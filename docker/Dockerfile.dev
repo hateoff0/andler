@@ -1,0 +1,113 @@
+# syntax=docker/dockerfile:1
+#
+# Multi-stage build для ANDLER.
+#
+# Таргеты:
+#   builder            — компилирует весь workspace, общий слой для остальных
+#   unit-test          — `cargo test --workspace`, БЕЗ /dev/kvm.
+#                        Гонять на каждый PR (см. §7 CORE_ARCHITECTURE_PLAN.md):
+#                          docker build --target unit-test -t andler:unit-test .
+#                          docker run --rm andler:unit-test
+#   integration-test   — тесты, которым нужен реальный qemu-system-x86_64 и
+#                        /dev/kvm (andler-qemu spawn/QMP round-trip). Требует
+#                        запуска с --device=/dev/kvm на Linux-хосте с KVM —
+#                        собрать образ без него можно, а запустить тесты нет.
+#                          docker build --target integration-test -t andler:itest .
+#                          docker run --rm --device=/dev/kvm andler:itest
+#   daemon             — минимальный runtime-образ andlerd (см. docker-compose.yml)
+#
+# Источник истины по тому, какие тесты куда относятся — README.md каждого
+# крейта и docs/architecture/CORE_ARCHITECTURE_PLAN.md, §7.
+
+ARG RUST_VERSION=1
+
+# ---------------------------------------------------------------------------
+# builder — компилирует весь workspace один раз, дальше переиспользуется
+# ---------------------------------------------------------------------------
+FROM rust:${RUST_VERSION}-bookworm AS builder
+
+WORKDIR /andler
+
+# Системные зависимости, нужные для сборки (а не только для запуска) —
+# на текущем этапе пусто: andler-core/andler-qemu пока не тянут C-библиотек
+# напрямую (qemu-img/qemu-system вызываются как внешние процессы, а не
+# линкуются). Если появятся bindings (например, к libvirt) — добавлять сюда.
+
+# Кэшируем зависимости отдельным слоем: копируем только манифесты сначала.
+# Cargo.lock коммитится в репозиторий (стандартная практика для бинарных
+# проектов вроде andlerd/andler-cli — фиксирует точные версии зависимостей
+# для воспроизводимой сборки) и копируется явно, как и Cargo.toml.
+COPY Cargo.toml Cargo.lock ./
+COPY crates/andler-core/Cargo.toml crates/andler-core/Cargo.toml
+COPY crates/andler-qemu/Cargo.toml crates/andler-qemu/Cargo.toml
+COPY crates/andler-vmm/Cargo.toml crates/andler-vmm/Cargo.toml
+COPY crates/andler-disk/Cargo.toml crates/andler-disk/Cargo.toml
+COPY crates/andler-net/Cargo.toml crates/andler-net/Cargo.toml
+COPY crates/andler-store/Cargo.toml crates/andler-store/Cargo.toml
+COPY crates/andler-rpc/Cargo.toml crates/andler-rpc/Cargo.toml
+COPY crates/andler-daemon/Cargo.toml crates/andler-daemon/Cargo.toml
+COPY crates/andler-cli/Cargo.toml crates/andler-cli/Cargo.toml
+
+# Фиктивные src/main.rs|lib.rs, чтобы `cargo fetch` мог разрезолвить граф
+# зависимостей без реального кода — реальный код копируется ниже и
+# инвалидирует только компиляцию, а не повторное скачивание crates.io.
+RUN for crate in andler-core andler-qemu andler-vmm andler-disk andler-net andler-store andler-rpc; do \
+        mkdir -p crates/$crate/src && echo "// placeholder" > crates/$crate/src/lib.rs; \
+    done && \
+    for crate in andler-daemon andler-cli; do \
+        mkdir -p crates/$crate/src && echo "fn main() {}" > crates/$crate/src/main.rs; \
+    done
+
+RUN cargo fetch
+
+# Теперь реальный код — этот слой инвалидируется при изменении исходников,
+# но не дёргает сеть повторно (зависимости уже в локальном registry-кэше).
+COPY crates/ crates/
+
+RUN cargo build --workspace --tests
+
+# ---------------------------------------------------------------------------
+# unit-test — без /dev/kvm, безопасно гонять на любом CI-раннере
+# ---------------------------------------------------------------------------
+FROM builder AS unit-test
+
+# `--workspace` гоняет тесты всех крейтов, но крейты, требующие /dev/kvm
+# для части тестов (andler-qemu, andler-daemon), должны помечать такие
+# тесты `#[ignore]` с явной причиной в комментарии — см. README этих
+# крейтов. `unit-test` таргет НЕ передаёт --device=/dev/kvm, поэтому
+# непомеченный тест, которому реально нужен KVM, здесь упадёт — это
+# сигнал, что тест попал не в тот таргет, а не баг Dockerfile.
+CMD ["cargo", "test", "--workspace"]
+
+# ---------------------------------------------------------------------------
+# integration-test — с реальным QEMU, требует --device=/dev/kvm при запуске
+# ---------------------------------------------------------------------------
+FROM builder AS integration-test
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        qemu-system-x86 \
+        qemu-utils \
+    && rm -rf /var/lib/apt/lists/*
+
+# Тесты, помеченные #[ignore], делятся на два случая: требующие /dev/kvm
+# (andler-qemu spawn/QMP) и требующие просто бинарник qemu-img без KVM
+# (andler-disk qcow2/overlay — реальное создание файлов). Оба запускаются
+# здесь явно через --ignored, так как оба недоступны в unit-test (там нет
+# ни /dev/kvm, ни qemu-utils). Конвенция тегирования — см. README
+# crates/andler-qemu и crates/andler-disk.
+CMD ["cargo", "test", "--workspace", "--", "--ignored"]
+
+# ---------------------------------------------------------------------------
+# daemon — минимальный runtime-образ andlerd (не тестовый, для docker-compose)
+# ---------------------------------------------------------------------------
+FROM debian:bookworm-slim AS daemon
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        qemu-system-x86 \
+        qemu-utils \
+        ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /andler/target/debug/andlerd /usr/local/bin/andlerd
+
+ENTRYPOINT ["/usr/local/bin/andlerd"]

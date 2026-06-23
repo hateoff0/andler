@@ -1,0 +1,15 @@
+[package]
+name = "andler-daemon"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "andlerd"
+path = "src/main.rs"
+
+[dependencies]
+andler-core = { path = "../andler-core" }
+andler-qemu = { path = "../andler-qemu" }
+tokio = { workspace = true }
+thiserror = { workspace = true }

@@ -1,0 +1,38 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/andler-core",
+    "crates/andler-qemu",
+    "crates/andler-vmm",
+    "crates/andler-disk",
+    "crates/andler-net",
+    "crates/andler-store",
+    "crates/andler-rpc",
+    "crates/andler-daemon",
+    "crates/andler-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+license = "GPL-3.0"
+edition = "2021"
+license = "GPL-3.0"
+repository = "https://github.com/andler-project/andler"
+
+[workspace.dependencies]
+# Общие зависимости версионируются в одном месте, чтобы избежать
+# расхождений между крейтами workspace'а.
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "fs", "net", "sync", "time", "io-util"] }
+async-trait = "0.1"
+serde = { version = "1", features = ["derive"] }
+thiserror = "1"
+tracing = "0.1"
+
+[profile.dev]
+# Полные debug-сборки QEMU-обёртки часто требуют живых процессов —
+# держим панику читаемой без потери производительности тестов.
+opt-level = 0
+
+[profile.release]
+lto = true
+strip = true
