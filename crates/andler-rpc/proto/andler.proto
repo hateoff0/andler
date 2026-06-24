@@ -8,18 +8,30 @@
 // метода `Daemon` означало бы проектировать протокол вслепую — то, что
 // явно решили не делать (см. README этого крейта и andler-daemon).
 //
-// `CreateInstance` для произвольного `InstanceConfig` (LinuxVm и т.п., не
-// через `AndroidProfile`) тоже пока не объявлен здесь — сериализация всего
-// `InstanceConfig` (CPU/память/диск/GPU/сеть/firmware/audio/input) через
-// protobuf сама по себе большая задача, и сейчас единственный реально
-// работающий путь создания инстанса конца в конец — это
-// `Daemon::create_android_instance`. `CreateInstance` для произвольного
-// `InstanceConfig` — следующий шаг после этого, не часть его.
+// `CreateInstance` — generic-путь создания инстанса через явный
+// `InstanceConfig`, соответствует `Daemon::create_instance` один-к-одному.
+// Сознательно ограничен на `LinuxVm` (поле `iso_path`, без `oneof kind`
+// с веткой Android) — `AndroidVm`-путь уже обслуживается отдельным
+// `CreateAndroidInstance` (резолв профиля + создание overlay-диска на
+// стороне демона перед вызовом того же `Daemon::create_instance`); делать
+// этот метод полностью generic по `InstanceKind` означало бы дать клиенту
+// два разных способа создать Android-инстанс (через профиль и через
+// голый `InstanceConfig` с уже готовым diskconfig), что требовало бы
+// клиенту самому собирать overlay/OVMF_VARS — то, что `CreateAndroidInstance`
+// явно берёт на себя. Если когда-нибудь понадобится создавать `AndroidVm`
+// из уже готового `InstanceConfig` напрямую (например, восстановление из
+// экспортированной конфигурации) — это расширение поля `kind` в
+// `CreateInstanceRequest` на `oneof`, не часть этого шага.
 syntax = "proto3";
 
 package andler;
 
 service AndlerService {
+    // Создаёт LinuxVm-инстанс из явного InstanceConfig — соответствует
+    // Daemon::create_instance. См. комментарий выше про то, почему
+    // ограничено на LinuxVm.
+    rpc CreateInstance(CreateInstanceRequest) returns (CreateInstanceResponse);
+
     // Резолвит AndroidProfile в InstanceConfig и регистрирует инстанс —
     // соответствует Daemon::create_android_instance.
     rpc CreateAndroidInstance(CreateAndroidInstanceRequest) returns (CreateInstanceResponse);
@@ -34,6 +46,177 @@ service AndlerService {
 }
 
 message Empty {}
+
+// --- InstanceConfig: типы, общие для CreateInstanceRequest -------------
+//
+// Каждый message/enum здесь соответствует одному типу из
+// `andler_core::config` один-к-одному по полям — см. соответствующий
+// файл в `andler-core/src/config/` для документации смысла каждого поля
+// (proto-схема намеренно не повторяет эти комментарии, чтобы не давать
+// им расходиться).
+
+enum CpuPriority {
+    CPU_PRIORITY_UNSPECIFIED = 0;
+    LOW = 1;
+    NORMAL = 2;
+    HIGH = 3;
+}
+
+message CpuConfig {
+    uint32 cores = 1;
+    uint32 sockets = 2;
+    uint32 threads = 3;
+    // Пустой список — это `andler_core::CpuConfig.affinity == None`
+    // (без привязки к физическим ядрам), не "привязка к нулю ядер" —
+    // конвертация (`convert.rs`) трактует absence/empty одинаково,
+    // так как `repeated` в proto3 не различает "не задано" и "задано
+    // пустым". Это симметрично остальным `repeated`-полям ниже, где их
+    // нет, но решение то же самое: пустой ⇒ None.
+    repeated uint64 affinity = 4;
+    CpuPriority priority = 5;
+}
+
+message MemoryConfig {
+    uint64 size_bytes = 1;
+    bool ballooning = 2;
+    bool zram = 3;
+    bool ksm = 4;
+}
+
+enum DiskFormat {
+    DISK_FORMAT_UNSPECIFIED = 0;
+    QCOW2 = 1;
+    RAW = 2;
+    VDI = 3;
+}
+
+message DiskConfig {
+    string path = 1;
+    uint64 size_bytes = 2;
+    DiskFormat format = 3;
+    // Пустая строка ⇒ `base_image: None` (обычный самостоятельный диск
+    // без backing chain) — см. `andler_core::DiskConfig.base_image`.
+    // `CreateInstance` создаёт LinuxVm с диском с нуля (см. комментарий
+    // у `rpc CreateInstance` выше), поэтому на практике это поле для
+    // этого пути почти всегда пустое; оставлено в схеме, а не убрано,
+    // чтобы `DiskConfig` здесь оставался полным отражением домена, а не
+    // урезанным под один сценарий вызова.
+    string base_image = 4;
+    bool thin_provisioning = 5;
+    bool trim_on_shutdown = 6;
+}
+
+message Resolution {
+    uint32 width = 1;
+    uint32 height = 2;
+}
+
+enum DisplayEngine {
+    DISPLAY_ENGINE_UNSPECIFIED = 0;
+    SDL = 1;
+    SPICE = 2;
+    DBUS = 3;
+}
+
+message DisplayConfig {
+    Resolution resolution = 1;
+    uint32 dpi = 2;
+    uint32 fps_limit = 3;
+    DisplayEngine display_engine = 4;
+    bool fullscreen = 5;
+}
+
+// `oneof` — `andler_core::RenderBackend` не C-style enum (`Passthrough`
+// несёт `gpu_pci_id: String`), поэтому, в отличие от `CpuPriority`/
+// `DiskFormat`/`DisplayEngine` выше, не выражается обычным proto `enum`.
+message RenderBackend {
+    message Venus {}
+    message VirtioGpu {}
+    message VirGl {}
+    message Cpu {}
+    message Passthrough {
+        string gpu_pci_id = 1;
+    }
+
+    oneof kind {
+        Venus venus = 1;
+        VirtioGpu virtio_gpu = 2;
+        VirGl vir_gl = 3;
+        Cpu cpu = 4;
+        Passthrough passthrough = 5;
+    }
+}
+
+message GpuConfig {
+    RenderBackend render_backend = 1;
+    uint64 hostmem_bytes = 2;
+    bool blob = 3;
+    bool gl = 4;
+}
+
+// `oneof` — как `RenderBackend` выше: `andler_core::NetworkMode::Bridge`
+// несёт `interface: String`.
+message NetworkMode {
+    message Nat {}
+    message Bridge {
+        string interface = 1;
+    }
+    message Isolated {}
+
+    oneof kind {
+        Nat nat = 1;
+        Bridge bridge = 2;
+        Isolated isolated = 3;
+    }
+}
+
+message NetworkConfig {
+    NetworkMode mode = 1;
+    string device_model = 2;
+}
+
+message FirmwareConfig {
+    string ovmf_code_path = 1;
+    string ovmf_vars_path = 2;
+}
+
+enum AudioBackend {
+    AUDIO_BACKEND_UNSPECIFIED = 0;
+    PIPEWIRE = 1;
+    PULSEAUDIO = 2;
+    AUDIO_NONE = 3;
+}
+
+message AudioConfig {
+    AudioBackend backend = 1;
+}
+
+message InputConfig {
+    bool tablet_mode = 1;
+    bool hide_host_cursor = 2;
+    bool clipboard_enabled = 3;
+}
+
+// Поля соответствуют `andler_core::InstanceConfig` для
+// `InstanceKind::LinuxVm` один-к-одному: `id`/`backend` здесь не
+// передаются — `id` генерируется демоном (`InstanceId::new()`, как и в
+// `create_android_instance`), `backend` всегда `BackendKind::Qemu`
+// (единственный зарегистрированный backend сегодня, см. `Daemon::new`
+// /`default_backends`) и не имеет смысла как параметр запроса, который
+// клиент мог бы перепутать.
+message CreateInstanceRequest {
+    string name = 1;
+    string iso_path = 2;
+    CpuConfig cpu = 3;
+    MemoryConfig memory = 4;
+    DiskConfig disk = 5;
+    DisplayConfig display = 6;
+    GpuConfig gpu = 7;
+    NetworkConfig network = 8;
+    FirmwareConfig firmware = 9;
+    AudioConfig audio = 10;
+    InputConfig input = 11;
+}
 
 enum AndroidVersion {
     ANDROID_VERSION_UNSPECIFIED = 0;

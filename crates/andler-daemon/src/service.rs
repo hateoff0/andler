@@ -6,11 +6,12 @@
 
 use std::sync::Arc;
 
+use andler_core::InstanceConfig;
 use andler_rpc::convert;
 use andler_rpc::proto::andler_service_server::AndlerService;
 use andler_rpc::proto::{
-    CreateAndroidInstanceRequest, CreateInstanceResponse, Empty, InstanceIdRequest,
-    InstanceStatusResponse, StopInstanceRequest,
+    CreateAndroidInstanceRequest, CreateInstanceRequest, CreateInstanceResponse, Empty,
+    InstanceIdRequest, InstanceStatusResponse, StopInstanceRequest,
 };
 use tonic::{Request, Response, Status};
 
@@ -33,6 +34,18 @@ impl DaemonService {
 /// демон не должен падать, он должен вернуть штатный gRPC-статус),
 /// нарушение FSM/отсутствие хэндла -> `FAILED_PRECONDITION` (клиент мог бы
 /// исправить ситуацию, изменив порядок вызовов), остальное -> `INTERNAL`.
+///
+/// `DaemonError::Restore` — отдельная ветка, не часть `_ => INTERNAL`:
+/// она недостижима из любого метода `AndlerService` (всю обработку
+/// запросов выполняют `create_instance`/`start_instance`/`stop_instance`/
+/// `pause_instance`/`resume_instance`/`status`/`create_android_instance`,
+/// ни один из которых не вызывает `Daemon::restore` — `restore` вызывается
+/// только однократно в `main.rs`, до того, как сервис вообще создан).
+/// `Status::internal` здесь — это документирующий, а не ожидаемый путь:
+/// если он когда-либо сработает на практике, это означает, что
+/// `DaemonService` стал вызывать `restore` из обработчика запроса, что
+/// само по себе было бы ошибкой архитектуры, а не штатной ситуацией,
+/// которую стоит транслировать в более специфичный статус.
 impl From<DaemonError> for Status {
     fn from(err: DaemonError) -> Self {
         match &err {
@@ -45,9 +58,10 @@ impl From<DaemonError> for Status {
             DaemonError::Backend(andler_core::BackendError::HandleNotFound(_)) => {
                 Status::failed_precondition(err.to_string())
             }
-            DaemonError::Backend(_) | DaemonError::Disk(_) | DaemonError::Io { .. } => {
-                Status::internal(err.to_string())
-            }
+            DaemonError::Backend(_)
+            | DaemonError::Disk(_)
+            | DaemonError::Io { .. }
+            | DaemonError::Restore(_) => Status::internal(err.to_string()),
         }
     }
 }
@@ -60,6 +74,25 @@ impl From<DaemonError> for Status {
 
 #[tonic::async_trait]
 impl AndlerService for DaemonService {
+    /// Создаёт `LinuxVm`-инстанс из явного `InstanceConfig`, переданного
+    /// клиентом целиком. В отличие от `create_android_instance`, здесь нет
+    /// промежуточного резолва профиля/создания overlay-диска — конвертация
+    /// `CreateInstanceRequest -> InstanceConfig` (`andler_rpc::convert`)
+    /// уже даёт полный, готовый к `Daemon::create_instance` конфиг. См.
+    /// комментарий у `rpc CreateInstance` в `andler.proto` про то, почему
+    /// этот путь ограничен на `LinuxVm` и не принимает `AndroidVm`.
+    async fn create_instance(
+        &self,
+        request: Request<CreateInstanceRequest>,
+    ) -> Result<Response<CreateInstanceResponse>, Status> {
+        let cfg = InstanceConfig::try_from(request.into_inner())?;
+        let id = self.daemon.create_instance(cfg).await?;
+
+        Ok(Response::new(CreateInstanceResponse {
+            instance_id: id.0.to_string(),
+        }))
+    }
+
     async fn create_android_instance(
         &self,
         request: Request<CreateAndroidInstanceRequest>,

@@ -13,9 +13,12 @@ andler-core = { path = "../andler-core" }
 andler-qemu = { path = "../andler-qemu" }
 andler-disk = { path = "../andler-disk" }
 andler-rpc = { path = "../andler-rpc" }
+andler-store = { path = "../andler-store" }
 tonic = { workspace = true }
 tokio = { workspace = true }
 thiserror = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [dev-dependencies]
 tokio-stream = { version = "0.1", features = ["net"] }

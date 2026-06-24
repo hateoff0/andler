@@ -35,11 +35,40 @@ in-memory состояние инстансов, без сети и без пе�
   подмножество §5.1 архитектурного плана; см. README `andler-rpc` почему.
   Отображение `DaemonError -> tonic::Status` — в `service.rs`
   (`impl From<DaemonError> for Status`).
-- **Персистентность** — состояние инстансов хранится только в памяти
-  процесса (`tokio::sync::RwLock<HashMap<InstanceId, InstanceRecord>>`).
-  Перезапуск `andlerd` сейчас теряет весь список инстансов. `andler-store`
-  должен будет сохранять `InstanceConfig`/`InstanceState` и восстанавливать
-  их при старте — это отдельный шаг, не часть `daemon.rs`.
+  - **`CreateInstance` (generic, `LinuxVm`)** — теперь **реализовано**:
+    принимает полный `InstanceConfig` через `CreateInstanceRequest`
+    (все 9 под-конфигураций), без промежуточного резолва — конвертация
+    `andler_rpc::convert::TryFrom<CreateInstanceRequest> for InstanceConfig`
+    уже даёт готовый конфиг, который идёт прямо в `Daemon::create_instance`.
+    До этого единственным сквозным путём создания инстанса по сети был
+    `CreateAndroidInstance` — теперь `LinuxVm` тоже доступен клиенту, не
+    только напрямую через Rust-вызов `Daemon::create_instance` в тестах.
+- **Персистентность** — теперь **реализовано**: `Daemon` опционально несёт
+  `andler_store::Store` (`Daemon::new()` — без персистентности, как
+  раньше; `Daemon::with_store(store)` — с персистентностью без
+  восстановления; `Daemon::restore(store)` — восстанавливает все ранее
+  сохранённые инстансы при старте, используется в `main.rs`).
+  `create_instance` сохраняет новую запись, `start_instance`/
+  `stop_instance` сохраняют каждый промежуточный и финальный переход FSM
+  (включая `Starting`/`Stopping` — не только конечные `Running`/`Stopped`/
+  `Error`). Ошибка записи в `store` логируется (`tracing::error!`) и не
+  проваливает саму операцию — in-memory состояние остаётся источником
+  истины для текущей сессии демона; см. подробное обоснование в
+  комментарии `Daemon::persist_state`/`persist_new_instance`.
+  `pause_instance`/`resume_instance` не персистируются отдельно — как и
+  раньше, они не меняют `InstanceState` записи демона напрямую (см.
+  раздел "Важные решения" ниже), поэтому нет нового состояния, которое
+  нужно было бы сохранить.
+  - **Восстановление и потерянные backend-хэндлы** — `Daemon::restore`
+    принудительно переводит любую запись, восстановленную в
+    нетерминальном состоянии (`Starting`/`Running`/`Paused`/`Stopping`),
+    в `InstanceState::Error` — backend-хэндл (дескриптор живого QEMU-
+    процесса) никогда не персистируется и не может быть восстановлен
+    после перезапуска `andlerd`, так что оставлять такую запись как
+    `Running` было бы ложью о текущем состоянии. См. подробности в
+    docstring `Daemon::restore`.
+  - Путь к sqlite-файлу — `ANDLERD_STORE_PATH` (по умолчанию
+    `andlerd-state.db` в рабочем каталоге процесса).
 - **Получение `base_image_path` для `create_android_instance`** — проверка
   кэша базового образа и скачивание (см. §4.4.2 архитектурного плана и
   `GUEST_IMAGE_PLAN.md`) остаются вне `Daemon`: метод принимает уже готовый
@@ -66,7 +95,15 @@ in-memory состояние инстансов, без сети и без пе�
 ## Тесты
 
 - `daemon::tests` — `Daemon` напрямую, без сети (включая
-  `create_android_instance`).
+  `create_android_instance`), плюс новый блок персистентности:
+  `with_store_persists_created_instance`,
+  `with_store_persists_failed_start_as_error_state`,
+  `daemon_without_store_does_not_panic_on_state_transitions` (режим без
+  `Store` остаётся валидным no-op путём), `restore_*` — восстановление из
+  `Store` (терминальные состояния переживают restore как есть,
+  нетерминальные принудительно становятся `Error`, пустой `Store` даёт
+  `Daemon` без инстансов, восстановленный `Daemon` продолжает
+  персистировать новые операции).
 - `grpc_roundtrip_test` (`#[cfg(test)]`, не помечен `#[ignore]`) — реальный
   `tonic::transport::Server` на эфемерном `127.0.0.1`-порту + реальный
   `AndlerServiceClient` через настоящий TCP. Проверяет то, что unit-тесты
@@ -74,7 +111,19 @@ in-memory состояние инстансов, без сети и без пе�
   роутит на метод трейда -> зовёт `Daemon` -> сериализует ответ обратно"
   реально работает по сети, а не только компилируется. Не требует
   `qemu-img`/`/dev/kvm` — только TCP-loopback, поэтому не в
-  `integration-test` Docker-таргете.
+  `integration-test` Docker-таргете. Использует `Daemon::new()` (без
+  персистентности) — этот тест про gRPC-слой, не про `andler-store`.
+  Включает три теста на `CreateInstance`:
+  `create_instance_round_trips_over_real_grpc_and_status_reports_created`
+  (полный happy path, плюс `oneof`-вариант `RenderBackend::Venus`),
+  `create_instance_with_bridge_network_round_trips_over_real_grpc`
+  (`NetworkMode::Bridge` — `oneof`-вариант с данными, не просто
+  пустой message-маркер, единственный надёжный способ проверить, что
+  `prost` реально переживает protobuf-сериализацию этой ветки по TCP, а
+  не только в памяти, как unit-тесты `convert.rs`), и
+  `create_instance_missing_cpu_field_round_trips_as_invalid_argument`
+  (отсутствие обязательного `Option`-поля -> `INVALID_ARGUMENT`, не паника
+  сервиса).
 
 ## Требования к окружению
 

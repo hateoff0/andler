@@ -11,17 +11,19 @@ gRPC-схема (`proto/andler.proto`) и сгенерированный код 
 `andler.proto` объявляет только методы, для которых уже есть реализация в
 `andler_daemon::Daemon`:
 
+- `CreateInstance` — соответствует `Daemon::create_instance` для
+  `InstanceKind::LinuxVm`. Принимает явный `InstanceConfig` целиком (все
+  9 под-конфигураций: CPU/память/диск/дисплей/GPU/сеть/firmware/audio/
+  input), без промежуточного резолва — в отличие от
+  `CreateAndroidInstance`. Сознательно ограничен на `LinuxVm`, не
+  `oneof kind` с веткой Android — см. подробное обоснование в комментарии
+  у `rpc CreateInstance` в `andler.proto`.
 - `CreateAndroidInstance` — соответствует `Daemon::create_android_instance`.
 - `StartInstance`/`StopInstance`/`PauseInstance`/`ResumeInstance`/
   `GetInstanceStatus` — соответствуют одноимённым методам `Daemon`.
 
 **Чего здесь нет и почему:**
 
-- `CreateInstance` для произвольного `InstanceConfig` (не через
-  `AndroidProfile`, например `LinuxVm`) — сериализация всего
-  `InstanceConfig` (CPU/память/диск/GPU/сеть/firmware/audio/input) через
-  protobuf — отдельная по объёму задача, которую сознательно не стали
-  делать вместе с первым gRPC-слоем.
 - `CloneInstance`/`RemoveInstance`/`ListInstances`/`StreamInstanceLogs`/
   `StreamResourceMetrics` из §5.1 — у `Daemon` пока нет соответствующих
   методов. Объявлять rpc-метод раньше метода `Daemon`, который он должен
@@ -35,11 +37,17 @@ gRPC-схема (`proto/andler.proto`) и сгенерированный код 
   Требует системный `protoc` (пакет `protobuf-compiler` в окружении сборки,
   см. `docker/Dockerfile.dev`, стадия `builder`).
 - `src/lib.rs` — `pub mod proto { tonic::include_proto!("andler"); }`.
-- `src/convert.rs` — `TryFrom`/`From` между proto-сообщениями
-  (`proto::AndroidProfile`, `proto::AndroidVersion`, `proto::RootMode`) и
-  `andler_core::{AndroidProfile, AndroidVersion, RootMode}`, плюс
-  `parse_instance_id` (строка из gRPC-запроса -> `InstanceId`) и
-  `instance_state_to_proto` (`InstanceState` -> `(InstanceStateKind, error_message)`).
+- `src/convert.rs` — `TryFrom`/`From` между proto-сообщениями и доменными
+  типами `andler-core`: `AndroidProfile`/`AndroidVersion`/`RootMode`, и
+  каждый под-тип `InstanceConfig` (`CpuConfig`, `MemoryConfig`,
+  `DiskConfig`, `DisplayConfig`/`Resolution`, `GpuConfig`/`RenderBackend`,
+  `NetworkConfig`/`NetworkMode`, `FirmwareConfig`, `AudioConfig`,
+  `InputConfig`) для `CreateInstanceRequest`. `RenderBackend`/`NetworkMode`
+  — `oneof` в proto (не C-style enum), так как их доменные эквиваленты
+  несут данные в отдельных вариантах (`Passthrough { gpu_pci_id }`,
+  `Bridge { interface }`). Плюс `parse_instance_id` (строка из
+  gRPC-запроса -> `InstanceId`) и `instance_state_to_proto`
+  (`InstanceState` -> `(InstanceStateKind, error_message)`).
 
 ## Версионирование
 

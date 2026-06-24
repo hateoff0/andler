@@ -17,7 +17,11 @@ use std::sync::Arc;
 
 use andler_rpc::proto::andler_service_client::AndlerServiceClient;
 use andler_rpc::proto::andler_service_server::AndlerServiceServer;
-use andler_rpc::proto::InstanceIdRequest;
+use andler_rpc::proto::{
+    AudioConfig, CpuConfig, CreateInstanceRequest, DiskConfig, DisplayConfig, FirmwareConfig,
+    GpuConfig, InputConfig, InstanceIdRequest, InstanceStateKind, MemoryConfig, NetworkConfig,
+    Resolution,
+};
 use tokio::net::TcpListener;
 use tokio_stream::wrappers::TcpListenerStream;
 use tonic::transport::Server;
@@ -136,6 +140,177 @@ async fn malformed_instance_id_round_trips_as_invalid_argument_over_real_grpc() 
         .await
         .expect_err("empty instance_id must be rejected as INVALID_ARGUMENT too");
     assert_eq!(status.code(), tonic::Code::InvalidArgument);
+
+    server.abort();
+}
+
+/// Полный набор полей `CreateInstanceRequest`, соответствующий
+/// `andler_core::config::*::reference_default()` — используется как
+/// валидная база для теста ниже и для модификаций в негативных сценариях.
+/// Живёт здесь (а не в `andler-rpc::convert::tests`, где уже есть похожий
+/// `sample_instance_config`), потому что строит именно `proto`-сообщение
+/// напрямую, без прохода через `InstanceConfig` — этот тест проверяет
+/// сериализацию через реальный TCP, а не саму конвертацию (та уже покрыта
+/// `andler-rpc::convert::tests::create_instance_request_round_trips_into_instance_config`
+/// и соседними тестами).
+fn sample_create_instance_request() -> CreateInstanceRequest {
+    use andler_rpc::proto::{network_mode, render_backend};
+
+    let mut cpu = CpuConfig {
+        cores: 4,
+        sockets: 1,
+        threads: 1,
+        affinity: vec![],
+        ..Default::default()
+    };
+    cpu.set_priority(andler_rpc::proto::CpuPriority::Normal);
+
+    let mut disk = DiskConfig {
+        path: "/tmp/disk.qcow2".to_string(),
+        size_bytes: 40 * 1024 * 1024 * 1024,
+        base_image: String::new(),
+        thin_provisioning: true,
+        trim_on_shutdown: true,
+        ..Default::default()
+    };
+    disk.set_format(andler_rpc::proto::DiskFormat::Qcow2);
+
+    let mut display = DisplayConfig {
+        resolution: Some(Resolution {
+            width: 1920,
+            height: 1080,
+        }),
+        dpi: 96,
+        fps_limit: 0,
+        fullscreen: false,
+        ..Default::default()
+    };
+    display.set_display_engine(andler_rpc::proto::DisplayEngine::Sdl);
+
+    let gpu = GpuConfig {
+        render_backend: Some(andler_rpc::proto::RenderBackend {
+            kind: Some(render_backend::Kind::Venus(render_backend::Venus {})),
+        }),
+        hostmem_bytes: 4096 * 1024 * 1024,
+        blob: true,
+        gl: true,
+    };
+
+    let network = NetworkConfig {
+        mode: Some(andler_rpc::proto::NetworkMode {
+            kind: Some(network_mode::Kind::Nat(network_mode::Nat {})),
+        }),
+        device_model: "virtio-net-pci".to_string(),
+    };
+
+    let firmware = FirmwareConfig {
+        ovmf_code_path: "/usr/share/edk2-ovmf/x64/OVMF_CODE.4m.fd".to_string(),
+        ovmf_vars_path: "/tmp/test_VARS.fd".to_string(),
+    };
+
+    let mut audio = AudioConfig::default();
+    audio.set_backend(andler_rpc::proto::AudioBackend::Pipewire);
+
+    let input = InputConfig {
+        tablet_mode: true,
+        hide_host_cursor: true,
+        clipboard_enabled: true,
+    };
+
+    CreateInstanceRequest {
+        name: "test-linux-vm".to_string(),
+        iso_path: "/tmp/test.iso".to_string(),
+        cpu: Some(cpu),
+        memory: Some(MemoryConfig {
+            size_bytes: 8 * 1024 * 1024 * 1024,
+            ballooning: false,
+            zram: false,
+            ksm: true,
+        }),
+        disk: Some(disk),
+        display: Some(display),
+        gpu: Some(gpu),
+        network: Some(network),
+        firmware: Some(firmware),
+        audio: Some(audio),
+        input: Some(input),
+    }
+}
+
+#[tokio::test]
+async fn create_instance_round_trips_over_real_grpc_and_status_reports_created() {
+    // Самый рискованный путь этой партии изменений: `RenderBackend`/
+    // `NetworkMode` — `oneof`, и единственный способ убедиться, что
+    // `prost` реально (де)сериализует их так, как ожидает `convert.rs`
+    // (а не, например, теряет ветку при кодировании через настоящий
+    // protobuf wire format, в отличие от прямого вызова конвертации в
+    // памяти, как делают unit-тесты `andler-rpc::convert::tests`) — это
+    // прогнать запрос через настоящий TCP-сокет, как здесь.
+    let (mut client, server) = spawn_server_and_connect().await;
+
+    let response = client
+        .create_instance(sample_create_instance_request())
+        .await
+        .expect("a fully-populated CreateInstanceRequest must be accepted")
+        .into_inner();
+
+    let id = uuid::Uuid::parse_str(&response.instance_id)
+        .expect("CreateInstanceResponse.instance_id must be a valid UUID");
+
+    let status = client
+        .get_instance_status(InstanceIdRequest {
+            instance_id: id.to_string(),
+        })
+        .await
+        .expect("freshly created instance must be found")
+        .into_inner();
+    assert_eq!(status.state, InstanceStateKind::Created as i32);
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn create_instance_missing_cpu_field_round_trips_as_invalid_argument() {
+    let (mut client, server) = spawn_server_and_connect().await;
+
+    let mut request = sample_create_instance_request();
+    request.cpu = None;
+
+    let status = client
+        .create_instance(request)
+        .await
+        .expect_err("a CreateInstanceRequest missing a required field must be rejected");
+    assert_eq!(status.code(), tonic::Code::InvalidArgument);
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn create_instance_with_bridge_network_round_trips_over_real_grpc() {
+    // `NetworkMode::Bridge` несёт данные (`interface`), в отличие от
+    // `Nat`/`Isolated` — отдельный тест проверяет, что oneof-ветка с
+    // полем, не только маркерные пустые message'и, переживает настоящую
+    // protobuf-сериализацию по TCP.
+    use andler_rpc::proto::network_mode;
+
+    let (mut client, server) = spawn_server_and_connect().await;
+    let mut request = sample_create_instance_request();
+    request.network = Some(NetworkConfig {
+        mode: Some(andler_rpc::proto::NetworkMode {
+            kind: Some(network_mode::Kind::Bridge(network_mode::Bridge {
+                interface: "br0".to_string(),
+            })),
+        }),
+        device_model: "virtio-net-pci".to_string(),
+    });
+
+    let response = client
+        .create_instance(request)
+        .await
+        .expect("a request with NetworkMode::Bridge must be accepted")
+        .into_inner();
+    uuid::Uuid::parse_str(&response.instance_id)
+        .expect("CreateInstanceResponse.instance_id must be a valid UUID");
 
     server.abort();
 }
