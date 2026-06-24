@@ -11,5 +11,12 @@ path = "src/main.rs"
 [dependencies]
 andler-core = { path = "../andler-core" }
 andler-qemu = { path = "../andler-qemu" }
+andler-disk = { path = "../andler-disk" }
+andler-rpc = { path = "../andler-rpc" }
+tonic = { workspace = true }
 tokio = { workspace = true }
 thiserror = { workspace = true }
+
+[dev-dependencies]
+tokio-stream = { version = "0.1", features = ["net"] }
+uuid = { version = "1" }

@@ -13,11 +13,12 @@
 //! сами пока не знают про gRPC.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use andler_core::{
-    BackendError, BackendHandle, BackendKind, BackendStatus, HypervisorBackend, InstanceConfig,
-    InstanceEvent, InstanceId, InstanceState,
+    AndroidProfile, BackendError, BackendHandle, BackendKind, BackendStatus, HypervisorBackend,
+    InstanceConfig, InstanceEvent, InstanceId, InstanceState,
 };
 use andler_qemu::QemuBackend;
 use thiserror::Error;
@@ -47,6 +48,21 @@ pub enum DaemonError {
     /// Backend вернул ошибку при выполнении операции.
     #[error("backend error: {0}")]
     Backend(#[from] BackendError),
+
+    /// Ошибка `andler-disk` при создании overlay-диска для Android-инстанса
+    /// (см. `create_android_instance`).
+    #[error("disk error: {0}")]
+    Disk(#[from] andler_disk::DiskError),
+
+    /// Ошибка файловой системы вне `andler-disk` — на данный момент это
+    /// только подготовка персональной копии `OVMF_VARS` для нового
+    /// Android-инстанса (создание каталога инстанса, копирование шаблона).
+    #[error("filesystem error at {path}: {source}")]
+    Io {
+        path: std::path::PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
 }
 
 /// Внутреннее состояние одного инстанса с точки зрения `Daemon`:
@@ -117,6 +133,91 @@ impl Daemon {
         );
 
         Ok(id)
+    }
+
+    /// Резолвит `AndroidProfile` в полноценный инстанс и регистрирует его —
+    /// связывает `AndroidProfile::resolve()` (домен, `andler-core`) с
+    /// реальным созданием overlay-диска на диске (`andler-disk::overlay`)
+    /// и персональной копии `OVMF_VARS`, и только потом передаёт получившийся
+    /// `InstanceConfig` в `create_instance` (то есть проходит ту же
+    /// валидацию backend'а и попадает в тот же реестр, что и инстанс,
+    /// созданный напрямую из готового `InstanceConfig`).
+    ///
+    /// `instances_root` — каталог, под которым у каждого инстанса свой
+    /// подкаталог `<instances_root>/<InstanceId>/` (overlay-диск и
+    /// `VARS.fd` внутри него) — соответствует `/var/lib/andler/instances/`
+    /// из архитектурного плана, но путь не хардкодится здесь, чтобы тесты
+    /// могли передать временный каталог.
+    ///
+    /// `base_image_path` — путь к уже скачанному и проверенному базовому
+    /// образу для этого профиля; получение этого пути (кэш/скачивание) —
+    /// явно вне рамок этого метода (см. документацию `AndroidProfile::resolve`)
+    /// и пока не реализовано ни здесь, ни где-либо ещё в системе.
+    ///
+    /// `ovmf_vars_template` — путь к системному шаблону `OVMF_VARS`
+    /// (например, `/usr/share/edk2-ovmf/x64/OVMF_VARS.4m.fd`), который
+    /// копируется в персональную копию инстанса, а не используется
+    /// напрямую — каждый инстанс должен иметь свою копию, так как UEFI
+    /// пишет в этот файл во время работы (boot order, Secure Boot keys и
+    /// т.п.), и общий файл между инстансами привёл бы к гонкам/порче
+    /// состояния друг друга.
+    ///
+    /// Если создание каталога инстанса, копирование шаблона `OVMF_VARS`
+    /// или создание overlay-диска завершается ошибкой — инстанс не
+    /// регистрируется в `Daemon` вообще (никакой частично созданной
+    /// записи), но уже созданные на диске файлы (каталог, скопированный
+    /// `VARS.fd`, если до него дошло) не удаляются — очистка частично
+    /// созданного instance_dir в случае ошибки осознанно не реализована
+    /// здесь: TODO для будущего шага, как и сам Factory Reset/удаление
+    /// инстанса через `Daemon`.
+    pub async fn create_android_instance(
+        &self,
+        profile: AndroidProfile,
+        instance_name: String,
+        base_image_path: PathBuf,
+        instances_root: PathBuf,
+        overlay_size_bytes: u64,
+        ovmf_vars_template: PathBuf,
+    ) -> Result<InstanceId, DaemonError> {
+        let id = InstanceId::new();
+        let instance_dir = instances_root.join(id.0.to_string());
+
+        tokio::fs::create_dir_all(&instance_dir)
+            .await
+            .map_err(|source| DaemonError::Io {
+                path: instance_dir.clone(),
+                source,
+            })?;
+
+        let ovmf_vars_path = instance_dir.join("VARS.fd");
+        tokio::fs::copy(&ovmf_vars_template, &ovmf_vars_path)
+            .await
+            .map_err(|source| DaemonError::Io {
+                path: ovmf_vars_path.clone(),
+                source,
+            })?;
+
+        let overlay = andler_disk::overlay::create_overlay(
+            &instance_dir,
+            &base_image_path,
+            overlay_size_bytes,
+        )
+        .await?;
+
+        let mut cfg = profile.resolve(
+            instance_name,
+            overlay.base_image_path,
+            overlay.overlay_path,
+            overlay_size_bytes,
+            ovmf_vars_path,
+        );
+        // `resolve()` сама генерирует InstanceId (она ничего не знает про
+        // instance_dir/overlay, которые мы уже создали под заранее выбранным
+        // `id`) — перезаписываем тем `id`, под которым реально лежат файлы
+        // на диске, иначе InstanceConfig.id разойдётся с именем каталога.
+        cfg.id = id;
+
+        self.create_instance(cfg).await
     }
 
     /// Запускает ранее созданный инстанс: `Created -> Starting -> Running`
@@ -266,6 +367,7 @@ mod tests {
         AudioConfig, CpuConfig, DiskConfig, DisplayConfig, FirmwareConfig, GpuConfig,
         InputConfig, InstanceKind, MemoryConfig, NetworkConfig, RenderBackend,
     };
+    use andler_core::{AndroidVersion, RootMode};
     use std::path::PathBuf;
 
     fn sample_config() -> InstanceConfig {
@@ -407,5 +509,109 @@ mod tests {
 
         let instances = daemon.instances.read().await;
         assert_eq!(instances.get(&id).unwrap().config.name, "renamed");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires qemu-img binary, see docker/README.md integration-test target"]
+    async fn create_android_instance_resolves_profile_and_creates_overlay() {
+        let dir = std::env::temp_dir().join("andler-daemon-test-android-e2e");
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+
+        // Базовый образ и шаблон OVMF_VARS — оба "настоящие" файлы на диске,
+        // как и в реальной системе (только без реального содержимого UEFI
+        // vars — для qemu-img create это не важно).
+        let base_image = dir.join("base.qcow2");
+        andler_disk::qcow2::create(&base_image, 10 * 1024 * 1024 * 1024)
+            .await
+            .unwrap();
+        let ovmf_template = dir.join("OVMF_VARS.template.fd");
+        tokio::fs::write(&ovmf_template, b"fake-ovmf-vars")
+            .await
+            .unwrap();
+
+        let instances_root = dir.join("instances");
+        let daemon = Daemon::new();
+
+        let profile = AndroidProfile {
+            android_version: AndroidVersion::Android13,
+            gapps: true,
+            microg: false,
+            libndk: true,
+            root: RootMode::None,
+        };
+
+        let id = daemon
+            .create_android_instance(
+                profile.clone(),
+                "my-android".to_string(),
+                base_image.clone(),
+                instances_root.clone(),
+                20 * 1024 * 1024 * 1024,
+                ovmf_template,
+            )
+            .await
+            .unwrap();
+
+        let status = daemon.status(id).await.unwrap();
+        assert_eq!(status.state, InstanceState::Created);
+
+        let instance_dir = instances_root.join(id.0.to_string());
+        assert!(instance_dir.join("disk.qcow2").exists());
+        assert!(instance_dir.join("VARS.fd").exists());
+
+        let instances = daemon.instances.read().await;
+        let record = instances.get(&id).unwrap();
+        assert_eq!(record.config.id, id);
+        assert_eq!(record.config.disk.base_image, Some(base_image));
+        match &record.config.kind {
+            InstanceKind::AndroidVm { android_profile } => {
+                assert_eq!(*android_profile, profile);
+            }
+            InstanceKind::LinuxVm { .. } => panic!("expected AndroidVm"),
+        }
+
+        tokio::fs::remove_dir_all(&dir).await.ok();
+    }
+
+    #[tokio::test]
+    async fn create_android_instance_fails_when_base_image_missing() {
+        let dir = std::env::temp_dir().join("andler-daemon-test-android-missing-base");
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+
+        let ovmf_template = dir.join("OVMF_VARS.template.fd");
+        tokio::fs::write(&ovmf_template, b"fake-ovmf-vars")
+            .await
+            .unwrap();
+
+        let missing_base = dir.join("does-not-exist.qcow2");
+        let instances_root = dir.join("instances");
+        let daemon = Daemon::new();
+
+        let profile = AndroidProfile {
+            android_version: AndroidVersion::Android13,
+            gapps: false,
+            microg: true,
+            libndk: false,
+            root: RootMode::None,
+        };
+
+        let err = daemon
+            .create_android_instance(
+                profile,
+                "my-android".to_string(),
+                missing_base,
+                instances_root,
+                20 * 1024 * 1024 * 1024,
+                ovmf_template,
+            )
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            err,
+            DaemonError::Disk(andler_disk::DiskError::BackingFileNotFound(_))
+        ));
+
+        tokio::fs::remove_dir_all(&dir).await.ok();
     }
 }

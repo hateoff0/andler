@@ -28,6 +28,14 @@ FROM rust:${RUST_VERSION}-bookworm AS builder
 
 WORKDIR /andler
 
+# protobuf-compiler — нужен build.rs крейта andler-rpc (tonic-build/prost
+# зовут системный `protoc`, сами его не вендорят). Ставим в самом начале
+# builder-стадии, а не позже — это системный пакет, а не Cargo-зависимость,
+# инвалидация слоя при изменении Cargo.toml/исходников его не трогает.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        protobuf-compiler \
+    && rm -rf /var/lib/apt/lists/*
+
 # Системные зависимости, нужные для сборки (а не только для запуска) —
 # на текущем этапе пусто: andler-core/andler-qemu пока не тянут C-библиотек
 # напрямую (qemu-img/qemu-system вызываются как внешние процессы, а не

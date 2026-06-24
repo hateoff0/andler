@@ -27,6 +27,10 @@ async-trait = "0.1"
 serde = { version = "1", features = ["derive"] }
 thiserror = "1"
 tracing = "0.1"
+tonic = "0.12"
+tonic-build = "0.12"
+prost = "0.13"
+clap = { version = "4", features = ["derive"] }
 
 [profile.dev]
 # Полные debug-сборки QEMU-обёртки часто требуют живых процессов —

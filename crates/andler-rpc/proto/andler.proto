@@ -1,0 +1,103 @@
+// gRPC-схема andlerd <-> andler (CLI)/GUI.
+//
+// СОЗНАТЕЛЬНО НЕПОЛНАЯ относительно §5.1 CORE_ARCHITECTURE_PLAN.md: там
+// описан целевой набор методов (CloneInstance, RemoveInstance,
+// ListInstances, StreamInstanceLogs, StreamResourceMetrics и т.п.) —
+// здесь объявлены только методы, которые реально есть как методы
+// `andler_daemon::Daemon` сегодня. Добавлять rpc-метод без соответствующего
+// метода `Daemon` означало бы проектировать протокол вслепую — то, что
+// явно решили не делать (см. README этого крейта и andler-daemon).
+//
+// `CreateInstance` для произвольного `InstanceConfig` (LinuxVm и т.п., не
+// через `AndroidProfile`) тоже пока не объявлен здесь — сериализация всего
+// `InstanceConfig` (CPU/память/диск/GPU/сеть/firmware/audio/input) через
+// protobuf сама по себе большая задача, и сейчас единственный реально
+// работающий путь создания инстанса конца в конец — это
+// `Daemon::create_android_instance`. `CreateInstance` для произвольного
+// `InstanceConfig` — следующий шаг после этого, не часть его.
+syntax = "proto3";
+
+package andler;
+
+service AndlerService {
+    // Резолвит AndroidProfile в InstanceConfig и регистрирует инстанс —
+    // соответствует Daemon::create_android_instance.
+    rpc CreateAndroidInstance(CreateAndroidInstanceRequest) returns (CreateInstanceResponse);
+
+    // Соответствуют Daemon::start_instance/stop_instance/pause_instance/
+    // resume_instance/status один-к-одному.
+    rpc StartInstance(InstanceIdRequest) returns (Empty);
+    rpc StopInstance(StopInstanceRequest) returns (Empty);
+    rpc PauseInstance(InstanceIdRequest) returns (Empty);
+    rpc ResumeInstance(InstanceIdRequest) returns (Empty);
+    rpc GetInstanceStatus(InstanceIdRequest) returns (InstanceStatusResponse);
+}
+
+message Empty {}
+
+enum AndroidVersion {
+    ANDROID_VERSION_UNSPECIFIED = 0;
+    ANDROID_11 = 1;
+    ANDROID_13 = 2;
+}
+
+enum RootMode {
+    ROOT_MODE_UNSPECIFIED = 0;
+    ROOT_MODE_NONE = 1;
+    ROOT_MODE_MAGISK = 2;
+    ROOT_MODE_KERNEL_SU = 3;
+}
+
+message AndroidProfile {
+    AndroidVersion android_version = 1;
+    bool gapps = 2;
+    bool microg = 3;
+    bool libndk = 4;
+    RootMode root = 5;
+}
+
+// Поля соответствуют параметрам Daemon::create_android_instance
+// один-к-одному — см. документацию там про смысл каждого пути.
+message CreateAndroidInstanceRequest {
+    string name = 1;
+    AndroidProfile profile = 2;
+    string base_image_path = 3;
+    string instances_root = 4;
+    uint64 overlay_size_bytes = 5;
+    string ovmf_vars_template = 6;
+}
+
+message CreateInstanceResponse {
+    string instance_id = 1;
+}
+
+message InstanceIdRequest {
+    string instance_id = 1;
+}
+
+message StopInstanceRequest {
+    string instance_id = 1;
+    bool graceful = 2;
+}
+
+// Соответствует andler_core::InstanceState один-к-одному (см. fsm.rs).
+enum InstanceStateKind {
+    INSTANCE_STATE_UNSPECIFIED = 0;
+    CREATED = 1;
+    STARTING = 2;
+    RUNNING = 3;
+    PAUSED = 4;
+    STOPPING = 5;
+    STOPPED = 6;
+    ERROR = 7;
+}
+
+message InstanceStatusResponse {
+    InstanceStateKind state = 1;
+    // Заполнено только при state == ERROR (соответствует
+    // InstanceState::Error.message).
+    string error_message = 2;
+    // Доп. диагностика из BackendStatus::detail, если backend её дал
+    // (например, "instance has no running backend handle").
+    string detail = 3;
+}
