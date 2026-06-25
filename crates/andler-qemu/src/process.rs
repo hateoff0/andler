@@ -17,6 +17,7 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use thiserror::Error;
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::time::timeout;
 
@@ -73,15 +74,13 @@ impl QemuProcess {
     ///
     /// stdout/stderr процесса перенаправляются в `Stdio::piped()`, а не
     /// наследуются от `andlerd` — иначе вывод множества QEMU-инстансов
-    /// смешивался бы в одном терминале демона. На этом этапе вывод не
-    /// читается активно (`Child` хранит дескрипторы, но никто их не
-    /// drain'ит) — если QEMU выведет достаточно много в stderr и буфер
-    /// ОС заполнится, процесс может заблокироваться на записи. Это
-    /// известное ограничение текущего шага, не описанное как решённое:
-    /// полноценное логирование вывода QEMU — отдельная задача (см. TODO
-    /// в README этого крейта).
+    /// смешивался бы в одном терминале демона. Оба потока вычитываются
+    /// построчно в фоновых задачах и логируются через `tracing::warn!`
+    /// (см. `drain_to_tracing` ниже) — раньше дескрипторы просто никем не
+    /// читались, и причину падения процесса узнать было невозможно без
+    /// внешних средств.
     pub async fn spawn(args: &[String], qmp_socket_path: PathBuf) -> Result<Self, ProcessError> {
-        let child = Command::new(QEMU_BINARY)
+        let mut child = Command::new(QEMU_BINARY)
             .args(args)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -98,11 +97,53 @@ impl QemuProcess {
             .id()
             .expect("freshly spawned child must have a pid");
 
+        // Раньше вывод процесса никем не читался (см. историю этого
+        // комментария в README крейта) — pid живого процесса было видно,
+        // но причину падения (например, неподходящий аргумент командной
+        // строки, отсутствующий файл прошивки, недоступный /dev/kvm)
+        // узнать было невозможно без внешних средств. Здесь — минимальное
+        // решение: вычитываем stdout/stderr построчно в фоновых задачах и
+        // логируем через `tracing`, привязывая к pid. Не блокирует
+        // основной поток управления и не задерживает возврат из `spawn`;
+        // если процесс пишет в stderr быстрее, чем мы читаем, буфер ОС
+        // всё равно ограничен — но теперь хотя бы то, что было прочитано,
+        // не пропадает молча.
+        if let Some(stdout) = child.stdout.take() {
+            tokio::spawn(Self::drain_to_tracing(stdout, pid, "stdout"));
+        }
+        if let Some(stderr) = child.stderr.take() {
+            tokio::spawn(Self::drain_to_tracing(stderr, pid, "stderr"));
+        }
+
         Ok(QemuProcess {
             child,
             pid,
             qmp_socket_path,
         })
+    }
+
+    /// Построчно читает `reader` до EOF и логирует каждую строку через
+    /// `tracing::warn!` (не `info!` — вывод QEMU в норме почти пуст;
+    /// что-то в нём появляющееся обычно стоит внимания при диагностике,
+    /// даже если сам процесс в итоге работает штатно). `stream_name` —
+    /// `"stdout"` или `"stderr"`, чтобы не путать источники в логах.
+    async fn drain_to_tracing<R>(reader: R, pid: u32, stream_name: &'static str)
+    where
+        R: tokio::io::AsyncRead + Unpin,
+    {
+        let mut lines = BufReader::new(reader).lines();
+        loop {
+            match lines.next_line().await {
+                Ok(Some(line)) => {
+                    tracing::warn!(pid, stream = stream_name, "{line}");
+                }
+                Ok(None) => break,
+                Err(io_err) => {
+                    tracing::warn!(pid, stream = stream_name, error = %io_err, "failed to read qemu output");
+                    break;
+                }
+            }
+        }
     }
 
     pub fn pid(&self) -> u32 {

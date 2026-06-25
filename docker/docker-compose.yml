@@ -3,6 +3,7 @@
 # Использование:
 #   docker compose run --rm unit-test
 #   docker compose run --rm integration-test     # требует KVM на хосте
+#   docker compose run --rm e2e                   # требует KVM на хосте
 #   docker compose up daemon
 #
 # Это не продуктовый деплой — andlerd предполагается распространять через
@@ -40,6 +41,17 @@ services:
       - /dev/kvm
     volumes:
       - andler-data:/var/lib/andler
+
+  e2e:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.dev
+      target: e2e
+    devices:
+      - /dev/kvm
+    # Реальный andlerd + andler в одном контейнере (docker/e2e_smoke.sh):
+    # настоящий процесс, TCP, sqlite-файл на диске, перезапуск демона.
+    # Как и integration-test, без /dev/kvm на хосте не запустится.
 
 volumes:
   andler-data:
