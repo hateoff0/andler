@@ -21,14 +21,25 @@ gRPC-схема (`proto/andler.proto`) и сгенерированный код 
 - `CreateAndroidInstance` — соответствует `Daemon::create_android_instance`.
 - `StartInstance`/`StopInstance`/`PauseInstance`/`ResumeInstance`/
   `GetInstanceStatus` — соответствуют одноимённым методам `Daemon`.
+- `ListInstances` — соответствует `Daemon::list_instances`. Возвращает
+  только `instance_id`/`name`/грубое `InstanceStateKind` на запись
+  (`InstanceListEntry`), не полный `InstanceConfig` и не live
+  backend-статус — см. комментарий у `Daemon::list_instances` за тем,
+  почему список не дёргает `backend.status()` по каждому инстансу.
+- `RemoveInstance` — соответствует `Daemon::remove_instance`. Отвергает
+  запросы для нетерминальных состояний (`Starting`/`Running`/`Paused`/
+  `Stopping`) как `FAILED_PRECONDITION` — не останавливает инстанс
+  сама, требует явного `StopInstance` сначала. Не удаляет файлы
+  инстанса с диска — см. подробное обоснование в комментарии у
+  `Daemon::remove_instance`.
 
 **Чего здесь нет и почему:**
 
-- `CloneInstance`/`RemoveInstance`/`ListInstances`/`StreamInstanceLogs`/
-  `StreamResourceMetrics` из §5.1 — у `Daemon` пока нет соответствующих
-  методов. Объявлять rpc-метод раньше метода `Daemon`, который он должен
-  вызывать, означало бы проектировать протокол вслепую — ровно то, чего
-  избегали при выборе порядка `daemon.rs` перед `andler-rpc` изначально.
+- `CloneInstance`/`StreamInstanceLogs`/`StreamResourceMetrics` из §5.1 —
+  у `Daemon` пока нет соответствующих методов. Объявлять rpc-метод
+  раньше метода `Daemon`, который он должен вызывать, означало бы
+  проектировать протокол вслепую — ровно то, чего избегали при выборе
+  порядка `daemon.rs` перед `andler-rpc` изначально.
 
 ## Структура
 

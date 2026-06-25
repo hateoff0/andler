@@ -2,11 +2,11 @@
 //
 // СОЗНАТЕЛЬНО НЕПОЛНАЯ относительно §5.1 CORE_ARCHITECTURE_PLAN.md: там
 // описан целевой набор методов (CloneInstance, RemoveInstance,
-// ListInstances, StreamInstanceLogs, StreamResourceMetrics и т.п.) —
-// здесь объявлены только методы, которые реально есть как методы
-// `andler_daemon::Daemon` сегодня. Добавлять rpc-метод без соответствующего
-// метода `Daemon` означало бы проектировать протокол вслепую — то, что
-// явно решили не делать (см. README этого крейта и andler-daemon).
+// StreamInstanceLogs, StreamResourceMetrics и т.п.) — здесь объявлены
+// только методы, которые реально есть как методы `andler_daemon::Daemon`
+// сегодня. Добавлять rpc-метод без соответствующего метода `Daemon`
+// означало бы проектировать протокол вслепую — то, что явно решили не
+// делать (см. README этого крейта и andler-daemon).
 //
 // `CreateInstance` — generic-путь создания инстанса через явный
 // `InstanceConfig`, соответствует `Daemon::create_instance` один-к-одному.
@@ -43,6 +43,17 @@ service AndlerService {
     rpc PauseInstance(InstanceIdRequest) returns (Empty);
     rpc ResumeInstance(InstanceIdRequest) returns (Empty);
     rpc GetInstanceStatus(InstanceIdRequest) returns (InstanceStatusResponse);
+
+    // Соответствует Daemon::list_instances. Возвращает только
+    // id/name/state каждого инстанса (не полный InstanceConfig) — см.
+    // комментарий у `Daemon::list_instances`/`InstanceSummary` за тем,
+    // почему список не дёргает backend.status() по каждому инстансу.
+    rpc ListInstances(Empty) returns (ListInstancesResponse);
+
+    // Соответствует Daemon::remove_instance. Не удаляет файлы инстанса с
+    // диска и не останавливает запущенный инстанс сама — см. подробное
+    // обоснование в комментарии у `Daemon::remove_instance`.
+    rpc RemoveInstance(InstanceIdRequest) returns (Empty);
 }
 
 message Empty {}
@@ -283,4 +294,23 @@ message InstanceStatusResponse {
     // Доп. диагностика из BackendStatus::detail, если backend её дал
     // (например, "instance has no running backend handle").
     string detail = 3;
+}
+
+// Одна строка ListInstancesResponse — зеркало
+// `andler_daemon::daemon::InstanceSummary`. Названо `InstanceListEntry`,
+// не `InstanceSummary`, чтобы избежать одноимённости с доменным типом
+// при чтении кода на стороне Rust (`andler_rpc::proto::InstanceSummary`
+// vs `andler_daemon::InstanceSummary` было бы легко перепутать в одном
+// файле конвертации). `error_message`/`detail` сознательно отсутствуют
+// здесь, в отличие от `InstanceStatusResponse` — `Daemon::list_instances`
+// не обращается к backend'у и не имеет `BackendStatus::detail`; точная
+// причина ошибки конкретного инстанса остаётся за `GetInstanceStatus`.
+message InstanceListEntry {
+    string instance_id = 1;
+    string name = 2;
+    InstanceStateKind state = 3;
+}
+
+message ListInstancesResponse {
+    repeated InstanceListEntry instances = 1;
 }

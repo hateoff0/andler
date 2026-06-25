@@ -2,13 +2,17 @@
 //! бизнес-логики здесь: каждая подкоманда формирует один gRPC-запрос через
 //! `andler-rpc`/`tonic` и печатает ответ. См. README.md этого крейта.
 
+mod instance_file;
+
 use andler_rpc::proto::andler_service_client::AndlerServiceClient;
 use andler_rpc::proto::{
     AndroidProfile as ProtoAndroidProfile, AndroidVersion as ProtoAndroidVersion,
-    CreateAndroidInstanceRequest, InstanceIdRequest, InstanceStateKind, RootMode as ProtoRootMode,
-    StopInstanceRequest,
+    CreateAndroidInstanceRequest, Empty, InstanceIdRequest, InstanceStateKind,
+    RootMode as ProtoRootMode, StopInstanceRequest,
 };
 use clap::{Parser, Subcommand, ValueEnum};
+use instance_file::InstanceFile;
+use std::path::PathBuf;
 
 const DEFAULT_DAEMON_ADDR: &str = "http://127.0.0.1:50051";
 
@@ -26,6 +30,14 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Создаёт LinuxVm-инстанс из TOML-файла конфигурации — см.
+    /// `andler-cli/src/instance_file.rs` за полем `InstanceFile` и
+    /// README этого крейта за примером файла.
+    Create {
+        /// Путь к TOML-файлу, описывающему инстанс (см. `InstanceFile`).
+        #[arg(long)]
+        file: PathBuf,
+    },
     /// Резолвит AndroidProfile в инстанс и регистрирует его в andlerd.
     CreateAndroid {
         #[arg(long)]
@@ -67,6 +79,16 @@ enum Command {
     Resume { instance_id: String },
     /// Печатает текущий статус инстанса.
     Status { instance_id: String },
+    /// Печатает список всех зарегистрированных инстансов
+    /// (id/имя/состояние). См. `Daemon::list_instances` — состояние тут
+    /// грубое (запись демона, не live backend-статус); для точного
+    /// статуса конкретного инстанса используй `status`.
+    List,
+    /// Удаляет запись инстанса. Требует, чтобы инстанс был остановлен
+    /// (`Created`/`Stopped`/`Error`) — см. `Daemon::remove_instance` за
+    /// тем, почему запущенный инстанс нужно сначала явно `stop`нуть.
+    /// Не удаляет файлы инстанса с диска.
+    Remove { instance_id: String },
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -127,6 +149,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut client = AndlerServiceClient::connect(addr).await?;
 
     match cli.command {
+        Command::Create { file } => {
+            let instance_file = InstanceFile::load(&file)?;
+            let response = client
+                .create_instance(instance_file.into_request())
+                .await?;
+            println!("{}", response.into_inner().instance_id);
+        }
         Command::CreateAndroid {
             name,
             android_version,
@@ -203,6 +232,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             if !response.error_message.is_empty() {
                 println!("error: {}", response.error_message);
             }
+        }
+        Command::List => {
+            let response = client.list_instances(Empty {}).await?.into_inner();
+            if response.instances.is_empty() {
+                println!("no instances");
+            } else {
+                for entry in response.instances {
+                    println!(
+                        "{}  {}  {}",
+                        entry.instance_id,
+                        state_kind_name(entry.state()),
+                        entry.name
+                    );
+                }
+            }
+        }
+        Command::Remove { instance_id } => {
+            client
+                .remove_instance(InstanceIdRequest { instance_id })
+                .await?;
+            println!("removed");
         }
     }
 

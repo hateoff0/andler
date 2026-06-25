@@ -74,6 +74,13 @@ pub enum DaemonError {
     /// поднимать процесс с заведомо нечитаемой базой.
     #[error("failed to restore instances from store: {0}")]
     Restore(#[from] StoreError),
+
+    /// `remove_instance` вызван для записи в нетерминальном состоянии
+    /// (`Starting`/`Running`/`Paused`/`Stopping`) — см. документацию
+    /// `Daemon::remove_instance` за тем, почему удаление запущенного
+    /// инстанса запрещено, а не просто молча останавливает его сначала.
+    #[error("cannot remove instance {0:?}: it is in non-terminal state {1:?}; stop it first")]
+    InstanceNotRemovable(InstanceId, InstanceState),
 }
 
 /// Реестр backend'ов по умолчанию: `Qemu -> QemuBackend`. `Vmm`
@@ -119,6 +126,59 @@ pub struct Daemon {
     backends: HashMap<BackendKind, Arc<dyn HypervisorBackend>>,
     instances: RwLock<HashMap<InstanceId, InstanceRecord>>,
     store: Option<Store>,
+}
+
+/// RAII-страховка от мусора на диске при частично неудавшемся
+/// `create_android_instance`: удаляет `instance_dir` целиком при выходе
+/// из скоупа, если не был явно разряжён (`disarm()`) после того, как вся
+/// последовательность (создание каталога → копирование `OVMF_VARS` →
+/// overlay-диск → регистрация в `Daemon::create_instance`) завершилась
+/// успешно.
+///
+/// RAII, а не `tokio::fs::remove_dir_all` в каждой ветке `?` по отдельности
+/// — расставлять очистку вручную на каждой точке выхода надёжно ровно до
+/// тех пор, пока кто-то не добавит новую точку сбоя в середину метода и
+/// не забудет про неё; guard убирает за собой при *любом* раннем
+/// возврате, включая будущие, которые сегодня ещё не написаны.
+///
+/// `Drop::drop` синхронный, поэтому очистка — `std::fs::remove_dir_all`,
+/// не `tokio::fs::remove_dir_all`: `Drop` не может быть `async`, а
+/// блокировать executor на удаление нескольких файлов в каталоге одного
+/// инстанса — приемлемо, поскольку этот путь срабатывает только при
+/// ошибке создания (не на каждый успешный вызов) и удаляет малый,
+/// заранее известный набор файлов (VARS.fd, overlay/base qcow2), не
+/// произвольно большое дерево.
+struct InstanceDirGuard {
+    path: PathBuf,
+    armed: bool,
+}
+
+impl InstanceDirGuard {
+    fn new(path: PathBuf) -> Self {
+        InstanceDirGuard { path, armed: true }
+    }
+
+    /// Снимает страховку — вызывается после того, как `instance_dir`
+    /// больше не нужно удалять (вся последовательность создания
+    /// инстанса завершилась успешно, включая регистрацию в `Daemon`).
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for InstanceDirGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        // Ошибка самой очистки (например, гонка с параллельным удалением)
+        // намеренно проглатывается, не паникует и не логируется через
+        // `tracing` — `Drop` это не место для эскалации новой ошибки на
+        // фоне уже идущей (метод, вызывающий этот guard, уже возвращает
+        // `Err` по другой причине); путь к каталогу виден через
+        // `self.path`, если потребуется диагностика вручную.
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
 }
 
 impl Daemon {
@@ -346,11 +406,15 @@ impl Daemon {
     /// Если создание каталога инстанса, копирование шаблона `OVMF_VARS`
     /// или создание overlay-диска завершается ошибкой — инстанс не
     /// регистрируется в `Daemon` вообще (никакой частично созданной
-    /// записи), но уже созданные на диске файлы (каталог, скопированный
-    /// `VARS.fd`, если до него дошло) не удаляются — очистка частично
-    /// созданного instance_dir в случае ошибки осознанно не реализована
-    /// здесь: TODO для будущего шага, как и сам Factory Reset/удаление
-    /// инстанса через `Daemon`.
+    /// записи), и любые уже созданные на диске файлы (каталог,
+    /// скопированный `VARS.fd`, overlay-диск, если до них дошло)
+    /// удаляются через `InstanceDirGuard` — см. его документацию.
+    /// Очистка срабатывает при ЛЮБОМ раннем возврате этого метода,
+    /// включая отказ финального `self.create_instance(cfg)` (например,
+    /// `NoBackendRegistered`) — на этот момент уже создан весь
+    /// `instance_dir` с overlay-диском, и оставлять его на диске без
+    /// зарегистрированной записи было бы такой же тихой утечкой, как и
+    /// при более ранних точках сбоя.
     pub async fn create_android_instance(
         &self,
         profile: AndroidProfile,
@@ -362,6 +426,7 @@ impl Daemon {
     ) -> Result<InstanceId, DaemonError> {
         let id = InstanceId::new();
         let instance_dir = instances_root.join(id.0.to_string());
+        let mut dir_guard = InstanceDirGuard::new(instance_dir.clone());
 
         tokio::fs::create_dir_all(&instance_dir)
             .await
@@ -398,7 +463,13 @@ impl Daemon {
         // на диске, иначе InstanceConfig.id разойдётся с именем каталога.
         cfg.id = id;
 
-        self.create_instance(cfg).await
+        let registered_id = self.create_instance(cfg).await?;
+        // Вся последовательность (каталог, OVMF_VARS, overlay,
+        // регистрация в Daemon) успешна — instance_dir больше не
+        // подлежит автоматической очистке через Drop этого guard'а.
+        dir_guard.disarm();
+
+        Ok(registered_id)
     }
 
     /// Запускает ранее созданный инстанс: `Created -> Starting -> Running`
@@ -589,6 +660,116 @@ impl Daemon {
             }),
         }
     }
+
+    /// Сводка по всем зарегистрированным инстансам — единственный способ
+    /// узнать, какие `InstanceId` вообще существуют, без необходимости
+    /// заранее знать их (например, если вывод `andler create` потерян:
+    /// закрыт терминал, не сохранён stdout скрипта — без `list_instances`
+    /// созданный инстанс физически существует в `Daemon`/`Store`, но
+    /// недостижим ни для одной другой команды, которым всем нужен
+    /// `InstanceId` на входе).
+    ///
+    /// Сознательно возвращает только состояние записи демона
+    /// (`record.state`), а не реальный backend-статус через
+    /// `backend.status(handle)`, как делает `status()` для запущенных
+    /// инстансов — обзорный список не должен порождать по одному
+    /// сетевому/процессному запросу на каждый инстанс (для QEMU это QMP
+    /// round-trip), когда вызывающему обычно нужен только список
+    /// id/имён/грубых состояний, а не точный live-статус каждого. Для
+    /// точного статуса конкретного инстанса остаётся `status(id)`.
+    ///
+    /// Порядок записей не гарантирован — источник (`HashMap`) сам по себе
+    /// не упорядочен; вызывающая сторона (`andler-cli`) сортирует, если
+    /// ей это нужно для вывода.
+    pub async fn list_instances(&self) -> Vec<InstanceSummary> {
+        let instances = self.instances.read().await;
+        instances
+            .values()
+            .map(|record| InstanceSummary {
+                id: record.config.id,
+                name: record.config.name.clone(),
+                state: record.state.clone(),
+            })
+            .collect()
+    }
+
+    /// Удаляет запись инстанса из `Daemon` (и из `store`, если
+    /// персистентность включена).
+    ///
+    /// Запрещено для `Starting`/`Running`/`Paused`/`Stopping` —
+    /// сознательно НЕ останавливает инстанс сначала сама: останавливать
+    /// что-то от имени пользователя в рамках вызова, который выглядит как
+    /// "удалить", было бы скрытым побочным эффектом (что если graceful
+    /// stop важен пользователю и он не ожидал, что `remove` его выполнит
+    /// неявно?). Вызывающая сторона должна сначала явно вызвать
+    /// `stop_instance`, как и для `start_instance` на ещё не
+    /// зарегистрированный инстанс — `Daemon` не угадывает намерение,
+    /// требует явной последовательности операций. Разрешено из
+    /// `Created`/`Stopped`/`Error` — не использует
+    /// `InstanceState::is_terminal()` (тот определяет терминальность FSM:
+    /// `Stopped | Error`, не включает `Created`), потому что семантика
+    /// здесь другая — "безопасно ли удалить запись прямо сейчас", а не
+    /// "достигнут ли конец графа переходов"; `Created` инстанс, который
+    /// никогда не запускался, не имеет процесса, который можно было бы
+    /// случайно оборвать удалением.
+    ///
+    /// НЕ удаляет файлы инстанса с диска (диск, `instance_dir` для
+    /// Android) — `InstanceConfig.disk.path` может указывать на путь,
+    /// который пользователь указал сам (например, через `andler create
+    /// --file`, см. `andler-cli`), и автоматическое удаление файла по
+    /// произвольному пользовательскому пути — операция, которая не
+    /// должна происходить неявно как побочный эффект удаления записи.
+    /// Очистка диска, если нужна, остаётся осознанным отдельным шагом
+    /// пользователя/будущего метода (например, `andler remove --purge`),
+    /// не часть этого вызова.
+    ///
+    /// Ошибка удаления из `store` логируется, но не проваливает операцию
+    /// — как и в `persist_state`/`persist_new_instance`, in-memory
+    /// состояние остаётся источником истины текущей сессии демона;
+    /// разойдётся только переживание перезапуска.
+    pub async fn remove_instance(&self, id: InstanceId) -> Result<(), DaemonError> {
+        {
+            let mut instances = self.instances.write().await;
+            let record = instances
+                .get(&id)
+                .ok_or(DaemonError::InstanceNotFound(id))?;
+
+            let removable = matches!(
+                record.state,
+                InstanceState::Created | InstanceState::Stopped | InstanceState::Error { .. }
+            );
+            if !removable {
+                return Err(DaemonError::InstanceNotRemovable(id, record.state.clone()));
+            }
+
+            instances.remove(&id);
+        }
+
+        if let Some(store) = &self.store {
+            if let Err(err) = store.delete_instance(id).await {
+                tracing::error!(
+                    instance_id = %id.0,
+                    error = %err,
+                    "failed to delete instance from store after in-memory removal"
+                );
+            }
+        }
+
+        Ok(())
+    }
+}
+
+/// Одна строка сводки `Daemon::list_instances` — `id`/`name`/`state`, не
+/// полный `InstanceConfig`: список существует для того, чтобы найти
+/// нужный `InstanceId` и человекочитаемое имя, не для просмотра всей
+/// конфигурации инстанса (для этого, если понадобится, естественнее
+/// отдельный `GetInstanceConfig`, а не нагружать список лишним объёмом
+/// данных, который в большинстве вызовов не нужен).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InstanceSummary {
+    pub id: InstanceId,
+    pub name: String,
+    pub state: InstanceState,
 }
 
 impl Default for Daemon {
@@ -837,7 +1018,7 @@ mod tests {
                 profile,
                 "my-android".to_string(),
                 missing_base,
-                instances_root,
+                instances_root.clone(),
                 20 * 1024 * 1024 * 1024,
                 ovmf_template,
             )
@@ -848,6 +1029,62 @@ mod tests {
             err,
             DaemonError::Disk(andler_disk::DiskError::BackingFileNotFound(_))
         ));
+
+        // InstanceDirGuard должен убрать за собой: к моменту сбоя на
+        // create_overlay каталог инстанса и скопированный VARS.fd уже
+        // были созданы на диске (см. порядок операций в
+        // create_android_instance) — без очистки они остались бы
+        // мусором, не привязанным ни к одной зарегистрированной записи.
+        let mut instance_dirs = tokio::fs::read_dir(&instances_root).await.unwrap();
+        assert!(
+            instance_dirs.next_entry().await.unwrap().is_none(),
+            "instances_root must be empty after a failed create_android_instance"
+        );
+
+        tokio::fs::remove_dir_all(&dir).await.ok();
+    }
+
+    #[tokio::test]
+    async fn create_android_instance_cleans_up_instance_dir_on_missing_ovmf_template() {
+        // Сбой раньше, чем в create_android_instance_fails_when_base_image_missing:
+        // здесь падает само copy(ovmf_vars_template) — instance_dir к
+        // этому моменту уже создан (пустой, без VARS.fd), и его тоже
+        // нужно убрать.
+        let dir = std::env::temp_dir().join("andler-daemon-test-android-missing-ovmf");
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+
+        let missing_ovmf_template = dir.join("does-not-exist-template.fd");
+        let base_image = dir.join("base.qcow2"); // не используется, copy падает раньше
+        let instances_root = dir.join("instances");
+        let daemon = Daemon::new();
+
+        let profile = AndroidProfile {
+            android_version: AndroidVersion::Android13,
+            gapps: false,
+            microg: true,
+            libndk: false,
+            root: RootMode::None,
+        };
+
+        let err = daemon
+            .create_android_instance(
+                profile,
+                "my-android".to_string(),
+                base_image,
+                instances_root.clone(),
+                20 * 1024 * 1024 * 1024,
+                missing_ovmf_template,
+            )
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, DaemonError::Io { .. }));
+
+        let mut instance_dirs = tokio::fs::read_dir(&instances_root).await.unwrap();
+        assert!(
+            instance_dirs.next_entry().await.unwrap().is_none(),
+            "instances_root must be empty after copy(ovmf_vars_template) fails"
+        );
 
         tokio::fs::remove_dir_all(&dir).await.ok();
     }
@@ -1018,5 +1255,223 @@ mod tests {
         let stored = store.load_instance(id).await.unwrap();
         assert_eq!(stored.config, cfg);
         assert_eq!(stored.state, InstanceState::Created);
+    }
+
+    // --- list_instances ------------------------------------------------
+
+    #[tokio::test]
+    async fn list_instances_on_empty_daemon_returns_empty_vec() {
+        let daemon = Daemon::new();
+        assert!(daemon.list_instances().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn list_instances_returns_one_summary_per_created_instance() {
+        let daemon = Daemon::new();
+        let cfg1 = sample_config();
+        let mut cfg2 = sample_config();
+        cfg2.name = "second-vm".to_string();
+
+        let id1 = daemon.create_instance(cfg1).await.unwrap();
+        let id2 = daemon.create_instance(cfg2).await.unwrap();
+
+        let mut summaries = daemon.list_instances().await;
+        summaries.sort_by_key(|s| s.name.clone());
+
+        assert_eq!(summaries.len(), 2);
+        assert_eq!(summaries[0].id, id2);
+        assert_eq!(summaries[0].name, "second-vm");
+        assert_eq!(summaries[0].state, InstanceState::Created);
+        assert_eq!(summaries[1].id, id1);
+        assert_eq!(summaries[1].state, InstanceState::Created);
+    }
+
+    #[tokio::test]
+    async fn list_instances_reflects_state_after_failed_start() {
+        // list_instances должен видеть актуальное record.state, не
+        // застывший снимок на момент create_instance — после неудачного
+        // start_instance (Passthrough, как и в других тестах на Fail-ветку
+        // выше) запись должна появиться в списке уже как Error, не
+        // Created.
+        let daemon = Daemon::new();
+        let mut cfg = sample_config();
+        cfg.gpu.render_backend = RenderBackend::Passthrough {
+            gpu_pci_id: "0000:01:00.0".to_string(),
+        };
+        let id = daemon.create_instance(cfg).await.unwrap();
+        daemon.start_instance(id).await.unwrap_err();
+
+        let summaries = daemon.list_instances().await;
+        assert_eq!(summaries.len(), 1);
+        assert!(matches!(summaries[0].state, InstanceState::Error { .. }));
+    }
+
+    #[tokio::test]
+    async fn list_instances_after_restore_includes_restored_instances() {
+        let store = andler_store::Store::open_in_memory().await.unwrap();
+        let cfg = sample_config();
+        let id = cfg.id;
+        store
+            .save_instance(&cfg, &InstanceState::Created)
+            .await
+            .unwrap();
+
+        let daemon = Daemon::restore(store).await.unwrap();
+        let summaries = daemon.list_instances().await;
+
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].id, id);
+        assert_eq!(summaries[0].name, cfg.name);
+    }
+
+    // --- remove_instance -------------------------------------------------
+
+    #[tokio::test]
+    async fn remove_instance_on_unknown_instance_returns_instance_not_found() {
+        let daemon = Daemon::new();
+        let err = daemon.remove_instance(InstanceId::new()).await.unwrap_err();
+        assert!(matches!(err, DaemonError::InstanceNotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn remove_instance_succeeds_from_created() {
+        let daemon = Daemon::new();
+        let id = daemon.create_instance(sample_config()).await.unwrap();
+
+        daemon.remove_instance(id).await.unwrap();
+
+        let err = daemon.status(id).await.unwrap_err();
+        assert!(matches!(err, DaemonError::InstanceNotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn remove_instance_succeeds_from_error_state() {
+        // Created -> Error через тот же неудачный-start трюк, что в
+        // других тестах на ветку Fail (RenderBackend::Passthrough
+        // гарантированно падает на валидации backend'а без реального
+        // QEMU-процесса).
+        let daemon = Daemon::new();
+        let mut cfg = sample_config();
+        cfg.gpu.render_backend = RenderBackend::Passthrough {
+            gpu_pci_id: "0000:01:00.0".to_string(),
+        };
+        let id = daemon.create_instance(cfg).await.unwrap();
+        daemon.start_instance(id).await.unwrap_err();
+
+        daemon.remove_instance(id).await.unwrap();
+
+        let err = daemon.status(id).await.unwrap_err();
+        assert!(matches!(err, DaemonError::InstanceNotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn remove_instance_rejects_running_instance() {
+        // Получить реальный Running через start_instance() требует
+        // настоящего qemu-system-x86_64/доступа к /dev/kvm, которых нет в
+        // обычном unit-test окружении (см. #[ignore]-тесты в
+        // andler-qemu::backend). Вместо этого вставляем запись с нужным
+        // state напрямую — тестовый модуль того же файла имеет доступ к
+        // приватным `Daemon::instances`/`InstanceRecord`, и это не
+        // обходит проверяемую логику: remove_instance видит только
+        // record.state, ему не важно, как именно запись попала в Running.
+        let daemon = Daemon::new();
+        let cfg = sample_config();
+        let id = cfg.id;
+        daemon.instances.write().await.insert(
+            id,
+            InstanceRecord {
+                config: cfg,
+                state: InstanceState::Running,
+                handle: None,
+            },
+        );
+
+        let err = daemon.remove_instance(id).await.unwrap_err();
+        assert!(matches!(
+            err,
+            DaemonError::InstanceNotRemovable(_, InstanceState::Running)
+        ));
+
+        // Запись должна остаться нетронутой после отказа — remove_instance
+        // не должен ничего удалять/менять, если проверка removable не
+        // прошла.
+        let status = daemon.status(id).await.unwrap();
+        assert_eq!(status.state, InstanceState::Running);
+    }
+
+    #[tokio::test]
+    async fn remove_instance_rejects_every_non_terminal_state() {
+        for state in [
+            InstanceState::Starting,
+            InstanceState::Running,
+            InstanceState::Paused,
+            InstanceState::Stopping,
+        ] {
+            let daemon = Daemon::new();
+            let cfg = sample_config();
+            let id = cfg.id;
+            daemon.instances.write().await.insert(
+                id,
+                InstanceRecord {
+                    config: cfg,
+                    state: state.clone(),
+                    handle: None,
+                },
+            );
+
+            let err = daemon.remove_instance(id).await.unwrap_err();
+            assert!(
+                matches!(err, DaemonError::InstanceNotRemovable(_, ref s) if *s == state),
+                "expected InstanceNotRemovable({state:?}, ..), got {err:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn remove_instance_succeeds_from_stopped() {
+        // Stopped — терминальное состояние, достижимое только через
+        // успешный stop_instance() на реально запущенном инстансе в
+        // обычной работе демона; здесь инъектируем его напрямую по той
+        // же причине, что в remove_instance_rejects_running_instance —
+        // remove_instance проверяет только record.state, не то, как
+        // инстанс в это состояние попал.
+        let daemon = Daemon::new();
+        let cfg = sample_config();
+        let id = cfg.id;
+        daemon.instances.write().await.insert(
+            id,
+            InstanceRecord {
+                config: cfg,
+                state: InstanceState::Stopped,
+                handle: None,
+            },
+        );
+
+        daemon.remove_instance(id).await.unwrap();
+
+        let err = daemon.status(id).await.unwrap_err();
+        assert!(matches!(err, DaemonError::InstanceNotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn remove_instance_also_deletes_from_store() {
+        let store = andler_store::Store::open_in_memory().await.unwrap();
+        let daemon = Daemon::with_store(store.clone());
+        let id = daemon.create_instance(sample_config()).await.unwrap();
+
+        daemon.remove_instance(id).await.unwrap();
+
+        let err = store.load_instance(id).await.unwrap_err();
+        assert!(matches!(err, andler_store::StoreError::NotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn remove_instance_disappears_from_list_instances() {
+        let daemon = Daemon::new();
+        let id = daemon.create_instance(sample_config()).await.unwrap();
+        daemon.remove_instance(id).await.unwrap();
+
+        let summaries = daemon.list_instances().await;
+        assert!(summaries.is_empty());
     }
 }

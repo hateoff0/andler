@@ -18,9 +18,9 @@ use std::sync::Arc;
 use andler_rpc::proto::andler_service_client::AndlerServiceClient;
 use andler_rpc::proto::andler_service_server::AndlerServiceServer;
 use andler_rpc::proto::{
-    AudioConfig, CpuConfig, CreateInstanceRequest, DiskConfig, DisplayConfig, FirmwareConfig,
-    GpuConfig, InputConfig, InstanceIdRequest, InstanceStateKind, MemoryConfig, NetworkConfig,
-    Resolution,
+    AudioConfig, CpuConfig, CreateInstanceRequest, DiskConfig, DisplayConfig, Empty,
+    FirmwareConfig, GpuConfig, InputConfig, InstanceIdRequest, InstanceStateKind, MemoryConfig,
+    NetworkConfig, Resolution,
 };
 use tokio::net::TcpListener;
 use tokio_stream::wrappers::TcpListenerStream;
@@ -311,6 +311,179 @@ async fn create_instance_with_bridge_network_round_trips_over_real_grpc() {
         .into_inner();
     uuid::Uuid::parse_str(&response.instance_id)
         .expect("CreateInstanceResponse.instance_id must be a valid UUID");
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn list_instances_on_fresh_server_returns_empty() {
+    let (mut client, server) = spawn_server_and_connect().await;
+
+    let response = client
+        .list_instances(Empty {})
+        .await
+        .expect("ListInstances on a fresh daemon must succeed")
+        .into_inner();
+    assert!(response.instances.is_empty());
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn list_instances_over_real_grpc_reflects_created_instance() {
+    // Самое важное здесь не "список не пуст", а то, что он отражает
+    // именно тот instance_id, который вернул CreateInstance — без этого
+    // ListInstances мог бы технически "работать" и при этом указывать на
+    // данные, рассинхронизированные с тем, что реально создал клиент.
+    let (mut client, server) = spawn_server_and_connect().await;
+
+    let create_response = client
+        .create_instance(sample_create_instance_request())
+        .await
+        .expect("create_instance must succeed")
+        .into_inner();
+
+    let list_response = client
+        .list_instances(Empty {})
+        .await
+        .expect("list_instances must succeed")
+        .into_inner();
+
+    assert_eq!(list_response.instances.len(), 1);
+    let entry = &list_response.instances[0];
+    assert_eq!(entry.instance_id, create_response.instance_id);
+    assert_eq!(entry.name, "test-linux-vm");
+    assert_eq!(entry.state, InstanceStateKind::Created as i32);
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn list_instances_includes_every_created_instance() {
+    let (mut client, server) = spawn_server_and_connect().await;
+
+    let mut request_a = sample_create_instance_request();
+    request_a.name = "vm-a".to_string();
+    let mut request_b = sample_create_instance_request();
+    request_b.name = "vm-b".to_string();
+
+    client
+        .create_instance(request_a)
+        .await
+        .expect("creating vm-a must succeed");
+    client
+        .create_instance(request_b)
+        .await
+        .expect("creating vm-b must succeed");
+
+    let response = client
+        .list_instances(Empty {})
+        .await
+        .expect("list_instances must succeed")
+        .into_inner();
+
+    let mut names: Vec<&str> = response.instances.iter().map(|e| e.name.as_str()).collect();
+    names.sort();
+    assert_eq!(names, vec!["vm-a", "vm-b"]);
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn remove_instance_over_real_grpc_then_status_returns_not_found() {
+    let (mut client, server) = spawn_server_and_connect().await;
+
+    let create_response = client
+        .create_instance(sample_create_instance_request())
+        .await
+        .expect("create_instance must succeed")
+        .into_inner();
+    let id = create_response.instance_id;
+
+    client
+        .remove_instance(InstanceIdRequest {
+            instance_id: id.clone(),
+        })
+        .await
+        .expect("removing a freshly created (Created-state) instance must succeed");
+
+    let status = client
+        .get_instance_status(InstanceIdRequest { instance_id: id })
+        .await
+        .expect_err("a removed instance must no longer be found");
+    assert_eq!(status.code(), tonic::Code::NotFound);
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn remove_instance_on_failed_instance_round_trips_over_real_grpc() {
+    // RenderBackend::Passthrough гарантированно проваливает spawn на
+    // валидации, синхронно и без обращения к реальному
+    // qemu-system-x86_64 (см. тот же приём в других тестах этого файла и
+    // в daemon::tests) — единственный детерминированный способ получить
+    // терминальное Error-состояние через настоящий gRPC-вызов
+    // StartInstance, не гадая, есть ли в среде CI рабочий QEMU/KVM.
+    use andler_rpc::proto::render_backend;
+
+    let (mut client, server) = spawn_server_and_connect().await;
+    let mut request = sample_create_instance_request();
+    request.gpu = Some(GpuConfig {
+        render_backend: Some(andler_rpc::proto::RenderBackend {
+            kind: Some(render_backend::Kind::Passthrough(
+                render_backend::Passthrough {
+                    gpu_pci_id: "0000:01:00.0".to_string(),
+                },
+            )),
+        }),
+        hostmem_bytes: 4096 * 1024 * 1024,
+        blob: true,
+        gl: true,
+    });
+
+    let create_response = client
+        .create_instance(request)
+        .await
+        .expect("create_instance must succeed")
+        .into_inner();
+    let id = create_response.instance_id;
+
+    client
+        .start_instance(InstanceIdRequest {
+            instance_id: id.clone(),
+        })
+        .await
+        .expect_err("starting an instance with RenderBackend::Passthrough must fail");
+
+    // Инстанс теперь в Error (терминальное) — remove_instance должен
+    // пройти.
+    client
+        .remove_instance(InstanceIdRequest {
+            instance_id: id.clone(),
+        })
+        .await
+        .expect("removing an instance left in Error state must succeed");
+
+    let status = client
+        .get_instance_status(InstanceIdRequest { instance_id: id })
+        .await
+        .expect_err("a removed instance must no longer be found");
+    assert_eq!(status.code(), tonic::Code::NotFound);
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn remove_unknown_instance_round_trips_as_not_found() {
+    let (mut client, server) = spawn_server_and_connect().await;
+
+    let status = client
+        .remove_instance(InstanceIdRequest {
+            instance_id: uuid::Uuid::new_v4().to_string(),
+        })
+        .await
+        .expect_err("removing an unregistered instance_id must fail");
+    assert_eq!(status.code(), tonic::Code::NotFound);
 
     server.abort();
 }

@@ -11,7 +11,8 @@ use andler_rpc::convert;
 use andler_rpc::proto::andler_service_server::AndlerService;
 use andler_rpc::proto::{
     CreateAndroidInstanceRequest, CreateInstanceRequest, CreateInstanceResponse, Empty,
-    InstanceIdRequest, InstanceStatusResponse, StopInstanceRequest,
+    InstanceIdRequest, InstanceListEntry, InstanceStatusResponse, ListInstancesResponse,
+    StopInstanceRequest,
 };
 use tonic::{Request, Response, Status};
 
@@ -32,26 +33,32 @@ impl DaemonService {
 /// `BackendError::NotImplemented`) -> `UNIMPLEMENTED` (соответствует
 /// "Контракту для незавершённых backend'ов" из §4 архитектурного плана —
 /// демон не должен падать, он должен вернуть штатный gRPC-статус),
-/// нарушение FSM/отсутствие хэндла -> `FAILED_PRECONDITION` (клиент мог бы
-/// исправить ситуацию, изменив порядок вызовов), остальное -> `INTERNAL`.
+/// нарушение FSM/отсутствие хэндла/`InstanceNotRemovable` ->
+/// `FAILED_PRECONDITION` (клиент мог бы исправить ситуацию, изменив
+/// порядок вызовов — например, `stop` перед `remove`), остальное ->
+/// `INTERNAL`.
 ///
 /// `DaemonError::Restore` — отдельная ветка, не часть `_ => INTERNAL`:
 /// она недостижима из любого метода `AndlerService` (всю обработку
 /// запросов выполняют `create_instance`/`start_instance`/`stop_instance`/
-/// `pause_instance`/`resume_instance`/`status`/`create_android_instance`,
-/// ни один из которых не вызывает `Daemon::restore` — `restore` вызывается
-/// только однократно в `main.rs`, до того, как сервис вообще создан).
-/// `Status::internal` здесь — это документирующий, а не ожидаемый путь:
-/// если он когда-либо сработает на практике, это означает, что
-/// `DaemonService` стал вызывать `restore` из обработчика запроса, что
-/// само по себе было бы ошибкой архитектуры, а не штатной ситуацией,
-/// которую стоит транслировать в более специфичный статус.
+/// `pause_instance`/`resume_instance`/`status`/`create_android_instance`/
+/// `list_instances`/`remove_instance`, ни один из которых не вызывает
+/// `Daemon::restore` — `restore` вызывается только однократно в
+/// `main.rs`, до того, как сервис вообще создан). `Status::internal`
+/// здесь — это документирующий, а не ожидаемый путь: если он когда-либо
+/// сработает на практике, это означает, что `DaemonService` стал
+/// вызывать `restore` из обработчика запроса, что само по себе было бы
+/// ошибкой архитектуры, а не штатной ситуацией, которую стоит
+/// транслировать в более специфичный статус.
 impl From<DaemonError> for Status {
     fn from(err: DaemonError) -> Self {
         match &err {
             DaemonError::InstanceNotFound(_) => Status::not_found(err.to_string()),
             DaemonError::NoBackendRegistered(_) => Status::unimplemented(err.to_string()),
             DaemonError::InvalidTransition(_) => Status::failed_precondition(err.to_string()),
+            DaemonError::InstanceNotRemovable(_, _) => {
+                Status::failed_precondition(err.to_string())
+            }
             DaemonError::Backend(andler_core::BackendError::NotImplemented { .. }) => {
                 Status::unimplemented(err.to_string())
             }
@@ -169,5 +176,40 @@ impl AndlerService for DaemonService {
             error_message,
             detail: status.detail.unwrap_or_default(),
         }))
+    }
+
+    /// Соответствует `Daemon::list_instances`. Конвертация
+    /// `daemon::InstanceSummary -> proto::InstanceListEntry` живёт здесь,
+    /// а не в `andler_rpc::convert` (как остальные конвертации в этом
+    /// файле) — `InstanceSummary` определён в `andler-daemon::daemon`, а
+    /// `andler-rpc` не зависит от `andler-daemon` (зависимость обратная);
+    /// `convert.rs` физически не может на него сослаться.
+    async fn list_instances(
+        &self,
+        _request: Request<Empty>,
+    ) -> Result<Response<ListInstancesResponse>, Status> {
+        let summaries = self.daemon.list_instances().await;
+        let instances = summaries
+            .into_iter()
+            .map(|summary| {
+                let (state, _error_message) = convert::instance_state_to_proto(&summary.state);
+                InstanceListEntry {
+                    instance_id: summary.id.0.to_string(),
+                    name: summary.name,
+                    state: state as i32,
+                }
+            })
+            .collect();
+
+        Ok(Response::new(ListInstancesResponse { instances }))
+    }
+
+    async fn remove_instance(
+        &self,
+        request: Request<InstanceIdRequest>,
+    ) -> Result<Response<Empty>, Status> {
+        let id = convert::parse_instance_id(&request.into_inner().instance_id)?;
+        self.daemon.remove_instance(id).await?;
+        Ok(Response::new(Empty {}))
     }
 }

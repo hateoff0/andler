@@ -7,13 +7,32 @@ in-memory состояние инстансов, без сети и без пе�
 ## Что здесь есть
 
 - `daemon.rs` — **реализовано**. `Daemon::create_instance`/`start_instance`/
-  `stop_instance`/`pause_instance`/`resume_instance`/`status` — методы,
-  которые соответствуют будущим gRPC-методам один-к-одному по смыслу, но
-  пока вызываются прямо как обычные async-методы Rust. Каждый метод
-  применяет переходы `andler_core::fsm` и делегирует нужному backend'у
-  через `HypervisorBackend`. `Daemon::new()` регистрирует только
+  `stop_instance`/`pause_instance`/`resume_instance`/`status`/
+  `list_instances`/`remove_instance` — методы, которые соответствуют
+  будущим gRPC-методам один-к-одному по смыслу, но пока вызываются прямо
+  как обычные async-методы Rust. Каждый метод применяет переходы
+  `andler_core::fsm` и делегирует нужному backend'у через
+  `HypervisorBackend`. `Daemon::new()` регистрирует только
   `BackendKind::Qemu -> QemuBackend` — `Vmm` не регистрируется, пока
   `andler-vmm` остаётся пустым каркасом (см. его README).
+  - **`list_instances`** — возвращает `Vec<InstanceSummary>`
+    (`id`/`name`/`state` записи демона, не полный `InstanceConfig` и не
+    live backend-статус). Единственный способ узнать, какие `InstanceId`
+    вообще существуют, без необходимости заранее их знать — до этого
+    метода созданный инстанс, чей `instance_id` потерян (закрыт терминал
+    до того, как его записали), был физически жив, но недостижим ни для
+    одной другой команды.
+  - **`remove_instance`** — отвергает нетерминальные состояния
+    (`Starting`/`Running`/`Paused`/`Stopping`) как
+    `DaemonError::InstanceNotRemovable`, не пытается сама остановить
+    инстанс перед удалением (явная последовательность `stop` → `remove`,
+    не скрытый побочный эффект). Не удаляет файлы инстанса с диска —
+    `InstanceConfig.disk.path` может указывать на путь, который указал
+    сам пользователь (`andler create --file`), автоматическое удаление
+    произвольного пользовательского файла не должно быть неявным
+    следствием удаления записи. Удаляет из `store`, если персистентность
+    включена; ошибка удаления из `store` логируется, но не проваливает
+    операцию (та же семантика, что у `persist_state`).
 - `Daemon::create_android_instance` — **реализовано**. Связывает
   `AndroidProfile::resolve()` (`andler-core`, чистая функция) с реальным
   созданием на диске: каталог инстанса, персональная копия `OVMF_VARS`
@@ -22,6 +41,15 @@ in-memory состояние инстансов, без сети и без пе�
   проходит через тот же `create_instance`, что и при прямом вызове — то
   есть та же валидация backend'а и тот же реестр. Это первый сквозной
   путь от Android-профиля до зарегистрированного инстанса.
+  - **Очистка при частичном сбое** — `InstanceDirGuard` (RAII, `Drop`)
+    удаляет `instance_dir` целиком при любом раннем возврате метода
+    (сбой `create_dir_all`/`copy`/`create_overlay`/финального
+    `create_instance`), если последовательность не дошла до конца.
+    Разряжается (`disarm()`) только после успешной регистрации в
+    `Daemon` — до этого момента любой `?` оставляет каталог помеченным
+    на удаление. `Drop::drop` синхронный, поэтому сама очистка —
+    `std::fs::remove_dir_all`, не `tokio::fs`; см. подробности в
+    docstring `InstanceDirGuard`.
 
 ## Что здесь НЕ реализовано (следующие слои поверх `Daemon`)
 
@@ -75,10 +103,6 @@ in-memory состояние инстансов, без сети и без пе�
   путь к базовому образу, не качает его сам. Через gRPC это значит, что
   `base_image_path`/`ovmf_vars_template` в `CreateAndroidInstanceRequest` —
   пути на файловой системе хоста `andlerd`, не клиента (см. `docs/api/grpc.md`).
-- **Очистка частично созданного `instance_dir` при ошибке внутри
-  `create_android_instance`** (например, overlay не создался после того,
-  как `VARS.fd` уже скопирован) — осознанно не реализована; TODO вместе с
-  удалением инстанса/Factory Reset через `Daemon`.
 
 ## Важные решения, зафиксированные в `daemon.rs`
 
@@ -95,7 +119,15 @@ in-memory состояние инстансов, без сети и без пе�
 ## Тесты
 
 - `daemon::tests` — `Daemon` напрямую, без сети (включая
-  `create_android_instance`), плюс новый блок персистентности:
+  `create_android_instance`, плюс
+  `create_android_instance_cleans_up_instance_dir_on_missing_ovmf_template`
+  и обновлённый `create_android_instance_fails_when_base_image_missing`
+  — оба теперь проверяют не только код ошибки, но и то, что
+  `InstanceDirGuard` реально удалил `instance_dir` с диска после сбоя;
+  успешный путь `create_android_instance_resolves_profile_and_creates_overlay`,
+  `#[ignore]` как требующий `qemu-img`, неявно подтверждает обратное —
+  что guard не удаляет каталог при успехе, проверяя
+  `instance_dir.join("disk.qcow2").exists()`), плюс блок персистентности:
   `with_store_persists_created_instance`,
   `with_store_persists_failed_start_as_error_state`,
   `daemon_without_store_does_not_panic_on_state_transitions` (режим без
@@ -103,7 +135,17 @@ in-memory состояние инстансов, без сети и без пе�
   `Store` (терминальные состояния переживают restore как есть,
   нетерминальные принудительно становятся `Error`, пустой `Store` даёт
   `Daemon` без инстансов, восстановленный `Daemon` продолжает
-  персистировать новые операции).
+  персистировать новые операции), плюс `list_instances_*` — пустой
+  список на свежем `Daemon`, одна запись на каждый созданный инстанс,
+  актуальное (не застывшее) состояние после неудачного `start_instance`,
+  и видимость восстановленных через `Daemon::restore` инстансов. Плюс
+  `remove_instance_*`: успех из `Created`/`Error`/`Stopped`, отказ для
+  каждого нетерминального состояния (инъектированного напрямую в
+  `Daemon::instances` — тестовый модуль того же файла имеет доступ к
+  приватным `InstanceRecord`/`instances`, что избавляет от необходимости
+  реального `qemu-system-x86_64` для проверки именно этой ветки), а
+  также то, что удаление действительно убирает запись из `store` и из
+  `list_instances`.
 - `grpc_roundtrip_test` (`#[cfg(test)]`, не помечен `#[ignore]`) — реальный
   `tonic::transport::Server` на эфемерном `127.0.0.1`-порту + реальный
   `AndlerServiceClient` через настоящий TCP. Проверяет то, что unit-тесты
@@ -123,7 +165,21 @@ in-memory состояние инстансов, без сети и без пе�
   не только в памяти, как unit-тесты `convert.rs`), и
   `create_instance_missing_cpu_field_round_trips_as_invalid_argument`
   (отсутствие обязательного `Option`-поля -> `INVALID_ARGUMENT`, не паника
-  сервиса).
+  сервиса). Плюс три теста на `ListInstances`: пустой результат на свежем
+  сервере, точное соответствие `instance_id`/`name`/`state` тому, что
+  вернул предшествующий `CreateInstance` (не просто "список не пуст" —
+  явная проверка, что список не рассинхронизирован с тем, что реально
+  создано), и видимость нескольких созданных инстансов одновременно.
+  Плюс два теста на `RemoveInstance`: полный happy path
+  (`CreateInstance` -> `StartInstance` с `RenderBackend::Passthrough`,
+  гарантированно проваливающим `spawn` синхронно без реального QEMU,
+  -> `Error` -> успешное удаление -> `GetInstanceStatus` возвращает
+  `NOT_FOUND`), и удаление незарегистрированного `instance_id` ->
+  `NOT_FOUND`. Отказ для `Running`/нетерминальных состояний по сети
+  отдельно не тестируется (нет лёгкого способа детерминированно
+  получить такое состояние через настоящий gRPC-вызов без
+  `qemu-system-x86_64`) — эта ветка покрыта `daemon::tests` напрямую,
+  через инъекцию состояния в приватные поля `Daemon`.
 
 ## Требования к окружению
 

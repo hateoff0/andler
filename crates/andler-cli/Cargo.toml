@@ -9,7 +9,11 @@ name = "andler"
 path = "src/main.rs"
 
 [dependencies]
+andler-core = { path = "../andler-core" }
 andler-rpc = { path = "../andler-rpc" }
 tonic = { workspace = true }
 tokio = { workspace = true }
 clap = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+toml = "0.8"
