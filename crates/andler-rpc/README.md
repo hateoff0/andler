@@ -29,9 +29,12 @@ gRPC-схема (`proto/andler.proto`) и сгенерированный код 
 - `RemoveInstance` — соответствует `Daemon::remove_instance`. Отвергает
   запросы для нетерминальных состояний (`Starting`/`Running`/`Paused`/
   `Stopping`) как `FAILED_PRECONDITION` — не останавливает инстанс
-  сама, требует явного `StopInstance` сначала. Не удаляет файлы
-  инстанса с диска — см. подробное обоснование в комментарии у
-  `Daemon::remove_instance`.
+  сама, требует явного `StopInstance` сначала. По умолчанию (`purge:
+  false` в `RemoveInstanceRequest`) не удаляет файлы инстанса с диска;
+  `purge: true` дополнительно удаляет `disk.path` и
+  `firmware.ovmf_vars_path` (никогда `base_image`/`ovmf_code_path` —
+  они общие для нескольких инстансов) — см. подробное обоснование в
+  комментарии у `Daemon::remove_instance`.
 - `GetInstanceConfig` — соответствует `Daemon::get_instance_config`.
   Возвращает полный `InstanceConfig` целиком (все 9 секций + `id`/
   `backend`/`kind`), в отличие от `ListInstances` — точечный запрос по

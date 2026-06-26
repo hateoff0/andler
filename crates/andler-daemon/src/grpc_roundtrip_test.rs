@@ -20,7 +20,7 @@ use andler_rpc::proto::andler_service_server::AndlerServiceServer;
 use andler_rpc::proto::{
     AudioConfig, CpuConfig, CreateInstanceRequest, DiskConfig, DisplayConfig, Empty,
     FirmwareConfig, GpuConfig, InputConfig, InstanceIdRequest, InstanceStateKind, MemoryConfig,
-    NetworkConfig, Resolution,
+    NetworkConfig, RemoveInstanceRequest, Resolution,
 };
 use tokio::net::TcpListener;
 use tokio_stream::wrappers::TcpListenerStream;
@@ -401,8 +401,9 @@ async fn remove_instance_over_real_grpc_then_status_returns_not_found() {
     let id = create_response.instance_id;
 
     client
-        .remove_instance(InstanceIdRequest {
+        .remove_instance(RemoveInstanceRequest {
             instance_id: id.clone(),
+            purge: false,
         })
         .await
         .expect("removing a freshly created (Created-state) instance must succeed");
@@ -458,8 +459,9 @@ async fn remove_instance_on_failed_instance_round_trips_over_real_grpc() {
     // Инстанс теперь в Error (терминальное) — remove_instance должен
     // пройти.
     client
-        .remove_instance(InstanceIdRequest {
+        .remove_instance(RemoveInstanceRequest {
             instance_id: id.clone(),
+            purge: false,
         })
         .await
         .expect("removing an instance left in Error state must succeed");
@@ -478,8 +480,9 @@ async fn remove_unknown_instance_round_trips_as_not_found() {
     let (mut client, server) = spawn_server_and_connect().await;
 
     let status = client
-        .remove_instance(InstanceIdRequest {
+        .remove_instance(RemoveInstanceRequest {
             instance_id: uuid::Uuid::new_v4().to_string(),
+            purge: false,
         })
         .await
         .expect_err("removing an unregistered instance_id must fail");

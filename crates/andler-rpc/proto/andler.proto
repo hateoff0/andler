@@ -50,10 +50,11 @@ service AndlerService {
     // почему список не дёргает backend.status() по каждому инстансу.
     rpc ListInstances(Empty) returns (ListInstancesResponse);
 
-    // Соответствует Daemon::remove_instance. Не удаляет файлы инстанса с
-    // диска и не останавливает запущенный инстанс сама — см. подробное
-    // обоснование в комментарии у `Daemon::remove_instance`.
-    rpc RemoveInstance(InstanceIdRequest) returns (Empty);
+    // Соответствует Daemon::remove_instance. Не останавливает запущенный
+    // инстанс сама — см. подробное обоснование в комментарии у
+    // `Daemon::remove_instance`. Файлы инстанса с диска удаляются только
+    // если `RemoveInstanceRequest.purge == true` (см. там же).
+    rpc RemoveInstance(RemoveInstanceRequest) returns (Empty);
 
     // Соответствует Daemon::get_instance_config. Возвращает полный
     // InstanceConfig одного инстанса — в отличие от ListInstances
@@ -279,6 +280,21 @@ message CreateInstanceResponse {
 
 message InstanceIdRequest {
     string instance_id = 1;
+}
+
+// См. комментарий у `rpc RemoveInstance` и у `Daemon::remove_instance` за
+// полным обоснованием `purge`. Отдельное сообщение, не переиспользование
+// `InstanceIdRequest` — добавлять `purge` туда означало бы тащить это
+// поле во все остальные методы, которые принимают `InstanceIdRequest`
+// (`StartInstance`/`PauseInstance`/`ResumeInstance`/`GetInstanceStatus`/
+// `GetInstanceConfig`), для которых оно не имеет смысла.
+message RemoveInstanceRequest {
+    string instance_id = 1;
+    // false (по умолчанию) — файлы инстанса на диске не трогаются. true —
+    // удалить disk.path и firmware.ovmf_vars_path после удаления записи
+    // (никогда не base_image/ovmf_code_path — общие для нескольких
+    // инстансов файлы).
+    bool purge = 2;
 }
 
 message StopInstanceRequest {

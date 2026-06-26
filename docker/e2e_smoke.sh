@@ -166,10 +166,31 @@ grep -q "Stopped" <<<"$LIST_AFTER_RESTART" || {
     exit 1
 }
 
-echo "==> andler remove $INSTANCE_ID"
-andler remove "$INSTANCE_ID"
+echo "==> andler remove $INSTANCE_ID --purge (expect disk.qcow2/VARS.fd deleted)"
+andler remove "$INSTANCE_ID" --purge
 
 echo "==> andler list after remove (expect no instances)"
 andler list | grep -q "no instances" || { echo "FAIL: instance still listed after remove"; exit 1; }
+
+if [[ -e "$WORKDIR/disk.qcow2" ]]; then
+    echo "FAIL: disk.qcow2 still present after remove --purge"
+    exit 1
+fi
+if [[ -e "$WORKDIR/VARS.fd" ]]; then
+    echo "FAIL: VARS.fd still present after remove --purge"
+    exit 1
+fi
+# instance.toml/empty.iso/sqlite-файл лежат в том же $WORKDIR — purge не
+# должен задеть посторонние файлы, поэтому каталог не должен опустеть и
+# исчезнуть (см. `Daemon::remove_instance`: `remove_dir`, не
+# `remove_dir_all`, и только если каталог реально пуст).
+if [[ ! -d "$WORKDIR" ]]; then
+    echo "FAIL: \$WORKDIR itself was removed — purge must not touch directories containing unrelated files"
+    exit 1
+fi
+if [[ ! -e "$WORKDIR/empty.iso" ]]; then
+    echo "FAIL: unrelated empty.iso disappeared after remove --purge"
+    exit 1
+fi
 
 echo "==> ALL E2E CHECKS PASSED"

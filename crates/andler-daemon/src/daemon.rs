@@ -181,6 +181,47 @@ impl Drop for InstanceDirGuard {
     }
 }
 
+/// Удаляет файлы инстанса, принадлежащие только ему (диск, персональная
+/// копия OVMF_VARS), и делает best-effort попытку убрать опустевший
+/// родительский каталог. Используется только из `Daemon::remove_instance`
+/// при `purge: true` — см. документацию там за полным обоснованием того,
+/// что удаляется и почему.
+///
+/// Каждая ошибка удаления логируется отдельно, не агрегируется и не
+/// возвращается — вызывающая сторона (`remove_instance`) уже считает
+/// purge best-effort шагом после того, как сама запись инстанса уже
+/// удалена; частичный сбой здесь не должен превращаться в `Err` для уже
+/// выполненной операции удаления.
+async fn purge_instance_files(id: InstanceId, config: &InstanceConfig) {
+    if let Err(err) = tokio::fs::remove_file(&config.disk.path).await {
+        tracing::error!(
+            instance_id = %id.0,
+            path = %config.disk.path.display(),
+            error = %err,
+            "purge: failed to remove instance disk file"
+        );
+    }
+
+    if let Err(err) = tokio::fs::remove_file(&config.firmware.ovmf_vars_path).await {
+        tracing::error!(
+            instance_id = %id.0,
+            path = %config.firmware.ovmf_vars_path.display(),
+            error = %err,
+            "purge: failed to remove instance OVMF_VARS file"
+        );
+    }
+
+    // Best-effort: только убирает каталог, если он уже пуст (т.е. оба
+    // файла выше были единственным его содержимым — типичный случай для
+    // `AndroidVm::instance_dir`). Непустой каталог (типичный случай для
+    // `LinuxVm` с пользовательским путём, где рядом могут быть чужие
+    // файлы) тихо остаётся на месте — это не ошибка purge, а ожидаемый
+    // исход для путей вне `instance_dir`.
+    if let Some(parent) = config.disk.path.parent() {
+        let _ = tokio::fs::remove_dir(parent).await;
+    }
+}
+
 impl Daemon {
     /// Создаёт `Daemon` с реестром backend'ов по умолчанию: `Qemu` ->
     /// `QemuBackend`. `Vmm` сознательно не регистрируется здесь —
@@ -713,22 +754,48 @@ impl Daemon {
     /// никогда не запускался, не имеет процесса, который можно было бы
     /// случайно оборвать удалением.
     ///
-    /// НЕ удаляет файлы инстанса с диска (диск, `instance_dir` для
-    /// Android) — `InstanceConfig.disk.path` может указывать на путь,
-    /// который пользователь указал сам (например, через `andler create
-    /// --file`, см. `andler-cli`), и автоматическое удаление файла по
-    /// произвольному пользовательскому пути — операция, которая не
-    /// должна происходить неявно как побочный эффект удаления записи.
-    /// Очистка диска, если нужна, остаётся осознанным отдельным шагом
-    /// пользователя/будущего метода (например, `andler remove --purge`),
-    /// не часть этого вызова.
+    /// Без `purge` (см. параметр) НЕ удаляет файлы инстанса с диска (диск,
+    /// `instance_dir` для Android) — `InstanceConfig.disk.path` может
+    /// указывать на путь, который пользователь указал сам (например, через
+    /// `andler create --file`, см. `andler-cli`), и автоматическое удаление
+    /// файла по произвольному пользовательскому пути — операция, которая
+    /// не должна происходить неявно как побочный эффект удаления записи.
+    /// Явное согласие пользователя на это — флаг `purge` (`andler remove
+    /// --purge`), не часть этого вызова по умолчанию.
     ///
     /// Ошибка удаления из `store` логируется, но не проваливает операцию
     /// — как и в `persist_state`/`persist_new_instance`, in-memory
     /// состояние остаётся источником истины текущей сессии демона;
     /// разойдётся только переживание перезапуска.
-    pub async fn remove_instance(&self, id: InstanceId) -> Result<(), DaemonError> {
-        {
+    ///
+    /// `purge: true` дополнительно удаляет файлы, однозначно принадлежащие
+    /// только этому инстансу:
+    /// - `config.disk.path` — для `AndroidVm` это overlay (никогда не
+    ///   `base_image`, который кэширован и разделяется между инстансами —
+    ///   его удалять нельзя в принципе, независимо от `purge`);
+    /// - `config.firmware.ovmf_vars_path` — персональная копия EFI-переменных
+    ///   (никогда `ovmf_code_path`, общий read-only образ всех инстансов).
+    ///
+    /// После удаления обоих файлов делается одна best-effort попытка
+    /// `remove_dir` (не `remove_dir_all`!) родительского каталога
+    /// `disk.path`: для `AndroidVm`, где оба файла лежат прямо в
+    /// `instance_dir` и больше там ничего нет, каталог опустеет и будет
+    /// убран; для `LinuxVm` с произвольным пользовательским путём каталог
+    /// почти наверняка не пуст (там лежат чужие файлы пользователя) —
+    /// `remove_dir` откажется удалять непустой каталог, и это тихо
+    /// игнорируется. Не `remove_dir_all` — рекурсивное удаление
+    /// родительского каталога произвольного пользовательского пути могло
+    /// бы захватить файлы, не принадлежащие andler вообще.
+    ///
+    /// Ошибки самого удаления файлов (как и ошибка удаления из `store`)
+    /// логируются, но не проваливают операцию — запись об инстансе уже
+    /// удалена из `Daemon` и (если включена персистентность) из `store` к
+    /// моменту попытки purge; превращать частичный сбой очистки диска в
+    /// `Err` означало бы оставить вызывающую сторону с записью, которая
+    /// выглядит неудалённой, хотя на самом деле уже удалена везде, кроме
+    /// файловой системы.
+    pub async fn remove_instance(&self, id: InstanceId, purge: bool) -> Result<(), DaemonError> {
+        let config = {
             let mut instances = self.instances.write().await;
             let record = instances
                 .get(&id)
@@ -742,8 +809,8 @@ impl Daemon {
                 return Err(DaemonError::InstanceNotRemovable(id, record.state.clone()));
             }
 
-            instances.remove(&id);
-        }
+            instances.remove(&id).map(|record| record.config)
+        };
 
         if let Some(store) = &self.store {
             if let Err(err) = store.delete_instance(id).await {
@@ -752,6 +819,12 @@ impl Daemon {
                     error = %err,
                     "failed to delete instance from store after in-memory removal"
                 );
+            }
+        }
+
+        if purge {
+            if let Some(config) = config {
+                purge_instance_files(id, &config).await;
             }
         }
 
@@ -809,6 +882,35 @@ mod tests {
     };
     use andler_core::{AndroidVersion, RootMode};
     use std::path::PathBuf;
+
+    /// Минимальная замена внешнему `tempfile` (не добавлен в
+    /// dev-dependencies этого крейта): создаёт уникальный каталог в
+    /// `std::env::temp_dir()` и удаляет его рекурсивно при выходе из
+    /// скоупа теста (`Drop`, best-effort — ошибка очистки не паникует,
+    /// она бы только замаскировала настоящий результат теста).
+    struct TestTempDir(PathBuf);
+
+    impl TestTempDir {
+        fn new() -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "andler-daemon-test-{}-{}",
+                std::process::id(),
+                InstanceId::new().0
+            ));
+            std::fs::create_dir_all(&path).expect("create test temp dir");
+            TestTempDir(path)
+        }
+
+        fn path(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TestTempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
 
     fn sample_config() -> InstanceConfig {
         InstanceConfig {
@@ -1351,7 +1453,7 @@ mod tests {
     #[tokio::test]
     async fn remove_instance_on_unknown_instance_returns_instance_not_found() {
         let daemon = Daemon::new();
-        let err = daemon.remove_instance(InstanceId::new()).await.unwrap_err();
+        let err = daemon.remove_instance(InstanceId::new(), false).await.unwrap_err();
         assert!(matches!(err, DaemonError::InstanceNotFound(_)));
     }
 
@@ -1360,7 +1462,7 @@ mod tests {
         let daemon = Daemon::new();
         let id = daemon.create_instance(sample_config()).await.unwrap();
 
-        daemon.remove_instance(id).await.unwrap();
+        daemon.remove_instance(id, false).await.unwrap();
 
         let err = daemon.status(id).await.unwrap_err();
         assert!(matches!(err, DaemonError::InstanceNotFound(_)));
@@ -1380,7 +1482,7 @@ mod tests {
         let id = daemon.create_instance(cfg).await.unwrap();
         daemon.start_instance(id).await.unwrap_err();
 
-        daemon.remove_instance(id).await.unwrap();
+        daemon.remove_instance(id, false).await.unwrap();
 
         let err = daemon.status(id).await.unwrap_err();
         assert!(matches!(err, DaemonError::InstanceNotFound(_)));
@@ -1408,7 +1510,7 @@ mod tests {
             },
         );
 
-        let err = daemon.remove_instance(id).await.unwrap_err();
+        let err = daemon.remove_instance(id, false).await.unwrap_err();
         assert!(matches!(
             err,
             DaemonError::InstanceNotRemovable(_, InstanceState::Running)
@@ -1441,7 +1543,7 @@ mod tests {
                 },
             );
 
-            let err = daemon.remove_instance(id).await.unwrap_err();
+            let err = daemon.remove_instance(id, false).await.unwrap_err();
             assert!(
                 matches!(err, DaemonError::InstanceNotRemovable(_, ref s) if *s == state),
                 "expected InstanceNotRemovable({state:?}, ..), got {err:?}"
@@ -1469,7 +1571,7 @@ mod tests {
             },
         );
 
-        daemon.remove_instance(id).await.unwrap();
+        daemon.remove_instance(id, false).await.unwrap();
 
         let err = daemon.status(id).await.unwrap_err();
         assert!(matches!(err, DaemonError::InstanceNotFound(_)));
@@ -1481,7 +1583,7 @@ mod tests {
         let daemon = Daemon::with_store(store.clone());
         let id = daemon.create_instance(sample_config()).await.unwrap();
 
-        daemon.remove_instance(id).await.unwrap();
+        daemon.remove_instance(id, false).await.unwrap();
 
         let err = store.load_instance(id).await.unwrap_err();
         assert!(matches!(err, andler_store::StoreError::NotFound(_)));
@@ -1491,10 +1593,132 @@ mod tests {
     async fn remove_instance_disappears_from_list_instances() {
         let daemon = Daemon::new();
         let id = daemon.create_instance(sample_config()).await.unwrap();
-        daemon.remove_instance(id).await.unwrap();
+        daemon.remove_instance(id, false).await.unwrap();
 
         let summaries = daemon.list_instances().await;
         assert!(summaries.is_empty());
+    }
+
+    #[tokio::test]
+    async fn remove_instance_without_purge_leaves_disk_and_firmware_files() {
+        let dir = TestTempDir::new();
+        let disk_path = dir.path().join("disk.qcow2");
+        let vars_path = dir.path().join("VARS.fd");
+        tokio::fs::write(&disk_path, b"disk").await.unwrap();
+        tokio::fs::write(&vars_path, b"vars").await.unwrap();
+
+        let daemon = Daemon::new();
+        let mut cfg = sample_config();
+        cfg.disk.path = disk_path.clone();
+        cfg.firmware.ovmf_vars_path = vars_path.clone();
+        let id = daemon.create_instance(cfg).await.unwrap();
+
+        daemon.remove_instance(id, false).await.unwrap();
+
+        assert!(disk_path.exists());
+        assert!(vars_path.exists());
+    }
+
+    #[tokio::test]
+    async fn remove_instance_with_purge_deletes_disk_and_firmware_files() {
+        let dir = TestTempDir::new();
+        let disk_path = dir.path().join("disk.qcow2");
+        let vars_path = dir.path().join("VARS.fd");
+        tokio::fs::write(&disk_path, b"disk").await.unwrap();
+        tokio::fs::write(&vars_path, b"vars").await.unwrap();
+
+        let daemon = Daemon::new();
+        let mut cfg = sample_config();
+        cfg.disk.path = disk_path.clone();
+        cfg.firmware.ovmf_vars_path = vars_path.clone();
+        let id = daemon.create_instance(cfg).await.unwrap();
+
+        daemon.remove_instance(id, true).await.unwrap();
+
+        assert!(!disk_path.exists());
+        assert!(!vars_path.exists());
+        // Каталог состоял только из этих двух файлов -> должен опустеть и
+        // быть убран best-effort `remove_dir`.
+        assert!(!dir.path().exists());
+    }
+
+    #[tokio::test]
+    async fn remove_instance_with_purge_keeps_non_empty_parent_directory() {
+        // Имитирует LinuxVm с пользовательским путём: рядом с диском лежит
+        // чужой файл, не принадлежащий andler — purge должен удалить только
+        // disk.path/ovmf_vars_path, но не трогать каталог целиком.
+        let dir = TestTempDir::new();
+        let disk_path = dir.path().join("disk.qcow2");
+        let vars_path = dir.path().join("VARS.fd");
+        let unrelated_path = dir.path().join("unrelated-user-file.txt");
+        tokio::fs::write(&disk_path, b"disk").await.unwrap();
+        tokio::fs::write(&vars_path, b"vars").await.unwrap();
+        tokio::fs::write(&unrelated_path, b"mine").await.unwrap();
+
+        let daemon = Daemon::new();
+        let mut cfg = sample_config();
+        cfg.disk.path = disk_path.clone();
+        cfg.firmware.ovmf_vars_path = vars_path.clone();
+        let id = daemon.create_instance(cfg).await.unwrap();
+
+        daemon.remove_instance(id, true).await.unwrap();
+
+        assert!(!disk_path.exists());
+        assert!(!vars_path.exists());
+        assert!(dir.path().exists());
+        assert!(unrelated_path.exists());
+    }
+
+    #[tokio::test]
+    async fn remove_instance_with_purge_never_deletes_shared_base_image_or_ovmf_code() {
+        // base_image (кэшированный, общий для нескольких AndroidVm) и
+        // ovmf_code_path (общий read-only образ всех инстансов) не
+        // принадлежат конкретному инстансу — purge не должен их трогать,
+        // даже если они существуют на диске.
+        let dir = TestTempDir::new();
+        let disk_path = dir.path().join("overlay.qcow2");
+        let vars_path = dir.path().join("VARS.fd");
+        let base_image_path = dir.path().join("base.qcow2");
+        let ovmf_code_path = dir.path().join("OVMF_CODE.fd");
+        for path in [&disk_path, &vars_path, &base_image_path, &ovmf_code_path] {
+            tokio::fs::write(path, b"data").await.unwrap();
+        }
+
+        let daemon = Daemon::new();
+        let mut cfg = sample_config();
+        cfg.disk.path = disk_path.clone();
+        cfg.disk.base_image = Some(base_image_path.clone());
+        cfg.firmware.ovmf_vars_path = vars_path.clone();
+        cfg.firmware.ovmf_code_path = ovmf_code_path.clone();
+        let id = daemon.create_instance(cfg).await.unwrap();
+
+        daemon.remove_instance(id, true).await.unwrap();
+
+        assert!(!disk_path.exists());
+        assert!(!vars_path.exists());
+        assert!(base_image_path.exists());
+        assert!(ovmf_code_path.exists());
+    }
+
+    #[tokio::test]
+    async fn remove_instance_with_purge_tolerates_already_missing_files() {
+        // Файлы могли быть удалены вручную пользователем до remove --purge
+        // — purge должен остаться best-effort и не провалить операцию.
+        let dir = TestTempDir::new();
+        let disk_path = dir.path().join("disk.qcow2");
+        let vars_path = dir.path().join("VARS.fd");
+        // Не создаём файлы вообще — каталог тоже не существует.
+
+        let daemon = Daemon::new();
+        let mut cfg = sample_config();
+        cfg.disk.path = disk_path;
+        cfg.firmware.ovmf_vars_path = vars_path;
+        let id = daemon.create_instance(cfg).await.unwrap();
+
+        daemon.remove_instance(id, true).await.unwrap();
+
+        let err = daemon.status(id).await.unwrap_err();
+        assert!(matches!(err, DaemonError::InstanceNotFound(_)));
     }
 
     // --- get_instance_config ---------------------------------------------

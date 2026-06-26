@@ -12,7 +12,7 @@ use andler_rpc::proto::andler_service_server::AndlerService;
 use andler_rpc::proto::{
     CreateAndroidInstanceRequest, CreateInstanceRequest, CreateInstanceResponse, Empty,
     GetInstanceConfigResponse, InstanceIdRequest, InstanceListEntry, InstanceStatusResponse,
-    ListInstancesResponse, StopInstanceRequest,
+    ListInstancesResponse, RemoveInstanceRequest, StopInstanceRequest,
 };
 use tonic::{Request, Response, Status};
 
@@ -206,10 +206,11 @@ impl AndlerService for DaemonService {
 
     async fn remove_instance(
         &self,
-        request: Request<InstanceIdRequest>,
+        request: Request<RemoveInstanceRequest>,
     ) -> Result<Response<Empty>, Status> {
-        let id = convert::parse_instance_id(&request.into_inner().instance_id)?;
-        self.daemon.remove_instance(id).await?;
+        let request = request.into_inner();
+        let id = convert::parse_instance_id(&request.instance_id)?;
+        self.daemon.remove_instance(id, request.purge).await?;
         Ok(Response::new(Empty {}))
     }
 

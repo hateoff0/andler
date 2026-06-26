@@ -9,7 +9,8 @@ use andler_rpc::proto::{
     instance_kind, network_mode, render_backend, AndroidProfile as ProtoAndroidProfile,
     AndroidVersion as ProtoAndroidVersion, AudioBackend, BackendKind, CpuPriority,
     CreateAndroidInstanceRequest, DiskFormat, DisplayEngine, Empty, GetInstanceConfigResponse,
-    InstanceIdRequest, InstanceStateKind, RootMode as ProtoRootMode, StopInstanceRequest,
+    InstanceIdRequest, InstanceStateKind, RemoveInstanceRequest, RootMode as ProtoRootMode,
+    StopInstanceRequest,
 };
 use clap::{Parser, Subcommand, ValueEnum};
 use instance_file::InstanceFile;
@@ -88,8 +89,17 @@ enum Command {
     /// Удаляет запись инстанса. Требует, чтобы инстанс был остановлен
     /// (`Created`/`Stopped`/`Error`) — см. `Daemon::remove_instance` за
     /// тем, почему запущенный инстанс нужно сначала явно `stop`нуть.
-    /// Не удаляет файлы инстанса с диска.
-    Remove { instance_id: String },
+    /// По умолчанию не удаляет файлы инстанса с диска — добавь `--purge`,
+    /// чтобы дополнительно удалить disk.path и firmware.ovmf_vars_path
+    /// (никогда base_image/ovmf_code_path — общие файлы, см.
+    /// `Daemon::remove_instance`).
+    Remove {
+        instance_id: String,
+        /// Дополнительно удалить файлы инстанса с диска (диск, личная
+        /// копия OVMF_VARS). См. описание команды выше.
+        #[arg(long)]
+        purge: bool,
+    },
     /// Печатает полную конфигурацию инстанса (все 9 секций), не только
     /// сводку из `list`. См. `Daemon::get_instance_config`.
     Config { instance_id: String },
@@ -410,9 +420,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         }
-        Command::Remove { instance_id } => {
+        Command::Remove { instance_id, purge } => {
             client
-                .remove_instance(InstanceIdRequest { instance_id })
+                .remove_instance(RemoveInstanceRequest {
+                    instance_id,
+                    purge,
+                })
                 .await?;
             println!("removed");
         }
