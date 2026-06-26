@@ -197,6 +197,11 @@ fn gpu_display_args(cfg: &InstanceConfig) -> Vec<String> {
         // и т.п.) — открытый вопрос на момент реализации GUI, не этого шага.
         DisplayEngine::Spice => "spice-app".to_string(),
         DisplayEngine::Dbus => "dbus".to_string(),
+        // `-display none` — без какого-либо визуального вывода, без
+        // обращения к X11/Wayland хоста. См. docstring
+        // `DisplayEngine::None` в andler-core за тем, для чего это нужно
+        // (headless-серверы, CI/Docker без X-сервера).
+        DisplayEngine::None => "none".to_string(),
     };
     args.push("-display".to_string());
     args.push(display_str);
@@ -468,6 +473,22 @@ mod tests {
         let args = gpu_display_args(&cfg);
         assert!(args.contains(&"virtio-gpu-pci".to_string()));
         assert!(!args.iter().any(|a| a.contains("venus")));
+    }
+
+    #[test]
+    fn gpu_display_args_for_none_display_engine_uses_plain_display_none() {
+        // -display none не должен нести суффиксы gl=/show-cursor= — те
+        // специфичны для sdl и не имеют смысла без визуального вывода
+        // вообще.
+        let mut cfg = start_sh_equivalent_config();
+        cfg.display.display_engine = DisplayEngine::None;
+        let args = gpu_display_args(&cfg);
+
+        let display_idx = args
+            .iter()
+            .position(|a| a == "-display")
+            .expect("-display must be present");
+        assert_eq!(args[display_idx + 1], "none");
     }
 
     #[test]

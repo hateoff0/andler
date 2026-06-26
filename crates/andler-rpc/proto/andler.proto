@@ -54,6 +54,13 @@ service AndlerService {
     // диска и не останавливает запущенный инстанс сама — см. подробное
     // обоснование в комментарии у `Daemon::remove_instance`.
     rpc RemoveInstance(InstanceIdRequest) returns (Empty);
+
+    // Соответствует Daemon::get_instance_config. Возвращает полный
+    // InstanceConfig одного инстанса — в отличие от ListInstances
+    // (id/name/state на запись), это весь конфиг целиком; см.
+    // комментарий у `Daemon::get_instance_config` за тем, почему это
+    // отдельный метод, не часть ListInstances.
+    rpc GetInstanceConfig(InstanceIdRequest) returns (GetInstanceConfigResponse);
 }
 
 message Empty {}
@@ -127,6 +134,11 @@ enum DisplayEngine {
     SDL = 1;
     SPICE = 2;
     DBUS = 3;
+    // `DISPLAY_NONE`, не `NONE` — значения proto3 enum делят общее
+    // пространство имён на уровне package (см. тот же приём для
+    // `AUDIO_NONE` в `AudioBackend` ниже); голый `NONE` столкнулся бы с
+    // другими enum'ами в этом файле.
+    DISPLAY_NONE = 4;
 }
 
 message DisplayConfig {
@@ -313,4 +325,54 @@ message InstanceListEntry {
 
 message ListInstancesResponse {
     repeated InstanceListEntry instances = 1;
+}
+
+// Зеркало `andler_core::BackendKind`. Единственный зарегистрированный
+// backend сегодня — QEMU (см. `Daemon::default_backends`) — VMM включён
+// в схему для полноты ответа GetInstanceConfig, не потому что он сейчас
+// достижим на практике.
+enum BackendKind {
+    BACKEND_KIND_UNSPECIFIED = 0;
+    QEMU = 1;
+    VMM = 2;
+}
+
+// Зеркало `andler_core::InstanceKind` — `oneof`, не C-style enum, так
+// как оба варианта несут данные (`LinuxVm.iso_path`,
+// `AndroidVm.android_profile`).
+message InstanceKind {
+    message LinuxVm {
+        string iso_path = 1;
+    }
+    message AndroidVm {
+        AndroidProfile android_profile = 1;
+    }
+
+    oneof kind {
+        LinuxVm linux_vm = 1;
+        AndroidVm android_vm = 2;
+    }
+}
+
+// Ответ GetInstanceConfig — полный `InstanceConfig` инстанса, включая
+// `id`/`backend`/`kind`, которые `CreateInstanceRequest` сознательно не
+// принимает на входе (см. комментарий там) — здесь, в ответе на чтение,
+// показывать их естественно: клиент уже знает `instance_id` из запроса,
+// но получает его обратно для самодостаточности ответа (не нужно
+// сопоставлять с исходным запросом вручную), и видит, какой backend
+// реально использует инстанс.
+message GetInstanceConfigResponse {
+    string instance_id = 1;
+    string name = 2;
+    InstanceKind kind = 3;
+    BackendKind backend = 4;
+    CpuConfig cpu = 5;
+    MemoryConfig memory = 6;
+    DiskConfig disk = 7;
+    DisplayConfig display = 8;
+    GpuConfig gpu = 9;
+    NetworkConfig network = 10;
+    FirmwareConfig firmware = 11;
+    AudioConfig audio = 12;
+    InputConfig input = 13;
 }

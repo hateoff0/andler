@@ -309,6 +309,11 @@ impl TryFrom<proto::DisplayEngine> for DisplayEngine {
             proto::DisplayEngine::Sdl => Ok(DisplayEngine::Sdl),
             proto::DisplayEngine::Spice => Ok(DisplayEngine::Spice),
             proto::DisplayEngine::Dbus => Ok(DisplayEngine::Dbus),
+            // `DisplayNone`, не `None` — `DISPLAY_NONE` в proto не делится
+            // префиксом `DISPLAY_ENGINE_` с `DisplayEngineUnspecified`, и
+            // `prost` поэтому не обрезает префикс (тот же эффект, что у
+            // `AudioBackend::AudioNone` для `AUDIO_NONE` ниже).
+            proto::DisplayEngine::DisplayNone => Ok(DisplayEngine::None),
             proto::DisplayEngine::Unspecified => Err(ConvertError::MissingDisplayEngine),
         }
     }
@@ -320,6 +325,7 @@ impl From<DisplayEngine> for proto::DisplayEngine {
             DisplayEngine::Sdl => proto::DisplayEngine::Sdl,
             DisplayEngine::Spice => proto::DisplayEngine::Spice,
             DisplayEngine::Dbus => proto::DisplayEngine::Dbus,
+            DisplayEngine::None => proto::DisplayEngine::DisplayNone,
         }
     }
 }
@@ -616,6 +622,62 @@ impl TryFrom<proto::CreateInstanceRequest> for InstanceConfig {
                 .ok_or(ConvertError::MissingField("input"))?
                 .into(),
         })
+    }
+}
+
+// --- GetInstanceConfig (domain -> proto только; сервер никогда не
+// парсит GetInstanceConfigResponse обратно — это чисто исходящий ответ) -
+
+impl From<BackendKind> for proto::BackendKind {
+    fn from(value: BackendKind) -> Self {
+        match value {
+            BackendKind::Qemu => proto::BackendKind::Qemu,
+            BackendKind::Vmm => proto::BackendKind::Vmm,
+        }
+    }
+}
+
+impl From<InstanceKind> for proto::InstanceKind {
+    fn from(value: InstanceKind) -> Self {
+        use proto::instance_kind::Kind;
+
+        let kind = match value {
+            InstanceKind::LinuxVm { iso_path } => Kind::LinuxVm(proto::instance_kind::LinuxVm {
+                iso_path: iso_path.to_string_lossy().into_owned(),
+            }),
+            InstanceKind::AndroidVm { android_profile } => {
+                Kind::AndroidVm(proto::instance_kind::AndroidVm {
+                    android_profile: Some(android_profile.into()),
+                })
+            }
+        };
+        proto::InstanceKind { kind: Some(kind) }
+    }
+}
+
+/// Собирает `GetInstanceConfigResponse` из доменного `InstanceConfig`
+/// целиком. `From`, не `TryFrom` — в отличие от направления
+/// proto -> domain (`CreateInstanceRequest -> InstanceConfig`, которое
+/// может встретить `UNSPECIFIED`/отсутствующий oneof от клиента),
+/// доменный `InstanceConfig` по построению полон, конвертация в proto не
+/// может провалиться.
+impl From<InstanceConfig> for proto::GetInstanceConfigResponse {
+    fn from(value: InstanceConfig) -> Self {
+        proto::GetInstanceConfigResponse {
+            instance_id: value.id.0.to_string(),
+            name: value.name,
+            kind: Some(value.kind.into()),
+            backend: proto::BackendKind::from(value.backend) as i32,
+            cpu: Some(value.cpu.into()),
+            memory: Some(value.memory.into()),
+            disk: Some(value.disk.into()),
+            display: Some(value.display.into()),
+            gpu: Some(value.gpu.into()),
+            network: Some(value.network.into()),
+            firmware: Some(value.firmware.into()),
+            audio: Some(value.audio.into()),
+            input: Some(value.input.into()),
+        }
     }
 }
 
@@ -918,5 +980,88 @@ mod tests {
         let msg: proto::CpuConfig = cfg.clone().into();
         let back = CpuConfig::try_from(msg).unwrap();
         assert_eq!(back.affinity, cfg.affinity);
+    }
+
+    // --- GetInstanceConfigResponse ---------------------------------------
+
+    #[test]
+    fn get_instance_config_response_preserves_linux_vm_kind_and_id() {
+        let cfg = sample_instance_config();
+        let id = cfg.id;
+        let response: proto::GetInstanceConfigResponse = cfg.into();
+
+        assert_eq!(response.instance_id, id.0.to_string());
+        assert_eq!(response.name, "test-vm");
+        assert_eq!(response.backend(), proto::BackendKind::Qemu);
+
+        use proto::instance_kind::Kind;
+        match response.kind.expect("kind must be Some").kind {
+            Some(Kind::LinuxVm(linux_vm)) => {
+                assert_eq!(linux_vm.iso_path, "/tmp/test.iso");
+            }
+            other => panic!("expected LinuxVm kind, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn get_instance_config_response_preserves_android_vm_kind() {
+        let mut cfg = sample_instance_config();
+        cfg.kind = InstanceKind::AndroidVm {
+            android_profile: AndroidProfile {
+                android_version: AndroidVersion::Android13,
+                gapps: true,
+                microg: false,
+                libndk: false,
+                root: RootMode::Magisk,
+            },
+        };
+        let response: proto::GetInstanceConfigResponse = cfg.into();
+
+        use proto::instance_kind::Kind;
+        match response.kind.expect("kind must be Some").kind {
+            Some(Kind::AndroidVm(android_vm)) => {
+                let profile = android_vm
+                    .android_profile
+                    .expect("android_profile must be Some");
+                assert!(profile.gapps);
+                assert_eq!(profile.root(), proto::RootMode::Magisk);
+            }
+            other => panic!("expected AndroidVm kind, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn get_instance_config_response_carries_every_sub_config() {
+        // Не точечная проверка одного поля — все 9 секций должны
+        // присутствовать как Some, иначе andler-cli получил бы Option
+        // None там, где ожидает заполненную секцию для печати.
+        let cfg = sample_instance_config();
+        let response: proto::GetInstanceConfigResponse = cfg.into();
+
+        assert!(response.cpu.is_some());
+        assert!(response.memory.is_some());
+        assert!(response.disk.is_some());
+        assert!(response.display.is_some());
+        assert!(response.gpu.is_some());
+        assert!(response.network.is_some());
+        assert!(response.firmware.is_some());
+        assert!(response.audio.is_some());
+        assert!(response.input.is_some());
+    }
+
+    #[test]
+    fn display_engine_none_round_trips_through_proto() {
+        // DISPLAY_NONE не делит префикс с DisplayEngineUnspecified (в
+        // отличие от Sdl/Spice/Dbus, которые тоже не делят, но это уже
+        // было покрыто реальным успешным прогоном) — добавлен этот тест
+        // в первую очередь чтобы зафиксировать точное сгенерированное
+        // имя `prost` (`DisplayNone`) как контракт, не только проверить
+        // логику round-trip.
+        let msg = proto::DisplayEngine::DisplayNone;
+        let domain = DisplayEngine::try_from(msg).unwrap();
+        assert_eq!(domain, DisplayEngine::None);
+
+        let back: proto::DisplayEngine = domain.into();
+        assert_eq!(back, proto::DisplayEngine::DisplayNone);
     }
 }

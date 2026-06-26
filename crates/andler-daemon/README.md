@@ -8,10 +8,10 @@ in-memory состояние инстансов, без сети и без пе�
 
 - `daemon.rs` — **реализовано**. `Daemon::create_instance`/`start_instance`/
   `stop_instance`/`pause_instance`/`resume_instance`/`status`/
-  `list_instances`/`remove_instance` — методы, которые соответствуют
-  будущим gRPC-методам один-к-одному по смыслу, но пока вызываются прямо
-  как обычные async-методы Rust. Каждый метод применяет переходы
-  `andler_core::fsm` и делегирует нужному backend'у через
+  `list_instances`/`remove_instance`/`get_instance_config` — методы, которые
+  соответствуют будущим gRPC-методам один-к-одному по смыслу, но пока
+  вызываются прямо как обычные async-методы Rust. Каждый метод применяет
+  переходы `andler_core::fsm` и делегирует нужному backend'у через
   `HypervisorBackend`. `Daemon::new()` регистрирует только
   `BackendKind::Qemu -> QemuBackend` — `Vmm` не регистрируется, пока
   `andler-vmm` остаётся пустым каркасом (см. его README).
@@ -33,6 +33,11 @@ in-memory состояние инстансов, без сети и без пе�
     следствием удаления записи. Удаляет из `store`, если персистентность
     включена; ошибка удаления из `store` логируется, но не проваливает
     операцию (та же семантика, что у `persist_state`).
+  - **`get_instance_config`** — возвращает полный `InstanceConfig` одного
+    инстанса (клон, не ссылку — read-lock `instances` отпускается до
+    конвертации в proto на стороне `service.rs`). Существует отдельно от
+    `list_instances` — той не нужен весь объём данных каждой записи на
+    каждый вызов, а здесь это точечный запрос по одному `InstanceId`.
 - `Daemon::create_android_instance` — **реализовано**. Связывает
   `AndroidProfile::resolve()` (`andler-core`, чистая функция) с реальным
   созданием на диске: каталог инстанса, персональная копия `OVMF_VARS`
@@ -145,7 +150,10 @@ in-memory состояние инстансов, без сети и без пе�
   приватным `InstanceRecord`/`instances`, что избавляет от необходимости
   реального `qemu-system-x86_64` для проверки именно этой ветки), а
   также то, что удаление действительно убирает запись из `store` и из
-  `list_instances`.
+  `list_instances`. Плюс `get_instance_config_*`: `InstanceNotFound` для
+  неизвестного `id`, точное соответствие возвращённого конфига тому, что
+  было передано в `create_instance`, и то, что метод видит актуальную
+  запись, а не застывший снимок на момент создания.
 - `grpc_roundtrip_test` (`#[cfg(test)]`, не помечен `#[ignore]`) — реальный
   `tonic::transport::Server` на эфемерном `127.0.0.1`-порту + реальный
   `AndlerServiceClient` через настоящий TCP. Проверяет то, что unit-тесты
@@ -179,9 +187,29 @@ in-memory состояние инстансов, без сети и без пе�
   отдельно не тестируется (нет лёгкого способа детерминированно
   получить такое состояние через настоящий gRPC-вызов без
   `qemu-system-x86_64`) — эта ветка покрыта `daemon::tests` напрямую,
-  через инъекцию состояния в приватные поля `Daemon`.
+  через инъекцию состояния в приватные поля `Daemon`. Плюс два теста на
+  `GetInstanceConfig`: точное соответствие всех полей (включая
+  `oneof`-вариант `RenderBackend::Venus` и `InstanceKind::LinuxVm`) тому,
+  что было передано в предшествующий `CreateInstance`, и `NOT_FOUND` для
+  незарегистрированного `instance_id`.
 
 ## Требования к окружению
 
 Доступ к `/dev/kvm` (пользователь в группе `kvm`) — без root и без
 `CAP_SYS_ADMIN`. См. §10 архитектурного плана.
+
+## E2E-проверка (не cargo test)
+
+`docker/e2e_smoke.sh` (таргет `e2e` в `docker/Dockerfile.dev`/
+`docker-compose.yml`) — ручная сквозная проверка `andlerd`+`andler` как
+двух настоящих процессов: реальный TCP, реальный sqlite-файл, реальный
+`qemu-system-x86_64`, реальный перезапуск процесса демона (kill + новый
+процесс, не `Daemon::restore()` в памяти теста). Использует
+`DisplayEngine::None` ("-display none") для headless-запуска — без
+этого варианта раньше требовался виртуальный `Xvfb` только чтобы у SDL
+было куда присоединиться.
+
+```
+docker compose -f docker/docker-compose.yml run --rm e2e
+```
+

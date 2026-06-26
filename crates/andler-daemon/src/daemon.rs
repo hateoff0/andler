@@ -757,6 +757,28 @@ impl Daemon {
 
         Ok(())
     }
+
+    /// Возвращает полный `InstanceConfig` одного инстанса — в отличие от
+    /// `list_instances` (только `id`/`name`/`state` на каждую запись), это
+    /// весь конфиг целиком: CPU/память/диск/дисплей/GPU/сеть/firmware/
+    /// audio/input. Существует отдельно от `list_instances` сознательно
+    /// — большинству вызовов `list_instances` (например, выбор инстанса
+    /// для дальнейшей команды) не нужен весь объём данных каждого
+    /// инстанса, а `get_instance_config` — точечный запрос по одному
+    /// `InstanceId`, когда конфиг действительно нужен целиком (например,
+    /// чтобы показать пользователю, с чем именно был создан инстанс).
+    ///
+    /// Возвращает клон `InstanceConfig` (он уже `Clone` — см.
+    /// `andler-core::config::instance`), не ссылку — вызывающая сторона
+    /// (`service.rs`) должна владеть значением, чтобы сконвертировать его
+    /// в proto-ответ уже после того, как read-lock `instances` отпущен.
+    pub async fn get_instance_config(&self, id: InstanceId) -> Result<InstanceConfig, DaemonError> {
+        let instances = self.instances.read().await;
+        instances
+            .get(&id)
+            .map(|record| record.config.clone())
+            .ok_or(DaemonError::InstanceNotFound(id))
+    }
 }
 
 /// Одна строка сводки `Daemon::list_instances` — `id`/`name`/`state`, не
@@ -1473,5 +1495,46 @@ mod tests {
 
         let summaries = daemon.list_instances().await;
         assert!(summaries.is_empty());
+    }
+
+    // --- get_instance_config ---------------------------------------------
+
+    #[tokio::test]
+    async fn get_instance_config_on_unknown_instance_returns_instance_not_found() {
+        let daemon = Daemon::new();
+        let err = daemon
+            .get_instance_config(InstanceId::new())
+            .await
+            .unwrap_err();
+        assert!(matches!(err, DaemonError::InstanceNotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn get_instance_config_returns_full_config_unchanged() {
+        let daemon = Daemon::new();
+        let cfg = sample_config();
+        let id = daemon.create_instance(cfg.clone()).await.unwrap();
+
+        let fetched = daemon.get_instance_config(id).await.unwrap();
+        assert_eq!(fetched, cfg);
+    }
+
+    #[tokio::test]
+    async fn get_instance_config_reflects_current_record_not_a_stale_snapshot() {
+        // Не просто "вернуть то, что было передано в create_instance" —
+        // get_instance_config должен видеть актуальную запись из
+        // instances, даже если у инстанса с тех пор сменился id записи
+        // через double_create_with_same_id_overwrites_record-сценарий
+        // (см. соседний тест на это поведение Daemon::create_instance).
+        let daemon = Daemon::new();
+        let mut cfg = sample_config();
+        let id = cfg.id;
+        daemon.create_instance(cfg.clone()).await.unwrap();
+
+        cfg.name = "renamed-vm".to_string();
+        daemon.create_instance(cfg.clone()).await.unwrap();
+
+        let fetched = daemon.get_instance_config(id).await.unwrap();
+        assert_eq!(fetched.name, "renamed-vm");
     }
 }

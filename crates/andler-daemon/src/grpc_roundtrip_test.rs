@@ -487,3 +487,64 @@ async fn remove_unknown_instance_round_trips_as_not_found() {
 
     server.abort();
 }
+
+#[tokio::test]
+async fn get_instance_config_over_real_grpc_returns_what_was_created() {
+    // Самое важное здесь — не "ответ не пуст", а то, что конкретные
+    // значения, которые клиент передал в CreateInstanceRequest, реально
+    // дойдут обратно через GetInstanceConfigResponse по настоящему TCP
+    // (включая RenderBackend::Venus, единственный oneof-вариант, который
+    // несёт sample_create_instance_request — round-trip всего oneof
+    // через protobuf, не только in-memory конвертация).
+    let (mut client, server) = spawn_server_and_connect().await;
+
+    let create_response = client
+        .create_instance(sample_create_instance_request())
+        .await
+        .expect("create_instance must succeed")
+        .into_inner();
+    let id = create_response.instance_id;
+
+    let config = client
+        .get_instance_config(InstanceIdRequest {
+            instance_id: id.clone(),
+        })
+        .await
+        .expect("get_instance_config must succeed for a freshly created instance")
+        .into_inner();
+
+    assert_eq!(config.instance_id, id);
+    assert_eq!(config.name, "test-linux-vm");
+    assert_eq!(config.backend(), andler_rpc::proto::BackendKind::Qemu);
+
+    use andler_rpc::proto::instance_kind::Kind;
+    match config.kind.expect("kind must be Some").kind {
+        Some(Kind::LinuxVm(linux_vm)) => {
+            assert_eq!(linux_vm.iso_path, "/tmp/test.iso");
+        }
+        other => panic!("expected LinuxVm kind, got {other:?}"),
+    }
+
+    let gpu = config.gpu.expect("gpu must be Some");
+    match gpu.render_backend.expect("render_backend must be Some").kind {
+        Some(andler_rpc::proto::render_backend::Kind::Venus(_)) => {}
+        other => panic!("expected Venus render backend, got {other:?}"),
+    }
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn get_instance_config_on_unknown_instance_round_trips_as_not_found() {
+    let (mut client, server) = spawn_server_and_connect().await;
+
+    let status = client
+        .get_instance_config(InstanceIdRequest {
+            instance_id: uuid::Uuid::new_v4().to_string(),
+        })
+        .await
+        .expect_err("get_instance_config on an unregistered instance_id must fail");
+    assert_eq!(status.code(), tonic::Code::NotFound);
+
+    server.abort();
+}

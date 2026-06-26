@@ -18,26 +18,15 @@ WORKDIR="$(mktemp -d)"
 STORE_PATH="$WORKDIR/andlerd-state.db"
 LISTEN_ADDR="127.0.0.1:50051"
 ANDLERD_PID=""
-XVFB_PID=""
-DISPLAY_NUM=":99"
 
 cleanup() {
     if [[ -n "$ANDLERD_PID" ]] && kill -0 "$ANDLERD_PID" 2>/dev/null; then
         kill "$ANDLERD_PID" 2>/dev/null || true
         wait "$ANDLERD_PID" 2>/dev/null || true
     fi
-    if [[ -n "$XVFB_PID" ]] && kill -0 "$XVFB_PID" 2>/dev/null; then
-        kill "$XVFB_PID" 2>/dev/null || true
-        wait "$XVFB_PID" 2>/dev/null || true
-    fi
     rm -rf "$WORKDIR"
 }
 trap cleanup EXIT
-
-echo "==> starting Xvfb on $DISPLAY_NUM (andler-qemu's DisplayEngine has no headless variant — it always builds -display sdl,...,  which needs *some* X server to attach to)"
-Xvfb "$DISPLAY_NUM" -screen 0 1024x768x16 >/dev/null 2>&1 &
-XVFB_PID=$!
-export DISPLAY="$DISPLAY_NUM"
 
 andler() {
     /usr/local/bin/andler --daemon-addr "http://$LISTEN_ADDR" "$@"
@@ -89,17 +78,25 @@ iso_path = "$WORKDIR/empty.iso"
 disk_path = "$WORKDIR/disk.qcow2"
 ovmf_vars_path = "$WORKDIR/VARS.fd"
 
-# Дефолты GpuConfig/AudioConfig (reference_default(), см. README этого
-# крейта) — Venus+gl=on и PipeWire — рассчитаны на десктоп с реальным
-# GPU/звуковым сервером хоста, которых в этом контейнере нет. DisplayEngine
-# вообще не имеет headless-варианта (всегда -display sdl,...), так что SDL
-# всё равно нужен X-сервер — см. Xvfb выше; здесь снимаем именно то, что
-# требует GPU passthrough/PipeWire-сокет и непременно упало бы при spawn.
+# Дефолты GpuConfig/AudioConfig/DisplayConfig (reference_default(), см.
+# README этого крейта) — Venus+gl=on, PipeWire, и SDL — рассчитаны на
+# десктоп с реальным GPU/звуковым сервером/X-сервером хоста, которых в
+# этом контейнере нет. DisplayEngine::None ("-display none") — настоящий
+# headless-режим без какого-либо X11/Wayland-сервера хоста (раньше здесь
+# был нужен виртуальный Xvfb только чтобы у SDL было куда присоединиться
+# — с DisplayEngine::None эта зависимость не нужна вообще).
 [gpu]
 render_backend = "Cpu"
 hostmem_bytes = 67108864
 blob = false
 gl = false
+
+[display]
+resolution = { width = 1024, height = 768 }
+dpi = 96
+fps_limit = 0
+display_engine = "None"
+fullscreen = false
 
 [audio]
 backend = "None"
@@ -122,6 +119,12 @@ echo "==> andler status $INSTANCE_ID (expect Created)"
 STATUS_OUTPUT="$(andler status "$INSTANCE_ID")"
 echo "$STATUS_OUTPUT"
 grep -q "Created" <<<"$STATUS_OUTPUT" || { echo "FAIL: status is not Created"; exit 1; }
+
+echo "==> andler config $INSTANCE_ID (expect full config incl. headless display)"
+CONFIG_OUTPUT="$(andler config "$INSTANCE_ID")"
+echo "$CONFIG_OUTPUT"
+grep -q "e2e-smoke-vm" <<<"$CONFIG_OUTPUT" || { echo "FAIL: config output missing instance name"; exit 1; }
+grep -q "display_engine: None" <<<"$CONFIG_OUTPUT" || { echo "FAIL: config output missing headless display_engine"; exit 1; }
 
 echo "==> andler start $INSTANCE_ID (real qemu-system-x86_64 under /dev/kvm)"
 andler start "$INSTANCE_ID"

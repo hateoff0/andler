@@ -34,6 +34,15 @@ pub enum DisplayEngine {
     /// например встраивание окна инстанса в композитор) — наименее
     /// проработанный вариант на данный момент.
     Dbus,
+    /// `-display none` — без вывода вообще, без обращения к какому-либо
+    /// X11/Wayland-серверу хоста. Нужен для headless-сценариев: серверы
+    /// без дисплея, CI/Docker-окружения для smoke-проверок (см.
+    /// `docker/e2e_smoke.sh`, где раньше для `DisplayEngine::Sdl`
+    /// требовался виртуальный `Xvfb` только чтобы у SDL было куда
+    /// присоединиться — с `None` эта зависимость отсутствует). Не
+    /// тождественен `Spice`/`Dbus`: те создают поток/канал для удалённого
+    /// клиента, `None` не создаёт вообще никакого визуального вывода.
+    None,
 }
 
 /// Конфигурация дисплея инстанса.
@@ -79,5 +88,21 @@ mod tests {
         assert_eq!(cfg.display_engine, DisplayEngine::Sdl);
         assert_eq!(cfg.fps_limit, DisplayConfig::FPS_UNLIMITED);
         assert!(!cfg.fullscreen);
+    }
+
+    #[test]
+    fn none_display_engine_round_trips_through_serde_json() {
+        // DisplayEngine::None — добавлен для headless-сценариев (см. его
+        // docstring) после того, как остальные варианты уже были
+        // покрыты косвенно через config_round_trips_through_serde_json
+        // в instance.rs; отдельный тест здесь явно фиксирует, что новый
+        // вариант не сломал (де)сериализацию.
+        let cfg = DisplayConfig {
+            display_engine: DisplayEngine::None,
+            ..DisplayConfig::reference_default()
+        };
+        let json = serde_json::to_string(&cfg).unwrap();
+        let back: DisplayConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, cfg);
     }
 }

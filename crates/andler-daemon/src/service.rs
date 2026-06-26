@@ -11,8 +11,8 @@ use andler_rpc::convert;
 use andler_rpc::proto::andler_service_server::AndlerService;
 use andler_rpc::proto::{
     CreateAndroidInstanceRequest, CreateInstanceRequest, CreateInstanceResponse, Empty,
-    InstanceIdRequest, InstanceListEntry, InstanceStatusResponse, ListInstancesResponse,
-    StopInstanceRequest,
+    GetInstanceConfigResponse, InstanceIdRequest, InstanceListEntry, InstanceStatusResponse,
+    ListInstancesResponse, StopInstanceRequest,
 };
 use tonic::{Request, Response, Status};
 
@@ -211,5 +211,21 @@ impl AndlerService for DaemonService {
         let id = convert::parse_instance_id(&request.into_inner().instance_id)?;
         self.daemon.remove_instance(id).await?;
         Ok(Response::new(Empty {}))
+    }
+
+    /// Соответствует `Daemon::get_instance_config`. Конвертация
+    /// `InstanceConfig -> GetInstanceConfigResponse` целиком живёт в
+    /// `andler_rpc::convert` (`impl From<InstanceConfig> for
+    /// proto::GetInstanceConfigResponse`) — в отличие от
+    /// `list_instances` выше, тут нет зависимости от типа, специфичного
+    /// для `andler-daemon`: `InstanceConfig` — тип `andler-core`, на
+    /// который `andler-rpc` и так ссылается.
+    async fn get_instance_config(
+        &self,
+        request: Request<InstanceIdRequest>,
+    ) -> Result<Response<GetInstanceConfigResponse>, Status> {
+        let id = convert::parse_instance_id(&request.into_inner().instance_id)?;
+        let config = self.daemon.get_instance_config(id).await?;
+        Ok(Response::new(config.into()))
     }
 }

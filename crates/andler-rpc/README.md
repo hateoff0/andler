@@ -32,6 +32,13 @@ gRPC-схема (`proto/andler.proto`) и сгенерированный код 
   сама, требует явного `StopInstance` сначала. Не удаляет файлы
   инстанса с диска — см. подробное обоснование в комментарии у
   `Daemon::remove_instance`.
+- `GetInstanceConfig` — соответствует `Daemon::get_instance_config`.
+  Возвращает полный `InstanceConfig` целиком (все 9 секций + `id`/
+  `backend`/`kind`), в отличие от `ListInstances` — точечный запрос по
+  одному `InstanceId`, не сводка по всем. Конвертация
+  `InstanceConfig -> GetInstanceConfigResponse` — `From`, не `TryFrom`
+  (доменный тип уже полон, конвертация в proto не может провалиться) —
+  в отличие от направления `CreateInstanceRequest -> InstanceConfig`.
 
 **Чего здесь нет и почему:**
 
