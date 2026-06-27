@@ -16,12 +16,15 @@
   — низкоуровневое управление реальным процессом `qemu-system-x86_64` через
   `tokio::process::Command`. `terminate()` — `SIGTERM` + ожидание с таймаутом (через
   `libc::kill`, без отдельного крейта-обёртки); это временная мера до `qmp.rs` — не
-  ACPI-сигнал гостю, см. документацию метода.
+  ACPI-сигнал гостю, см. документацию метода. stdout/stderr процесса вычитываются
+  построчно в фоновых задачах (`drain_to_tracing`): каждая строка одновременно
+  логируется через `tracing::warn!` и публикуется в `broadcast`-канал
+  (`subscribe_logs`) — источник для `HypervisorBackend::log_stream` в `backend.rs`.
 - `backend.rs` — **реализовано**. `QemuBackend` — `HypervisorBackend`, связывающий
   `cmdline`+`process` с единым интерфейсом. Реестр живых процессов — `HashMap` под
-  `tokio::sync::Mutex`. `spawn`/`stop`/`status` реализованы полноценно;
+  `tokio::sync::Mutex`. `spawn`/`stop`/`status`/`log_stream` реализованы полноценно;
   `pause`/`resume`/`snapshot`/`metrics_stream` возвращают `BackendError::NotImplemented`
-  (требуют QMP).
+  (требуют QMP)/пустой поток.
 - `qmp.rs` — **реализовано частично**. `QmpClient::connect` (handshake +
   `qmp_capabilities`), `pause` (`stop`), `resume` (`cont`), `query_status`
   (`query-status`) — через `serde_json` (newline-delimited JSON поверх unix-сокета).
@@ -30,8 +33,9 @@
 - `backend.rs` — **реализовано**. `QemuBackend` — `HypervisorBackend`, связывающий
   `cmdline`+`process`+`qmp` с единым интерфейсом. Реестр живых инстансов (процесс +
   опциональный QMP-клиент, подключаемый лениво при первом обращении) — `HashMap` под
-  `tokio::sync::Mutex`. `spawn`/`stop`/`pause`/`resume`/`status` реализованы полноценно;
-  `snapshot`/`metrics_stream` возвращают `BackendError::NotImplemented`.
+  `tokio::sync::Mutex`. `spawn`/`stop`/`pause`/`resume`/`status`/`log_stream`
+  реализованы полноценно; `snapshot`/`metrics_stream` возвращают
+  `BackendError::NotImplemented`/пустой поток.
 
 ## Чего не было в исходном `InstanceConfig` и пришлось добавить в `andler-core`
 
@@ -71,13 +75,17 @@ OVMF/UEFI firmware, audio и input/clipboard — добавлены `FirmwareCon
 - Без `/dev/kvm` и без бинарника QEMU: `cmdline.rs` целиком, `qmp.rs` — парсинг
   структур ответа (`QmpReply`, `VmStatus`, `QueryStatusReturn`), `backend.rs` —
   валидация `Passthrough`, обработка неизвестного `BackendHandle`,
-  `NotImplemented`-ветки, маппинг `VmStatus -> InstanceState`, `process.rs` — ветка
-  `SpawnFailed` через гарантированно отсутствующий бинарник.
+  `NotImplemented`-ветки, маппинг `VmStatus -> InstanceState`, неизвестный
+  `BackendHandle` для `log_stream` (пустой поток), `process.rs` — ветка
+  `SpawnFailed` через гарантированно отсутствующий бинарник, `drain_to_tracing`
+  напрямую на байтовом срезе (без реального процесса): публикация строк
+  единственному и нескольким подписчикам, отсутствие паники без подписчиков.
 - С `/dev/kvm` и `qemu-system-x86_64` (отдельный CI job, `integration-test`
   Docker-таргет, не `unit-test`): реальный spawn/is_alive/terminate/force_kill,
-  spawn→status→stop и spawn→pause→resume round-trip через `QemuBackend` (последний
-  реально упражняет `qmp.rs` через живое соединение). Все помечены `#[ignore]` с
-  указанием причины.
+  spawn→status→stop и spawn→pause→resume round-trip через `QemuBackend`
+  (последний реально упражняет `qmp.rs` через живое соединение),
+  smoke-проверка `log_stream` на реальном выводе QEMU. Все помечены
+  `#[ignore]` с указанием причины.
 
 ## Связанная документация
 

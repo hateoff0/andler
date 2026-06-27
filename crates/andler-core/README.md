@@ -8,7 +8,14 @@
 - `backend.rs` — trait `HypervisorBackend`, который реализуют `andler-qemu` и (пока
   пустой) `andler-vmm`. Любой метод, не реализованный конкретным backend'ом, обязан
   возвращать `BackendError::NotImplemented`, а не паниковать — см.
-  `docs/architecture/CORE_ARCHITECTURE_PLAN.md`, §2.1.
+  `docs/architecture/CORE_ARCHITECTURE_PLAN.md`, §2.1. Исключение —
+  `metrics_stream`/`log_stream`: их сигнатура (обычный `fn`, не `async fn`,
+  без `Result`) не позволяет вернуть `Result`, поэтому "не реализовано" или
+  "хэндл сейчас ничего не стримит" выражается как немедленно завершающийся
+  пустой поток. `LogLine`/`LogStreamSource` — тип строки live-tail
+  stdout/stderr процесса гипервизора, отдаваемой через `log_stream`; только
+  собственный вывод процесса, без структурированных FSM-событий
+  `andler-daemon` и без гостевых логов (оба — за пределами первой версии).
 - `fsm.rs` — состояния инстанса (`Created → Starting → Running ⇄ Paused → Stopping →
   Stopped`, плюс `Error { message }`) и разрешённые переходы между ними. Набор
   состояний соответствует §4.1 `CORE_ARCHITECTURE_PLAN.md`.
@@ -20,6 +27,11 @@
   также даёт `reference_default()`, соответствующий `scripts/start.sh`.
 - `android_profile.rs` — `AndroidProfile` и его резолв в `InstanceConfig` (overlay-диск
   над базовым образом). См. §4.4 архитектурного плана.
+- `clone.rs` — `CloneMode` (`Linked`/`FullStandalone`/`SharedBase`): три режима, в
+  которых `Daemon::clone_instance` (`andler-daemon`) может создать диск нового
+  инстанса из диска существующего. Не часть `config/` — это не конфигурация
+  одного инстанса, а параметр операции над парой инстансов; реализация на уровне
+  файлов qcow2 — `andler_disk::clone`.
 - `error.rs` — общие типы ошибок домена.
 
 ## Что здесь НЕ должно появляться

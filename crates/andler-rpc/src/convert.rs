@@ -7,10 +7,10 @@ use std::path::PathBuf;
 
 use crate::proto;
 use andler_core::{
-    AndroidProfile, AndroidVersion, AudioBackend, AudioConfig, BackendKind, CpuConfig,
+    AndroidProfile, AndroidVersion, AudioBackend, AudioConfig, BackendKind, CloneMode, CpuConfig,
     CpuPriority, DiskConfig, DiskFormat, DisplayConfig, DisplayEngine, FirmwareConfig, GpuConfig,
-    InputConfig, InstanceConfig, InstanceId, InstanceKind, InstanceState, MemoryConfig,
-    NetworkConfig, NetworkMode, RenderBackend, Resolution, RootMode,
+    InputConfig, InstanceConfig, InstanceId, InstanceKind, InstanceState, LogLine, LogStreamSource,
+    MemoryConfig, NetworkConfig, NetworkMode, RenderBackend, Resolution, RootMode,
 };
 
 /// Ошибка конвертации proto-сообщения в доменный тип — на практике сейчас
@@ -39,6 +39,8 @@ pub enum ConvertError {
     MissingRenderBackendKind,
     #[error("missing network_mode.kind oneof")]
     MissingNetworkModeKind,
+    #[error("missing or unspecified clone_mode")]
+    MissingCloneMode,
     #[error("missing field `{0}` in request")]
     MissingField(&'static str),
 }
@@ -60,6 +62,19 @@ impl From<AndroidVersion> for proto::AndroidVersion {
         match value {
             AndroidVersion::Android11 => proto::AndroidVersion::Android11,
             AndroidVersion::Android13 => proto::AndroidVersion::Android13,
+        }
+    }
+}
+
+impl TryFrom<proto::CloneMode> for CloneMode {
+    type Error = ConvertError;
+
+    fn try_from(value: proto::CloneMode) -> Result<Self, Self::Error> {
+        match value {
+            proto::CloneMode::Linked => Ok(CloneMode::Linked),
+            proto::CloneMode::FullStandalone => Ok(CloneMode::FullStandalone),
+            proto::CloneMode::SharedBase => Ok(CloneMode::SharedBase),
+            proto::CloneMode::Unspecified => Err(ConvertError::MissingCloneMode),
         }
     }
 }
@@ -723,6 +738,32 @@ impl From<ConvertError> for tonic::Status {
     }
 }
 
+impl From<LogStreamSource> for proto::LogStreamSource {
+    fn from(value: LogStreamSource) -> Self {
+        match value {
+            LogStreamSource::Stdout => proto::LogStreamSource::Stdout,
+            LogStreamSource::Stderr => proto::LogStreamSource::Stderr,
+        }
+    }
+}
+
+/// Только domain -> proto: `LogLineResponse` — выходное сообщение
+/// `rpc StreamInstanceLogs`, клиент его не присылает обратно, поэтому
+/// `TryFrom<proto::LogLineResponse> for LogLine` сейчас не нужен (в
+/// отличие от большинства других типов в этом файле, у которых есть оба
+/// направления, потому что соответствующие proto-типы — это запросы,
+/// приходящие от клиента).
+impl From<LogLine> for proto::LogLineResponse {
+    fn from(value: LogLine) -> Self {
+        let mut msg = proto::LogLineResponse {
+            line: value.line,
+            ..Default::default()
+        };
+        msg.set_source(value.source.into());
+        msg
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1063,5 +1104,41 @@ mod tests {
 
         let back: proto::DisplayEngine = domain.into();
         assert_eq!(back, proto::DisplayEngine::DisplayNone);
+    }
+
+    #[test]
+    fn log_line_converts_to_proto_preserving_source_and_text() {
+        let stdout_line = LogLine {
+            source: LogStreamSource::Stdout,
+            line: "VNC server running".to_string(),
+        };
+        let msg: proto::LogLineResponse = stdout_line.into();
+        assert_eq!(msg.source(), proto::LogStreamSource::Stdout);
+        assert_eq!(msg.line, "VNC server running");
+
+        let stderr_line = LogLine {
+            source: LogStreamSource::Stderr,
+            line: "qemu-system-x86_64: warning: ...".to_string(),
+        };
+        let msg: proto::LogLineResponse = stderr_line.into();
+        assert_eq!(msg.source(), proto::LogStreamSource::Stderr);
+    }
+
+    #[test]
+    fn clone_mode_round_trips_through_proto_for_every_variant() {
+        for (domain, proto_variant) in [
+            (CloneMode::Linked, proto::CloneMode::Linked),
+            (CloneMode::FullStandalone, proto::CloneMode::FullStandalone),
+            (CloneMode::SharedBase, proto::CloneMode::SharedBase),
+        ] {
+            let converted = CloneMode::try_from(proto_variant).unwrap();
+            assert_eq!(converted, domain);
+        }
+    }
+
+    #[test]
+    fn unspecified_clone_mode_is_rejected() {
+        let err = CloneMode::try_from(proto::CloneMode::Unspecified).unwrap_err();
+        assert!(matches!(err, ConvertError::MissingCloneMode));
     }
 }

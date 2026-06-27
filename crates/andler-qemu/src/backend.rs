@@ -6,22 +6,24 @@
 //! управляет инстансами (см. docs/architecture/CORE_ARCHITECTURE_PLAN.md,
 //! §2.1).
 //!
-//! `snapshot`/`metrics_stream` остаются `BackendError::NotImplemented` —
-//! snapshot требует отдельного решения между `snapshot-save` (job API) и
-//! `human-monitor-command`+`savevm` (см. README этого крейта), а метрики
-//! требуют QMP polling нескольких разных команд (см. §6.1.1 архитектурного
-//! плана) — оба за пределами текущего шага. `spawn`/`stop`/`pause`/
-//! `resume`/`status` реализованы полноценно.
+//! `snapshot`/`metrics_stream` остаются `BackendError::NotImplemented`/
+//! пустым потоком — snapshot требует отдельного решения между
+//! `snapshot-save` (job API) и `human-monitor-command`+`savevm` (см.
+//! README этого крейта), а метрики требуют QMP polling нескольких разных
+//! команд (см. §6.1.1 архитектурного плана) — оба за пределами текущего
+//! шага. `spawn`/`stop`/`pause`/`resume`/`status`/`log_stream`
+//! реализованы полноценно.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
 
 use andler_core::{
     BackendError, BackendHandle, BackendStatus, HypervisorBackend, InstanceConfig, InstanceState,
-    RenderBackend, ResourceMetrics,
+    LogLine, RenderBackend, ResourceMetrics,
 };
 use async_trait::async_trait;
 use futures_core::stream::BoxStream;
+use futures_util::StreamExt;
 use tokio::sync::Mutex;
 
 use crate::cmdline;
@@ -350,6 +352,59 @@ impl HypervisorBackend for QemuBackend {
         // поток, не паника: сигнатура метода не позволяет вернуть Result.
         Box::pin(futures_util::stream::empty())
     }
+
+    fn log_stream(&self, handle: &BackendHandle) -> BoxStream<'_, LogLine> {
+        // `log_stream` — не `async fn` (см. andler_core::backend за тем,
+        // почему сигнатура трейта такая же, как у metrics_stream), а
+        // `self.instances` — `tokio::sync::Mutex`, требующий `.await` для
+        // обычного `lock()`. `try_lock()` — единственный способ
+        // синхронно достать `RunningInstance` здесь без переделки всего
+        // метода в `async fn` (что сломало бы единообразие с
+        // metrics_stream и сигнатуру трейта).
+        //
+        // Все остальные методы (`pause`/`resume`/`stop`/`status`) держат
+        // этот `Mutex` только на короткие, без внутренних `.await` на
+        // самом локе, синхронные секции (взять `&mut RunningInstance`,
+        // отдать обратно) — она не остаётся захваченной во время
+        // QMP-обмена с самим QEMU (`ensure_qmp_connected` и операции QMP
+        // вызываются на уже полученной ссылке, не повторно лочат
+        // `instances`). Поэтому `try_lock()` здесь практически никогда не
+        // провалится из-за конкуренции; в редком случае гонки с другим
+        // вызовом `log_stream`/`pause`/`stop` в тот же момент — отдаём
+        // пустой поток, тот же контракт, что и для "хэндл не найден" (см.
+        // документацию `HypervisorBackend::log_stream`): подписка на
+        // следующий вызов клиента отработает штатно, потерянных данных
+        // нет (broadcast не накапливает историю для ещё не подключённого
+        // подписчика в любом случае).
+        let receiver = match self.instances.try_lock() {
+            Ok(mut instances) => instances.get_mut(handle).map(|i| i.process.subscribe_logs()),
+            Err(_would_block) => None,
+        };
+
+        match receiver {
+            Some(receiver) => Box::pin(
+                tokio_stream::wrappers::BroadcastStream::new(receiver).filter_map(|item| async {
+                    match item {
+                        Ok(line) => Some(line),
+                        // `Lagged(n)` — подписчик отстал больше, чем
+                        // вмещает `LOG_CHANNEL_CAPACITY` (см.
+                        // process::LOG_CHANNEL_CAPACITY), и пропустил `n`
+                        // строк. Пропускаем сам факт пропуска молча и
+                        // продолжаем поток со следующей доступной строки
+                        // — закрывать стрим здесь было бы хуже для
+                        // живого хвоста логов, чем потерять уведомление о
+                        // разрыве; в логах andlerd (`tracing`) эти же
+                        // строки в любом случае не потеряны — лагает
+                        // только данный gRPC-подписчик, не сам канал.
+                        Err(tokio_stream::wrappers::errors::BroadcastStreamRecvError::Lagged(
+                            _,
+                        )) => None,
+                    }
+                }),
+            ),
+            None => Box::pin(futures_util::stream::empty()),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -465,6 +520,21 @@ mod tests {
         assert!(stream.next().await.is_none());
     }
 
+    /// Неизвестный хэндл — пустой поток сразу же, не ошибка (см.
+    /// документацию `HypervisorBackend::log_stream` за тем, почему это
+    /// сознательно отличается от `pause`/`resume`/`status` с тем же
+    /// неизвестным хэндлом). Не требует реального процесса QEMU —
+    /// `instances` пуст с самого начала.
+    #[tokio::test]
+    async fn log_stream_on_unknown_handle_is_immediately_empty() {
+        use futures_util::StreamExt;
+
+        let backend = QemuBackend::new();
+        let handle = BackendHandle("qemu:whatever".to_string());
+        let mut stream = backend.log_stream(&handle);
+        assert!(stream.next().await.is_none());
+    }
+
     #[test]
     fn vm_status_maps_running_and_paused_directly() {
         assert_eq!(
@@ -518,6 +588,38 @@ mod tests {
         backend.resume(&handle).await.unwrap();
         let status = backend.status(&handle).await.unwrap();
         assert_eq!(status.state, InstanceState::Running);
+
+        backend.stop(&handle, false).await.unwrap();
+    }
+
+    /// Сквозная проверка `log_stream` через весь стек `QemuBackend`
+    /// (в отличие от `drain_to_tracing_publishes_lines_to_subscriber` в
+    /// `process.rs`, которая проверяет только саму механику чтения
+    /// строк — здесь важно, что `BackendHandle` → `RunningInstance` →
+    /// `subscribe_logs` → `BroadcastStream` действительно соединены друг
+    /// с другом). QEMU обычно пишет в stderr хотя бы строку лицензии или
+    /// предупреждения при запуске с `-nographic`/неполным набором
+    /// устройств — этого достаточно, чтобы получить хотя бы одну строку
+    /// без необходимости провоцировать конкретную ошибку.
+    #[tokio::test]
+    #[ignore = "requires qemu-system-x86_64 binary, see docker/README.md integration-test target"]
+    async fn log_stream_receives_real_process_output() {
+        use futures_util::StreamExt;
+        use tokio::time::{timeout, Duration};
+
+        let backend = QemuBackend::new();
+        let mut cfg = sample_config(RenderBackend::Cpu);
+        cfg.display.display_engine = andler_core::DisplayEngine::Sdl;
+
+        let handle = backend.spawn(&cfg).await.unwrap();
+        let mut stream = backend.log_stream(&handle);
+
+        // Не любой запуск QEMU гарантированно что-то пишет в stdout/stderr
+        // в первые секунды — таймаут здесь означает "не успели получить
+        // строку", не "механика не работает"; smoke-проверка того, что
+        // стрим хотя бы подключён к реальному процессу, не строгая
+        // гарантия конкретного вывода.
+        let _ = timeout(Duration::from_secs(5), stream.next()).await;
 
         backend.stop(&handle, false).await.unwrap();
     }

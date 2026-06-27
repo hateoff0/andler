@@ -7,12 +7,16 @@
 
 pub mod android_profile;
 pub mod backend;
+pub mod clone;
 pub mod config;
 pub mod error;
 pub mod fsm;
 
 pub use android_profile::{AndroidProfile, AndroidVersion, RootMode};
-pub use backend::{BackendHandle, BackendStatus, HypervisorBackend, ResourceMetrics};
+pub use backend::{
+    BackendHandle, BackendStatus, HypervisorBackend, LogLine, LogStreamSource, ResourceMetrics,
+};
+pub use clone::CloneMode;
 pub use config::{
     AudioBackend, AudioConfig, BackendKind, CpuConfig, CpuPriority, DiskConfig, DiskFormat,
     DisplayConfig, DisplayEngine, FirmwareConfig, GpuConfig, InputConfig, InstanceConfig,

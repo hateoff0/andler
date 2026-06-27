@@ -7,10 +7,10 @@ mod instance_file;
 use andler_rpc::proto::andler_service_client::AndlerServiceClient;
 use andler_rpc::proto::{
     instance_kind, network_mode, render_backend, AndroidProfile as ProtoAndroidProfile,
-    AndroidVersion as ProtoAndroidVersion, AudioBackend, BackendKind, CpuPriority,
-    CreateAndroidInstanceRequest, DiskFormat, DisplayEngine, Empty, GetInstanceConfigResponse,
-    InstanceIdRequest, InstanceStateKind, RemoveInstanceRequest, RootMode as ProtoRootMode,
-    StopInstanceRequest,
+    AndroidVersion as ProtoAndroidVersion, AudioBackend, BackendKind, CloneInstanceRequest,
+    CpuPriority, CreateAndroidInstanceRequest, DiskFormat, DisplayEngine, Empty,
+    ExportInstanceDiskRequest, GetInstanceConfigResponse, InstanceIdRequest, InstanceStateKind,
+    LogStreamSource, RemoveInstanceRequest, RootMode as ProtoRootMode, StopInstanceRequest,
 };
 use clap::{Parser, Subcommand, ValueEnum};
 use instance_file::InstanceFile;
@@ -103,6 +103,69 @@ enum Command {
     /// Печатает полную конфигурацию инстанса (все 9 секций), не только
     /// сводку из `list`. См. `Daemon::get_instance_config`.
     Config { instance_id: String },
+    /// Стримит stdout/stderr процесса гипервизора инстанса в реальном
+    /// времени (live-tail) — см. `Daemon::stream_instance_logs`. Не
+    /// показывает строки, написанные до подключения (нет истории, см.
+    /// документацию там же), и завершается сразу же без ошибки, если у
+    /// инстанса сейчас нет запущенного backend'а (ещё не стартовал, либо
+    /// уже остановлен) — в этом случае печатает предупреждение в stderr
+    /// и завершается с кодом 0, не как при невалидном запросе.
+    Logs { instance_id: String },
+    /// Клонирует Android-инстанс (только `AndroidVm` — `LinuxVm` сейчас
+    /// не поддерживается, см. `Daemon::clone_instance`) в новый,
+    /// независимый инстанс. Источник должен быть остановлен
+    /// (`Created`/`Stopped`/`Error`), как и для `remove`.
+    Clone {
+        source_instance_id: String,
+        /// Имя нового инстанса.
+        #[arg(long)]
+        name: String,
+        /// Каталог, под которым создаётся `<instances_root>/<новый_id>/`
+        /// для файлов клона — тот же смысл, что у `instances_root` в
+        /// `create-android` (см. там).
+        #[arg(long)]
+        instances_root: String,
+        /// Режим клонирования диска — см. `CliCloneMode` за описанием
+        /// каждого варианта.
+        #[arg(long, value_enum)]
+        mode: CliCloneMode,
+    },
+    /// Экспортирует диск Android-инстанса в самостоятельный файл по
+    /// указанному пути — для переноса между хостами или бэкапа, не
+    /// создаёт новый инстанс (в отличие от `clone --mode full-standalone`,
+    /// который создаёт). См. `Daemon::export_instance_disk`.
+    Export {
+        source_instance_id: String,
+        dest_path: String,
+    },
+}
+
+/// Соответствует `andler_core::CloneMode` (через `andler_rpc::proto::CloneMode`)
+/// один-к-одному — см. документацию `CloneMode` за полным обоснованием
+/// каждого варианта; здесь только краткое напоминание для `--help`.
+#[derive(Clone, Copy, ValueEnum)]
+enum CliCloneMode {
+    /// Дёшево и быстро, но клон зависит от источника — `remove --purge`
+    /// источника откажет, пока клон жив.
+    Linked,
+    /// Полностью самостоятельный файл, дороже по месту/времени — не
+    /// зависит ни от источника, ни от общего базового образа.
+    #[value(name = "full-standalone")]
+    FullStandalone,
+    /// Не зависит от источника физически, но остаётся тонким
+    /// относительно общего базового образа профиля.
+    #[value(name = "shared-base")]
+    SharedBase,
+}
+
+impl From<CliCloneMode> for andler_rpc::proto::CloneMode {
+    fn from(value: CliCloneMode) -> Self {
+        match value {
+            CliCloneMode::Linked => andler_rpc::proto::CloneMode::Linked,
+            CliCloneMode::FullStandalone => andler_rpc::proto::CloneMode::FullStandalone,
+            CliCloneMode::SharedBase => andler_rpc::proto::CloneMode::SharedBase,
+        }
+    }
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -435,6 +498,76 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .await?
                 .into_inner();
             print_instance_config(response);
+        }
+        Command::Logs { instance_id } => {
+            let mut stream = client
+                .stream_instance_logs(InstanceIdRequest { instance_id })
+                .await?
+                .into_inner();
+
+            // Первое сообщение решает, печатать ли предупреждение о
+            // пустом потоке — нельзя просто проверить "пуст ли стрим" до
+            // первого `.message()`, у tonic-клиента нет такого метода
+            // отдельно от попытки прочитать. Если первый `.message()`
+            // сразу `None` — это и есть случай "нет запущенного
+            // backend'а", см. документацию `Daemon::stream_instance_logs`
+            // за тем, почему это не ошибка и не InvalidArgument.
+            let mut got_any_line = false;
+            while let Some(line) = stream.message().await? {
+                got_any_line = true;
+                let prefix = match line.source() {
+                    LogStreamSource::Stdout => "stdout",
+                    LogStreamSource::Stderr => "stderr",
+                    // `prost` всегда требует первый вариант enum'а как
+                    // значение 0 (см. комментарий у `enum LogStreamSource`
+                    // в `andler.proto`) — сервер никогда сознательно не
+                    // отправляет `Unspecified` (см. `convert.rs`:
+                    // `From<LogLine>` всегда вызывает `set_source` с
+                    // `Stdout`/`Stderr`), но компилятор не знает об этом
+                    // инварианте на уровне типов, поэтому ветка всё равно
+                    // обязательна. Печатаем как есть, не падаем — это не
+                    // повод обрывать стрим клиенту.
+                    LogStreamSource::Unspecified => "unspecified",
+                };
+                println!("[{prefix}] {}", line.line);
+            }
+
+            if !got_any_line {
+                eprintln!(
+                    "no log lines received (instance may have no running backend right now, \
+                     or simply hasn't written anything to stdout/stderr yet)"
+                );
+            }
+        }
+        Command::Clone {
+            source_instance_id,
+            name,
+            instances_root,
+            mode,
+        } => {
+            let response = client
+                .clone_instance(CloneInstanceRequest {
+                    source_instance_id,
+                    new_name: name,
+                    instances_root,
+                    mode: andler_rpc::proto::CloneMode::from(mode) as i32,
+                })
+                .await?
+                .into_inner();
+            println!("cloned instance_id={}", response.instance_id);
+        }
+        Command::Export {
+            source_instance_id,
+            dest_path,
+        } => {
+            let response = client
+                .export_instance_disk(ExportInstanceDiskRequest {
+                    source_instance_id,
+                    dest_path,
+                })
+                .await?
+                .into_inner();
+            println!("exported to {}", response.dest_path);
         }
     }
 

@@ -18,9 +18,10 @@ use std::sync::Arc;
 use andler_rpc::proto::andler_service_client::AndlerServiceClient;
 use andler_rpc::proto::andler_service_server::AndlerServiceServer;
 use andler_rpc::proto::{
-    AudioConfig, CpuConfig, CreateInstanceRequest, DiskConfig, DisplayConfig, Empty,
-    FirmwareConfig, GpuConfig, InputConfig, InstanceIdRequest, InstanceStateKind, MemoryConfig,
-    NetworkConfig, RemoveInstanceRequest, Resolution,
+    AudioConfig, CloneInstanceRequest, CloneMode, CpuConfig, CreateInstanceRequest, DiskConfig,
+    DisplayConfig, Empty, ExportInstanceDiskRequest, FirmwareConfig, GpuConfig, InputConfig,
+    InstanceIdRequest, InstanceStateKind, MemoryConfig, NetworkConfig, RemoveInstanceRequest,
+    Resolution,
 };
 use tokio::net::TcpListener;
 use tokio_stream::wrappers::TcpListenerStream;
@@ -548,6 +549,208 @@ async fn get_instance_config_on_unknown_instance_round_trips_as_not_found() {
         .await
         .expect_err("get_instance_config on an unregistered instance_id must fail");
     assert_eq!(status.code(), tonic::Code::NotFound);
+
+    server.abort();
+}
+
+/// Инстанс существует (только что создан через `CreateInstance`), но
+/// никогда не запускался — `Daemon::stream_instance_logs` должен отдать
+/// пустой, немедленно завершающийся поток (не gRPC-ошибку, см.
+/// документацию там). Через настоящий `tonic::Streaming<LogLineResponse>`
+/// "немедленно завершающийся" означает, что первый `.message()` уже
+/// возвращает `Ok(None)`, а не зависает в ожидании.
+#[tokio::test]
+async fn stream_instance_logs_for_instance_without_backend_completes_immediately() {
+    let (mut client, server) = spawn_server_and_connect().await;
+
+    let create_response = client
+        .create_instance(sample_create_instance_request())
+        .await
+        .expect("create_instance must succeed")
+        .into_inner();
+    let id = create_response.instance_id;
+
+    let mut stream = client
+        .stream_instance_logs(InstanceIdRequest { instance_id: id })
+        .await
+        .expect("streaming logs for an existing, never-started instance must not error")
+        .into_inner();
+
+    let first = stream
+        .message()
+        .await
+        .expect("the stream itself must not error");
+    assert!(
+        first.is_none(),
+        "an instance with no running backend handle must yield an empty stream"
+    );
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn stream_instance_logs_on_unknown_instance_round_trips_as_not_found() {
+    let (mut client, server) = spawn_server_and_connect().await;
+
+    let status = client
+        .stream_instance_logs(InstanceIdRequest {
+            instance_id: uuid::Uuid::new_v4().to_string(),
+        })
+        .await
+        .expect_err("streaming logs for an unregistered instance_id must fail");
+    assert_eq!(status.code(), tonic::Code::NotFound);
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn stream_instance_logs_rejects_malformed_instance_id() {
+    let (mut client, server) = spawn_server_and_connect().await;
+
+    let status = client
+        .stream_instance_logs(InstanceIdRequest {
+            instance_id: "not-a-uuid".to_string(),
+        })
+        .await
+        .expect_err("a malformed instance_id must be rejected before reaching Daemon");
+    assert_eq!(status.code(), tonic::Code::InvalidArgument);
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn clone_instance_on_unknown_source_round_trips_as_not_found() {
+    let (mut client, server) = spawn_server_and_connect().await;
+
+    let status = client
+        .clone_instance(CloneInstanceRequest {
+            source_instance_id: uuid::Uuid::new_v4().to_string(),
+            new_name: "clone".to_string(),
+            instances_root: "/tmp/instances".to_string(),
+            mode: CloneMode::Linked as i32,
+        })
+        .await
+        .expect_err("cloning an unregistered instance_id must fail");
+    assert_eq!(status.code(), tonic::Code::NotFound);
+
+    server.abort();
+}
+
+/// `CreateInstance` (см. `sample_create_instance_request`) всегда создаёт
+/// `LinuxVm` — достаточно, чтобы проверить, что `CloneInstance` отказывает
+/// для не-`AndroidVm` источника, без необходимости реального `qemu-img`
+/// (сквозная проверка с настоящим `AndroidVm`-источником и реальным
+/// клонированием диска — `daemon::tests::clone_instance_with_*_mode_*`,
+/// `#[ignore]`, требует `qemu-img`; здесь только маршрутизация ошибки
+/// через настоящий gRPC, не файловая система).
+#[tokio::test]
+async fn clone_instance_rejects_linux_vm_source_as_failed_precondition() {
+    let (mut client, server) = spawn_server_and_connect().await;
+
+    let create_response = client
+        .create_instance(sample_create_instance_request())
+        .await
+        .expect("create_instance must succeed")
+        .into_inner();
+
+    let status = client
+        .clone_instance(CloneInstanceRequest {
+            source_instance_id: create_response.instance_id,
+            new_name: "clone".to_string(),
+            instances_root: "/tmp/instances".to_string(),
+            mode: CloneMode::Linked as i32,
+        })
+        .await
+        .expect_err("cloning a LinuxVm instance must fail");
+    assert_eq!(status.code(), tonic::Code::FailedPrecondition);
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn clone_instance_rejects_unspecified_mode_as_invalid_argument() {
+    let (mut client, server) = spawn_server_and_connect().await;
+
+    let create_response = client
+        .create_instance(sample_create_instance_request())
+        .await
+        .expect("create_instance must succeed")
+        .into_inner();
+
+    // Намеренно не CloneNotSupportedForKind: mode конвертируется (и может
+    // провалиться) до того, как Daemon::clone_instance успевает увидеть
+    // source_instance_id — см. порядок операций в
+    // DaemonService::clone_instance (service.rs): parse_instance_id ->
+    // CloneMode::try_from -> daemon.clone_instance(...). Здесь источник
+    // существует (LinuxVm, тот же, что и в соседнем тесте) специально,
+    // чтобы убедиться, что ошибка приходит именно от валидации mode, не
+    // от случайного совпадения с "источник не найден"/"не AndroidVm".
+    let status = client
+        .clone_instance(CloneInstanceRequest {
+            source_instance_id: create_response.instance_id,
+            new_name: "clone".to_string(),
+            instances_root: "/tmp/instances".to_string(),
+            mode: CloneMode::Unspecified as i32,
+        })
+        .await
+        .expect_err("an unspecified clone mode must be rejected");
+    assert_eq!(status.code(), tonic::Code::InvalidArgument);
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn clone_instance_rejects_malformed_instance_id() {
+    let (mut client, server) = spawn_server_and_connect().await;
+
+    let status = client
+        .clone_instance(CloneInstanceRequest {
+            source_instance_id: "not-a-uuid".to_string(),
+            new_name: "clone".to_string(),
+            instances_root: "/tmp/instances".to_string(),
+            mode: CloneMode::Linked as i32,
+        })
+        .await
+        .expect_err("a malformed instance_id must be rejected before reaching Daemon");
+    assert_eq!(status.code(), tonic::Code::InvalidArgument);
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn export_instance_disk_on_unknown_source_round_trips_as_not_found() {
+    let (mut client, server) = spawn_server_and_connect().await;
+
+    let status = client
+        .export_instance_disk(ExportInstanceDiskRequest {
+            source_instance_id: uuid::Uuid::new_v4().to_string(),
+            dest_path: "/tmp/export.qcow2".to_string(),
+        })
+        .await
+        .expect_err("exporting an unregistered instance_id must fail");
+    assert_eq!(status.code(), tonic::Code::NotFound);
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn export_instance_disk_rejects_linux_vm_source_as_failed_precondition() {
+    let (mut client, server) = spawn_server_and_connect().await;
+
+    let create_response = client
+        .create_instance(sample_create_instance_request())
+        .await
+        .expect("create_instance must succeed")
+        .into_inner();
+
+    let status = client
+        .export_instance_disk(ExportInstanceDiskRequest {
+            source_instance_id: create_response.instance_id,
+            dest_path: "/tmp/export.qcow2".to_string(),
+        })
+        .await
+        .expect_err("exporting a LinuxVm instance must fail");
+    assert_eq!(status.code(), tonic::Code::FailedPrecondition);
 
     server.abort();
 }

@@ -17,11 +17,14 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use andler_core::{
-    AndroidProfile, BackendError, BackendHandle, BackendKind, BackendStatus, HypervisorBackend,
-    InstanceConfig, InstanceEvent, InstanceId, InstanceState,
+    AndroidProfile, BackendError, BackendHandle, BackendKind, BackendStatus, CloneMode,
+    HypervisorBackend, InstanceConfig, InstanceEvent, InstanceId, InstanceKind, InstanceState,
+    LogLine,
 };
 use andler_qemu::QemuBackend;
 use andler_store::{Store, StoreError};
+use futures_core::stream::BoxStream;
+use futures_util::StreamExt;
 use thiserror::Error;
 use tokio::sync::RwLock;
 
@@ -81,6 +84,32 @@ pub enum DaemonError {
     /// инстанса запрещено, а не просто молча останавливает его сначала.
     #[error("cannot remove instance {0:?}: it is in non-terminal state {1:?}; stop it first")]
     InstanceNotRemovable(InstanceId, InstanceState),
+
+    /// `clone_instance`/`export_instance_disk` вызван для записи в
+    /// нетерминальном состоянии — копировать/линковать диск живого
+    /// процесса QEMU небезопасно без stop или отдельного live-snapshot
+    /// механизма QEMU (которого здесь нет), см. документацию
+    /// `Daemon::clone_instance`.
+    #[error(
+        "cannot clone/export instance {0:?}: it is in non-terminal state {1:?}; stop it first"
+    )]
+    InstanceNotClonable(InstanceId, InstanceState),
+
+    /// `clone_instance`/`export_instance_disk` вызван для
+    /// `InstanceKind::LinuxVm` — за пределами текущего шага реализации,
+    /// см. документацию `Daemon::clone_instance`.
+    #[error("clone/export is only supported for AndroidVm instances, not {0:?}")]
+    CloneNotSupportedForKind(InstanceId),
+
+    /// `remove_instance(purge: true)` вызван для инстанса, у которого
+    /// есть один или больше `CloneMode::Linked`-клонов, всё ещё
+    /// ссылающихся на его диск как на `backing_file` — purge удалил бы
+    /// файл, от которого зависят эти клоны, оставив их сломанными. См.
+    /// документацию `Daemon::find_live_clones`.
+    #[error(
+        "cannot purge instance {0:?}: it has live linked clones {1:?}; remove them first"
+    )]
+    InstanceHasLiveClones(InstanceId, Vec<InstanceId>),
 }
 
 /// Реестр backend'ов по умолчанию: `Qemu -> QemuBackend`. `Vmm`
@@ -513,6 +542,236 @@ impl Daemon {
         Ok(registered_id)
     }
 
+    /// Клонирует существующий Android-инстанс в новый, независимый
+    /// `InstanceId` — три режима диска (`CloneMode`, см. его документацию
+    /// за полным обоснованием), общая для всех трёх логика вокруг этого:
+    /// проверка состояния источника, копирование `OVMF_VARS`, сборка
+    /// нового `InstanceConfig`, регистрация через `create_instance`.
+    ///
+    /// Только `InstanceKind::AndroidVm` — `LinuxVm` не имеет управляемого
+    /// `instances_root`, куда можно было бы детерминированно положить
+    /// файлы клона (пользовательский путь, переданный через `--file` при
+    /// создании оригинала, не подразумевает никакого "соседнего" места
+    /// для клона) — попытка клонировать `LinuxVm` возвращает
+    /// `DaemonError::CloneNotSupportedForKind`, см. обсуждение в истории
+    /// проекта за тем, почему это явный отказ, не молчаливая выдумка
+    /// пути.
+    ///
+    /// Источник должен быть в терминальном состоянии
+    /// (`Created`/`Stopped`/`Error`) — копировать/линковать диск живого
+    /// процесса QEMU небезопасно (см. `DaemonError::InstanceNotClonable`),
+    /// по той же причине, что и у `remove_instance`.
+    ///
+    /// Клонирование уже существующего клона разрешено и не требует
+    /// особого случая здесь: с точки зрения этого метода исходный
+    /// инстанс — это просто запись с `InstanceConfig`, откуда взять
+    /// `disk.path`/`firmware.ovmf_vars_path`; то, что эта запись сама
+    /// была создана как `Linked`/`SharedBase`-клон чего-то ещё, не имеет
+    /// значения для построения нового клона от неё.
+    ///
+    /// `instances_root` — тот же смысл, что и у `create_android_instance`
+    /// (не хардкодится, чтобы тесты могли передать временный каталог).
+    ///
+    /// При сбое посередине (после создания каталога клона, но до
+    /// успешной регистрации) — `InstanceDirGuard` убирает частично
+    /// созданный `instance_dir`, как и в `create_android_instance`.
+    pub async fn clone_instance(
+        &self,
+        source_id: InstanceId,
+        new_name: String,
+        instances_root: PathBuf,
+        mode: CloneMode,
+    ) -> Result<InstanceId, DaemonError> {
+        let source_config = self.terminal_android_instance_config(source_id).await?;
+
+        let new_id = InstanceId::new();
+        let instance_dir = instances_root.join(new_id.0.to_string());
+        let mut dir_guard = InstanceDirGuard::new(instance_dir.clone());
+
+        tokio::fs::create_dir_all(&instance_dir)
+            .await
+            .map_err(|source| DaemonError::Io {
+                path: instance_dir.clone(),
+                source,
+            })?;
+
+        let new_ovmf_vars_path = instance_dir.join("VARS.fd");
+        tokio::fs::copy(&source_config.firmware.ovmf_vars_path, &new_ovmf_vars_path)
+            .await
+            .map_err(|source| DaemonError::Io {
+                path: new_ovmf_vars_path.clone(),
+                source,
+            })?;
+
+        let new_disk_path = instance_dir.join("disk.qcow2");
+        let cloned_disk = match mode {
+            CloneMode::Linked => {
+                andler_disk::clone::linked_clone(
+                    &source_config.disk.path,
+                    &new_disk_path,
+                    source_config.disk.size_bytes,
+                )
+                .await?
+            }
+            CloneMode::FullStandalone => {
+                andler_disk::clone::full_standalone_clone(&source_config.disk.path, &new_disk_path)
+                    .await?
+            }
+            CloneMode::SharedBase => {
+                // `SharedBase` требует общий `base_image` — для
+                // Android-инстанса он есть всегда (см. `DiskConfig::overlay`,
+                // используемую `create_android_instance`), но тип
+                // `DiskConfig.base_image: Option<PathBuf>` этого не
+                // гарантирует статически. Отсутствие `base_image` здесь
+                // означало бы, что источник сам не overlay (не должно
+                // происходить для записи, прошедшей
+                // `terminal_android_instance_config`, — `AndroidVm`
+                // всегда создаётся с overlay через `create_android_instance`
+                // — но явная ошибка лучше `unwrap`, если это
+                // предположение когда-нибудь нарушится).
+                let base_image = source_config.disk.base_image.clone().ok_or_else(|| {
+                    DaemonError::Io {
+                        path: source_config.disk.path.clone(),
+                        source: std::io::Error::new(
+                            std::io::ErrorKind::InvalidInput,
+                            "SharedBase clone requires a source disk with base_image set",
+                        ),
+                    }
+                })?;
+                andler_disk::clone::shared_base_clone(
+                    &source_config.disk.path,
+                    &new_disk_path,
+                    &base_image,
+                )
+                .await?
+            }
+        };
+
+        let mut new_config = source_config;
+        new_config.id = new_id;
+        new_config.name = new_name;
+        new_config.disk.path = cloned_disk.disk_path;
+        new_config.disk.base_image = cloned_disk.backing_file;
+        new_config.firmware.ovmf_vars_path = new_ovmf_vars_path;
+
+        let registered_id = self.create_instance(new_config).await?;
+        dir_guard.disarm();
+
+        Ok(registered_id)
+    }
+
+    /// Экспортирует диск Android-инстанса как один самостоятельный файл
+    /// по указанному пути — для переноса между хостами или бэкапа, не
+    /// для создания нового управляемого инстанса (в отличие от
+    /// `clone_instance` с `CloneMode::FullStandalone`, этот метод не
+    /// регистрирует ничего в `Daemon`: результат — файл, о котором
+    /// `Daemon` больше ничего не знает и не отвечает за него).
+    ///
+    /// Реализовано через тот же `andler_disk::clone::full_standalone_clone`
+    /// (разворачивает всю backing chain, включая общий `base_image`, в
+    /// один файл) — переиспользует механику `CloneMode::FullStandalone`
+    /// без дублирования кода, просто без шагов "создать каталог
+    /// инстанса"/"скопировать OVMF_VARS"/"зарегистрировать", которые
+    /// специфичны для создания нового инстанса, не для экспорта файла.
+    ///
+    /// Источник должен быть в терминальном состоянии — та же причина, что
+    /// у `clone_instance`. Только `InstanceKind::AndroidVm` — та же
+    /// причина, что у `clone_instance` (нет принципиальной проблемы
+    /// экспортировать диск `LinuxVm`, но раз весь `LinuxVm`-путь для
+    /// клонирования отложен, последовательность ради единообразия важнее
+    /// гипотетического удобства, которое сейчас никто не просил).
+    ///
+    /// Не использует `InstanceDirGuard` — `dest_path` не "каталог
+    /// инстанса", это один файл по пути, который выбрал и за который
+    /// отвечает вызывающий; при сбое самого `full_standalone_clone` не
+    /// остаётся частично созданного состояния, требующего откат (либо
+    /// файл не создан вообще, либо `qemu-img convert` не оставляет
+    /// частично записанный файл по контракту самого `qemu-img`).
+    pub async fn export_instance_disk(
+        &self,
+        source_id: InstanceId,
+        dest_path: PathBuf,
+    ) -> Result<(), DaemonError> {
+        let source_config = self.terminal_android_instance_config(source_id).await?;
+
+        andler_disk::clone::full_standalone_clone(&source_config.disk.path, &dest_path).await?;
+
+        Ok(())
+    }
+
+    /// Общая проверка для `clone_instance`/`export_instance_disk`:
+    /// инстанс существует, в терминальном состоянии, и это `AndroidVm` —
+    /// см. документацию обоих методов за тем, почему именно эти условия.
+    /// Возвращает клон `InstanceConfig` источника (не ссылку — read-lock
+    /// `instances` отпускается до того, как вызывающая сторона начинает
+    /// файловые операции, которые могут занять заметное время для
+    /// `FullStandalone`).
+    async fn terminal_android_instance_config(
+        &self,
+        id: InstanceId,
+    ) -> Result<InstanceConfig, DaemonError> {
+        let instances = self.instances.read().await;
+        let record = instances.get(&id).ok_or(DaemonError::InstanceNotFound(id))?;
+
+        let clonable = matches!(
+            record.state,
+            InstanceState::Created | InstanceState::Stopped | InstanceState::Error { .. }
+        );
+        if !clonable {
+            return Err(DaemonError::InstanceNotClonable(id, record.state.clone()));
+        }
+
+        if !matches!(record.config.kind, InstanceKind::AndroidVm { .. }) {
+            return Err(DaemonError::CloneNotSupportedForKind(id));
+        }
+
+        Ok(record.config.clone())
+    }
+
+    /// Находит `InstanceId` всех инстансов, чей `disk.base_image`
+    /// указывает прямо на диск инстанса `id` — то есть живых
+    /// `CloneMode::Linked`-клонов этого инстанса (см. документацию
+    /// `CloneMode::Linked` за тем, почему именно такие клоны, а не
+    /// `FullStandalone`/`SharedBase`, представляют риск при purge).
+    ///
+    /// Сравнение по `disk.path` инстанса `id`, не по самому `id` —
+    /// `base_image` в `InstanceConfig` хранит путь к файлу, не
+    /// `InstanceId` (см. `DiskConfig`), это единственный способ найти
+    /// связь без дополнительной, потенциально расходящейся с
+    /// реальностью структуры данных только для этой цели. Стоимость —
+    /// O(количество инстансов) сканирование при каждом
+    /// `remove_instance(purge=true)`; на ожидаемых масштабах (десятки,
+    /// не тысячи инстансов на один `andlerd`) это не узкое место,
+    /// заводить отдельный индекс ради этого было бы преждевременной
+    /// оптимизацией.
+    ///
+    /// Не различает `Linked`-клон от `SharedBase`-клона, у которого
+    /// `base_image` совпал бы с диском источника лишь случайно (на
+    /// практике невозможно: `SharedBase` всегда ссылается на общий
+    /// `base_image` профиля, не на диск конкретного инстанса, — `id` и
+    /// есть инстанс, не профиль, так что такое совпадение означало бы,
+    /// что сам диск инстанса `id` используется как `base_image` целого
+    /// профиля, что не предусмотрено текущей моделью создания
+    /// Android-инстансов).
+    async fn find_live_clones(&self, id: InstanceId) -> Result<Vec<InstanceId>, DaemonError> {
+        let instances = self.instances.read().await;
+        let target_disk_path = instances
+            .get(&id)
+            .map(|record| record.config.disk.path.clone())
+            .ok_or(DaemonError::InstanceNotFound(id))?;
+
+        let clones = instances
+            .iter()
+            .filter(|(other_id, record)| {
+                **other_id != id && record.config.disk.base_image.as_deref() == Some(target_disk_path.as_path())
+            })
+            .map(|(other_id, _)| *other_id)
+            .collect();
+
+        Ok(clones)
+    }
+
+
     /// Запускает ранее созданный инстанс: `Created -> Starting -> Running`
     /// (см. `andler_core::fsm`). При ошибке backend'а переводит запись в
     /// `Error { message }`, а не оставляет её в промежуточном `Starting`
@@ -702,6 +961,60 @@ impl Daemon {
         }
     }
 
+    /// Поток строк stdout/stderr процесса гипервизора инстанса (см.
+    /// `andler_core::LogLine`) — live-tail с момента вызова, без истории
+    /// (см. документацию `HypervisorBackend::log_stream` за обоснованием).
+    ///
+    /// Для инстанса без запущенного backend'а (`record.handle == None`,
+    /// тот же случай, что у `status()` выше) возвращает немедленно
+    /// завершающийся пустой поток, не ошибку — наблюдать за процессом,
+    /// которого сейчас нет, означает "сейчас нечего показать", не
+    /// "невалидный запрос" (см. документацию `HypervisorBackend::log_stream`
+    /// за тем, почему это сознательно отличается от `pause_instance`/
+    /// `resume_instance` с тем же отсутствующим хэндлом).
+    ///
+    /// Возвращаемый поток — `'static` и не заимствует `&self`: внутри
+    /// держит собственный клон `Arc<dyn HypervisorBackend>` (backend'ы
+    /// уже хранятся как `Arc` в `self.backends`, клонирование — это просто
+    /// инкремент счётчика ссылок, не глубокое копирование) и сам
+    /// `BackendHandle`, поэтому переживает возврат из этого метода — это
+    /// необходимо: gRPC-хендлер (`andler-rpc`/`service.rs`) будет
+    /// поллить этот поток уже после того, как вызов `stream_instance_logs`
+    /// завершился и любые ссылки на `Daemon` из этого вызова вышли из
+    /// скоупа.
+    pub async fn stream_instance_logs(
+        &self,
+        id: InstanceId,
+    ) -> Result<BoxStream<'static, LogLine>, DaemonError> {
+        let instances = self.instances.read().await;
+        let record = instances
+            .get(&id)
+            .ok_or(DaemonError::InstanceNotFound(id))?;
+
+        let handle = match record.handle.clone() {
+            Some(handle) => handle,
+            None => return Ok(Box::pin(futures_util::stream::empty())),
+        };
+        let backend = self.backend_for(record.config.backend)?.clone();
+
+        // `async_stream::stream!` строит `Stream`, которому позволено
+        // владеть `backend`/`handle` внутри собственного тела генератора
+        // — отсюда и `'static` результат, в отличие от прямого
+        // `backend.log_stream(&handle)`, чей `BoxStream<'_, LogLine>`
+        // заимствовал бы `backend` на время жизни этого вызова. Сам
+        // внутренний поток подписывается на `broadcast`-канал процесса
+        // только один раз, при первом полле (а не при каждом вызове
+        // `log_stream`), и дальше просто транслирует его элементы —
+        // подписка происходит ровно там же, где произошла бы при прямом
+        // вызове `backend.log_stream(&handle)`.
+        Ok(Box::pin(async_stream::stream! {
+            let mut inner = backend.log_stream(&handle);
+            while let Some(line) = inner.next().await {
+                yield line;
+            }
+        }))
+    }
+
     /// Сводка по всем зарегистрированным инстансам — единственный способ
     /// узнать, какие `InstanceId` вообще существуют, без необходимости
     /// заранее знать их (например, если вывод `andler create` потерян:
@@ -794,7 +1107,30 @@ impl Daemon {
     /// `Err` означало бы оставить вызывающую сторону с записью, которая
     /// выглядит неудалённой, хотя на самом деле уже удалена везде, кроме
     /// файловой системы.
+    ///
+    /// `purge: true` дополнительно отказывает целиком (запись НЕ
+    /// удаляется, файлы НЕ трогаются), если у инстанса есть живые
+    /// `CloneMode::Linked`-клоны (см. `find_live_clones`/
+    /// `CloneMode::Linked`) — удаление `disk.path` сломало бы их
+    /// `backing_file`. `FullStandalone`/`SharedBase`-клоны не создают
+    /// такой зависимости и не блокируют purge. Без `purge` эта проверка
+    /// не выполняется — запись исчезает из `Daemon`, но файл диска
+    /// остаётся на месте, клоны не страдают.
     pub async fn remove_instance(&self, id: InstanceId, purge: bool) -> Result<(), DaemonError> {
+        // Проверка живых клонов — только когда `purge: true` и только до
+        // удаления записи (после `instances.remove(&id)` ниже у
+        // `find_live_clones` не было бы доступа к `disk.path` источника,
+        // см. её документацию). Без `purge` эта проверка не нужна:
+        // запись исчезает из `Daemon`, но файл диска остаётся на месте
+        // нетронутым — клон, ссылающийся на него как на `backing_file`,
+        // ничего не замечает.
+        if purge {
+            let live_clones = self.find_live_clones(id).await?;
+            if !live_clones.is_empty() {
+                return Err(DaemonError::InstanceHasLiveClones(id, live_clones));
+            }
+        }
+
         let config = {
             let mut instances = self.instances.write().await;
             let record = instances
@@ -932,6 +1268,34 @@ mod tests {
         }
     }
 
+    /// Вариант `sample_config()` с `InstanceKind::AndroidVm` и явно
+    /// заданными `disk.path`/`disk.base_image` — для тестов
+    /// `clone_instance`/`find_live_clones`/`CloneNotSupportedForKind`,
+    /// которым нужен именно `AndroidVm` с управляемым диском, но не
+    /// нужен настоящий overlay-файл на диске (в отличие от
+    /// `create_android_instance_resolves_profile_and_creates_overlay`,
+    /// которая создаёт реальный qcow2 через `qemu-img` и помечена
+    /// `#[ignore]`) — эти тесты вызывают `create_instance` напрямую,
+    /// минуя `create_android_instance`, поэтому им не нужен бинарник
+    /// `qemu-img` вообще, только корректные значения полей
+    /// `InstanceConfig` для проверки логики `Daemon`, не файловой
+    /// системы.
+    fn sample_android_config(disk_path: PathBuf, base_image: PathBuf) -> InstanceConfig {
+        let mut cfg = sample_config();
+        cfg.id = InstanceId::new();
+        cfg.kind = InstanceKind::AndroidVm {
+            android_profile: AndroidProfile {
+                android_version: AndroidVersion::Android13,
+                gapps: false,
+                microg: false,
+                libndk: false,
+                root: RootMode::None,
+            },
+        };
+        cfg.disk = DiskConfig::overlay(disk_path, base_image, 20 * DiskConfig::GIB);
+        cfg
+    }
+
     #[tokio::test]
     async fn create_instance_registers_with_created_state() {
         let daemon = Daemon::new();
@@ -1006,6 +1370,39 @@ mod tests {
             err,
             DaemonError::Backend(BackendError::HandleNotFound(_))
         ));
+    }
+
+    /// В отличие от `pause_before_start_returns_handle_not_found` —
+    /// `stream_instance_logs` без запущенного backend'а не должен быть
+    /// ошибкой вообще (см. документацию метода за обоснованием): просто
+    /// немедленно завершающийся пустой поток.
+    #[tokio::test]
+    async fn stream_logs_before_start_returns_empty_stream_not_error() {
+        let daemon = Daemon::new();
+        let cfg = sample_config();
+        let id = cfg.id;
+        daemon.create_instance(cfg).await.unwrap();
+
+        let mut stream = daemon.stream_instance_logs(id).await.unwrap();
+        assert!(stream.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn stream_logs_on_unknown_instance_returns_instance_not_found() {
+        let daemon = Daemon::new();
+        // `.unwrap_err()` здесь не годится: оно требует `T: Debug` для
+        // всего `Result<T, E>` (паническая ветка форматирует `Ok`-значение
+        // через `{:?}`, даже когда мы ожидаем `Err`), а
+        // `T = BoxStream<'static, LogLine>` = `Pin<Box<dyn Stream<...> +
+        // Send>>` не реализует `Debug` и не может — оборачивать живой
+        // поток в `Debug` не имеет смысла. `.err()` не требует `T: Debug`
+        // (оно просто отбрасывает `Ok`-значение, не форматирует его).
+        let err = daemon
+            .stream_instance_logs(InstanceId::new())
+            .await
+            .err()
+            .expect("an unregistered instance_id must yield an error, not a stream");
+        assert!(matches!(err, DaemonError::InstanceNotFound(_)));
     }
 
     #[tokio::test]
@@ -1760,5 +2157,559 @@ mod tests {
 
         let fetched = daemon.get_instance_config(id).await.unwrap();
         assert_eq!(fetched.name, "renamed-vm");
+    }
+
+    // --- clone_instance / export_instance_disk / find_live_clones ---
+    //
+    // Тесты ниже регистрируют записи через `create_instance` напрямую
+    // (не через `create_android_instance`), поэтому им не нужен
+    // настоящий overlay-файл/бинарник `qemu-img` для проверки логики
+    // `Daemon` (выбор режима, FSM-проверки, поиск живых клонов) — кроме
+    // тех, что явно вызывают `clone_instance`/`export_instance_disk`
+    // целиком (они доходят до `andler_disk::clone::*`, которому нужен
+    // настоящий `qemu-img`, и помечены `#[ignore]`, как и аналогичные
+    // тесты `create_android_instance`).
+
+    #[tokio::test]
+    async fn clone_on_unknown_instance_returns_instance_not_found() {
+        let daemon = Daemon::new();
+        let err = daemon
+            .clone_instance(
+                InstanceId::new(),
+                "clone".to_string(),
+                PathBuf::from("/tmp/instances"),
+                CloneMode::Linked,
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, DaemonError::InstanceNotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn clone_rejects_linux_vm_with_clone_not_supported_for_kind() {
+        let daemon = Daemon::new();
+        let cfg = sample_config(); // LinuxVm
+        let id = cfg.id;
+        daemon.create_instance(cfg).await.unwrap();
+
+        let err = daemon
+            .clone_instance(
+                id,
+                "clone".to_string(),
+                PathBuf::from("/tmp/instances"),
+                CloneMode::Linked,
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, DaemonError::CloneNotSupportedForKind(returned_id) if returned_id == id));
+    }
+
+    #[tokio::test]
+    async fn clone_rejects_non_terminal_source_state() {
+        let dir = TestTempDir::new();
+        let daemon = Daemon::new();
+        let cfg = sample_android_config(
+            dir.path().join("disk.qcow2"),
+            dir.path().join("base.qcow2"),
+        );
+        let id = cfg.id;
+        daemon.create_instance(cfg).await.unwrap();
+
+        // pause_before_start_returns_handle_not_found показывает, что
+        // start_instance без реального backend'а перейдёт в Error — это
+        // нетерминальное-для-clone не является целью здесь; вместо
+        // этого напрямую переводим запись в Running через тот же приём,
+        // что и в других тестах этого файла, проверяющих поведение при
+        // нетерминальных состояниях (см. start_instance_rejects_*) —
+        // конкретно, манипулируем state напрямую через write-lock, так
+        // как нет смысла гонять настоящий QemuBackend только чтобы
+        // получить Running.
+        {
+            let mut instances = daemon.instances.write().await;
+            let record = instances.get_mut(&id).unwrap();
+            record.state = InstanceState::Running;
+        }
+
+        let err = daemon
+            .clone_instance(
+                id,
+                "clone".to_string(),
+                dir.path().to_path_buf(),
+                CloneMode::Linked,
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            DaemonError::InstanceNotClonable(returned_id, InstanceState::Running)
+                if returned_id == id
+        ));
+    }
+
+    #[tokio::test]
+    async fn export_on_linux_vm_returns_clone_not_supported_for_kind() {
+        let daemon = Daemon::new();
+        let cfg = sample_config(); // LinuxVm
+        let id = cfg.id;
+        daemon.create_instance(cfg).await.unwrap();
+
+        let err = daemon
+            .export_instance_disk(id, PathBuf::from("/tmp/export.qcow2"))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, DaemonError::CloneNotSupportedForKind(returned_id) if returned_id == id));
+    }
+
+    #[tokio::test]
+    async fn find_live_clones_on_unknown_instance_returns_instance_not_found() {
+        let daemon = Daemon::new();
+        let err = daemon.find_live_clones(InstanceId::new()).await.unwrap_err();
+        assert!(matches!(err, DaemonError::InstanceNotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn find_live_clones_is_empty_when_nothing_references_the_disk() {
+        let dir = TestTempDir::new();
+        let daemon = Daemon::new();
+        let cfg = sample_android_config(
+            dir.path().join("disk.qcow2"),
+            dir.path().join("base.qcow2"),
+        );
+        let id = cfg.id;
+        daemon.create_instance(cfg).await.unwrap();
+
+        let clones = daemon.find_live_clones(id).await.unwrap();
+        assert!(clones.is_empty());
+    }
+
+    #[tokio::test]
+    async fn find_live_clones_finds_instance_whose_base_image_is_the_source_disk() {
+        let dir = TestTempDir::new();
+        let daemon = Daemon::new();
+
+        let source_disk = dir.path().join("source").join("disk.qcow2");
+        let source_cfg =
+            sample_android_config(source_disk.clone(), dir.path().join("base.qcow2"));
+        let source_id = source_cfg.id;
+        daemon.create_instance(source_cfg).await.unwrap();
+
+        // Имитирует результат CloneMode::Linked: новый инстанс с
+        // disk.base_image == путь к диску источника (не к общему
+        // base_image профиля) — см. документацию find_live_clones за
+        // тем, почему именно это поле и есть сигнал "живой Linked-клон".
+        let linked_clone_cfg =
+            sample_android_config(dir.path().join("clone").join("disk.qcow2"), source_disk.clone());
+        let clone_id = linked_clone_cfg.id;
+        daemon.create_instance(linked_clone_cfg).await.unwrap();
+
+        let clones = daemon.find_live_clones(source_id).await.unwrap();
+        assert_eq!(clones, vec![clone_id]);
+    }
+
+    #[tokio::test]
+    async fn find_live_clones_ignores_instances_sharing_only_the_base_image() {
+        // Два обычных AndroidVm-инстанса одного профиля (оба overlay от
+        // одного base_image, без отношения клон-источник друг к другу)
+        // не должны считаться клонами друг друга — у обоих
+        // disk.base_image указывает на общий профильный образ, не на
+        // диск друг друга.
+        let dir = TestTempDir::new();
+        let daemon = Daemon::new();
+        let shared_base_image = dir.path().join("base.qcow2");
+
+        let first_cfg = sample_android_config(
+            dir.path().join("first").join("disk.qcow2"),
+            shared_base_image.clone(),
+        );
+        let first_id = first_cfg.id;
+        daemon.create_instance(first_cfg).await.unwrap();
+
+        let second_cfg = sample_android_config(
+            dir.path().join("second").join("disk.qcow2"),
+            shared_base_image,
+        );
+        daemon.create_instance(second_cfg).await.unwrap();
+
+        let clones = daemon.find_live_clones(first_id).await.unwrap();
+        assert!(clones.is_empty());
+    }
+
+    #[tokio::test]
+    async fn remove_instance_with_purge_rejects_when_live_linked_clone_exists() {
+        let dir = TestTempDir::new();
+        let disk_path = dir.path().join("source").join("disk.qcow2");
+        let vars_path = dir.path().join("source").join("VARS.fd");
+        tokio::fs::create_dir_all(disk_path.parent().unwrap())
+            .await
+            .unwrap();
+        tokio::fs::write(&disk_path, b"disk").await.unwrap();
+        tokio::fs::write(&vars_path, b"vars").await.unwrap();
+
+        let daemon = Daemon::new();
+        let mut source_cfg =
+            sample_android_config(disk_path.clone(), dir.path().join("base.qcow2"));
+        source_cfg.firmware.ovmf_vars_path = vars_path.clone();
+        let source_id = source_cfg.id;
+        daemon.create_instance(source_cfg).await.unwrap();
+
+        let clone_cfg =
+            sample_android_config(dir.path().join("clone").join("disk.qcow2"), disk_path.clone());
+        let clone_id = clone_cfg.id;
+        daemon.create_instance(clone_cfg).await.unwrap();
+
+        let err = daemon.remove_instance(source_id, true).await.unwrap_err();
+        assert!(matches!(
+            err,
+            DaemonError::InstanceHasLiveClones(returned_id, ref clones)
+                if returned_id == source_id && clones == &vec![clone_id]
+        ));
+
+        // Отказ — значит ничего не должно было быть тронуто: ни файлы,
+        // ни сама запись.
+        assert!(disk_path.exists());
+        assert!(vars_path.exists());
+        assert!(daemon.status(source_id).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn remove_instance_with_purge_succeeds_when_clone_is_full_standalone() {
+        // FullStandalone/SharedBase-клоны не создают зависимости от
+        // источника (см. документацию CloneMode) — их существование не
+        // должно блокировать purge источника, в отличие от Linked.
+        let dir = TestTempDir::new();
+        let disk_path = dir.path().join("source").join("disk.qcow2");
+        let vars_path = dir.path().join("source").join("VARS.fd");
+        tokio::fs::create_dir_all(disk_path.parent().unwrap())
+            .await
+            .unwrap();
+        tokio::fs::write(&disk_path, b"disk").await.unwrap();
+        tokio::fs::write(&vars_path, b"vars").await.unwrap();
+
+        let daemon = Daemon::new();
+        let mut source_cfg =
+            sample_android_config(disk_path.clone(), dir.path().join("base.qcow2"));
+        source_cfg.firmware.ovmf_vars_path = vars_path.clone();
+        let source_id = source_cfg.id;
+        daemon.create_instance(source_cfg).await.unwrap();
+
+        // FullStandalone-клон: disk.base_image == None, не путь к
+        // источнику — find_live_clones не должен его найти.
+        let mut standalone_clone_cfg =
+            sample_android_config(dir.path().join("clone").join("disk.qcow2"), disk_path.clone());
+        standalone_clone_cfg.disk.base_image = None;
+        daemon.create_instance(standalone_clone_cfg).await.unwrap();
+
+        daemon.remove_instance(source_id, true).await.unwrap();
+
+        assert!(!disk_path.exists());
+        assert!(!vars_path.exists());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires qemu-img binary, see docker/README.md integration-test target"]
+    async fn clone_instance_with_linked_mode_creates_overlay_pointing_at_source_disk() {
+        let dir = std::env::temp_dir().join("andler-daemon-test-clone-linked");
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+
+        let base_image = dir.join("base.qcow2");
+        andler_disk::qcow2::create(&base_image, 10 * 1024 * 1024 * 1024)
+            .await
+            .unwrap();
+        let ovmf_template = dir.join("OVMF_VARS.template.fd");
+        tokio::fs::write(&ovmf_template, b"fake-ovmf-vars").await.unwrap();
+
+        let instances_root = dir.join("instances");
+        let daemon = Daemon::new();
+
+        let profile = AndroidProfile {
+            android_version: AndroidVersion::Android13,
+            gapps: false,
+            microg: false,
+            libndk: false,
+            root: RootMode::None,
+        };
+        let source_id = daemon
+            .create_android_instance(
+                profile,
+                "source".to_string(),
+                base_image.clone(),
+                instances_root.clone(),
+                20 * 1024 * 1024 * 1024,
+                ovmf_template,
+            )
+            .await
+            .unwrap();
+        let source_disk_path = daemon
+            .get_instance_config(source_id)
+            .await
+            .unwrap()
+            .disk
+            .path;
+
+        let clone_id = daemon
+            .clone_instance(
+                source_id,
+                "clone-of-source".to_string(),
+                instances_root.clone(),
+                CloneMode::Linked,
+            )
+            .await
+            .unwrap();
+
+        let clone_cfg = daemon.get_instance_config(clone_id).await.unwrap();
+        assert_eq!(clone_cfg.name, "clone-of-source");
+        assert_eq!(clone_cfg.disk.base_image, Some(source_disk_path.clone()));
+        assert!(clone_cfg.disk.path.exists());
+        assert_ne!(clone_cfg.disk.path, source_disk_path);
+        assert!(clone_cfg.firmware.ovmf_vars_path.exists());
+        assert_ne!(
+            clone_cfg.firmware.ovmf_vars_path,
+            daemon.get_instance_config(source_id).await.unwrap().firmware.ovmf_vars_path
+        );
+
+        // Источник теперь имеет живой Linked-клон — purge должен
+        // отказать (сквозная проверка end-to-end того же поведения, что
+        // уже проверено изолированно в
+        // remove_instance_with_purge_rejects_when_live_linked_clone_exists).
+        let err = daemon.remove_instance(source_id, true).await.unwrap_err();
+        assert!(matches!(err, DaemonError::InstanceHasLiveClones(_, _)));
+
+        tokio::fs::remove_dir_all(&dir).await.ok();
+    }
+
+    #[tokio::test]
+    #[ignore = "requires qemu-img binary, see docker/README.md integration-test target"]
+    async fn clone_instance_with_full_standalone_mode_has_no_base_image() {
+        let dir = std::env::temp_dir().join("andler-daemon-test-clone-standalone");
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+
+        let base_image = dir.join("base.qcow2");
+        andler_disk::qcow2::create(&base_image, 10 * 1024 * 1024 * 1024)
+            .await
+            .unwrap();
+        let ovmf_template = dir.join("OVMF_VARS.template.fd");
+        tokio::fs::write(&ovmf_template, b"fake-ovmf-vars").await.unwrap();
+
+        let instances_root = dir.join("instances");
+        let daemon = Daemon::new();
+
+        let profile = AndroidProfile {
+            android_version: AndroidVersion::Android13,
+            gapps: false,
+            microg: false,
+            libndk: false,
+            root: RootMode::None,
+        };
+        let source_id = daemon
+            .create_android_instance(
+                profile,
+                "source".to_string(),
+                base_image,
+                instances_root.clone(),
+                20 * 1024 * 1024 * 1024,
+                ovmf_template,
+            )
+            .await
+            .unwrap();
+
+        let clone_id = daemon
+            .clone_instance(
+                source_id,
+                "standalone-clone".to_string(),
+                instances_root,
+                CloneMode::FullStandalone,
+            )
+            .await
+            .unwrap();
+
+        let clone_cfg = daemon.get_instance_config(clone_id).await.unwrap();
+        assert_eq!(clone_cfg.disk.base_image, None);
+        assert!(clone_cfg.disk.path.exists());
+
+        // FullStandalone-клон не должен блокировать purge источника.
+        daemon.remove_instance(source_id, true).await.unwrap();
+
+        tokio::fs::remove_dir_all(&dir).await.ok();
+    }
+
+    #[tokio::test]
+    #[ignore = "requires qemu-img binary, see docker/README.md integration-test target"]
+    async fn clone_instance_with_shared_base_mode_survives_source_purge() {
+        let dir = std::env::temp_dir().join("andler-daemon-test-clone-shared-base");
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+
+        let base_image = dir.join("base.qcow2");
+        andler_disk::qcow2::create(&base_image, 10 * 1024 * 1024 * 1024)
+            .await
+            .unwrap();
+        let ovmf_template = dir.join("OVMF_VARS.template.fd");
+        tokio::fs::write(&ovmf_template, b"fake-ovmf-vars").await.unwrap();
+
+        let instances_root = dir.join("instances");
+        let daemon = Daemon::new();
+
+        let profile = AndroidProfile {
+            android_version: AndroidVersion::Android13,
+            gapps: false,
+            microg: false,
+            libndk: false,
+            root: RootMode::None,
+        };
+        let source_id = daemon
+            .create_android_instance(
+                profile,
+                "source".to_string(),
+                base_image.clone(),
+                instances_root.clone(),
+                20 * 1024 * 1024 * 1024,
+                ovmf_template,
+            )
+            .await
+            .unwrap();
+
+        let clone_id = daemon
+            .clone_instance(
+                source_id,
+                "shared-base-clone".to_string(),
+                instances_root,
+                CloneMode::SharedBase,
+            )
+            .await
+            .unwrap();
+
+        let clone_cfg_before = daemon.get_instance_config(clone_id).await.unwrap();
+        assert_eq!(clone_cfg_before.disk.base_image, Some(base_image));
+        assert!(clone_cfg_before.disk.path.exists());
+
+        // SharedBase-клон не зависит от источника физически — purge
+        // источника (включая удаление файла его диска) не должен
+        // повредить уже скопированный файл клона.
+        daemon.remove_instance(source_id, true).await.unwrap();
+        assert!(clone_cfg_before.disk.path.exists());
+
+        tokio::fs::remove_dir_all(&dir).await.ok();
+    }
+
+    #[tokio::test]
+    #[ignore = "requires qemu-img binary, see docker/README.md integration-test target"]
+    async fn clone_instance_of_a_clone_is_allowed() {
+        // Подтверждает решение "клонировать клон разрешено" — двухуровневая
+        // Linked-цепочка (source -> clone_a -> clone_b) не требует
+        // особого случая в clone_instance, см. её документацию.
+        let dir = std::env::temp_dir().join("andler-daemon-test-clone-of-clone");
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+
+        let base_image = dir.join("base.qcow2");
+        andler_disk::qcow2::create(&base_image, 10 * 1024 * 1024 * 1024)
+            .await
+            .unwrap();
+        let ovmf_template = dir.join("OVMF_VARS.template.fd");
+        tokio::fs::write(&ovmf_template, b"fake-ovmf-vars").await.unwrap();
+
+        let instances_root = dir.join("instances");
+        let daemon = Daemon::new();
+
+        let profile = AndroidProfile {
+            android_version: AndroidVersion::Android13,
+            gapps: false,
+            microg: false,
+            libndk: false,
+            root: RootMode::None,
+        };
+        let source_id = daemon
+            .create_android_instance(
+                profile,
+                "source".to_string(),
+                base_image,
+                instances_root.clone(),
+                20 * 1024 * 1024 * 1024,
+                ovmf_template,
+            )
+            .await
+            .unwrap();
+
+        let clone_a_id = daemon
+            .clone_instance(
+                source_id,
+                "clone-a".to_string(),
+                instances_root.clone(),
+                CloneMode::Linked,
+            )
+            .await
+            .unwrap();
+
+        let clone_b_id = daemon
+            .clone_instance(
+                clone_a_id,
+                "clone-b".to_string(),
+                instances_root,
+                CloneMode::Linked,
+            )
+            .await
+            .unwrap();
+
+        let clone_a_disk = daemon.get_instance_config(clone_a_id).await.unwrap().disk.path;
+        let clone_b_cfg = daemon.get_instance_config(clone_b_id).await.unwrap();
+        assert_eq!(clone_b_cfg.disk.base_image, Some(clone_a_disk.clone()));
+
+        // clone_a теперь имеет свой собственный живой клон (clone_b) —
+        // purge clone_a должен отказать по той же причине, что у source.
+        let err = daemon.remove_instance(clone_a_id, true).await.unwrap_err();
+        assert!(matches!(err, DaemonError::InstanceHasLiveClones(returned_id, ref clones)
+            if returned_id == clone_a_id && clones == &vec![clone_b_id]));
+
+        tokio::fs::remove_dir_all(&dir).await.ok();
+    }
+
+    #[tokio::test]
+    #[ignore = "requires qemu-img binary, see docker/README.md integration-test target"]
+    async fn export_instance_disk_creates_standalone_file_without_registering_instance() {
+        let dir = std::env::temp_dir().join("andler-daemon-test-export");
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+
+        let base_image = dir.join("base.qcow2");
+        andler_disk::qcow2::create(&base_image, 10 * 1024 * 1024 * 1024)
+            .await
+            .unwrap();
+        let ovmf_template = dir.join("OVMF_VARS.template.fd");
+        tokio::fs::write(&ovmf_template, b"fake-ovmf-vars").await.unwrap();
+
+        let instances_root = dir.join("instances");
+        let daemon = Daemon::new();
+
+        let profile = AndroidProfile {
+            android_version: AndroidVersion::Android13,
+            gapps: false,
+            microg: false,
+            libndk: false,
+            root: RootMode::None,
+        };
+        let source_id = daemon
+            .create_android_instance(
+                profile,
+                "source".to_string(),
+                base_image,
+                instances_root,
+                20 * 1024 * 1024 * 1024,
+                ovmf_template,
+            )
+            .await
+            .unwrap();
+
+        let export_path = dir.join("exported.qcow2");
+        daemon
+            .export_instance_disk(source_id, export_path.clone())
+            .await
+            .unwrap();
+
+        assert!(export_path.exists());
+
+        // list_instances не должен видеть никакой новой записи —
+        // экспорт не регистрирует инстанс.
+        let instances_before = daemon.list_instances().await;
+        assert_eq!(instances_before.len(), 1);
+        assert_eq!(instances_before[0].id, source_id);
+
+        tokio::fs::remove_dir_all(&dir).await.ok();
     }
 }

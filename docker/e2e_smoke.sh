@@ -139,6 +139,37 @@ if ! grep -q "Running" <<<"$STATUS_OUTPUT"; then
     exit 1
 fi
 
+# --- andler logs: проверка StreamInstanceLogs на живом процессе ---
+#
+# Раньше здесь команда `andler logs` запускалась с окном в 8с СРАЗУ ПОСЛЕ
+# start и проверяла, что за это время появится хоть одна строка — расчёт
+# был на то, что qemu-system-x86_64 что-то пишет в первые секунды штатной
+# работы. Это оказалось неверным предположением для именно этой
+# конфигурации (headless `-display none`, `audio.backend = "None"`,
+# `empty.iso` без загрузочного содержимого) — QEMU в таком режиме может
+# быть полностью тихим всё время работы; "что-то печатает" — наблюдалось
+# раньше только в момент остановки (см. ниже), не во время работы.
+#
+# Вместо ожидания случайного вывода — провоцируем гарантированную строку
+# детерминированно: QEMU всегда логирует получение `SIGTERM` в stderr,
+# независимо от ISO/display/audio конфигурации (это поведение самого
+# QEMU при получении сигнала завершения процесса, не гостевой системы).
+# Подписываемся на `andler logs` *до* `stop`, в фоне (сам стрим не
+# закрывается, пока жив backend — блокирующий вызов, нельзя просто
+# вызвать его перед stop синхронно), затем останавливаем инстанс — это и
+# вызывает гарантированную строку — затем ждём, что фоновый процесс её
+# получит и сам завершится (сервер закрывает стрим, когда backend
+# исчезает, см. документацию `Daemon::stream_instance_logs`).
+LOGS_DURING_RUN_FILE="$WORKDIR/logs_during_run.txt"
+timeout 15 andler logs "$INSTANCE_ID" >"$LOGS_DURING_RUN_FILE" 2>&1 &
+LOGS_BG_PID=$!
+# Без сна здесь подписка могла бы не успеть дойти до сервера раньше, чем
+# приходит stop — тогда строка от SIGTERM ушла бы в канал до подписки и
+# была бы пропущена (нет истории, см. документацию `log_stream`). Не
+# изящно, но просто и достаточно для smoke-теста; 1с — большой запас для
+# локального gRPC-соединения на localhost.
+sleep 1
+
 echo "==> andler stop $INSTANCE_ID --graceful"
 andler stop "$INSTANCE_ID" --graceful
 
@@ -146,6 +177,34 @@ echo "==> andler status $INSTANCE_ID (expect Stopped)"
 STATUS_OUTPUT="$(andler status "$INSTANCE_ID")"
 echo "$STATUS_OUTPUT"
 grep -q "Stopped" <<<"$STATUS_OUTPUT" || { echo "FAIL: status is not Stopped after stop"; exit 1; }
+
+echo "==> andler logs $INSTANCE_ID (subscribed before stop, expect the SIGTERM line and a clean stream close)"
+# `wait` без таймаута здесь не нужен — фоновый процесс сам ограничен
+# `timeout 15` выше; если он зависнет дольше этого (то есть стрим не
+# закрылся сам, когда backend исчез), `wait` всё равно вернётся через
+# оставшееся время `timeout`, не навечно.
+wait "$LOGS_BG_PID" || true
+LOGS_OUTPUT="$(cat "$LOGS_DURING_RUN_FILE")"
+echo "$LOGS_OUTPUT"
+if ! grep -qE '^\[stderr\].*terminating on signal' <<<"$LOGS_OUTPUT"; then
+    echo "FAIL: andler logs did not capture the SIGTERM line that qemu writes to stderr on stop"
+    exit 1
+fi
+
+# Симметричная проверка для остановленного инстанса: команда должна сразу
+# же завершиться (не блокировать ожидая строк, которых уже не будет — нет
+# живого backend'а) и предупредить через stderr, не упасть с ошибкой —
+# см. документацию Daemon::stream_instance_logs за тем, почему отсутствие
+# backend'а не InvalidArgument/NotFound. Без `timeout` — если это
+# регрессирует в зависание, сам e2e зависнет здесь, что уже само по себе
+# сигнал (предпочтительнее, чем маскировать это через timeout).
+echo "==> andler logs $INSTANCE_ID after stop (expect immediate empty stream + stderr warning)"
+LOGS_AFTER_STOP="$(andler logs "$INSTANCE_ID" 2>&1)"
+echo "$LOGS_AFTER_STOP"
+grep -qE '^\[(stdout|stderr)\]' <<<"$LOGS_AFTER_STOP" && {
+    echo "FAIL: andler logs returned log lines for an instance with no running backend"
+    exit 1
+}
 
 # --- Реальный перезапуск процесса andlerd: проверка персистентности ---
 # не Daemon::restore() внутри одного процесса теста, а буквально новый
@@ -192,5 +251,88 @@ if [[ ! -e "$WORKDIR/empty.iso" ]]; then
     echo "FAIL: unrelated empty.iso disappeared after remove --purge"
     exit 1
 fi
+
+# --- AndroidVm: CloneInstance (все три режима) + ExportInstanceDisk ---
+#
+# Отдельный, независимый от LinuxVm-сценария выше блок — CloneInstance/
+# ExportInstanceDisk поддерживают только AndroidVm (см. документацию
+# Daemon::clone_instance за тем, почему LinuxVm вне рамок текущего шага),
+# так что нужен отдельный AndroidVm-инстанс, не переиспользование
+# $INSTANCE_ID выше (тот уже и удалён).
+echo "==> preparing AndroidVm fixtures (base image, ovmf vars template)"
+ANDROID_BASE_IMAGE="$WORKDIR/android-base.qcow2"
+ANDROID_OVMF_TEMPLATE="$WORKDIR/OVMF_VARS.template.fd"
+ANDROID_INSTANCES_ROOT="$WORKDIR/android-instances"
+qemu-img create -f qcow2 "$ANDROID_BASE_IMAGE" 4G
+qemu-img create -f raw "$ANDROID_OVMF_TEMPLATE" 4M
+
+echo "==> andler create-android (source for cloning)"
+SOURCE_ANDROID_ID="$(andler create-android \
+    --name source-android \
+    --android-version 13 \
+    --base-image-path "$ANDROID_BASE_IMAGE" \
+    --instances-root "$ANDROID_INSTANCES_ROOT" \
+    --ovmf-vars-template "$ANDROID_OVMF_TEMPLATE")"
+echo "created instance_id=$SOURCE_ANDROID_ID"
+[[ -n "$SOURCE_ANDROID_ID" ]] || { echo "FAIL: empty instance_id from create-android"; exit 1; }
+
+echo "==> andler clone --mode linked (expect dependency on source)"
+LINKED_CLONE_ID="$(andler clone "$SOURCE_ANDROID_ID" \
+    --name linked-clone \
+    --instances-root "$ANDROID_INSTANCES_ROOT" \
+    --mode linked | sed -n 's/^cloned instance_id=//p')"
+[[ -n "$LINKED_CLONE_ID" ]] || { echo "FAIL: empty instance_id from clone --mode linked"; exit 1; }
+
+echo "==> andler remove --purge on source (expect failure: live linked clone exists)"
+if andler remove "$SOURCE_ANDROID_ID" --purge 2>"$WORKDIR/remove_purge_stderr.txt"; then
+    echo "FAIL: remove --purge succeeded despite a live linked clone"
+    exit 1
+fi
+grep -qi "live" "$WORKDIR/remove_purge_stderr.txt" || {
+    echo "FAIL: remove --purge error did not mention live clones:"
+    cat "$WORKDIR/remove_purge_stderr.txt"
+    exit 1
+}
+
+echo "==> andler clone --mode full-standalone (expect no dependency on source)"
+STANDALONE_CLONE_ID="$(andler clone "$SOURCE_ANDROID_ID" \
+    --name standalone-clone \
+    --instances-root "$ANDROID_INSTANCES_ROOT" \
+    --mode full-standalone | sed -n 's/^cloned instance_id=//p')"
+[[ -n "$STANDALONE_CLONE_ID" ]] || { echo "FAIL: empty instance_id from clone --mode full-standalone"; exit 1; }
+
+echo "==> andler clone --mode shared-base (expect no dependency on source, thin vs base image)"
+SHARED_BASE_CLONE_ID="$(andler clone "$SOURCE_ANDROID_ID" \
+    --name shared-base-clone \
+    --instances-root "$ANDROID_INSTANCES_ROOT" \
+    --mode shared-base | sed -n 's/^cloned instance_id=//p')"
+[[ -n "$SHARED_BASE_CLONE_ID" ]] || { echo "FAIL: empty instance_id from clone --mode shared-base"; exit 1; }
+SHARED_BASE_CLONE_DISK="$ANDROID_INSTANCES_ROOT/$SHARED_BASE_CLONE_ID/disk.qcow2"
+[[ -e "$SHARED_BASE_CLONE_DISK" ]] || { echo "FAIL: shared-base clone disk file missing"; exit 1; }
+
+echo "==> andler export (standalone file, no new instance registered)"
+EXPORT_PATH="$WORKDIR/exported-android-disk.qcow2"
+andler export "$SOURCE_ANDROID_ID" "$EXPORT_PATH"
+[[ -e "$EXPORT_PATH" ]] || { echo "FAIL: exported disk file missing"; exit 1; }
+LIST_AFTER_EXPORT="$(andler list)"
+echo "$LIST_AFTER_EXPORT"
+LIST_AFTER_EXPORT_COUNT="$(grep -c . <<<"$LIST_AFTER_EXPORT")"
+if [[ "$LIST_AFTER_EXPORT_COUNT" -ne 4 ]]; then
+    echo "FAIL: expected exactly 4 instances after export (source + 3 clones), got $LIST_AFTER_EXPORT_COUNT"
+    exit 1
+fi
+
+echo "==> andler remove --purge on standalone clone (expect success: no dependency on source)"
+andler remove "$STANDALONE_CLONE_ID" --purge
+
+echo "==> andler remove --purge on shared-base clone (expect success: no dependency on source)"
+andler remove "$SHARED_BASE_CLONE_ID" --purge
+
+echo "==> andler remove --purge on linked clone, then on source (expect both to succeed now)"
+andler remove "$LINKED_CLONE_ID" --purge
+andler remove "$SOURCE_ANDROID_ID" --purge
+
+echo "==> andler list after cleanup (expect no instances)"
+andler list | grep -q "no instances" || { echo "FAIL: instances still listed after cleanup"; exit 1; }
 
 echo "==> ALL E2E CHECKS PASSED"

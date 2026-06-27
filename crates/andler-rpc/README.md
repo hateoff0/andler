@@ -42,14 +42,25 @@ gRPC-схема (`proto/andler.proto`) и сгенерированный код 
   `InstanceConfig -> GetInstanceConfigResponse` — `From`, не `TryFrom`
   (доменный тип уже полон, конвертация в proto не может провалиться) —
   в отличие от направления `CreateInstanceRequest -> InstanceConfig`.
+- `StreamInstanceLogs` — соответствует `Daemon::stream_instance_logs`.
+  Server-streaming: `rpc StreamInstanceLogs(InstanceIdRequest) returns
+  (stream LogLineResponse)`. Live-tail stdout/stderr процесса
+  гипервизора инстанса, без истории — только строки, написанные после
+  подключения. Для инстанса без запущенного backend'а поток сразу же
+  пустой, не gRPC-ошибка (наблюдение, не команда — отличается от
+  `PauseInstance`/`ResumeInstance` с тем же отсутствующим хэндлом).
+  `LogStreamSource`/`LogLineResponse` соответствуют
+  `andler_core::LogStreamSource`/`LogLine` один-к-одному; конвертация
+  только в одну сторону (domain -> proto) — клиент это сообщение не
+  присылает, см. `convert.rs`.
 
 **Чего здесь нет и почему:**
 
-- `CloneInstance`/`StreamInstanceLogs`/`StreamResourceMetrics` из §5.1 —
-  у `Daemon` пока нет соответствующих методов. Объявлять rpc-метод
-  раньше метода `Daemon`, который он должен вызывать, означало бы
-  проектировать протокол вслепую — ровно то, чего избегали при выборе
-  порядка `daemon.rs` перед `andler-rpc` изначально.
+- `CloneInstance`/`StreamResourceMetrics` из §5.1 — у `Daemon` пока нет
+  соответствующих методов. Объявлять rpc-метод раньше метода `Daemon`,
+  который он должен вызывать, означало бы проектировать протокол
+  вслепую — ровно то, чего избегали при выборе порядка `daemon.rs`
+  перед `andler-rpc` изначально.
 
 ## Структура
 
@@ -67,8 +78,10 @@ gRPC-схема (`proto/andler.proto`) и сгенерированный код 
   — `oneof` в proto (не C-style enum), так как их доменные эквиваленты
   несут данные в отдельных вариантах (`Passthrough { gpu_pci_id }`,
   `Bridge { interface }`). Плюс `parse_instance_id` (строка из
-  gRPC-запроса -> `InstanceId`) и `instance_state_to_proto`
-  (`InstanceState` -> `(InstanceStateKind, error_message)`).
+  gRPC-запроса -> `InstanceId`), `instance_state_to_proto`
+  (`InstanceState` -> `(InstanceStateKind, error_message)`) и
+  `From<LogLine> for proto::LogLineResponse` (только domain -> proto, см.
+  выше почему).
 
 ## Версионирование
 

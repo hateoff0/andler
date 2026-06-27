@@ -1,12 +1,19 @@
 // gRPC-схема andlerd <-> andler (CLI)/GUI.
 //
 // СОЗНАТЕЛЬНО НЕПОЛНАЯ относительно §5.1 CORE_ARCHITECTURE_PLAN.md: там
-// описан целевой набор методов (CloneInstance, RemoveInstance,
-// StreamInstanceLogs, StreamResourceMetrics и т.п.) — здесь объявлены
-// только методы, которые реально есть как методы `andler_daemon::Daemon`
-// сегодня. Добавлять rpc-метод без соответствующего метода `Daemon`
-// означало бы проектировать протокол вслепую — то, что явно решили не
-// делать (см. README этого крейта и andler-daemon).
+// описан целевой набор методов (StreamResourceMetrics и т.п.) — здесь
+// объявлены только методы, которые реально есть как методы
+// `andler_daemon::Daemon` сегодня (включая `StreamInstanceLogs` и
+// `CloneInstance`/`ExportInstanceDisk` — соответствуют
+// `Daemon::stream_instance_logs`/`Daemon::clone_instance`/
+// `Daemon::export_instance_disk`). Добавлять rpc-метод без
+// соответствующего метода `Daemon` означало бы проектировать протокол
+// вслепую — то, что явно решили не делать (см. README этого крейта и
+// andler-daemon).
+//
+// `CloneInstance`/`ExportInstanceDisk` — только для `AndroidVm` (см. их
+// документацию в `daemon.rs` за полным обоснованием) — `LinuxVm` за
+// пределами текущего шага.
 //
 // `CreateInstance` — generic-путь создания инстанса через явный
 // `InstanceConfig`, соответствует `Daemon::create_instance` один-к-одному.
@@ -62,6 +69,30 @@ service AndlerService {
     // комментарий у `Daemon::get_instance_config` за тем, почему это
     // отдельный метод, не часть ListInstances.
     rpc GetInstanceConfig(InstanceIdRequest) returns (GetInstanceConfigResponse);
+
+    // Соответствует Daemon::stream_instance_logs. Server-streaming —
+    // соединение остаётся открытым, пока клиент не отключится или сервер
+    // не закроет поток сам (инстанс остановлен/удалён, либо у него
+    // никогда не было запущенного backend'а — в этом случае поток сразу
+    // же завершается пустым, не ошибкой, см. там же).
+    //
+    // Live-tail с момента подключения, без истории строк, написанных до
+    // вызова — расширение до персистентного буфера осталось бы отдельным
+    // шагом (см. обсуждение `StreamInstanceLogs` в истории проекта).
+    rpc StreamInstanceLogs(InstanceIdRequest) returns (stream LogLineResponse);
+
+    // Соответствует Daemon::clone_instance — только для AndroidVm (см.
+    // CloneInstanceRequest.mode/Daemon::clone_instance за полным
+    // обоснованием трёх режимов и почему LinuxVm не поддерживается).
+    rpc CloneInstance(CloneInstanceRequest) returns (CreateInstanceResponse);
+
+    // Соответствует Daemon::export_instance_disk — экспортирует диск
+    // AndroidVm-инстанса в самостоятельный файл по указанному пути, не
+    // создаёт новый инстанс (в отличие от CloneInstance с
+    // CloneMode::FULL_STANDALONE, который создаёт). См. документацию
+    // Daemon::export_instance_disk за тем, почему это отдельный метод,
+    // не вариант CloneInstance.
+    rpc ExportInstanceDisk(ExportInstanceDiskRequest) returns (ExportInstanceDiskResponse);
 }
 
 message Empty {}
@@ -391,4 +422,63 @@ message GetInstanceConfigResponse {
     FirmwareConfig firmware = 11;
     AudioConfig audio = 12;
     InputConfig input = 13;
+}
+
+// Источник строки лога — см. `andler_core::LogStreamSource` за полным
+// обоснованием того, почему здесь только stdout/stderr самого процесса
+// гипервизора, не структурированные FSM-события и не гостевые логи.
+//
+// `LOG_STREAM_SOURCE_UNSPECIFIED = 0` недостижим на практике: сервер сам
+// заполняет это поле в каждом `LogLineResponse` (в отличие от
+// `CpuPriority`/`AndroidVersion`/`RootMode`, которые парсятся из
+// клиентских запросов и поэтому нуждаются в `TryFrom`-проверке на
+// unspecified) — оставлен здесь только для консистентности со
+// стилем остальных enum'ов этого файла (см. их комментарии), не
+// потому что отсутствие этого варианта было бы поведенческой проблемой.
+enum LogStreamSource {
+    LOG_STREAM_SOURCE_UNSPECIFIED = 0;
+    STDOUT = 1;
+    STDERR = 2;
+}
+
+// Одна строка вывода через `rpc StreamInstanceLogs`. Соответствует
+// `andler_core::LogLine` один-к-одному — см. конвертацию в
+// `andler-rpc/src/convert.rs`.
+message LogLineResponse {
+    LogStreamSource source = 1;
+    string line = 2;
+}
+
+// Соответствует `andler_core::CloneMode` один-к-одному — см. его
+// документацию за полным обоснованием каждого варианта.
+enum CloneMode {
+    CLONE_MODE_UNSPECIFIED = 0;
+    LINKED = 1;
+    FULL_STANDALONE = 2;
+    SHARED_BASE = 3;
+}
+
+// Поля соответствуют параметрам Daemon::clone_instance один-к-одному.
+// Только для AndroidVm — см. документацию там за тем, почему LinuxVm не
+// поддерживается (нет управляемого instances_root, куда можно было бы
+// детерминированно положить файлы клона).
+message CloneInstanceRequest {
+    string source_instance_id = 1;
+    string new_name = 2;
+    string instances_root = 3;
+    CloneMode mode = 4;
+}
+
+// Поля соответствуют параметрам Daemon::export_instance_disk
+// один-к-одному. Не создаёт новый инстанс (см. комментарий у
+// `rpc ExportInstanceDisk` за тем, почему это отдельный метод, не
+// вариант CloneInstance) — ответ эхо подтверждает путь, не возвращает
+// instance_id, так как никакого instance_id не существует.
+message ExportInstanceDiskRequest {
+    string source_instance_id = 1;
+    string dest_path = 2;
+}
+
+message ExportInstanceDiskResponse {
+    string dest_path = 1;
 }

@@ -59,6 +59,32 @@ pub struct ResourceMetrics {
     pub net_tx_bytes_per_sec: Option<u64>,
 }
 
+/// Откуда взялась конкретная строка `LogLine` — на этом этапе только
+/// stdout/stderr самого процесса гипервизора (для `andler-qemu`: то, что
+/// уже перехватывает `process::QemuProcess::drain_to_tracing`). Не
+/// включает структурированные события FSM `andler-daemon` (переходы
+/// состояний, ошибки backend'а) и не включает гостевые логи (для этого
+/// нужен бы отдельный serial-port/QMP-канал) — оба явно вне первой версии
+/// `log_stream`, см. обсуждение в истории проекта (`StreamInstanceLogs`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LogStreamSource {
+    Stdout,
+    Stderr,
+}
+
+/// Одна строка вывода процесса гипервизора, отдаваемая через
+/// `log_stream`.
+///
+/// Намеренно не несёт `instance_id` — `log_stream` уже принимает
+/// `&BackendHandle` одного конкретного инстанса, вызывающая сторона
+/// (`andler-daemon`) и так знает, какому `InstanceId` соответствует этот
+/// хэндл; дублировать это в каждой строке было бы избыточно.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LogLine {
+    pub source: LogStreamSource,
+    pub line: String,
+}
+
 /// Единый интерфейс для разных гипервизоров (QEMU сейчас, rust-vmm в
 /// перспективе). `andler-daemon` работает только через этот трейт и не
 /// импортирует `andler-qemu`/`andler-vmm` напрямую за пределами реестра
@@ -103,4 +129,24 @@ pub trait HypervisorBackend: Send + Sync {
     /// сигнатура этого метода не позволяет вернуть `Result`, поэтому
     /// "не реализовано" выражается как немедленно завершающийся поток.
     fn metrics_stream(&self, handle: &BackendHandle) -> BoxStream<'_, ResourceMetrics>;
+
+    /// Поток строк stdout/stderr процесса гипервизора (см. `LogLine`).
+    ///
+    /// Семантика та же, что у `metrics_stream`: для неизвестного хэндла
+    /// или backend'а без реализации — немедленно завершающийся пустой
+    /// поток, не ошибка и не паника (сигнатура не позволяет вернуть
+    /// `Result` по тем же причинам, что и `metrics_stream`). Это
+    /// сознательно отличается от того, как `pause`/`resume`/`status`
+    /// обрабатывают отсутствующий хэндл (`BackendError::HandleNotFound`)
+    /// — `log_stream` не запрашивает действие над процессом, который
+    /// должен существовать, а наблюдает за тем, что есть; отсутствие
+    /// живого процесса — основание для "сейчас нечего стримить", не для
+    /// ошибки.
+    ///
+    /// Только live-tail с момента подключения: реализация не обязана (и
+    /// в текущей версии не должна) отдавать историю строк, появившихся до
+    /// вызова `log_stream` — буферизация истории осталась бы отдельным
+    /// расширением (см. обсуждение `StreamInstanceLogs` в истории
+    /// проекта).
+    fn log_stream(&self, handle: &BackendHandle) -> BoxStream<'_, LogLine>;
 }

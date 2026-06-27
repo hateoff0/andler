@@ -16,9 +16,11 @@ use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::Duration;
 
+use andler_core::{LogLine, LogStreamSource};
 use thiserror::Error;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
+use tokio::sync::broadcast;
 use tokio::time::timeout;
 
 /// Имя бинарника QEMU. Константа, а не конфигурация — на этом этапе нет
@@ -31,6 +33,22 @@ const QEMU_BINARY: &str = "qemu-system-x86_64";
 /// `InstanceConfig` — это деталь способа остановки процесса, не часть
 /// декларативной конфигурации инстанса.
 const GRACEFUL_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Емкость `broadcast`-канала строк лога на один процесс (см.
+/// `QemuProcess::log_sender`/`subscribe_logs`).
+///
+/// `broadcast::channel` не блокирует отправителя при заполнении — старые
+/// неприсланные сообщения у медленного подписчика просто отбрасываются
+/// (`RecvError::Lagged`), новые продолжают прибывать; так и должно быть
+/// здесь, см. документацию `subscribe_logs` за тем, почему это
+/// предпочтительнее, чем застопорить чтение stdout/stderr самого QEMU.
+/// Значение — компромисс между памятью (один буфер на каждый живой
+/// инстанс, даже без подписчиков) и тем, сколько недавних строк успеет
+/// получить клиент, подключившийся через долю секунды после момента, как
+/// они были написаны, прежде чем более старые из них вытеснятся; не
+/// предназначено как история для уже отключённого клиента (live-tail —
+/// явное решение первой версии, см. `andler_core::HypervisorBackend::log_stream`).
+const LOG_CHANNEL_CAPACITY: usize = 256;
 
 #[derive(Debug, Error)]
 pub enum ProcessError {
@@ -66,6 +84,16 @@ pub struct QemuProcess {
     /// даже после этого.
     pid: u32,
     qmp_socket_path: PathBuf,
+    /// Канал, в который `drain_to_tracing` дублирует каждую прочитанную
+    /// строку stdout/stderr, помимо записи в `tracing` — источник для
+    /// `subscribe_logs`/`andler_core::HypervisorBackend::log_stream`.
+    /// `broadcast`, не `mpsc`: несколько клиентов могут одновременно
+    /// стримить логи одного инстанса (см. документацию `subscribe_logs`),
+    /// `mpsc` отдал бы каждую строку только одному из них. Хранится здесь,
+    /// не отдельно от `Child` — обе части умирают вместе с самим
+    /// `QemuProcess` (см. документацию `backend::RunningInstance`, где
+    /// живёт сам `QemuProcess`).
+    log_sender: broadcast::Sender<LogLine>,
 }
 
 impl QemuProcess {
@@ -75,8 +103,9 @@ impl QemuProcess {
     /// stdout/stderr процесса перенаправляются в `Stdio::piped()`, а не
     /// наследуются от `andlerd` — иначе вывод множества QEMU-инстансов
     /// смешивался бы в одном терминале демона. Оба потока вычитываются
-    /// построчно в фоновых задачах и логируются через `tracing::warn!`
-    /// (см. `drain_to_tracing` ниже) — раньше дескрипторы просто никем не
+    /// построчно в фоновых задачах, логируются через `tracing::warn!` и
+    /// публикуются в broadcast-канал для `subscribe_logs` (см.
+    /// `drain_to_tracing` ниже) — раньше дескрипторы просто никем не
     /// читались, и причину падения процесса узнать было невозможно без
     /// внешних средств.
     pub async fn spawn(args: &[String], qmp_socket_path: PathBuf) -> Result<Self, ProcessError> {
@@ -108,34 +137,72 @@ impl QemuProcess {
         // если процесс пишет в stderr быстрее, чем мы читаем, буфер ОС
         // всё равно ограничен — но теперь хотя бы то, что было прочитано,
         // не пропадает молча.
+        //
+        // Те же строки дублируются в `log_sender` (см. документацию поля)
+        // для `subscribe_logs`/`log_stream` — `tracing` остаётся
+        // источником для оператора демона (журнал процесса), `log_sender`
+        // — для клиента поверх gRPC; `drain_to_tracing` пишет в оба места
+        // за один проход по строке, не заводя двух читателей одного
+        // потока (что и невозможно — `ChildStdout`/`ChildStderr` можно
+        // прочитать только один раз).
+        let (log_sender, _) = broadcast::channel(LOG_CHANNEL_CAPACITY);
+
         if let Some(stdout) = child.stdout.take() {
-            tokio::spawn(Self::drain_to_tracing(stdout, pid, "stdout"));
+            tokio::spawn(Self::drain_to_tracing(
+                stdout,
+                pid,
+                LogStreamSource::Stdout,
+                log_sender.clone(),
+            ));
         }
         if let Some(stderr) = child.stderr.take() {
-            tokio::spawn(Self::drain_to_tracing(stderr, pid, "stderr"));
+            tokio::spawn(Self::drain_to_tracing(
+                stderr,
+                pid,
+                LogStreamSource::Stderr,
+                log_sender.clone(),
+            ));
         }
 
         Ok(QemuProcess {
             child,
             pid,
             qmp_socket_path,
+            log_sender,
         })
     }
 
-    /// Построчно читает `reader` до EOF и логирует каждую строку через
+    /// Построчно читает `reader` до EOF, логирует каждую строку через
     /// `tracing::warn!` (не `info!` — вывод QEMU в норме почти пуст;
     /// что-то в нём появляющееся обычно стоит внимания при диагностике,
-    /// даже если сам процесс в итоге работает штатно). `stream_name` —
-    /// `"stdout"` или `"stderr"`, чтобы не путать источники в логах.
-    async fn drain_to_tracing<R>(reader: R, pid: u32, stream_name: &'static str)
+    /// даже если сам процесс в итоге работает штатно) и одновременно
+    /// публикует её в `sender` для подписчиков `subscribe_logs`. `source`
+    /// — `LogStreamSource::Stdout`/`Stderr`, чтобы не путать источники.
+    ///
+    /// Ошибка `send` (нет подписчиков) намеренно проигнорирована — это
+    /// штатный случай: в любой момент может не быть ни одного активного
+    /// gRPC-клиента, стримящего логи, и строка просто никому не нужна
+    /// прямо сейчас; `tracing` уже получил её строкой выше независимо от
+    /// этого.
+    async fn drain_to_tracing<R>(
+        reader: R,
+        pid: u32,
+        source: LogStreamSource,
+        sender: broadcast::Sender<LogLine>,
+    )
     where
         R: tokio::io::AsyncRead + Unpin,
     {
+        let stream_name = match source {
+            LogStreamSource::Stdout => "stdout",
+            LogStreamSource::Stderr => "stderr",
+        };
         let mut lines = BufReader::new(reader).lines();
         loop {
             match lines.next_line().await {
                 Ok(Some(line)) => {
                     tracing::warn!(pid, stream = stream_name, "{line}");
+                    let _ = sender.send(LogLine { source, line });
                 }
                 Ok(None) => break,
                 Err(io_err) => {
@@ -144,6 +211,18 @@ impl QemuProcess {
                 }
             }
         }
+    }
+
+    /// Подписывает нового слушателя на live-tail stdout/stderr этого
+    /// процесса (см. документацию `log_sender`).
+    ///
+    /// Новый подписчик получает только строки, отправленные *после*
+    /// вызова `subscribe_logs` — `broadcast::Sender::subscribe()` не
+    /// отдаёт историю, см. документацию
+    /// `andler_core::HypervisorBackend::log_stream` за тем, что это
+    /// сознательный выбор первой версии, не упущение.
+    pub fn subscribe_logs(&self) -> broadcast::Receiver<LogLine> {
+        self.log_sender.subscribe()
     }
 
     pub fn pid(&self) -> u32 {
@@ -264,5 +343,64 @@ mod tests {
             .map_err(ProcessError::SpawnFailed);
 
         assert!(matches!(result, Err(ProcessError::SpawnFailed(_))));
+    }
+
+    /// Проверяет `drain_to_tracing` напрямую на `io::Cursor` (не на
+    /// реальном `ChildStdout`) — не требует бинарника QEMU, безопасно
+    /// гонять в unit-test. Подписчик, созданный *до* того, как
+    /// `drain_to_tracing` начал читать, должен получить обе строки в
+    /// порядке появления.
+    #[tokio::test]
+    async fn drain_to_tracing_publishes_lines_to_subscriber() {
+        let (sender, mut receiver) = broadcast::channel(LOG_CHANNEL_CAPACITY);
+        let reader: &[u8] = b"first line\nsecond line\n";
+
+        QemuProcess::drain_to_tracing(reader, 1234, LogStreamSource::Stdout, sender).await;
+
+        let first = receiver.try_recv().expect("first line should be queued");
+        assert_eq!(first.source, LogStreamSource::Stdout);
+        assert_eq!(first.line, "first line");
+
+        let second = receiver.try_recv().expect("second line should be queued");
+        assert_eq!(second.source, LogStreamSource::Stdout);
+        assert_eq!(second.line, "second line");
+
+        assert!(receiver.try_recv().is_err(), "no more lines after EOF");
+    }
+
+    /// `drain_to_tracing` должен не падать и не блокироваться, если ни
+    /// один подписчик не существует (`sender.send` возвращает `Err`,
+    /// который намеренно игнорируется) — см. документацию
+    /// `drain_to_tracing` за тем, почему это штатный случай, не ошибка.
+    #[tokio::test]
+    async fn drain_to_tracing_tolerates_no_subscribers() {
+        let (sender, _) = broadcast::channel::<LogLine>(LOG_CHANNEL_CAPACITY);
+        let reader: &[u8] = b"nobody is listening\n";
+
+        // Не должно ни паниковать, ни зависнуть — если бы здесь была
+        // ошибка обработки `send`, тест завис бы или упал бы.
+        QemuProcess::drain_to_tracing(reader, 1, LogStreamSource::Stderr, sender).await;
+    }
+
+    /// Несколько подписчиков, оформленных через одинаковый `Sender`
+    /// (модель `subscribe_logs` — см. его документацию), должны получить
+    /// одну и ту же строку независимо друг от друга — обоснование того,
+    /// почему канал `broadcast`, а не `mpsc`.
+    #[tokio::test]
+    async fn multiple_subscribers_each_receive_the_same_line() {
+        let (sender, mut first_receiver) = broadcast::channel(LOG_CHANNEL_CAPACITY);
+        let mut second_receiver = sender.subscribe();
+        let reader: &[u8] = b"shared line\n";
+
+        QemuProcess::drain_to_tracing(reader, 1, LogStreamSource::Stdout, sender).await;
+
+        assert_eq!(
+            first_receiver.try_recv().unwrap().line,
+            "shared line".to_string()
+        );
+        assert_eq!(
+            second_receiver.try_recv().unwrap().line,
+            "shared line".to_string()
+        );
     }
 }

@@ -8,11 +8,12 @@ in-memory состояние инстансов, без сети и без пе�
 
 - `daemon.rs` — **реализовано**. `Daemon::create_instance`/`start_instance`/
   `stop_instance`/`pause_instance`/`resume_instance`/`status`/
-  `list_instances`/`remove_instance`/`get_instance_config` — методы, которые
-  соответствуют будущим gRPC-методам один-к-одному по смыслу, но пока
-  вызываются прямо как обычные async-методы Rust. Каждый метод применяет
-  переходы `andler_core::fsm` и делегирует нужному backend'у через
-  `HypervisorBackend`. `Daemon::new()` регистрирует только
+  `list_instances`/`remove_instance`/`get_instance_config`/
+  `stream_instance_logs`/`clone_instance`/`export_instance_disk` — методы,
+  которые соответствуют будущим gRPC-методам один-к-одному по смыслу, но
+  пока вызываются прямо как обычные async-методы Rust. Каждый метод
+  применяет переходы `andler_core::fsm` и делегирует нужному backend'у
+  через `HypervisorBackend`. `Daemon::new()` регистрирует только
   `BackendKind::Qemu -> QemuBackend` — `Vmm` не регистрируется, пока
   `andler-vmm` остаётся пустым каркасом (см. его README).
   - **`list_instances`** — возвращает `Vec<InstanceSummary>`
@@ -41,11 +42,62 @@ in-memory состояние инстансов, без сети и без пе�
     месте. Удаляет из `store`, если персистентность включена; ошибка
     удаления из `store` (как и любая ошибка purge-файлов) логируется, но
     не проваливает операцию (та же семантика, что у `persist_state`).
+    `purge: true` дополнительно отказывает целиком (ничего не удаляется
+    — ни запись, ни файлы), если у инстанса есть живые
+    `CloneMode::Linked`-клоны (`Daemon::find_live_clones`, см. ниже) —
+    удаление `disk.path` сломало бы их `backing_file`.
   - **`get_instance_config`** — возвращает полный `InstanceConfig` одного
     инстанса (клон, не ссылку — read-lock `instances` отпускается до
     конвертации в proto на стороне `service.rs`). Существует отдельно от
     `list_instances` — той не нужен весь объём данных каждой записи на
     каждый вызов, а здесь это точечный запрос по одному `InstanceId`.
+  - **`stream_instance_logs`** — live-tail stdout/stderr процесса
+    гипервизора инстанса (`andler_core::LogLine`), без истории — только
+    строки, появившиеся после подписки. Для инстанса без запущенного
+    backend'а (`record.handle == None`) возвращает немедленно
+    завершающийся пустой поток, не `Err` — наблюдать за процессом,
+    которого сейчас нет, не невалидный запрос (в отличие от
+    `pause_instance`/`resume_instance` с тем же отсутствующим хэндлом —
+    те запрашивают действие над процессом, который обязан существовать).
+    Возвращаемый `BoxStream<'static, LogLine>` собран через
+    `async_stream::stream!`, владеющий собственным клоном
+    `Arc<dyn HypervisorBackend>` и `BackendHandle` — необходимо, так как
+    `HypervisorBackend::log_stream` по сигнатуре возвращает поток,
+    заимствующий `&self` backend'а; без этой обёртки результат был бы
+    привязан к времени жизни вызова `stream_instance_logs`, а не мог бы
+    переживать его (что обязательно — gRPC-хендлер в `service.rs`
+    поллит этот поток уже после возврата из самого вызова).
+  - **`clone_instance`** — клонирует `AndroidVm`-инстанс (только
+    `AndroidVm` — `LinuxVm` не имеет управляемого `instances_root`,
+    куда детерминированно положить файлы клона; попытка возвращает
+    `DaemonError::CloneNotSupportedForKind`) в новый `InstanceId`, в
+    одном из трёх `andler_core::CloneMode` (см. его документацию за
+    полным обоснованием каждого варианта — `Linked`/`FullStandalone`/
+    `SharedBase`). Источник должен быть в терминальном состоянии
+    (`Created`/`Stopped`/`Error`, как и у `remove_instance`) —
+    `DaemonError::InstanceNotClonable` иначе. `OVMF_VARS` всегда
+    копируется (содержимое, не чистый шаблон — снапшот EFI-состояния
+    источника), независимо от режима диска. Клонирование уже
+    существующего клона разрешено — для этого метода исходный инстанс
+    это просто запись с `InstanceConfig`, то, что она сама была создана
+    как клон чего-то ещё, не требует особого случая. При сбое
+    посередине — тот же `InstanceDirGuard`, что и у
+    `create_android_instance`.
+  - **`export_instance_disk`** — экспортирует диск `AndroidVm`-инстанса
+    в самостоятельный файл по указанному пути, не создаёт инстанс (в
+    отличие от `clone_instance` с `CloneMode::FullStandalone`, который
+    создаёт) — переиспользует тот же `andler_disk::clone::full_standalone_clone`
+    без дублирования кода, просто без шагов "создать каталог
+    инстанса"/"скопировать OVMF_VARS"/"зарегистрировать". Те же условия
+    на источник, что у `clone_instance`.
+  - **`find_live_clones`** (приватный) — находит `InstanceId` всех
+    инстансов, чей `disk.base_image` указывает прямо на диск инстанса
+    `id` — то есть живых `CloneMode::Linked`-клонов. Сравнение по
+    `disk.path`, не по `InstanceId` (`base_image` хранит путь к файлу,
+    не идентификатор) — O(количество инстансов) сканирование на каждый
+    `remove_instance(purge=true)`, не отдельный индекс (на ожидаемых
+    масштабах — десятки, не тысячи инстансов на один `andlerd` —
+    заводить индекс ради этого было бы преждевременной оптимизацией).
 - `Daemon::create_android_instance` — **реализовано**. Связывает
   `AndroidProfile::resolve()` (`andler-core`, чистая функция) с реальным
   созданием на диске: каталог инстанса, персональная копия `OVMF_VARS`
@@ -170,7 +222,38 @@ in-memory состояние инстансов, без сети и без пе�
   `get_instance_config_*`: `InstanceNotFound` для
   неизвестного `id`, точное соответствие возвращённого конфига тому, что
   было передано в `create_instance`, и то, что метод видит актуальную
-  запись, а не застывший снимок на момент создания.
+  запись, а не застывший снимок на момент создания. Плюс
+  `stream_logs_before_start_returns_empty_stream_not_error` (в отличие
+  от `pause`/`resume` с тем же отсутствующим хэндлом — `Ok` с пустым
+  потоком, не `Err`) и
+  `stream_logs_on_unknown_instance_returns_instance_not_found`. Плюс блок
+  `clone_instance`/`export_instance_disk`/`find_live_clones` —
+  error-пути без реального `qemu-img` через `sample_android_config`
+  (создаёт `AndroidVm`-запись напрямую через `create_instance`, минуя
+  `create_android_instance`, поэтому не требует настоящего overlay-файла
+  на диске для проверки логики `Daemon`, не файловой системы):
+  `InstanceNotFound`/`CloneNotSupportedForKind` (для `LinuxVm`)/
+  `InstanceNotClonable` (для `Running`, состояние инъектировано
+  напрямую, тот же приём, что у `remove_instance`-тестов) для обоих
+  методов; `find_live_clones` — пустой результат для инстанса без
+  клонов, находит клон по совпадению `disk.base_image` с `disk.path`
+  источника, не путает обычные overlay одного профиля (общий
+  `base_image`, не клон-источник) с настоящими клонами;
+  `remove_instance_with_purge_rejects_when_live_linked_clone_exists`/
+  `remove_instance_with_purge_succeeds_when_clone_is_full_standalone` —
+  `Linked`-клон блокирует purge источника, `FullStandalone`-клон не
+  блокирует. Плюс сквозные `#[ignore]`-тесты (требуют `qemu-img`,
+  начинаются от настоящего `create_android_instance`): по одному на
+  каждый `CloneMode` (`clone_instance_with_linked_mode_creates_overlay_pointing_at_source_disk`
+  дополнительно проверяет end-to-end, что purge источника с живым
+  Linked-клоном отказывает уже через реальный диск, не только
+  изолированно; `clone_instance_with_shared_base_mode_survives_source_purge`
+  явно удаляет источник через purge и проверяет, что файл клона
+  физически выжил), `clone_instance_of_a_clone_is_allowed`
+  (двухуровневая `Linked`-цепочка source → clone_a → clone_b, обе
+  ссылки проверяются явно), и `export_instance_disk_creates_standalone_file_without_registering_instance`
+  (`list_instances` после экспорта видит ровно одну запись — саму
+  изначальную, не появившуюся новую).
 - `grpc_roundtrip_test` (`#[cfg(test)]`, не помечен `#[ignore]`) — реальный
   `tonic::transport::Server` на эфемерном `127.0.0.1`-порту + реальный
   `AndlerServiceClient` через настоящий TCP. Проверяет то, что unit-тесты
@@ -208,7 +291,20 @@ in-memory состояние инстансов, без сети и без пе�
   `GetInstanceConfig`: точное соответствие всех полей (включая
   `oneof`-вариант `RenderBackend::Venus` и `InstanceKind::LinuxVm`) тому,
   что было передано в предшествующий `CreateInstance`, и `NOT_FOUND` для
-  незарегистрированного `instance_id`.
+  незарегистрированного `instance_id`. Плюс три теста на
+  `StreamInstanceLogs`: для только что созданного, никогда не
+  запускавшегося инстанса — настоящий `tonic::Streaming<LogLineResponse>`
+  завершается на первом `.message()` сразу `Ok(None)`, не зависает и не
+  ошибается (это то, что unit-тест с `BoxStream` напрямую в `daemon.rs`
+  не может подтвердить — там нет настоящей gRPC-сериализации/жизненного
+  цикла стрима); `NOT_FOUND` для незарегистрированного `instance_id`
+  (ошибка приходит из самого вызова, до получения `Streaming`, как и для
+  остальных методов); `INVALID_ARGUMENT` для `instance_id`, не
+  являющегося валидным UUID. Что не покрыто здесь: реальные строки
+  лога живого QEMU-процесса по сети — для этого нужен бы реальный
+  бинарник, такая проверка осталась бы для `integration-test`/e2e, не
+  для этого файла (требование "без `qemu-img`/`/dev/kvm`" в начале этой
+  секции).
 
 ## Требования к окружению
 

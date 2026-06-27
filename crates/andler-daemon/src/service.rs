@@ -4,16 +4,20 @@
 //! бизнес-логики здесь (она целиком в `daemon.rs`). Соответствует тому, как
 //! README `andler-daemon` описывал будущий `service.rs` с самого начала.
 
+use std::pin::Pin;
 use std::sync::Arc;
 
-use andler_core::InstanceConfig;
+use andler_core::{CloneMode, InstanceConfig};
 use andler_rpc::convert;
 use andler_rpc::proto::andler_service_server::AndlerService;
 use andler_rpc::proto::{
-    CreateAndroidInstanceRequest, CreateInstanceRequest, CreateInstanceResponse, Empty,
+    CloneInstanceRequest, CreateAndroidInstanceRequest, CreateInstanceRequest,
+    CreateInstanceResponse, Empty, ExportInstanceDiskRequest, ExportInstanceDiskResponse,
     GetInstanceConfigResponse, InstanceIdRequest, InstanceListEntry, InstanceStatusResponse,
-    ListInstancesResponse, RemoveInstanceRequest, StopInstanceRequest,
+    ListInstancesResponse, LogLineResponse, RemoveInstanceRequest, StopInstanceRequest,
 };
+use futures_core::Stream;
+use futures_util::StreamExt;
 use tonic::{Request, Response, Status};
 
 use crate::daemon::{Daemon, DaemonError};
@@ -33,10 +37,12 @@ impl DaemonService {
 /// `BackendError::NotImplemented`) -> `UNIMPLEMENTED` (соответствует
 /// "Контракту для незавершённых backend'ов" из §4 архитектурного плана —
 /// демон не должен падать, он должен вернуть штатный gRPC-статус),
-/// нарушение FSM/отсутствие хэндла/`InstanceNotRemovable` ->
-/// `FAILED_PRECONDITION` (клиент мог бы исправить ситуацию, изменив
-/// порядок вызовов — например, `stop` перед `remove`), остальное ->
-/// `INTERNAL`.
+/// нарушение FSM/отсутствие хэндла/`InstanceNotRemovable`/
+/// `InstanceNotClonable`/`CloneNotSupportedForKind`/
+/// `InstanceHasLiveClones` -> `FAILED_PRECONDITION` (клиент мог бы
+/// исправить ситуацию, изменив порядок вызовов — например, `stop` перед
+/// `remove`/`clone`/`export`, или удалить клоны перед `remove --purge`
+/// источника), остальное -> `INTERNAL`.
 ///
 /// `DaemonError::Restore` — отдельная ветка, не часть `_ => INTERNAL`:
 /// она недостижима из любого метода `AndlerService` (всю обработку
@@ -57,6 +63,17 @@ impl From<DaemonError> for Status {
             DaemonError::NoBackendRegistered(_) => Status::unimplemented(err.to_string()),
             DaemonError::InvalidTransition(_) => Status::failed_precondition(err.to_string()),
             DaemonError::InstanceNotRemovable(_, _) => {
+                Status::failed_precondition(err.to_string())
+            }
+            // Та же категория, что `InstanceNotRemovable` выше — клиент
+            // мог бы исправить ситуацию, изменив порядок вызовов (stop
+            // перед clone/export; убрать клоны перед purge), не
+            // INTERNAL.
+            DaemonError::InstanceNotClonable(_, _) => Status::failed_precondition(err.to_string()),
+            DaemonError::CloneNotSupportedForKind(_) => {
+                Status::failed_precondition(err.to_string())
+            }
+            DaemonError::InstanceHasLiveClones(_, _) => {
                 Status::failed_precondition(err.to_string())
             }
             DaemonError::Backend(andler_core::BackendError::NotImplemented { .. }) => {
@@ -81,6 +98,17 @@ impl From<DaemonError> for Status {
 
 #[tonic::async_trait]
 impl AndlerService for DaemonService {
+    /// Тип возвращаемого потока для `stream_instance_logs` — требуется
+    /// сгенерированным трейтом для server-streaming RPC (см.
+    /// `rpc StreamInstanceLogs` в `andler.proto`). `Pin<Box<dyn Stream<...>
+    /// + Send>>` — стандартная forма для такого ассоциированного типа в
+    /// `tonic`, не специфичная для этого метода деталь; конкретная
+    /// реализация (`Daemon::stream_instance_logs`, смэпленная через
+    /// `.map(...)` ниже) уже `'static` и `Send` сама по себе (см.
+    /// документацию `Daemon::stream_instance_logs` за тем, почему).
+    type StreamInstanceLogsStream =
+        Pin<Box<dyn Stream<Item = Result<LogLineResponse, Status>> + Send + 'static>>;
+
     /// Создаёт `LinuxVm`-инстанс из явного `InstanceConfig`, переданного
     /// клиентом целиком. В отличие от `create_android_instance`, здесь нет
     /// промежуточного резолва профиля/создания overlay-диска — конвертация
@@ -228,5 +256,64 @@ impl AndlerService for DaemonService {
         let id = convert::parse_instance_id(&request.into_inner().instance_id)?;
         let config = self.daemon.get_instance_config(id).await?;
         Ok(Response::new(config.into()))
+    }
+
+    /// Соответствует `Daemon::stream_instance_logs`. Не возвращает gRPC
+    /// ошибку для инстанса без запущенного backend'а — `Daemon` уже сам
+    /// отдаёт пустой поток в этом случае (см. документацию там), здесь
+    /// просто транслируется `LogLine -> LogLineResponse` (см.
+    /// `andler_rpc::convert`) по каждому элементу.
+    async fn stream_instance_logs(
+        &self,
+        request: Request<InstanceIdRequest>,
+    ) -> Result<Response<Self::StreamInstanceLogsStream>, Status> {
+        let id = convert::parse_instance_id(&request.into_inner().instance_id)?;
+        let inner = self.daemon.stream_instance_logs(id).await?;
+        let mapped = inner.map(|line| Ok(LogLineResponse::from(line)));
+        Ok(Response::new(Box::pin(mapped)))
+    }
+
+    /// Соответствует `Daemon::clone_instance`. `mode` — proto-enum
+    /// (`i32` на уровне сообщения, см. `req.mode()`), конвертация в
+    /// доменный `CloneMode` через `TryFrom` (`andler_rpc::convert`) —
+    /// `CLONE_MODE_UNSPECIFIED` отклоняется тем же путём, что и
+    /// `ANDROID_VERSION_UNSPECIFIED`/`ROOT_MODE_UNSPECIFIED` у
+    /// `create_android_instance`.
+    async fn clone_instance(
+        &self,
+        request: Request<CloneInstanceRequest>,
+    ) -> Result<Response<CreateInstanceResponse>, Status> {
+        let req = request.into_inner();
+        let source_id = convert::parse_instance_id(&req.source_instance_id)?;
+        let mode = CloneMode::try_from(req.mode())?;
+
+        let id = self
+            .daemon
+            .clone_instance(source_id, req.new_name, req.instances_root.into(), mode)
+            .await?;
+
+        Ok(Response::new(CreateInstanceResponse {
+            instance_id: id.0.to_string(),
+        }))
+    }
+
+    /// Соответствует `Daemon::export_instance_disk`. Не создаёт новый
+    /// инстанс — ответ эхо подтверждает `dest_path`, не возвращает
+    /// `instance_id` (см. документацию `rpc ExportInstanceDisk` за тем,
+    /// почему это отдельный метод, не вариант `CloneInstance`).
+    async fn export_instance_disk(
+        &self,
+        request: Request<ExportInstanceDiskRequest>,
+    ) -> Result<Response<ExportInstanceDiskResponse>, Status> {
+        let req = request.into_inner();
+        let source_id = convert::parse_instance_id(&req.source_instance_id)?;
+
+        self.daemon
+            .export_instance_disk(source_id, req.dest_path.clone().into())
+            .await?;
+
+        Ok(Response::new(ExportInstanceDiskResponse {
+            dest_path: req.dest_path,
+        }))
     }
 }
