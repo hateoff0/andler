@@ -7,6 +7,8 @@
 - [x] QEMU VM snapshots — create/restore/delete/list via job API
 - [x] Real-time resource metrics from `/proc` (CPU, RAM, disk, network)
 - [x] AMD GPU metrics from sysfs (VRAM, GPU load)
+- [x] NVIDIA GPU metrics via `nvidia-smi` CLI (VRAM, GPU load)
+- [x] Intel GPU metrics via sysfs `i915` (GPU load delta, VRAM stolen memory)
 - [x] Offline Magisk provisioning via `qemu-nbd`
 - [x] SQLite state persistence with cascade delete (`andler-store`)
 - [x] gRPC protocol with 19 RPCs and bidirectional conversions
@@ -31,8 +33,6 @@
 ### Medium-term
 
 - [ ] GPU passthrough via VFIO (`RenderBackend::Passthrough`)
-- [ ] NVIDIA GPU metrics (sysfs `vgpu` or `nvidia-smi`)
-- [ ] Intel GPU metrics (sysfs `i915`)
 - [ ] Cloud Hypervisor backend (`andler-vmm` with `rust-vmm` crates)
 - [ ] Online Magisk provisioning via guest agent (without `qemu-nbd`)
 

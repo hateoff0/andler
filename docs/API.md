@@ -40,7 +40,7 @@ andler create \
 | `--gapps` | No | Include Google Apps |
 | `--microg` | No | Include microG |
 | `--libndk` | No | Include ARM→x86 translation (libhoudini/libndk) |
-| `--root <mode>` | No | Root mode: `none` (default), `magisk`, `kernelsu` |
+| `--root <mode>` | No | Root mode: `none` (default), `magisk` |
 | `--magisk-dir <path>` | No | Path to Magisk binaries (required when `--root magisk`) |
 | `--overlay-size-gib <size>` | No | Overlay disk size in GiB (default: 20) |
 | `--instances-root <path>` | No | Instance directory root (default: `~/.local/share/andler/instances`) |

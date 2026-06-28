@@ -197,11 +197,13 @@ All host-side metrics from `/proc` — no QMP communication needed for metrics:
 | RAM | `/proc/<pid>/status` (VmRSS) | Direct read |
 | Disk I/O | `/sys/block/<dev>/stat` | Delta-based bytes/sec |
 | Net I/O | `/proc/<net/dev>` | Delta-based bytes/sec |
-| VRAM Used | `/sys/class/drm/card*/device/mem_info_vram_used` | AMD sysfs only |
-| VRAM Total | `/sys/class/drm/card*/device/mem_info_vram_total` | AMD sysfs only |
-| GPU Load | `/sys/class/drm/card*/device/gpu_busy_percent` | AMD sysfs only |
+| VRAM Used | AMD: `mem_info_vram_used`, NVIDIA: `nvidia-smi`, Intel: `mem_info_dev_local_mem_alloc` | Vendor-specific |
+| VRAM Total | AMD: `mem_info_vram_total`, NVIDIA: `nvidia-smi`, Intel: `mem_info_stolen_local_mem` | Vendor-specific |
+| GPU Load | AMD: `gpu_busy_percent`, NVIDIA: `nvidia-smi`, Intel: `busyiffies` delta | Vendor-specific |
 
 Polling interval: 1 second. Broadcast via `tokio::sync::broadcast`.
+
+GPU vendor detection priority: AMD → NVIDIA → Intel (first found wins). AMD uses direct sysfs reads. NVIDIA uses `nvidia-smi` CLI. Intel uses `i915` sysfs with delta-based busyiffies for GPU load.
 
 ## Magisk Provisioning
 

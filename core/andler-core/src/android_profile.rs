@@ -39,7 +39,6 @@ pub enum RootMode {
     #[default]
     None,
     Magisk,
-    KernelSu,
 }
 
 /// Параметры конкретного варианта Android-инстанса — то, что пользователь

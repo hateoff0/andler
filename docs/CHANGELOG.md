@@ -18,8 +18,11 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 - **QEMU VM snapshots**: Full CRUD — create, restore, delete, list snapshots via QEMU's `snapshot-save`/`snapshot-load`/`snapshot-delete` job API. Polls `query-jobs` for completion with configurable timeout.
 - **Resource metrics from `/proc`**: Real-time streaming of CPU%, RAM usage, disk I/O, and network I/O. No QMP required for metrics. 1-second polling interval.
-- **GPU metrics (AMD)**: Sysfs-based GPU metrics — VRAM used/total and GPU load percentage from `/sys/class/drm/card*/device/`. Other vendors return None (explicit first-version constraint).
-- **GPU metrics integration**: AMD GPU metrics merged into the main metrics poller. Single `ResourceMetrics` message per tick with both host and GPU data.
+- **GPU metrics (AMD)**: Sysfs-based GPU metrics — VRAM used/total and GPU load percentage from `/sys/class/drm/card*/device/`.
+- **GPU metrics (NVIDIA)**: `nvidia-smi` CLI-based GPU metrics — VRAM used/total (MiB) and GPU load %. Automatic vendor detection with AMD→NVIDIA→Intel priority.
+- **GPU metrics (Intel)**: i915 sysfs-based GPU metrics — GPU load % via busyiffies delta between consecutive polls, VRAM via stolen memory (approximate).
+- **GPU vendor detection**: Automatic AMD → NVIDIA → Intel priority. First found vendor wins. `is_nvidia_available()` caches result to avoid repeated PATH lookups.
+- **GPU metrics integration**: All vendor GPU metrics merged into the main metrics poller. Single `ResourceMetrics` message per tick with both host and GPU data.
 - **Configurable snapshot timeout**: Per-instance `snapshot_timeout` field in `RunningInstance`, read from `DiskConfig::snapshot_timeout_secs`.
 
 #### Services

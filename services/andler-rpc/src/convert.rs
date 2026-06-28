@@ -86,7 +86,6 @@ impl TryFrom<proto::RootMode> for RootMode {
         match value {
             proto::RootMode::None => Ok(RootMode::None),
             proto::RootMode::Magisk => Ok(RootMode::Magisk),
-            proto::RootMode::KernelSu => Ok(RootMode::KernelSu),
             proto::RootMode::Unspecified => Err(ConvertError::MissingRootMode),
         }
     }
@@ -97,7 +96,6 @@ impl From<RootMode> for proto::RootMode {
         match value {
             RootMode::None => proto::RootMode::None,
             RootMode::Magisk => proto::RootMode::Magisk,
-            RootMode::KernelSu => proto::RootMode::KernelSu,
         }
     }
 }

@@ -271,7 +271,6 @@ impl From<CliAndroidVersion> for ProtoAndroidVersion {
 enum CliRootMode {
     None,
     Magisk,
-    Kernelsu,
 }
 
 impl From<CliRootMode> for ProtoRootMode {
@@ -279,7 +278,6 @@ impl From<CliRootMode> for ProtoRootMode {
         match value {
             CliRootMode::None => ProtoRootMode::None,
             CliRootMode::Magisk => ProtoRootMode::Magisk,
-            CliRootMode::Kernelsu => ProtoRootMode::KernelSu,
         }
     }
 }

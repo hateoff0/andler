@@ -23,7 +23,7 @@ A Rust daemon and thin CLI client for managing QEMU virtual machines on Linux/KV
 ### Monitoring
 
 - **Real-time metrics** — CPU%, RAM, disk I/O, network I/O streamed every second from `/proc`
-- **GPU metrics (AMD)** — VRAM used/total and GPU load % from sysfs
+- **GPU metrics** — AMD (sysfs), NVIDIA (`nvidia-smi`), Intel (i915 sysfs) with automatic vendor detection
 - **Live logs** — tail QEMU stdout/stderr in real-time
 
 ### Android Support
@@ -208,7 +208,6 @@ clipboard_enabled = true
 |------|-------------|
 | `None` | No root access |
 | `Magisk` | Offline Magisk provisioning (requires `--magisk-dir`) |
-| `KernelSu` | KernelSu (planned) |
 
 ## Repository Structure
 
@@ -224,7 +223,7 @@ andler/
 │   │   ├── qmp.rs                 QMP protocol client
 │   │   ├── backend.rs             HypervisorBackend implementation
 │   │   ├── metrics.rs             /proc-based resource metrics
-│   │   └── gpu_metrics.rs         AMD sysfs GPU metrics
+│   │   └── gpu_metrics.rs         AMD/NVIDIA/Intel GPU metrics
 │   └── andler-vmm/                Stub for future Cloud Hypervisor
 │
 ├── services/                      Infrastructure services
@@ -326,10 +325,10 @@ Real-time resource monitoring from host `/proc` (no QMP required):
 | RAM | `/proc/<pid>/status` | VmRSS direct read |
 | Disk I/O | `/sys/block/<dev>/stat` | Delta-based bytes/sec |
 | Network I/O | `/proc/<net/dev>` | Delta-based bytes/sec |
-| VRAM | AMD sysfs | `mem_info_vram_used/total` |
-| GPU Load | AMD sysfs | `gpu_busy_percent` |
+| VRAM | AMD sysfs / NVIDIA nvidia-smi / Intel sysfs | Vendor-specific |
+| GPU Load | AMD sysfs / NVIDIA nvidia-smi / Intel busyiffies delta | Vendor-specific |
 
-Polling interval: 1 second. GPU metrics: AMD only (other vendors return None).
+Polling interval: 1 second. GPU metrics: AMD → NVIDIA → Intel (first found vendor wins).
 
 ## Requirements
 

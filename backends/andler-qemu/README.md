@@ -112,27 +112,42 @@ Collects resource metrics from `/proc` for the QEMU process. No QMP needed.
 
 **Polling interval**: 1 second (`DEFAULT_POLL_INTERVAL`).
 
-### `gpu_metrics` — GPU Metrics (AMD sysfs)
+### `gpu_metrics` — GPU Metrics (AMD, NVIDIA, Intel)
 
-Reads GPU metrics from the Linux DRM sysfs subsystem. **AMD-only** — other vendors return `None`.
+Reads GPU metrics from host-side sysfs and vendor CLI tools. Supports three vendors with automatic detection:
+
+| Vendor | Source | Metrics |
+|--------|--------|---------|
+| AMD | sysfs `mem_info_vram_*`, `gpu_busy_percent` | VRAM used/total, GPU load % |
+| NVIDIA | `nvidia-smi` CLI | VRAM used/total, GPU load % |
+| Intel | sysfs `i915` `busyiffies`, `mem_info_*` | GPU load % (delta-based), VRAM (stolen, approximate) |
 
 **Public API**:
 
 | Function | Signature | Description |
 |----------|-----------|-------------|
-| `read_gpu_metrics` | `fn() -> ResourceMetrics` | Reads AMD sysfs files, returns metrics with VRAM + GPU load |
+| `read_gpu_metrics` | `fn() -> ResourceMetrics` | Detects vendor (AMD → NVIDIA → Intel) and reads metrics |
 | `merge_gpu_metrics` | `fn(base: &mut ResourceMetrics, gpu: &ResourceMetrics)` | Merges GPU fields into base metrics (fills `None` fields, doesn't overwrite existing) |
 
-**Sysfs paths** (first AMD card found under `/sys/class/drm/card*/device/`):
+**Vendor detection**: AMD → NVIDIA → Intel priority. First found vendor wins. `is_nvidia_available()` checks if `nvidia-smi` is in PATH.
+
+**AMD sysfs paths** (first card under `/sys/class/drm/card*/device/`):
 - `mem_info_vram_used` → `vram_used_bytes`
 - `mem_info_vram_total` → `vram_total_bytes`
 - `gpu_busy_percent` → `gpu_load_percent`
+
+**NVIDIA**: Runs `nvidia-smi --query-gpu=memory.used,memory.total,utilization.gpu --format=csv,noheader,nounits`. Values in MiB, converted to bytes. If `nvidia-smi` not found, returns None (no retry).
+
+**Intel sysfs paths** (i915 driver):
+- `device/gt/gt0/attrs/busyiffies` → GPU load % (delta between consecutive calls, `AtomicU64` for state)
+- `device/mem_info_dev_local_mem_alloc` → `vram_used_bytes` (stolen memory, approximate)
+- `device/mem_info_stolen_local_mem` → `vram_total_bytes` (stolen memory, approximate)
 
 **Integration**: `spawn_metrics_poller` in `metrics.rs` calls `read_gpu_metrics()` and merges into the base metrics sample every tick. Single merged `ResourceMetrics` message per tick — no separate GPU channel.
 
 ## Tests
 
-50 tests across 6 test modules.
+75 tests across 6 test modules.
 
 ### Without `/dev/kvm` or QEMU binary
 
@@ -141,7 +156,7 @@ Reads GPU metrics from the Linux DRM sysfs subsystem. **AMD-only** — other ven
 - **`backend`** (9 tests): `Passthrough` validation, unknown handle handling, `NotImplemented` branches, `VmStatus → InstanceState` mapping, empty `metrics_stream`/`log_stream`.
 - **`process`** (3 tests): `SpawnFailed` via missing binary, `drain_to_tracing` line publishing, subscriber tolerance.
 - **`metrics`** (7 tests): CPU stat parsing, CPU% computation, I/O rates, RSS parsing, net_dev parsing.
-- **`gpu_metrics`** (5 tests): No DRM fallback, panic safety, merge behavior.
+- **`gpu_metrics`** (15 tests): AMD/NVIDIA/Intel detection, NVIDIA output parsing, Intel busyiffies delta (first call, second call, zero delta, clamping, None input), merge behavior, panic safety.
 
 ### With `/dev/kvm` and `qemu-system-x86_64` (integration tests, `#[ignore]`)
 

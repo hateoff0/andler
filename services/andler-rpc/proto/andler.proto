@@ -299,7 +299,7 @@ enum RootMode {
     ROOT_MODE_UNSPECIFIED = 0;
     ROOT_MODE_NONE = 1;
     ROOT_MODE_MAGISK = 2;
-    ROOT_MODE_KERNEL_SU = 3;
+    reserved 3; // was ROOT_MODE_KERNEL_SU, removed
 }
 
 message AndroidProfile {

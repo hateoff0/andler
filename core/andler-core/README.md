@@ -161,7 +161,7 @@ Each sub-config has a `reference_default()` method that produces sensible defaul
 ### `android_profile` — Android Instance Profiles
 
 - **`AndroidVersion`**: `Android11` | `Android13`.
-- **`RootMode`**: `None` (default) | `Magisk` | `KernelSu`.
+- **`RootMode`**: `None` (default) | `Magisk`.
 - **`AndroidProfile`**: `android_version`, `gapps`, `microg`, `libndk`, `root`.
   - `cache_key()`: Version/cache key string for base image lookup.
   - `resolve(...)`: Pure function — resolves profile into a full `InstanceConfig` with overlay disk. Does not download or create files.
