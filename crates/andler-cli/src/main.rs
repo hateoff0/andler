@@ -8,15 +8,24 @@ use andler_rpc::proto::andler_service_client::AndlerServiceClient;
 use andler_rpc::proto::{
     instance_kind, network_mode, render_backend, AndroidProfile as ProtoAndroidProfile,
     AndroidVersion as ProtoAndroidVersion, AudioBackend, BackendKind, CloneInstanceRequest,
-    CpuPriority, CreateAndroidInstanceRequest, DiskFormat, DisplayEngine, Empty,
-    ExportInstanceDiskRequest, GetInstanceConfigResponse, InstanceIdRequest, InstanceStateKind,
-    LogStreamSource, RemoveInstanceRequest, RootMode as ProtoRootMode, StopInstanceRequest,
+    CpuPriority, CreateAndroidInstanceRequest, CreateSnapshotRequest, DeleteSnapshotRequest,
+    DiskFormat, DisplayEngine, Empty, ExportInstanceDiskRequest, GetInstanceConfigResponse,
+    InstanceIdRequest, InstanceStateKind, LogStreamSource,
+    RemoveInstanceRequest, RestoreSnapshotRequest, RootMode as ProtoRootMode, StopInstanceRequest,
 };
 use clap::{Parser, Subcommand, ValueEnum};
 use instance_file::InstanceFile;
 use std::path::PathBuf;
 
 const DEFAULT_DAEMON_ADDR: &str = "http://127.0.0.1:50051";
+
+fn default_instances_root() -> String {
+    dirs::data_local_dir()
+        .unwrap_or_else(|| PathBuf::from("~/.local/share"))
+        .join("andler/instances")
+        .to_string_lossy()
+        .into_owned()
+}
 
 #[derive(Parser)]
 #[command(name = "andler", about = "Тонкий CLI-клиент к andlerd")]
@@ -56,7 +65,7 @@ enum Command {
         root: CliRootMode,
         #[arg(long)]
         base_image_path: String,
-        #[arg(long)]
+        #[arg(long, default_value_t = default_instances_root())]
         instances_root: String,
         /// Размер overlay-диска в GiB (не байтах — удобнее для CLI).
         #[arg(long, default_value_t = 20)]
@@ -111,9 +120,10 @@ enum Command {
     /// уже остановлен) — в этом случае печатает предупреждение в stderr
     /// и завершается с кодом 0, не как при невалидном запросе.
     Logs { instance_id: String },
-    /// Клонирует Android-инстанс (только `AndroidVm` — `LinuxVm` сейчас
-    /// не поддерживается, см. `Daemon::clone_instance`) в новый,
-    /// независимый инстанс. Источник должен быть остановлен
+    /// Клонирует инстанс (AndroidVm или LinuxVm) в новый, независимый
+    /// инстанс. `LinuxVm` поддерживается для режимов `linked`/
+    /// `full-standalone`; `shared-base` только для `AndroidVm` (см.
+    /// `Daemon::clone_instance`). Источник должен быть остановлен
     /// (`Created`/`Stopped`/`Error`), как и для `remove`.
     Clone {
         source_instance_id: String,
@@ -123,21 +133,58 @@ enum Command {
         /// Каталог, под которым создаётся `<instances_root>/<новый_id>/`
         /// для файлов клона — тот же смысл, что у `instances_root` в
         /// `create-android` (см. там).
-        #[arg(long)]
+        #[arg(long, default_value_t = default_instances_root())]
         instances_root: String,
         /// Режим клонирования диска — см. `CliCloneMode` за описанием
         /// каждого варианта.
         #[arg(long, value_enum)]
         mode: CliCloneMode,
     },
-    /// Экспортирует диск Android-инстанса в самостоятельный файл по
-    /// указанному пути — для переноса между хостами или бэкапа, не
-    /// создаёт новый инстанс (в отличие от `clone --mode full-standalone`,
-    /// который создаёт). См. `Daemon::export_instance_disk`.
+    /// Экспортирует диск инстанса (AndroidVm или LinuxVm) в
+    /// самостоятельный файл по указанному пути — для переноса между
+    /// хостами или бэкапа, не создаёт новый инстанс (в отличие от
+    /// `clone --mode full-standalone`, который создаёт). См.
+    /// `Daemon::export_instance_disk`.
     Export {
         source_instance_id: String,
         dest_path: String,
     },
+    /// Управление снапшотами инстанса. Инстанс должен быть запущен
+    /// (`Running`/`Paused`) для создания снапшота, или остановлен
+    /// (`Stopped`/`Created`/`Error`) для восстановления/удаления.
+    Snapshot {
+        instance_id: String,
+        #[command(subcommand)]
+        action: SnapshotAction,
+    },
+}
+
+/// Действия со снапшотами.
+#[derive(Subcommand)]
+enum SnapshotAction {
+    /// Создать снапшот текущего состояния (требует Running/Paused).
+    Create {
+        /// Имя снапшота (уникальное в пределах инстанса).
+        #[arg(long)]
+        tag: String,
+        /// Необязательное описание.
+        #[arg(long)]
+        description: Option<String>,
+    },
+    /// Восстановить инстанс из снапшота (требует остановленный инстанс).
+    Restore {
+        /// Имя снапшота для восстановления.
+        #[arg(long)]
+        tag: String,
+    },
+    /// Удалить снапшот (требует остановленный инстанс).
+    Delete {
+        /// Имя снапшота для удаления.
+        #[arg(long)]
+        tag: String,
+    },
+    /// Показать список снапшотов инстанса.
+    List,
 }
 
 /// Соответствует `andler_core::CloneMode` (через `andler_rpc::proto::CloneMode`)
@@ -569,6 +616,66 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .into_inner();
             println!("exported to {}", response.dest_path);
         }
+        Command::Snapshot {
+            instance_id,
+            action,
+        } => match action {
+            SnapshotAction::Create { tag, description } => {
+                let response = client
+                    .create_snapshot(CreateSnapshotRequest {
+                        instance_id,
+                        tag: tag.clone(),
+                        description: description.unwrap_or_default(),
+                    })
+                    .await?
+                    .into_inner();
+                println!(
+                    "snapshot created: tag={}, id={}, created_at={}",
+                    response.tag, response.snapshot_id, response.created_at
+                );
+            }
+            SnapshotAction::Restore { tag } => {
+                client
+                    .restore_snapshot(RestoreSnapshotRequest {
+                        instance_id,
+                        tag: tag.clone(),
+                    })
+                    .await?;
+                println!("snapshot {} restored", tag);
+            }
+            SnapshotAction::Delete { tag } => {
+                client
+                    .delete_snapshot(DeleteSnapshotRequest {
+                        instance_id,
+                        tag: tag.clone(),
+                    })
+                    .await?;
+                println!("snapshot {} deleted", tag);
+            }
+            SnapshotAction::List => {
+                let response = client
+                    .list_snapshots(InstanceIdRequest { instance_id })
+                    .await?
+                    .into_inner();
+                if response.snapshots.is_empty() {
+                    println!("no snapshots");
+                } else {
+                    for snap in &response.snapshots {
+                        println!(
+                            "tag={}, id={}, created_at={}, description={}",
+                            snap.tag,
+                            snap.snapshot_id,
+                            snap.created_at,
+                            if snap.description.is_empty() {
+                                "-"
+                            } else {
+                                &snap.description
+                            }
+                        );
+                    }
+                }
+            }
+        },
     }
 
     Ok(())

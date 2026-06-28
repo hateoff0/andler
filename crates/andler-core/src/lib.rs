@@ -15,6 +15,7 @@ pub mod fsm;
 pub use android_profile::{AndroidProfile, AndroidVersion, RootMode};
 pub use backend::{
     BackendHandle, BackendStatus, HypervisorBackend, LogLine, LogStreamSource, ResourceMetrics,
+    SnapshotInfo,
 };
 pub use clone::CloneMode;
 pub use config::{

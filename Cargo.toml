@@ -31,6 +31,7 @@ tonic = "0.12"
 tonic-build = "0.12"
 prost = "0.13"
 clap = { version = "4", features = ["derive"] }
+dirs = "5"
 
 [profile.dev]
 # Полные debug-сборки QEMU-обёртки часто требуют живых процессов —

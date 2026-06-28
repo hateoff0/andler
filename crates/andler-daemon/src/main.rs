@@ -35,7 +35,14 @@ use service::DaemonService;
 use tonic::transport::Server;
 
 const DEFAULT_LISTEN_ADDR: &str = "127.0.0.1:50051";
-const DEFAULT_STORE_PATH: &str = "andlerd-state.db";
+
+fn default_store_path() -> String {
+    dirs::data_local_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("~/.local/share"))
+        .join("andler/state.db")
+        .to_string_lossy()
+        .into_owned()
+}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -53,7 +60,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or_else(|_| DEFAULT_LISTEN_ADDR.to_string())
         .parse()?;
     let store_path =
-        std::env::var("ANDLERD_STORE_PATH").unwrap_or_else(|_| DEFAULT_STORE_PATH.to_string());
+        std::env::var("ANDLERD_STORE_PATH").unwrap_or_else(|_| default_store_path());
 
     let store = Store::open(&store_path).await?;
     let daemon = Daemon::restore(store).await?;

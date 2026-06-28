@@ -17,3 +17,4 @@ clap = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
 toml = "0.8"
+dirs = { workspace = true }

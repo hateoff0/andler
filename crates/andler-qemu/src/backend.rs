@@ -6,13 +6,10 @@
 //! управляет инстансами (см. docs/architecture/CORE_ARCHITECTURE_PLAN.md,
 //! §2.1).
 //!
-//! `snapshot`/`metrics_stream` остаются `BackendError::NotImplemented`/
-//! пустым потоком — snapshot требует отдельного решения между
-//! `snapshot-save` (job API) и `human-monitor-command`+`savevm` (см.
-//! README этого крейта), а метрики требуют QMP polling нескольких разных
-//! команд (см. §6.1.1 архитектурного плана) — оба за пределами текущего
-//! шага. `spawn`/`stop`/`pause`/`resume`/`status`/`log_stream`
-//! реализованы полноценно.
+//! `spawn`/`stop`/`pause`/`resume`/`status`/`snapshot`/`snapshot_restore`/
+//! `snapshot_delete`/`snapshot_list`/`log_stream` реализованы полноценно.
+//! `metrics_stream` остаётся пустым потоком (требует QMP polling нескольких
+//! разных команд, см. §6.1.1 архитектурного плана).
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -125,6 +122,13 @@ fn process_error_to_backend_error(err: ProcessError) -> BackendError {
 fn qmp_error_to_backend_error(err: QmpError) -> BackendError {
     BackendError::Io(err.to_string())
 }
+
+/// Имя устройства для snapshot-команд QEMU.
+/// Соответствует `id=drive-disk0` в cmdline (см. `cmdline.rs`).
+const DISK_DEVICE: &str = "drive-disk0";
+
+/// Таймаут ожидания завершения async job (snapshot-save/load/delete).
+const JOB_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// `VmStatus` (наблюдение QMP) -> `InstanceState` (домен `andler-core`).
 ///
@@ -334,15 +338,102 @@ impl HypervisorBackend for QemuBackend {
         }
     }
 
-    async fn snapshot(&self, _handle: &BackendHandle, _tag: &str) -> Result<(), BackendError> {
-        // Требует решения между snapshot-save (job API, асинхронный) и
-        // human-monitor-command+savevm (синхронный, не рекомендуется QEMU
-        // в долгосрочной перспективе) — сознательно не принято на этом
-        // шаге, см. README этого крейта.
-        Err(BackendError::NotImplemented {
-            backend: "qemu",
-            operation: "snapshot",
-        })
+    async fn snapshot(&self, handle: &BackendHandle, tag: &str) -> Result<(), BackendError> {
+        let mut instances = self.instances.lock().await;
+        let instance = instances
+            .get_mut(handle)
+            .ok_or_else(|| BackendError::HandleNotFound(handle.0.clone()))?;
+
+        Self::ensure_qmp_connected(instance)
+            .await
+            .map_err(qmp_error_to_backend_error)?;
+
+        let qmp = instance.qmp_client.as_mut().expect("just connected");
+        let job_id = qmp
+            .snapshot_save(DISK_DEVICE, tag)
+            .await
+            .map_err(qmp_error_to_backend_error)?;
+
+        qmp.wait_job_completion(&job_id, JOB_TIMEOUT)
+            .await
+            .map_err(qmp_error_to_backend_error)?;
+
+        Ok(())
+    }
+
+    async fn snapshot_restore(&self, handle: &BackendHandle, tag: &str) -> Result<(), BackendError> {
+        let mut instances = self.instances.lock().await;
+        let instance = instances
+            .get_mut(handle)
+            .ok_or_else(|| BackendError::HandleNotFound(handle.0.clone()))?;
+
+        Self::ensure_qmp_connected(instance)
+            .await
+            .map_err(qmp_error_to_backend_error)?;
+
+        let qmp = instance.qmp_client.as_mut().expect("just connected");
+        let job_id = qmp
+            .snapshot_load(DISK_DEVICE, tag)
+            .await
+            .map_err(qmp_error_to_backend_error)?;
+
+        qmp.wait_job_completion(&job_id, JOB_TIMEOUT)
+            .await
+            .map_err(qmp_error_to_backend_error)?;
+
+        Ok(())
+    }
+
+    async fn snapshot_delete(&self, handle: &BackendHandle, tag: &str) -> Result<(), BackendError> {
+        let mut instances = self.instances.lock().await;
+        let instance = instances
+            .get_mut(handle)
+            .ok_or_else(|| BackendError::HandleNotFound(handle.0.clone()))?;
+
+        Self::ensure_qmp_connected(instance)
+            .await
+            .map_err(qmp_error_to_backend_error)?;
+
+        let qmp = instance.qmp_client.as_mut().expect("just connected");
+        let job_id = qmp
+            .snapshot_delete(DISK_DEVICE, tag)
+            .await
+            .map_err(qmp_error_to_backend_error)?;
+
+        qmp.wait_job_completion(&job_id, JOB_TIMEOUT)
+            .await
+            .map_err(qmp_error_to_backend_error)?;
+
+        Ok(())
+    }
+
+    async fn snapshot_list(
+        &self,
+        handle: &BackendHandle,
+    ) -> Result<Vec<andler_core::SnapshotInfo>, BackendError> {
+        let mut instances = self.instances.lock().await;
+        let instance = instances
+            .get_mut(handle)
+            .ok_or_else(|| BackendError::HandleNotFound(handle.0.clone()))?;
+
+        Self::ensure_qmp_connected(instance)
+            .await
+            .map_err(qmp_error_to_backend_error)?;
+
+        let qmp = instance.qmp_client.as_mut().expect("just connected");
+        let snapshots = qmp
+            .query_block_snapshots(DISK_DEVICE)
+            .await
+            .map_err(qmp_error_to_backend_error)?;
+
+        Ok(snapshots
+            .into_iter()
+            .map(|s| andler_core::SnapshotInfo {
+                tag: s.tag,
+                id: s.id,
+                created_at: s.datetime,
+            })
+            .collect())
     }
 
     fn metrics_stream(&self, _handle: &BackendHandle) -> BoxStream<'_, ResourceMetrics> {
@@ -496,17 +587,6 @@ mod tests {
         assert!(matches!(
             backend.resume(&unknown).await,
             Err(BackendError::HandleNotFound(_))
-        ));
-    }
-
-    #[tokio::test]
-    async fn snapshot_is_not_implemented() {
-        let backend = QemuBackend::new();
-        let handle = BackendHandle("qemu:whatever".to_string());
-
-        assert!(matches!(
-            backend.snapshot(&handle, "tag").await,
-            Err(BackendError::NotImplemented { .. })
         ));
     }
 

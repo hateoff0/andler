@@ -95,11 +95,12 @@ pub enum DaemonError {
     )]
     InstanceNotClonable(InstanceId, InstanceState),
 
-    /// `clone_instance`/`export_instance_disk` вызван для
-    /// `InstanceKind::LinuxVm` — за пределами текущего шага реализации,
-    /// см. документацию `Daemon::clone_instance`.
-    #[error("clone/export is only supported for AndroidVm instances, not {0:?}")]
-    CloneNotSupportedForKind(InstanceId),
+    /// `clone_instance` вызван с `CloneMode::SharedBase` для
+    /// `InstanceKind::LinuxVm` — `SharedBase` предполагает общий
+    /// `base_image` профиля, которого у `LinuxVm` нет (диск standalone).
+    /// См. документацию `Daemon::clone_instance`.
+    #[error("shared-base clone is not supported for LinuxVm: {0:?}")]
+    SharedBaseNotSupportedForLinuxVm(InstanceId),
 
     /// `remove_instance(purge: true)` вызван для инстанса, у которого
     /// есть один или больше `CloneMode::Linked`-клонов, всё ещё
@@ -110,6 +111,30 @@ pub enum DaemonError {
         "cannot purge instance {0:?}: it has live linked clones {1:?}; remove them first"
     )]
     InstanceHasLiveClones(InstanceId, Vec<InstanceId>),
+
+    /// Снапшот с таким тегом не найден для данного инстанса.
+    #[error("snapshot {tag:?} not found for instance {instance_id:?}")]
+    SnapshotNotFound {
+        instance_id: InstanceId,
+        tag: String,
+    },
+
+    /// Снапшот с таким тегом уже существует для данного инстанса.
+    #[error("snapshot {tag:?} already exists for instance {instance_id:?}")]
+    SnapshotAlreadyExists {
+        instance_id: InstanceId,
+        tag: String,
+    },
+
+    /// Операция над снапшотом требует запущенный инстанс (`Running`/`Paused`),
+    /// но инстанс в нетерминальном состоянии.
+    #[error("snapshot operation requires running instance {0:?}, but state is {1:?}")]
+    SnapshotOperationRequiresRunningInstance(InstanceId, InstanceState),
+
+    /// Операция над снапшотом требует остановленный инстанс
+    /// (`Created`/`Stopped`/`Error`), но инстанс работает.
+    #[error("snapshot operation requires stopped instance {0:?}, but state is {1:?}")]
+    SnapshotOperationRequiresStoppedInstance(InstanceId, InstanceState),
 }
 
 /// Реестр backend'ов по умолчанию: `Qemu -> QemuBackend`. `Vmm`
@@ -132,6 +157,18 @@ struct InstanceRecord {
     config: InstanceConfig,
     state: InstanceState,
     handle: Option<BackendHandle>,
+}
+
+/// Метаданные снапшота на уровне демона.
+/// Сам снапшот (данные диска + состояние CPU/памяти) хранится внутри
+/// qcow2-файла — здесь только метаданные для быстрого доступа.
+#[derive(Debug, Clone)]
+pub struct SnapshotRecord {
+    pub id: uuid::Uuid,
+    pub instance_id: InstanceId,
+    pub tag: String,
+    pub description: Option<String>,
+    pub created_at: String,
 }
 
 /// Ядро `andlerd`: реестр backend'ов + текущее in-memory состояние
@@ -542,20 +579,18 @@ impl Daemon {
         Ok(registered_id)
     }
 
-    /// Клонирует существующий Android-инстанс в новый, независимый
-    /// `InstanceId` — три режима диска (`CloneMode`, см. его документацию
-    /// за полным обоснованием), общая для всех трёх логика вокруг этого:
-    /// проверка состояния источника, копирование `OVMF_VARS`, сборка
-    /// нового `InstanceConfig`, регистрация через `create_instance`.
+    /// Клонирует существующий инстанс (`LinuxVm` или `AndroidVm`) в
+    /// новый, независимый `InstanceId` — три режима диска (`CloneMode`,
+    /// см. его документацию за полным обоснованием), общая для всех трёх
+    /// логика вокруг этого: проверка состояния источника, копирование
+    /// `OVMF_VARS`, сборка нового `InstanceConfig`, регистрация через
+    /// `create_instance`.
     ///
-    /// Только `InstanceKind::AndroidVm` — `LinuxVm` не имеет управляемого
-    /// `instances_root`, куда можно было бы детерминированно положить
-    /// файлы клона (пользовательский путь, переданный через `--file` при
-    /// создании оригинала, не подразумевает никакого "соседнего" места
-    /// для клона) — попытка клонировать `LinuxVm` возвращает
-    /// `DaemonError::CloneNotSupportedForKind`, см. обсуждение в истории
-    /// проекта за тем, почему это явный отказ, не молчаливая выдумка
-    /// пути.
+    /// `LinuxVm` поддерживается для режимов `Linked`/`FullStandalone` —
+    /// disk-операции типо-agnostic и работают с любым qcow2. Режим
+    /// `SharedBase` требует общий `base_image` профиля (есть только у
+    /// `AndroidVm`), попытка использовать его для `LinuxVm` возвращает
+    /// `DaemonError::SharedBaseNotSupportedForLinuxVm`.
     ///
     /// Источник должен быть в терминальном состоянии
     /// (`Created`/`Stopped`/`Error`) — копировать/линковать диск живого
@@ -582,7 +617,20 @@ impl Daemon {
         instances_root: PathBuf,
         mode: CloneMode,
     ) -> Result<InstanceId, DaemonError> {
-        let source_config = self.terminal_android_instance_config(source_id).await?;
+        let source_config = self.terminal_clonable_instance_config(source_id).await?;
+
+        // Fail fast: `SharedBase` требует общий `base_image` — для
+        // Android-инстанса он есть всегда (см. `DiskConfig::overlay`,
+        // используемую `create_android_instance`), но тип
+        // `DiskConfig.base_image: Option<PathBuf>` этого не
+        // гарантирует статически. У `LinuxVm` нет `base_image`
+        // вообще — диск standalone, `SharedBase` к нему неприменим.
+        // Проверяем до любых файловых операций (create_dir, copy OVMF).
+        if mode == CloneMode::SharedBase
+            && !matches!(source_config.kind, InstanceKind::AndroidVm { .. })
+        {
+            return Err(DaemonError::SharedBaseNotSupportedForLinuxVm(source_id));
+        }
 
         let new_id = InstanceId::new();
         let instance_dir = instances_root.join(new_id.0.to_string());
@@ -618,17 +666,6 @@ impl Daemon {
                     .await?
             }
             CloneMode::SharedBase => {
-                // `SharedBase` требует общий `base_image` — для
-                // Android-инстанса он есть всегда (см. `DiskConfig::overlay`,
-                // используемую `create_android_instance`), но тип
-                // `DiskConfig.base_image: Option<PathBuf>` этого не
-                // гарантирует статически. Отсутствие `base_image` здесь
-                // означало бы, что источник сам не overlay (не должно
-                // происходить для записи, прошедшей
-                // `terminal_android_instance_config`, — `AndroidVm`
-                // всегда создаётся с overlay через `create_android_instance`
-                // — но явная ошибка лучше `unwrap`, если это
-                // предположение когда-нибудь нарушится).
                 let base_image = source_config.disk.base_image.clone().ok_or_else(|| {
                     DaemonError::Io {
                         path: source_config.disk.path.clone(),
@@ -660,12 +697,12 @@ impl Daemon {
         Ok(registered_id)
     }
 
-    /// Экспортирует диск Android-инстанса как один самостоятельный файл
-    /// по указанному пути — для переноса между хостами или бэкапа, не
-    /// для создания нового управляемого инстанса (в отличие от
-    /// `clone_instance` с `CloneMode::FullStandalone`, этот метод не
-    /// регистрирует ничего в `Daemon`: результат — файл, о котором
-    /// `Daemon` больше ничего не знает и не отвечает за него).
+    /// Экспортирует диск инстанса (`LinuxVm` или `AndroidVm`) как
+    /// самостоятельный файл по указанному пути — для переноса между
+    /// хостами или бэкапа, не для создания нового управляемого инстанса
+    /// (в отличие от `clone_instance` с `CloneMode::FullStandalone`,
+    /// который создаёт). Результат — файл, о котором `Daemon` больше
+    /// ничего не знает и не отвечает за него.
     ///
     /// Реализовано через тот же `andler_disk::clone::full_standalone_clone`
     /// (разворачивает всю backing chain, включая общий `base_image`, в
@@ -675,11 +712,7 @@ impl Daemon {
     /// специфичны для создания нового инстанса, не для экспорта файла.
     ///
     /// Источник должен быть в терминальном состоянии — та же причина, что
-    /// у `clone_instance`. Только `InstanceKind::AndroidVm` — та же
-    /// причина, что у `clone_instance` (нет принципиальной проблемы
-    /// экспортировать диск `LinuxVm`, но раз весь `LinuxVm`-путь для
-    /// клонирования отложен, последовательность ради единообразия важнее
-    /// гипотетического удобства, которое сейчас никто не просил).
+    /// у `clone_instance`.
     ///
     /// Не использует `InstanceDirGuard` — `dest_path` не "каталог
     /// инстанса", это один файл по пути, который выбрал и за который
@@ -692,7 +725,7 @@ impl Daemon {
         source_id: InstanceId,
         dest_path: PathBuf,
     ) -> Result<(), DaemonError> {
-        let source_config = self.terminal_android_instance_config(source_id).await?;
+        let source_config = self.terminal_clonable_instance_config(source_id).await?;
 
         andler_disk::clone::full_standalone_clone(&source_config.disk.path, &dest_path).await?;
 
@@ -700,13 +733,16 @@ impl Daemon {
     }
 
     /// Общая проверка для `clone_instance`/`export_instance_disk`:
-    /// инстанс существует, в терминальном состоянии, и это `AndroidVm` —
-    /// см. документацию обоих методов за тем, почему именно эти условия.
-    /// Возвращает клон `InstanceConfig` источника (не ссылку — read-lock
-    /// `instances` отпускается до того, как вызывающая сторона начинает
-    /// файловые операции, которые могут занять заметное время для
+    /// инстанс существует и в терминальном состоянии (`Created`/`Stopped`/
+    /// `Error`). Возвращает клон `InstanceConfig` источника (не ссылку —
+    /// read-lock `instances` отпускается до того, как вызывающая сторона
+    /// начинает файловые операции, которые могут занять заметное время для
     /// `FullStandalone`).
-    async fn terminal_android_instance_config(
+    ///
+    /// Проверка `InstanceKind` убрана — оба типа (`LinuxVm`/`AndroidVm`)
+    /// поддерживаются для `Linked`/`FullStandalone`; `SharedBase` валидируется
+    /// отдельно в `clone_instance` (только для `AndroidVm`).
+    async fn terminal_clonable_instance_config(
         &self,
         id: InstanceId,
     ) -> Result<InstanceConfig, DaemonError> {
@@ -719,10 +755,6 @@ impl Daemon {
         );
         if !clonable {
             return Err(DaemonError::InstanceNotClonable(id, record.state.clone()));
-        }
-
-        if !matches!(record.config.kind, InstanceKind::AndroidVm { .. }) {
-            return Err(DaemonError::CloneNotSupportedForKind(id));
         }
 
         Ok(record.config.clone())
@@ -771,6 +803,231 @@ impl Daemon {
         Ok(clones)
     }
 
+    // --- Snapshots --------------------------------------------------------
+
+    /// Создаёт снапшот работающего инстанса.
+    ///
+    /// Инстанс должен быть в состоянии `Running` или `Paused` — снапшот
+    /// фиксирует текущее состояние диска + CPU/память. Тег должен быть
+    /// уникальным в пределах инстанса.
+    ///
+    /// Алгоритм:
+    /// 1. Проверить FSM: `Running`/`Paused`
+    /// 2. Вызвать `backend.snapshot(handle, tag)` (async job через QMP)
+    /// 3. Сохранить метаданные в `store`
+    pub async fn create_snapshot(
+        &self,
+        id: InstanceId,
+        tag: String,
+        description: Option<String>,
+    ) -> Result<SnapshotRecord, DaemonError> {
+        let (backend, handle) = {
+            let instances = self.instances.read().await;
+            let record = instances
+                .get(&id)
+                .ok_or(DaemonError::InstanceNotFound(id))?;
+
+            let snapshottable = matches!(
+                record.state,
+                InstanceState::Running | InstanceState::Paused
+            );
+            if !snapshottable {
+                return Err(DaemonError::SnapshotOperationRequiresRunningInstance(
+                    id,
+                    record.state.clone(),
+                ));
+            }
+
+            let handle = record
+                .handle
+                .clone()
+                .ok_or_else(|| DaemonError::Backend(BackendError::HandleNotFound(id.0.to_string())))?;
+
+            (
+                self.backend_for(record.config.backend)?.clone(),
+                handle,
+            )
+        };
+
+        backend.snapshot(&handle, &tag).await?;
+
+        let record = SnapshotRecord {
+            id: uuid::Uuid::new_v4(),
+            instance_id: id,
+            tag: tag.clone(),
+            description,
+            created_at: chrono::Utc::now().to_rfc3339(),
+        };
+
+        if let Some(store) = &self.store {
+            let stored = andler_store::StoredSnapshot {
+                id: record.id,
+                instance_id: record.instance_id,
+                tag: record.tag.clone(),
+                description: record.description.clone(),
+                created_at: record.created_at.clone(),
+            };
+            if let Err(e) = store.save_snapshot(&stored).await {
+                tracing::warn!(instance_id = %id, tag = %tag, error = %e, "failed to persist snapshot metadata");
+            }
+        }
+
+        Ok(record)
+    }
+
+    /// Восстанавливает инстанс из снапшота.
+    ///
+    /// Инстанс должен быть в терминальном состоянии (`Stopped`/`Created`/
+    /// `Error`). После восстановления инстанс остаётся остановленным —
+    /// клиент должен явно вызвать `start_instance` для запуска.
+    pub async fn restore_snapshot(
+        &self,
+        id: InstanceId,
+        tag: String,
+    ) -> Result<(), DaemonError> {
+        let (backend, handle) = {
+            let instances = self.instances.read().await;
+            let record = instances
+                .get(&id)
+                .ok_or(DaemonError::InstanceNotFound(id))?;
+
+            let stopped = matches!(
+                record.state,
+                InstanceState::Created | InstanceState::Stopped | InstanceState::Error { .. }
+            );
+            if !stopped {
+                return Err(DaemonError::SnapshotOperationRequiresStoppedInstance(
+                    id,
+                    record.state.clone(),
+                ));
+            }
+
+            let handle = record
+                .handle
+                .clone()
+                .ok_or_else(|| DaemonError::Backend(BackendError::HandleNotFound(id.0.to_string())))?;
+
+            (
+                self.backend_for(record.config.backend)?.clone(),
+                handle,
+            )
+        };
+
+        backend.snapshot_restore(&handle, &tag).await?;
+        Ok(())
+    }
+
+    /// Удаляет снапшот инстанса.
+    ///
+    /// Инстанс должен быть в терминальном состоянии.
+    pub async fn delete_snapshot(
+        &self,
+        id: InstanceId,
+        tag: String,
+    ) -> Result<(), DaemonError> {
+        let (backend, handle) = {
+            let instances = self.instances.read().await;
+            let record = instances
+                .get(&id)
+                .ok_or(DaemonError::InstanceNotFound(id))?;
+
+            let stopped = matches!(
+                record.state,
+                InstanceState::Created | InstanceState::Stopped | InstanceState::Error { .. }
+            );
+            if !stopped {
+                return Err(DaemonError::SnapshotOperationRequiresStoppedInstance(
+                    id,
+                    record.state.clone(),
+                ));
+            }
+
+            let handle = record
+                .handle
+                .clone()
+                .ok_or_else(|| DaemonError::Backend(BackendError::HandleNotFound(id.0.to_string())))?;
+
+            (
+                self.backend_for(record.config.backend)?.clone(),
+                handle,
+            )
+        };
+
+        backend.snapshot_delete(&handle, &tag).await?;
+
+        if let Some(store) = &self.store {
+            if let Err(e) = store.delete_snapshot(id, &tag).await {
+                tracing::warn!(instance_id = %id, tag = %tag, error = %e, "failed to delete snapshot metadata from store");
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Возвращает список снапшотов инстанса.
+    ///
+    /// Информация берётся из `store` (метаданные) + backend (актуальное
+    /// состояние qcow2-файла). Если store недоступен, возвращается пустой
+    /// список.
+    pub async fn list_snapshots(
+        &self,
+        id: InstanceId,
+    ) -> Result<Vec<SnapshotRecord>, DaemonError> {
+        let instances = self.instances.read().await;
+        let record = instances
+            .get(&id)
+            .ok_or(DaemonError::InstanceNotFound(id))?;
+
+        let handle = record.handle.clone();
+        let backend = self.backend_for(record.config.backend)?.clone();
+        drop(instances);
+
+        let backend_snapshots = if let Some(handle) = handle {
+            backend.snapshot_list(&handle).await.unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+
+        if let Some(store) = &self.store {
+            let stored = store.load_snapshots(id).await.unwrap_or_default();
+            let mut result: Vec<SnapshotRecord> = stored
+                .into_iter()
+                .map(|s| SnapshotRecord {
+                    id: s.id,
+                    instance_id: s.instance_id,
+                    tag: s.tag,
+                    description: s.description,
+                    created_at: s.created_at,
+                })
+                .collect();
+
+            // Merge with backend snapshots (add any that aren't in store yet)
+            for bs in &backend_snapshots {
+                if !result.iter().any(|r| r.tag == bs.tag) {
+                    result.push(SnapshotRecord {
+                        id: uuid::Uuid::new_v4(),
+                        instance_id: id,
+                        tag: bs.tag.clone(),
+                        description: None,
+                        created_at: bs.created_at.clone().unwrap_or_default(),
+                    });
+                }
+            }
+
+            Ok(result)
+        } else {
+            Ok(backend_snapshots
+                .into_iter()
+                .map(|s| SnapshotRecord {
+                    id: uuid::Uuid::new_v4(),
+                    instance_id: id,
+                    tag: s.tag,
+                    description: None,
+                    created_at: s.created_at.unwrap_or_default(),
+                })
+                .collect())
+        }
+    }
 
     /// Запускает ранее созданный инстанс: `Created -> Starting -> Running`
     /// (см. `andler_core::fsm`). При ошибке backend'а переводит запись в
@@ -1270,7 +1527,7 @@ mod tests {
 
     /// Вариант `sample_config()` с `InstanceKind::AndroidVm` и явно
     /// заданными `disk.path`/`disk.base_image` — для тестов
-    /// `clone_instance`/`find_live_clones`/`CloneNotSupportedForKind`,
+    /// `clone_instance`/`find_live_clones`/`SharedBaseNotSupportedForLinuxVm`,
     /// которым нужен именно `AndroidVm` с управляемым диском, но не
     /// нужен настоящий overlay-файл на диске (в отличие от
     /// `create_android_instance_resolves_profile_and_creates_overlay`,
@@ -2186,7 +2443,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn clone_rejects_linux_vm_with_clone_not_supported_for_kind() {
+    async fn clone_rejects_linux_vm_with_shared_base() {
         let daemon = Daemon::new();
         let cfg = sample_config(); // LinuxVm
         let id = cfg.id;
@@ -2197,11 +2454,11 @@ mod tests {
                 id,
                 "clone".to_string(),
                 PathBuf::from("/tmp/instances"),
-                CloneMode::Linked,
+                CloneMode::SharedBase,
             )
             .await
             .unwrap_err();
-        assert!(matches!(err, DaemonError::CloneNotSupportedForKind(returned_id) if returned_id == id));
+        assert!(matches!(err, DaemonError::SharedBaseNotSupportedForLinuxVm(returned_id) if returned_id == id));
     }
 
     #[tokio::test]
@@ -2246,18 +2503,33 @@ mod tests {
         ));
     }
 
+    /// Export LinuxVm разрешён — `full_standalone_clone` требует
+    /// `qemu-img`, поэтому тест помечен `#[ignore]`.
     #[tokio::test]
-    async fn export_on_linux_vm_returns_clone_not_supported_for_kind() {
-        let daemon = Daemon::new();
-        let cfg = sample_config(); // LinuxVm
-        let id = cfg.id;
-        daemon.create_instance(cfg).await.unwrap();
-
-        let err = daemon
-            .export_instance_disk(id, PathBuf::from("/tmp/export.qcow2"))
+    #[ignore = "requires qemu-img binary, see docker/README.md integration-test target"]
+    async fn export_linux_vm_disk_creates_standalone_file() {
+        let dir = TestTempDir::new();
+        let disk_path = dir.path().join("disk.qcow2");
+        andler_disk::qcow2::create(&disk_path, 10 * 1024 * 1024 * 1024)
             .await
-            .unwrap_err();
-        assert!(matches!(err, DaemonError::CloneNotSupportedForKind(returned_id) if returned_id == id));
+            .unwrap();
+        let vars_path = dir.path().join("VARS.fd");
+        tokio::fs::write(&vars_path, b"fake-vars").await.unwrap();
+
+        let daemon = Daemon::new();
+        let mut cfg = sample_config(); // LinuxVm
+        cfg.disk.path = disk_path;
+        cfg.firmware.ovmf_vars_path = vars_path;
+        let id = daemon.create_instance(cfg).await.unwrap();
+
+        let export_path = dir.path().join("exported.qcow2");
+        daemon
+            .export_instance_disk(id, export_path.clone())
+            .await
+            .unwrap();
+
+        assert!(export_path.exists());
+        assert!(daemon.status(id).await.is_ok());
     }
 
     #[tokio::test]
@@ -2711,5 +2983,166 @@ mod tests {
         assert_eq!(instances_before[0].id, source_id);
 
         tokio::fs::remove_dir_all(&dir).await.ok();
+    }
+
+    // --- LinuxVm clone/export -------------------------------------------
+
+    #[tokio::test]
+    async fn clone_linux_vm_linked_mode_is_allowed() {
+        let dir = TestTempDir::new();
+        let disk_path = dir.path().join("disk.qcow2");
+        let vars_path = dir.path().join("VARS.fd");
+        tokio::fs::write(&disk_path, b"disk").await.unwrap();
+        tokio::fs::write(&vars_path, b"vars").await.unwrap();
+
+        let daemon = Daemon::new();
+        let mut cfg = sample_config(); // LinuxVm
+        cfg.disk.path = disk_path.clone();
+        cfg.firmware.ovmf_vars_path = vars_path.clone();
+        let id = daemon.create_instance(cfg).await.unwrap();
+
+        // Linked clone создаёт overlay с backing_file = source disk.
+        // Без реального qemu-img clone_instance упадёт на_disk-операции,
+        // но проверяем, что LinuxVm НЕ блокируется на уровне Daemon
+        // (ошибка должна быть Disk/IO, а не SharedBaseNotSupportedForLinuxVm).
+        let err = daemon
+            .clone_instance(
+                id,
+                "clone".to_string(),
+                dir.path().to_path_buf(),
+                CloneMode::Linked,
+            )
+            .await
+            .unwrap_err();
+        // Ошибка не SharedBaseNotSupportedForLinuxVm
+        assert!(
+            !matches!(
+                err,
+                DaemonError::SharedBaseNotSupportedForLinuxVm(_)
+            ),
+            "LinuxVm + Linked should not be blocked, got: {err:?}"
+        );
+        // Ожидаем ошибку файловой системы (директория существует,
+        // но qemu-img недоступен или файл не qcow2)
+    }
+
+    #[tokio::test]
+    async fn clone_linux_vm_full_standalone_mode_is_allowed() {
+        let dir = TestTempDir::new();
+        let disk_path = dir.path().join("disk.qcow2");
+        let vars_path = dir.path().join("VARS.fd");
+        tokio::fs::write(&disk_path, b"disk").await.unwrap();
+        tokio::fs::write(&vars_path, b"vars").await.unwrap();
+
+        let daemon = Daemon::new();
+        let mut cfg = sample_config(); // LinuxVm
+        cfg.disk.path = disk_path.clone();
+        cfg.firmware.ovmf_vars_path = vars_path.clone();
+        let id = daemon.create_instance(cfg).await.unwrap();
+
+        let err = daemon
+            .clone_instance(
+                id,
+                "clone".to_string(),
+                dir.path().to_path_buf(),
+                CloneMode::FullStandalone,
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            !matches!(
+                err,
+                DaemonError::SharedBaseNotSupportedForLinuxVm(_)
+            ),
+            "LinuxVm + FullStandalone should not be blocked, got: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn clone_linux_vm_shared_base_mode_returns_shared_base_not_supported() {
+        let dir = TestTempDir::new();
+        let disk_path = dir.path().join("disk.qcow2");
+        let vars_path = dir.path().join("VARS.fd");
+        tokio::fs::write(&disk_path, b"disk").await.unwrap();
+        tokio::fs::write(&vars_path, b"vars").await.unwrap();
+
+        let daemon = Daemon::new();
+        let mut cfg = sample_config(); // LinuxVm
+        cfg.disk.path = disk_path;
+        cfg.firmware.ovmf_vars_path = vars_path;
+        let id = daemon.create_instance(cfg).await.unwrap();
+
+        let err = daemon
+            .clone_instance(
+                id,
+                "clone".to_string(),
+                dir.path().to_path_buf(),
+                CloneMode::SharedBase,
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, DaemonError::SharedBaseNotSupportedForLinuxVm(returned_id) if returned_id == id));
+    }
+
+    #[tokio::test]
+    async fn export_linux_vm_disk_does_not_block_on_instance_kind() {
+        let dir = TestTempDir::new();
+        let disk_path = dir.path().join("disk.qcow2");
+        let vars_path = dir.path().join("VARS.fd");
+        tokio::fs::write(&disk_path, b"disk").await.unwrap();
+        tokio::fs::write(&vars_path, b"vars").await.unwrap();
+
+        let daemon = Daemon::new();
+        let mut cfg = sample_config(); // LinuxVm
+        cfg.disk.path = disk_path;
+        cfg.firmware.ovmf_vars_path = vars_path;
+        let id = daemon.create_instance(cfg).await.unwrap();
+
+        // Export LinuxVm теперь разрешён — ошибка должна быть
+        // файловой (qemu-img convert падает на невалидном qcow2),
+        // а не Block на уровне InstanceKind.
+        let err = daemon
+            .export_instance_disk(id, dir.path().join("exported.qcow2"))
+            .await
+            .unwrap_err();
+        assert!(
+            !matches!(
+                err,
+                DaemonError::SharedBaseNotSupportedForLinuxVm(_)
+            ),
+            "LinuxVm export should not be blocked, got: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn clone_linux_vm_rejects_non_terminal_source_state() {
+        let dir = TestTempDir::new();
+        let daemon = Daemon::new();
+        let mut cfg = sample_config(); // LinuxVm
+        cfg.disk.path = dir.path().join("disk.qcow2");
+        cfg.firmware.ovmf_vars_path = dir.path().join("VARS.fd");
+        let id = cfg.id;
+        daemon.create_instance(cfg).await.unwrap();
+
+        {
+            let mut instances = daemon.instances.write().await;
+            let record = instances.get_mut(&id).unwrap();
+            record.state = InstanceState::Running;
+        }
+
+        let err = daemon
+            .clone_instance(
+                id,
+                "clone".to_string(),
+                dir.path().to_path_buf(),
+                CloneMode::Linked,
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            DaemonError::InstanceNotClonable(returned_id, InstanceState::Running)
+                if returned_id == id
+        ));
     }
 }

@@ -85,6 +85,19 @@ pub struct LogLine {
     pub line: String,
 }
 
+/// Метаданные снапшота, возвращаемые `snapshot_list`.
+///
+/// Конкретное наполнение определяется backend'ом (для QEMU — из
+/// `query-block` с snapshot info). `tag` — пользовательский идентификатор,
+/// заданный при создании снапшота.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SnapshotInfo {
+    pub tag: String,
+    pub id: String,
+    /// Человекочитаемая дата/время создания (формат backend-специфичный).
+    pub created_at: Option<String>,
+}
+
 /// Единый интерфейс для разных гипервизоров (QEMU сейчас, rust-vmm в
 /// перспективе). `andler-daemon` работает только через этот трейт и не
 /// импортирует `andler-qemu`/`andler-vmm` напрямую за пределами реестра
@@ -122,7 +135,50 @@ pub trait HypervisorBackend: Send + Sync {
     async fn status(&self, handle: &BackendHandle) -> Result<BackendStatus, BackendError>;
 
     /// Создаёт снимок состояния инстанса с заданным тегом.
-    async fn snapshot(&self, handle: &BackendHandle, tag: &str) -> Result<(), BackendError>;
+    ///
+    /// Для QEMU: `snapshot-save` job API (async). Дефолтная реализация
+    /// возвращает `BackendError::NotImplemented` — backend без snapshot-
+    /// поддержки не обязан переопределять этот метод.
+    async fn snapshot(&self, handle: &BackendHandle, tag: &str) -> Result<(), BackendError> {
+        let _ = (handle, tag);
+        Err(BackendError::NotImplemented {
+            backend: self.name(),
+            operation: "snapshot",
+        })
+    }
+
+    /// Восстанавливает инстанс из снапшота по тегу.
+    ///
+    /// Инстанс должен быть в терминальном состоянии (`Stopped`/`Created`/
+    /// `Error`). После восстановления инстанс остаётся остановленным.
+    async fn snapshot_restore(&self, handle: &BackendHandle, tag: &str) -> Result<(), BackendError> {
+        let _ = (handle, tag);
+        Err(BackendError::NotImplemented {
+            backend: self.name(),
+            operation: "snapshot_restore",
+        })
+    }
+
+    /// Удаляет снапшот по тегу.
+    ///
+    /// Инстанс должен быть в терминальном состоянии. Нельзя удалить
+    /// снапшот, на который ссылается текущее состояние диска.
+    async fn snapshot_delete(&self, handle: &BackendHandle, tag: &str) -> Result<(), BackendError> {
+        let _ = (handle, tag);
+        Err(BackendError::NotImplemented {
+            backend: self.name(),
+            operation: "snapshot_delete",
+        })
+    }
+
+    /// Возвращает список снапшотов инстанса.
+    async fn snapshot_list(&self, handle: &BackendHandle) -> Result<Vec<SnapshotInfo>, BackendError> {
+        let _ = handle;
+        Err(BackendError::NotImplemented {
+            backend: self.name(),
+            operation: "snapshot_list",
+        })
+    }
 
     /// Поток метрик ресурсов. Для backend'ов без реализации возвращает
     /// пустой поток, а не паникует — в отличие от остальных методов трейта,

@@ -22,20 +22,20 @@
   (`subscribe_logs`) — источник для `HypervisorBackend::log_stream` в `backend.rs`.
 - `backend.rs` — **реализовано**. `QemuBackend` — `HypervisorBackend`, связывающий
   `cmdline`+`process` с единым интерфейсом. Реестр живых процессов — `HashMap` под
-  `tokio::sync::Mutex`. `spawn`/`stop`/`status`/`log_stream` реализованы полноценно;
-  `pause`/`resume`/`snapshot`/`metrics_stream` возвращают `BackendError::NotImplemented`
-  (требуют QMP)/пустой поток.
-- `qmp.rs` — **реализовано частично**. `QmpClient::connect` (handshake +
+  `tokio::sync::Mutex`. `spawn`/`stop`/`pause`/`resume`/`status`/`snapshot`/
+  `snapshot_restore`/`snapshot_delete`/`snapshot_list`/`log_stream` реализованы
+  полноценно; `metrics_stream` возвращает пустой поток.
+- `qmp.rs` — **реализовано**. `QmpClient::connect` (handshake +
   `qmp_capabilities`), `pause` (`stop`), `resume` (`cont`), `query_status`
-  (`query-status`) — через `serde_json` (newline-delimited JSON поверх unix-сокета).
-  Snapshot (`snapshot-save` job API vs `human-monitor-command`+`savevm`) — решение
-  сознательно не принято, см. ниже.
+  (`query-status`), `snapshot_save`/`snapshot_load`/`snapshot_delete`
+  (job API через `snapshot-save`/`snapshot-load`/`snapshot-delete`),
+  `query_block_snapshots` (`query-block`), `wait_job_completion`
+  (polling `query-jobs`).
 - `backend.rs` — **реализовано**. `QemuBackend` — `HypervisorBackend`, связывающий
   `cmdline`+`process`+`qmp` с единым интерфейсом. Реестр живых инстансов (процесс +
   опциональный QMP-клиент, подключаемый лениво при первом обращении) — `HashMap` под
-  `tokio::sync::Mutex`. `spawn`/`stop`/`pause`/`resume`/`status`/`log_stream`
-  реализованы полноценно; `snapshot`/`metrics_stream` возвращают
-  `BackendError::NotImplemented`/пустой поток.
+  `tokio::sync::Mutex`. Все методы трейта реализованы полноценно, кроме
+  `metrics_stream` (пустой поток).
 
 ## Чего не было в исходном `InstanceConfig` и пришлось добавить в `andler-core`
 
@@ -55,9 +55,11 @@ OVMF/UEFI firmware, audio и input/clipboard — добавлены `FirmwareCon
   считается ошибкой парсинга. Не проблема для текущего скоупа (`stop`/`cont`/
   `query-status` не порождают события, которые клиент мог бы получить не на свой
   запрос), но станет ограничением при добавлении подписки на события в будущем.
-- Snapshot — решение между `snapshot-save` (job API, асинхронный, современный) и
-  `human-monitor-command`+`savevm` (синхронный, не рекомендуется QEMU в долгосрочной
-  перспективе) сознательно не принято на этом шаге.
+- Snapshot: device name захардкожен как `drive-disk0` (соответствует `cmdline.rs`).
+  Если в будущем появится поддержка нескольких дисков, потребуется передавать device
+  name параметром.
+- Snapshot polling (`wait_job_completion`) использует фиксированный таймаут 30 секунд.
+  Для очень больших снапшотов (сотни GiB) может потребоваться настройка.
 
 ## Что здесь НЕ реализуется
 

@@ -67,29 +67,30 @@ in-memory состояние инстансов, без сети и без пе�
     привязан к времени жизни вызова `stream_instance_logs`, а не мог бы
     переживать его (что обязательно — gRPC-хендлер в `service.rs`
     поллит этот поток уже после возврата из самого вызова).
-  - **`clone_instance`** — клонирует `AndroidVm`-инстанс (только
-    `AndroidVm` — `LinuxVm` не имеет управляемого `instances_root`,
-    куда детерминированно положить файлы клона; попытка возвращает
-    `DaemonError::CloneNotSupportedForKind`) в новый `InstanceId`, в
-    одном из трёх `andler_core::CloneMode` (см. его документацию за
+  - **`clone_instance`** — клонирует инстанс (`LinuxVm` или `AndroidVm`)
+    в новый `InstanceId`, в одном из трёх
+    `andler_core::CloneMode` (см. его документацию за
     полным обоснованием каждого варианта — `Linked`/`FullStandalone`/
-    `SharedBase`). Источник должен быть в терминальном состоянии
-    (`Created`/`Stopped`/`Error`, как и у `remove_instance`) —
-    `DaemonError::InstanceNotClonable` иначе. `OVMF_VARS` всегда
-    копируется (содержимое, не чистый шаблон — снапшот EFI-состояния
-    источника), независимо от режима диска. Клонирование уже
-    существующего клона разрешено — для этого метода исходный инстанс
+    `SharedBase`). `SharedBase` разрешён только для `AndroidVm`
+    (`LinuxVm` не имеет shared `base_image` — попытка возвращает
+    `DaemonError::SharedBaseNotSupportedForLinuxVm`). Источник должен
+    быть в терминальном состоянии (`Created`/`Stopped`/`Error`, как и у
+    `remove_instance`) — `DaemonError::InstanceNotClonable` иначе.
+    `OVMF_VARS` всегда копируется (содержимое, не чистый шаблон — снапшот
+    EFI-состояния источника), независимо от режима диска. Клонирование
+    уже существующего клона разрешено — для этого метода исходный инстанс
     это просто запись с `InstanceConfig`, то, что она сама была создана
     как клон чего-то ещё, не требует особого случая. При сбое
     посередине — тот же `InstanceDirGuard`, что и у
     `create_android_instance`.
-  - **`export_instance_disk`** — экспортирует диск `AndroidVm`-инстанса
-    в самостоятельный файл по указанному пути, не создаёт инстанс (в
-    отличие от `clone_instance` с `CloneMode::FullStandalone`, который
-    создаёт) — переиспользует тот же `andler_disk::clone::full_standalone_clone`
-    без дублирования кода, просто без шагов "создать каталог
-    инстанса"/"скопировать OVMF_VARS"/"зарегистрировать". Те же условия
-    на источник, что у `clone_instance`.
+  - **`export_instance_disk`** — экспортирует диск инстанса (`LinuxVm`
+    или `AndroidVm`) в самостоятельный файл по указанному пути, не создаёт
+    инстанс (в отличие от `clone_instance` с
+    `CloneMode::FullStandalone`, который создаёт) — переиспользует тот же
+    `andler_disk::clone::full_standalone_clone` без дублирования кода,
+    просто без шагов "создать каталог инстанса"/"скопировать
+    OVMF_VARS"/"зарегистрировать". Те же условия на источник, что у
+    `clone_instance`.
   - **`find_live_clones`** (приватный) — находит `InstanceId` всех
     инстансов, чей `disk.base_image` указывает прямо на диск инстанса
     `id` — то есть живых `CloneMode::Linked`-клонов. Сравнение по
@@ -115,6 +116,12 @@ in-memory состояние инстансов, без сети и без пе�
     на удаление. `Drop::drop` синхронный, поэтому сама очистка —
     `std::fs::remove_dir_all`, не `tokio::fs`; см. подробности в
     docstring `InstanceDirGuard`.
+  - **Snapshot-операции** — `create_snapshot`, `restore_snapshot`,
+    `delete_snapshot`, `list_snapshots`. `create_snapshot` требует
+    запущенный инстанс (`Running`/`Paused`); `restore_snapshot`/
+    `delete_snapshot` требуют остановленный (`Stopped`/`Created`/`Error`).
+    Метаданные хранятся в `andler-store` (таблица `snapshots`); сами данные
+    снапшота — внутри qcow2-файла через QEMU snapshot-save job API.
 
 ## Что здесь НЕ реализовано (следующие слои поверх `Daemon`)
 
@@ -232,7 +239,7 @@ in-memory состояние инстансов, без сети и без пе�
   (создаёт `AndroidVm`-запись напрямую через `create_instance`, минуя
   `create_android_instance`, поэтому не требует настоящего overlay-файла
   на диске для проверки логики `Daemon`, не файловой системы):
-  `InstanceNotFound`/`CloneNotSupportedForKind` (для `LinuxVm`)/
+  `InstanceNotFound`/`SharedBaseNotSupportedForLinuxVm` (для `LinuxVm` с `SharedBase`)/
   `InstanceNotClonable` (для `Running`, состояние инъектировано
   напрямую, тот же приём, что у `remove_instance`-тестов) для обоих
   методов; `find_live_clones` — пустой результат для инстанса без

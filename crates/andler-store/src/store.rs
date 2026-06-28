@@ -54,6 +54,18 @@ pub struct StoredInstance {
     pub state: InstanceState,
 }
 
+/// Метаданные снапшота, хранящиеся в таблице `snapshots`.
+/// Сам снапшот (данные диска + состояние CPU/памяти) хранится внутри
+/// qcow2-файла — здесь только метаданные для быстрого доступа.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredSnapshot {
+    pub id: uuid::Uuid,
+    pub instance_id: InstanceId,
+    pub tag: String,
+    pub description: Option<String>,
+    pub created_at: String,
+}
+
 impl Store {
     /// Открывает (или создаёт, если файла ещё нет) sqlite-базу по
     /// указанному пути и применяет схему. Путь, а не строка подключения —
@@ -240,6 +252,134 @@ impl Store {
 
         Ok(())
     }
+
+    // --- Snapshots CRUD ---------------------------------------------------
+
+    /// Сохраняет метаданные снапшота. Вызывается после успешного
+    /// `snapshot-save` через QMP — сам снапшот уже записан в qcow2-файл,
+    /// здесь только регистрируем метаданные.
+    pub async fn save_snapshot(&self, snapshot: &StoredSnapshot) -> Result<(), StoreError> {
+        let id = snapshot.id.to_string();
+        let instance_id = snapshot.instance_id.0.to_string();
+        let tag = snapshot.tag.clone();
+        let description = snapshot.description.clone();
+        let created_at = snapshot.created_at.clone();
+        let conn = self.conn.clone();
+
+        tokio::task::spawn_blocking(move || -> Result<(), StoreError> {
+            let conn = conn.lock().expect("sqlite connection mutex poisoned");
+            conn.execute(
+                "INSERT OR REPLACE INTO snapshots (id, instance_id, tag, description, created_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                (id, instance_id, tag, description, created_at),
+            )?;
+            Ok(())
+        })
+        .await??;
+
+        Ok(())
+    }
+
+    /// Возвращает все снапшоты инстанса, отсортированные по дате создания.
+    pub async fn load_snapshots(
+        &self,
+        instance_id: InstanceId,
+    ) -> Result<Vec<StoredSnapshot>, StoreError> {
+        let instance_id_str = instance_id.0.to_string();
+        let conn = self.conn.clone();
+
+        tokio::task::spawn_blocking(move || -> Result<Vec<StoredSnapshot>, StoreError> {
+            let conn = conn.lock().expect("sqlite connection mutex poisoned");
+            let mut stmt = conn.prepare(
+                "SELECT id, instance_id, tag, description, created_at \
+                 FROM snapshots WHERE instance_id = ?1 ORDER BY created_at",
+            )?;
+            let rows = stmt.query_map([instance_id_str], |row| {
+                Ok(StoredSnapshot {
+                    id: uuid::Uuid::parse_str(&row.get::<_, String>(0)?)
+                        .map_err(|e| rusqlite::Error::InvalidParameterName(e.to_string()))?,
+                    instance_id: InstanceId(
+                        uuid::Uuid::parse_str(&row.get::<_, String>(1)?)
+                            .map_err(|e| rusqlite::Error::InvalidParameterName(e.to_string()))?,
+                    ),
+                    tag: row.get(2)?,
+                    description: row.get(3)?,
+                    created_at: row.get(4)?,
+                })
+            })?;
+
+            let mut result = Vec::new();
+            for row in rows {
+                result.push(row?);
+            }
+            Ok(result)
+        })
+        .await?
+    }
+
+    /// Возвращает один снапшот по тегу.
+    pub async fn get_snapshot(
+        &self,
+        instance_id: InstanceId,
+        tag: &str,
+    ) -> Result<Option<StoredSnapshot>, StoreError> {
+        let instance_id_str = instance_id.0.to_string();
+        let tag = tag.to_string();
+        let conn = self.conn.clone();
+
+        tokio::task::spawn_blocking(move || -> Result<Option<StoredSnapshot>, StoreError> {
+            let conn = conn.lock().expect("sqlite connection mutex poisoned");
+            let result = conn.query_row(
+                "SELECT id, instance_id, tag, description, created_at \
+                 FROM snapshots WHERE instance_id = ?1 AND tag = ?2",
+                (instance_id_str, tag),
+                |row| {
+                    Ok(StoredSnapshot {
+                        id: uuid::Uuid::parse_str(&row.get::<_, String>(0)?)
+                            .map_err(|e| rusqlite::Error::InvalidParameterName(e.to_string()))?,
+                        instance_id: InstanceId(
+                            uuid::Uuid::parse_str(&row.get::<_, String>(1)?)
+                                .map_err(|e| rusqlite::Error::InvalidParameterName(e.to_string()))?,
+                        ),
+                        tag: row.get(2)?,
+                        description: row.get(3)?,
+                        created_at: row.get(4)?,
+                    })
+                },
+            );
+
+            match result {
+                Ok(snapshot) => Ok(Some(snapshot)),
+                Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+                Err(e) => Err(StoreError::Sqlite(e)),
+            }
+        })
+        .await?
+    }
+
+    /// Удаляет снапшот по тегу. Идемпотентно — удаление несуществующего
+    /// снапшота не ошибка.
+    pub async fn delete_snapshot(
+        &self,
+        instance_id: InstanceId,
+        tag: &str,
+    ) -> Result<(), StoreError> {
+        let instance_id_str = instance_id.0.to_string();
+        let tag = tag.to_string();
+        let conn = self.conn.clone();
+
+        tokio::task::spawn_blocking(move || -> Result<(), StoreError> {
+            let conn = conn.lock().expect("sqlite connection mutex poisoned");
+            conn.execute(
+                "DELETE FROM snapshots WHERE instance_id = ?1 AND tag = ?2",
+                (instance_id_str, tag),
+            )?;
+            Ok(())
+        })
+        .await??;
+
+        Ok(())
+    }
 }
 
 /// Превращает строку `(config_json, state_json)` в `StoredInstance`,
@@ -272,7 +412,19 @@ fn apply_schema(conn: &Connection) -> Result<(), StoreError> {
             id          TEXT PRIMARY KEY,
             config_json TEXT NOT NULL,
             state_json  TEXT NOT NULL
-        );",
+        );
+
+        CREATE TABLE IF NOT EXISTS snapshots (
+            id          TEXT PRIMARY KEY,
+            instance_id TEXT NOT NULL,
+            tag         TEXT NOT NULL,
+            description TEXT,
+            created_at  TEXT NOT NULL,
+            FOREIGN KEY (instance_id) REFERENCES instances(id) ON DELETE CASCADE
+        );
+
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_snapshots_instance_tag
+            ON snapshots(instance_id, tag);",
     )?;
     Ok(())
 }
@@ -477,5 +629,198 @@ mod tests {
     #[test]
     fn parse_instance_id_rejects_garbage() {
         assert!(parse_instance_id("not-a-uuid").is_err());
+    }
+
+    // --- Snapshot CRUD tests -----------------------------------------------
+
+    #[tokio::test]
+    async fn save_and_load_snapshot_round_trips() {
+        let store = Store::open_in_memory().await.unwrap();
+        let cfg = sample_config();
+        let instance_id = cfg.id;
+        store
+            .save_instance(&cfg, &InstanceState::Created)
+            .await
+            .unwrap();
+
+        let snapshot = StoredSnapshot {
+            id: uuid::Uuid::new_v4(),
+            instance_id,
+            tag: "backup1".to_string(),
+            description: Some("Before update".to_string()),
+            created_at: "2024-01-15T10:30:00Z".to_string(),
+        };
+        store.save_snapshot(&snapshot).await.unwrap();
+
+        let loaded = store.load_snapshots(instance_id).await.unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].tag, "backup1");
+        assert_eq!(
+            loaded[0].description,
+            Some("Before update".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn snapshot_unique_tag_per_instance() {
+        let store = Store::open_in_memory().await.unwrap();
+        let cfg = sample_config();
+        let instance_id = cfg.id;
+        store
+            .save_instance(&cfg, &InstanceState::Created)
+            .await
+            .unwrap();
+
+        let s1 = StoredSnapshot {
+            id: uuid::Uuid::new_v4(),
+            instance_id,
+            tag: "backup".to_string(),
+            description: None,
+            created_at: "2024-01-15T10:30:00Z".to_string(),
+        };
+        store.save_snapshot(&s1).await.unwrap();
+
+        // Same tag, different id — should overwrite (INSERT OR REPLACE)
+        let s2 = StoredSnapshot {
+            id: uuid::Uuid::new_v4(),
+            instance_id,
+            tag: "backup".to_string(),
+            description: Some("Updated".to_string()),
+            created_at: "2024-01-15T11:00:00Z".to_string(),
+        };
+        store.save_snapshot(&s2).await.unwrap();
+
+        let loaded = store.load_snapshots(instance_id).await.unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].id, s2.id);
+        assert_eq!(loaded[0].description, Some("Updated".to_string()));
+    }
+
+    #[tokio::test]
+    async fn get_snapshot_by_tag() {
+        let store = Store::open_in_memory().await.unwrap();
+        let cfg = sample_config();
+        let instance_id = cfg.id;
+        store
+            .save_instance(&cfg, &InstanceState::Created)
+            .await
+            .unwrap();
+
+        let snapshot = StoredSnapshot {
+            id: uuid::Uuid::new_v4(),
+            instance_id,
+            tag: "test-snap".to_string(),
+            description: None,
+            created_at: "2024-01-15T10:30:00Z".to_string(),
+        };
+        store.save_snapshot(&snapshot).await.unwrap();
+
+        let found = store.get_snapshot(instance_id, "test-snap").await.unwrap();
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().tag, "test-snap");
+
+        let not_found = store.get_snapshot(instance_id, "nonexistent").await.unwrap();
+        assert!(not_found.is_none());
+    }
+
+    #[tokio::test]
+    async fn delete_snapshot_removes_row() {
+        let store = Store::open_in_memory().await.unwrap();
+        let cfg = sample_config();
+        let instance_id = cfg.id;
+        store
+            .save_instance(&cfg, &InstanceState::Created)
+            .await
+            .unwrap();
+
+        let snapshot = StoredSnapshot {
+            id: uuid::Uuid::new_v4(),
+            instance_id,
+            tag: "to-delete".to_string(),
+            description: None,
+            created_at: "2024-01-15T10:30:00Z".to_string(),
+        };
+        store.save_snapshot(&snapshot).await.unwrap();
+
+        store.delete_snapshot(instance_id, "to-delete").await.unwrap();
+
+        let found = store.get_snapshot(instance_id, "to-delete").await.unwrap();
+        assert!(found.is_none());
+    }
+
+    #[tokio::test]
+    async fn delete_nonexistent_snapshot_is_not_an_error() {
+        let store = Store::open_in_memory().await.unwrap();
+        store
+            .delete_snapshot(InstanceId::new(), "nonexistent")
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn snapshots_cascade_delete_with_instance() {
+        let store = Store::open_in_memory().await.unwrap();
+        let cfg = sample_config();
+        let instance_id = cfg.id;
+        store
+            .save_instance(&cfg, &InstanceState::Created)
+            .await
+            .unwrap();
+
+        let snapshot = StoredSnapshot {
+            id: uuid::Uuid::new_v4(),
+            instance_id,
+            tag: "cascade-test".to_string(),
+            description: None,
+            created_at: "2024-01-15T10:30:00Z".to_string(),
+        };
+        store.save_snapshot(&snapshot).await.unwrap();
+
+        // Delete instance — snapshots should be cascade-deleted
+        store.delete_instance(instance_id).await.unwrap();
+
+        let loaded = store.load_snapshots(instance_id).await.unwrap();
+        assert!(loaded.is_empty());
+    }
+
+    #[tokio::test]
+    async fn different_instances_can_have_same_tag() {
+        let store = Store::open_in_memory().await.unwrap();
+        let cfg1 = sample_config();
+        let cfg2 = sample_config();
+        let id1 = cfg1.id;
+        let id2 = cfg2.id;
+        store
+            .save_instance(&cfg1, &InstanceState::Created)
+            .await
+            .unwrap();
+        store
+            .save_instance(&cfg2, &InstanceState::Created)
+            .await
+            .unwrap();
+
+        let s1 = StoredSnapshot {
+            id: uuid::Uuid::new_v4(),
+            instance_id: id1,
+            tag: "backup".to_string(),
+            description: None,
+            created_at: "2024-01-15T10:30:00Z".to_string(),
+        };
+        let s2 = StoredSnapshot {
+            id: uuid::Uuid::new_v4(),
+            instance_id: id2,
+            tag: "backup".to_string(),
+            description: None,
+            created_at: "2024-01-15T11:00:00Z".to_string(),
+        };
+        store.save_snapshot(&s1).await.unwrap();
+        store.save_snapshot(&s2).await.unwrap();
+
+        let loaded1 = store.load_snapshots(id1).await.unwrap();
+        let loaded2 = store.load_snapshots(id2).await.unwrap();
+        assert_eq!(loaded1.len(), 1);
+        assert_eq!(loaded2.len(), 1);
+        assert_eq!(loaded1[0].tag, "backup");
+        assert_eq!(loaded2[0].tag, "backup");
     }
 }

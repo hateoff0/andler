@@ -637,14 +637,11 @@ async fn clone_instance_on_unknown_source_round_trips_as_not_found() {
 }
 
 /// `CreateInstance` (см. `sample_create_instance_request`) всегда создаёт
-/// `LinuxVm` — достаточно, чтобы проверить, что `CloneInstance` отказывает
-/// для не-`AndroidVm` источника, без необходимости реального `qemu-img`
-/// (сквозная проверка с настоящим `AndroidVm`-источником и реальным
-/// клонированием диска — `daemon::tests::clone_instance_with_*_mode_*`,
-/// `#[ignore]`, требует `qemu-img`; здесь только маршрутизация ошибки
-/// через настоящий gRPC, не файловая система).
+/// `LinuxVm` —clone LinuxVm с `Linked` теперь разрешён, но disk-операция
+/// требует `qemu-img` (нет в CI). Ошибка приходит от `DiskError::SpawnFailed`
+/// → `INTERNAL`, не `FAILED_PRECONDITION`.
 #[tokio::test]
-async fn clone_instance_rejects_linux_vm_source_as_failed_precondition() {
+async fn clone_instance_linux_vm_linked_requires_qemu_img() {
     let (mut client, server) = spawn_server_and_connect().await;
 
     let create_response = client
@@ -661,8 +658,9 @@ async fn clone_instance_rejects_linux_vm_source_as_failed_precondition() {
             mode: CloneMode::Linked as i32,
         })
         .await
-        .expect_err("cloning a LinuxVm instance must fail");
-    assert_eq!(status.code(), tonic::Code::FailedPrecondition);
+        .expect_err("cloning a LinuxVm with Linked requires qemu-img");
+    // DiskError::SpawnFailed (нет qemu-img) → INTERNAL
+    assert_eq!(status.code(), tonic::Code::Internal);
 
     server.abort();
 }
@@ -677,14 +675,14 @@ async fn clone_instance_rejects_unspecified_mode_as_invalid_argument() {
         .expect("create_instance must succeed")
         .into_inner();
 
-    // Намеренно не CloneNotSupportedForKind: mode конвертируется (и может
+    // Намеренно не SharedBaseNotSupportedForLinuxVm: mode конвертируется (и может
     // провалиться) до того, как Daemon::clone_instance успевает увидеть
     // source_instance_id — см. порядок операций в
     // DaemonService::clone_instance (service.rs): parse_instance_id ->
     // CloneMode::try_from -> daemon.clone_instance(...). Здесь источник
     // существует (LinuxVm, тот же, что и в соседнем тесте) специально,
     // чтобы убедиться, что ошибка приходит именно от валидации mode, не
-    // от случайного совпадения с "источник не найден"/"не AndroidVm".
+    // от случайного совпадения с "источник не найден"/"LinuxVm + SharedBase".
     let status = client
         .clone_instance(CloneInstanceRequest {
             source_instance_id: create_response.instance_id,
@@ -733,8 +731,11 @@ async fn export_instance_disk_on_unknown_source_round_trips_as_not_found() {
     server.abort();
 }
 
+/// Export LinuxVm теперь разрешён — `full_standalone_clone` требует
+/// `qemu-img` (нет в CI), поэтому ошибка приходит от `DiskError::SpawnFailed`
+/// → `INTERNAL`, не `FAILED_PRECONDITION`.
 #[tokio::test]
-async fn export_instance_disk_rejects_linux_vm_source_as_failed_precondition() {
+async fn export_instance_disk_linux_vm_requires_qemu_img() {
     let (mut client, server) = spawn_server_and_connect().await;
 
     let create_response = client
@@ -749,7 +750,60 @@ async fn export_instance_disk_rejects_linux_vm_source_as_failed_precondition() {
             dest_path: "/tmp/export.qcow2".to_string(),
         })
         .await
-        .expect_err("exporting a LinuxVm instance must fail");
+        .expect_err("exporting a LinuxVm requires qemu-img");
+    assert_eq!(status.code(), tonic::Code::Internal);
+
+    server.abort();
+}
+
+/// LinuxVm + FullStandalone — требует `qemu-img` (копирование диска),
+/// поэтому ошибка приходит от `DiskError::SpawnFailed` → `INTERNAL`.
+#[tokio::test]
+async fn clone_instance_linux_vm_full_standalone_requires_qemu_img() {
+    let (mut client, server) = spawn_server_and_connect().await;
+
+    let create_response = client
+        .create_instance(sample_create_instance_request())
+        .await
+        .expect("create_instance must succeed")
+        .into_inner();
+
+    let status = client
+        .clone_instance(CloneInstanceRequest {
+            source_instance_id: create_response.instance_id,
+            new_name: "clone".to_string(),
+            instances_root: "/tmp/instances".to_string(),
+            mode: CloneMode::FullStandalone as i32,
+        })
+        .await
+        .expect_err("LinuxVm + FullStandalone requires qemu-img");
+    assert_eq!(status.code(), tonic::Code::Internal);
+
+    server.abort();
+}
+
+/// LinuxVm + SharedBase — должен вернуть `FAILED_PRECONDITION`
+/// (`SharedBaseNotSupportedForLinuxVm`), потому что у LinuxVm нет
+/// shared `base_image`, к которому можно сделать thin-клон.
+#[tokio::test]
+async fn clone_instance_linux_vm_shared_base_rejected_as_failed_precondition() {
+    let (mut client, server) = spawn_server_and_connect().await;
+
+    let create_response = client
+        .create_instance(sample_create_instance_request())
+        .await
+        .expect("create_instance must succeed")
+        .into_inner();
+
+    let status = client
+        .clone_instance(CloneInstanceRequest {
+            source_instance_id: create_response.instance_id,
+            new_name: "clone".to_string(),
+            instances_root: "/tmp/instances".to_string(),
+            mode: CloneMode::SharedBase as i32,
+        })
+        .await
+        .expect_err("LinuxVm + SharedBase must be rejected");
     assert_eq!(status.code(), tonic::Code::FailedPrecondition);
 
     server.abort();

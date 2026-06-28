@@ -12,9 +12,11 @@ use andler_rpc::convert;
 use andler_rpc::proto::andler_service_server::AndlerService;
 use andler_rpc::proto::{
     CloneInstanceRequest, CreateAndroidInstanceRequest, CreateInstanceRequest,
-    CreateInstanceResponse, Empty, ExportInstanceDiskRequest, ExportInstanceDiskResponse,
-    GetInstanceConfigResponse, InstanceIdRequest, InstanceListEntry, InstanceStatusResponse,
-    ListInstancesResponse, LogLineResponse, RemoveInstanceRequest, StopInstanceRequest,
+    CreateInstanceResponse, CreateSnapshotRequest, CreateSnapshotResponse, DeleteSnapshotRequest,
+    Empty, ExportInstanceDiskRequest, ExportInstanceDiskResponse, GetInstanceConfigResponse,
+    InstanceIdRequest, InstanceListEntry, InstanceStatusResponse, ListInstancesResponse,
+    ListSnapshotsResponse, LogLineResponse, RemoveInstanceRequest, RestoreSnapshotRequest,
+    SnapshotEntry, StopInstanceRequest,
 };
 use futures_core::Stream;
 use futures_util::StreamExt;
@@ -38,7 +40,7 @@ impl DaemonService {
 /// "Контракту для незавершённых backend'ов" из §4 архитектурного плана —
 /// демон не должен падать, он должен вернуть штатный gRPC-статус),
 /// нарушение FSM/отсутствие хэндла/`InstanceNotRemovable`/
-/// `InstanceNotClonable`/`CloneNotSupportedForKind`/
+/// `InstanceNotClonable`/`SharedBaseNotSupportedForLinuxVm`/
 /// `InstanceHasLiveClones` -> `FAILED_PRECONDITION` (клиент мог бы
 /// исправить ситуацию, изменив порядок вызовов — например, `stop` перед
 /// `remove`/`clone`/`export`, или удалить клоны перед `remove --purge`
@@ -70,10 +72,20 @@ impl From<DaemonError> for Status {
             // перед clone/export; убрать клоны перед purge), не
             // INTERNAL.
             DaemonError::InstanceNotClonable(_, _) => Status::failed_precondition(err.to_string()),
-            DaemonError::CloneNotSupportedForKind(_) => {
+            DaemonError::SharedBaseNotSupportedForLinuxVm(_) => {
                 Status::failed_precondition(err.to_string())
             }
             DaemonError::InstanceHasLiveClones(_, _) => {
+                Status::failed_precondition(err.to_string())
+            }
+            // Snapshot-ошибки: клиент может исправить, изменив параметры
+            // или порядок вызовов.
+            DaemonError::SnapshotNotFound { .. } => Status::not_found(err.to_string()),
+            DaemonError::SnapshotAlreadyExists { .. } => Status::already_exists(err.to_string()),
+            DaemonError::SnapshotOperationRequiresRunningInstance(_, _) => {
+                Status::failed_precondition(err.to_string())
+            }
+            DaemonError::SnapshotOperationRequiresStoppedInstance(_, _) => {
                 Status::failed_precondition(err.to_string())
             }
             DaemonError::Backend(andler_core::BackendError::NotImplemented { .. }) => {
@@ -315,5 +327,71 @@ impl AndlerService for DaemonService {
         Ok(Response::new(ExportInstanceDiskResponse {
             dest_path: req.dest_path,
         }))
+    }
+
+    // --- Snapshot handlers ------------------------------------------------
+
+    async fn create_snapshot(
+        &self,
+        request: Request<CreateSnapshotRequest>,
+    ) -> Result<Response<CreateSnapshotResponse>, Status> {
+        let req = request.into_inner();
+        let id = convert::parse_instance_id(&req.instance_id)?;
+
+        let record = self
+            .daemon
+            .create_snapshot(id, req.tag, Some(req.description).filter(|s| !s.is_empty()))
+            .await?;
+
+        Ok(Response::new(CreateSnapshotResponse {
+            snapshot_id: record.id.to_string(),
+            tag: record.tag,
+            created_at: record.created_at,
+        }))
+    }
+
+    async fn restore_snapshot(
+        &self,
+        request: Request<RestoreSnapshotRequest>,
+    ) -> Result<Response<Empty>, Status> {
+        let req = request.into_inner();
+        let id = convert::parse_instance_id(&req.instance_id)?;
+
+        self.daemon.restore_snapshot(id, req.tag).await?;
+
+        Ok(Response::new(Empty {}))
+    }
+
+    async fn delete_snapshot(
+        &self,
+        request: Request<DeleteSnapshotRequest>,
+    ) -> Result<Response<Empty>, Status> {
+        let req = request.into_inner();
+        let id = convert::parse_instance_id(&req.instance_id)?;
+
+        self.daemon.delete_snapshot(id, req.tag).await?;
+
+        Ok(Response::new(Empty {}))
+    }
+
+    async fn list_snapshots(
+        &self,
+        request: Request<InstanceIdRequest>,
+    ) -> Result<Response<ListSnapshotsResponse>, Status> {
+        let id = convert::parse_instance_id(&request.into_inner().instance_id)?;
+
+        let records = self.daemon.list_snapshots(id).await?;
+
+        let snapshots = records
+            .into_iter()
+            .map(|r| SnapshotEntry {
+                snapshot_id: r.id.to_string(),
+                tag: r.tag,
+                description: r.description.unwrap_or_default(),
+                created_at: r.created_at,
+            })
+            .collect();
+
+        Ok(Response::new(ListSnapshotsResponse { snapshots }))
     }
 }

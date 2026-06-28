@@ -19,6 +19,12 @@ use crate::android_profile::AndroidProfile;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct InstanceId(pub Uuid);
 
+impl std::fmt::Display for InstanceId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
 impl InstanceId {
     pub fn new() -> Self {
         InstanceId(Uuid::new_v4())

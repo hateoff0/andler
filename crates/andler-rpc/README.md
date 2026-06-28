@@ -53,11 +53,18 @@ gRPC-схема (`proto/andler.proto`) и сгенерированный код 
   `andler_core::LogStreamSource`/`LogLine` один-к-одному; конвертация
   только в одну сторону (domain -> proto) — клиент это сообщение не
   присылает, см. `convert.rs`.
+- `CloneInstance` — соответствует `Daemon::clone_instance`. Поддерживает
+  как `AndroidVm`, так и `LinuxVm` (для `Linked`/`FullStandalone` режимов).
+- `ExportInstanceDisk` — соответствует `Daemon::export_instance_disk`.
+- `CreateSnapshot`/`RestoreSnapshot`/`DeleteSnapshot`/`ListSnapshots` —
+  соответствуют одноимённым методам `Daemon`. `CreateSnapshot` требует
+  запущенный инстанс; `RestoreSnapshot`/`DeleteSnapshot` требуют
+  остановленный.
 
 **Чего здесь нет и почему:**
 
-- `CloneInstance`/`StreamResourceMetrics` из §5.1 — у `Daemon` пока нет
-  соответствующих методов. Объявлять rpc-метод раньше метода `Daemon`,
+- `StreamResourceMetrics` из §5.1 — у `Daemon` пока нет
+  соответствующего метода. Объявлять rpc-метод раньше метода `Daemon`,
   который он должен вызывать, означало бы проектировать протокол
   вслепую — ровно то, чего избегали при выборе порядка `daemon.rs`
   перед `andler-rpc` изначально.

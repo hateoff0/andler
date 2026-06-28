@@ -1,11 +1,10 @@
 //! Клиент QEMU Machine Protocol (QMP) поверх unix-сокета.
 //!
-//! Реализует только то, что нужно для `pause`/`resume`/точного `status` в
-//! `backend.rs` (см. README этого крейта про текущий скоуп): handshake,
-//! отправку команд `stop`/`cont`/`query-status` и разбор ответов. Snapshot
-//! (`snapshot-save` job API или `human-monitor-command`+`savevm`) — за
-//! пределами этого шага, см. README — решение между этими двумя подходами
-//! сознательно не принято здесь.
+//! Реализует команды управления инстансами: `stop`/`cont`/`query-status`
+//! (pause/resume/status) и `snapshot-save`/`snapshot-load`/`snapshot-delete`/
+//! `query-block`/`query-jobs` (снапшоты). Snapshot-команды используют
+//! async job API QEMU: `snapshot-save/load/delete` запускают асинхронный job,
+//! который завершается через `wait_job_completion` (polling `query-jobs`).
 //!
 //! Протокол: newline-delimited JSON поверх unix-сокета. При подключении
 //! QEMU сразу присылает greeting (`{"QMP": {...}}`); клиент обязан
@@ -165,6 +164,126 @@ impl QmpClient {
         Ok(parsed.status)
     }
 
+    /// `snapshot-save` — создаёт внутренний снапшот qcow2-диска (async job).
+    ///
+    /// После вызова нужно ждать завершения через `wait_job_completion`.
+    /// `device` — имя устройства (например, `"drive-disk0"`, как в cmdline).
+    /// `tag` — пользовательский идентификатор снапшота.
+    pub async fn snapshot_save(
+        &mut self,
+        device: &str,
+        tag: &str,
+    ) -> Result<String, QmpError> {
+        let job_id = format!("snap-{tag}");
+        let args = json!({
+            "job-id": &job_id,
+            "device": device,
+            "tag": tag,
+        });
+        self.execute_raw("snapshot-save", Some(args)).await?;
+        Ok(job_id)
+    }
+
+    /// `snapshot-load` — восстанавливает инстанс из внутреннего снапшота (async job).
+    ///
+    /// После вызова нужно ждать завершения через `wait_job_completion`.
+    pub async fn snapshot_load(
+        &mut self,
+        device: &str,
+        tag: &str,
+    ) -> Result<String, QmpError> {
+        let job_id = format!("load-{tag}");
+        let args = json!({
+            "job-id": &job_id,
+            "device": device,
+            "tag": tag,
+        });
+        self.execute_raw("snapshot-load", Some(args)).await?;
+        Ok(job_id)
+    }
+
+    /// `snapshot-delete` — удаляет внутренний снапшот qcow2-диска (async job).
+    ///
+    /// После вызова нужно ждать завершения через `wait_job_completion`.
+    pub async fn snapshot_delete(
+        &mut self,
+        device: &str,
+        tag: &str,
+    ) -> Result<String, QmpError> {
+        let job_id = format!("del-{tag}");
+        let args = json!({
+            "job-id": &job_id,
+            "device": device,
+            "tag": tag,
+        });
+        self.execute_raw("snapshot-delete", Some(args)).await?;
+        Ok(job_id)
+    }
+
+    /// Ожидает завершения async job по `job_id`, poll-я через `query-jobs`.
+    ///
+    /// Максимальное время ожидания — `timeout`. Возвращает ошибку при
+    /// таймауте или если job завершился с ошибкой.
+    pub async fn wait_job_completion(
+        &mut self,
+        job_id: &str,
+        timeout: std::time::Duration,
+    ) -> Result<(), QmpError> {
+        use std::time::Instant;
+        let start = Instant::now();
+
+        loop {
+            let value = self.execute_raw("query-jobs", None).await?;
+            let jobs: Vec<QueryJobInfo> =
+                serde_json::from_value(value).map_err(QmpError::ParseError)?;
+
+            if let Some(job) = jobs.iter().find(|j| j.id == job_id) {
+                match job.status.as_deref() {
+                    Some("completed") => return Ok(()),
+                    Some("failed") | Some("aborted") => {
+                        return Err(QmpError::CommandFailed {
+                            command: format!("job {job_id}"),
+                            class: job.error.clone().unwrap_or_default(),
+                            desc: job.error.clone().unwrap_or_else(|| "job failed".to_string()),
+                        });
+                    }
+                    _ => {} // running, pending, etc. — keep polling
+                }
+            }
+
+            if start.elapsed() > timeout {
+                return Err(QmpError::CommandFailed {
+                    command: format!("wait for job {job_id}"),
+                    class: "Timeout".to_string(),
+                    desc: format!(
+                        "job {job_id} did not complete within {:?}",
+                        timeout
+                    ),
+                });
+            }
+
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    }
+
+    /// `query-block` — возвращает список снапшотов для указанного устройства.
+    pub async fn query_block_snapshots(
+        &mut self,
+        device: &str,
+    ) -> Result<Vec<SnapshotInfo>, QmpError> {
+        let value = self.execute_raw("query-block", None).await?;
+        let blocks: Vec<BlockDeviceInfo> =
+            serde_json::from_value(value).map_err(QmpError::ParseError)?;
+
+        for block in blocks {
+            if block.device.as_deref() == Some(device) {
+                return Ok(block.snapshots.unwrap_or_default());
+            }
+        }
+
+        Ok(Vec::new())
+    }
+
     /// Отправляет команду `{"execute": command, "arguments": arguments?}`
     /// и возвращает содержимое поля `return` при успехе, либо
     /// `QmpError::CommandFailed` при `{"error": ...}` в ответе.
@@ -230,6 +349,38 @@ impl QmpClient {
 
         serde_json::from_str(&line).map_err(QmpError::ParseError)
     }
+}
+
+/// Метаданные одного снапшота, полученные из `query-block`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct SnapshotInfo {
+    pub tag: String,
+    pub id: String,
+    #[serde(default)]
+    pub vm_clock_nsec: Option<u64>,
+    #[serde(default)]
+    pub datetime: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct BlockDeviceInfo {
+    #[serde(default)]
+    device: Option<String>,
+    #[allow(dead_code)]
+    #[serde(default)]
+    removable: bool,
+    #[serde(default, rename = "snapshot")]
+    snapshots: Option<Vec<SnapshotInfo>>,
+}
+
+/// Структура ответа `query-jobs`.
+#[derive(Debug, Deserialize)]
+struct QueryJobInfo {
+    id: String,
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    error: Option<String>,
 }
 
 #[cfg(test)]
@@ -304,5 +455,72 @@ mod tests {
         // интеграционным тестом на уровне backend.rs
         // (spawn_then_status_then_stop_round_trip), куда естественно
         // добавить pause/resume-шаги при следующей итерации.
+    }
+
+    #[test]
+    fn snapshot_info_parses_from_query_block() {
+        let json = r#"[
+            {
+                "device": "drive0",
+                "removable": false,
+                "snapshot": [
+                    {"tag": "backup1", "id": "1", "vm-clock-nsec": 12345, "datetime": "2024-01-15T10:30:00"},
+                    {"tag": "backup2", "id": "2"}
+                ]
+            }
+        ]"#;
+        let blocks: Vec<BlockDeviceInfo> = serde_json::from_str(json).unwrap();
+        assert_eq!(blocks.len(), 1);
+        let snapshots = blocks[0].snapshots.as_ref().unwrap();
+        assert_eq!(snapshots.len(), 2);
+        assert_eq!(snapshots[0].tag, "backup1");
+        assert_eq!(snapshots[0].id, "1");
+        assert_eq!(snapshots[0].datetime.as_deref(), Some("2024-01-15T10:30:00"));
+        assert_eq!(snapshots[1].tag, "backup2");
+        assert_eq!(snapshots[1].id, "2");
+        assert!(snapshots[1].datetime.is_none());
+    }
+
+    #[test]
+    fn snapshot_info_empty_list() {
+        let json = r#"[
+            {
+                "device": "drive0",
+                "removable": false,
+                "snapshot": []
+            }
+        ]"#;
+        let blocks: Vec<BlockDeviceInfo> = serde_json::from_str(json).unwrap();
+        let snapshots = blocks[0].snapshots.as_ref().unwrap();
+        assert!(snapshots.is_empty());
+    }
+
+    #[test]
+    fn snapshot_info_missing_snapshot_field() {
+        let json = r#"[
+            {
+                "device": "drive0",
+                "removable": false
+            }
+        ]"#;
+        let blocks: Vec<BlockDeviceInfo> = serde_json::from_str(json).unwrap();
+        assert!(blocks[0].snapshots.is_none());
+    }
+
+    #[test]
+    fn query_job_info_parses_completed() {
+        let json = r#"[{"id": "snap-backup1", "status": "completed"}]"#;
+        let jobs: Vec<QueryJobInfo> = serde_json::from_str(json).unwrap();
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].id, "snap-backup1");
+        assert_eq!(jobs[0].status.as_deref(), Some("completed"));
+    }
+
+    #[test]
+    fn query_job_info_parses_failed_with_error() {
+        let json = r#"[{"id": "snap-backup1", "status": "failed", "error": "device is in use"}]"#;
+        let jobs: Vec<QueryJobInfo> = serde_json::from_str(json).unwrap();
+        assert_eq!(jobs[0].status.as_deref(), Some("failed"));
+        assert_eq!(jobs[0].error.as_deref(), Some("device is in use"));
     }
 }

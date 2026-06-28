@@ -11,9 +11,8 @@
 // вслепую — то, что явно решили не делать (см. README этого крейта и
 // andler-daemon).
 //
-// `CloneInstance`/`ExportInstanceDisk` — только для `AndroidVm` (см. их
-// документацию в `daemon.rs` за полным обоснованием) — `LinuxVm` за
-// пределами текущего шага.
+// `CloneInstance`/`ExportInstanceDisk` поддерживают как `AndroidVm`, так и
+// `LinuxVm` (см. их документацию в `daemon.rs` за полным обоснованием).
 //
 // `CreateInstance` — generic-путь создания инстанса через явный
 // `InstanceConfig`, соответствует `Daemon::create_instance` один-к-одному.
@@ -81,9 +80,9 @@ service AndlerService {
     // шагом (см. обсуждение `StreamInstanceLogs` в истории проекта).
     rpc StreamInstanceLogs(InstanceIdRequest) returns (stream LogLineResponse);
 
-    // Соответствует Daemon::clone_instance — только для AndroidVm (см.
-    // CloneInstanceRequest.mode/Daemon::clone_instance за полным
-    // обоснованием трёх режимов и почему LinuxVm не поддерживается).
+    // Соответствует Daemon::clone_instance — поддерживает как AndroidVm,
+    // так и LinuxVm (см. CloneInstanceRequest.mode/Daemon::clone_instance
+    // за полным обоснованием трёх режимов).
     rpc CloneInstance(CloneInstanceRequest) returns (CreateInstanceResponse);
 
     // Соответствует Daemon::export_instance_disk — экспортирует диск
@@ -93,6 +92,13 @@ service AndlerService {
     // Daemon::export_instance_disk за тем, почему это отдельный метод,
     // не вариант CloneInstance.
     rpc ExportInstanceDisk(ExportInstanceDiskRequest) returns (ExportInstanceDiskResponse);
+
+    // Snapshot-операции — соответствуют Daemon::create_snapshot/
+    // restore_snapshot/delete_snapshot/list_snapshots.
+    rpc CreateSnapshot(CreateSnapshotRequest) returns (CreateSnapshotResponse);
+    rpc RestoreSnapshot(RestoreSnapshotRequest) returns (Empty);
+    rpc DeleteSnapshot(DeleteSnapshotRequest) returns (Empty);
+    rpc ListSnapshots(InstanceIdRequest) returns (ListSnapshotsResponse);
 }
 
 message Empty {}
@@ -481,4 +487,39 @@ message ExportInstanceDiskRequest {
 
 message ExportInstanceDiskResponse {
     string dest_path = 1;
+}
+
+// --- Snapshot-операции ---------------------------------------------------
+
+message CreateSnapshotRequest {
+    string instance_id = 1;
+    string tag = 2;
+    string description = 3;
+}
+
+message CreateSnapshotResponse {
+    string snapshot_id = 1;
+    string tag = 2;
+    string created_at = 3;
+}
+
+message RestoreSnapshotRequest {
+    string instance_id = 1;
+    string tag = 2;
+}
+
+message DeleteSnapshotRequest {
+    string instance_id = 1;
+    string tag = 2;
+}
+
+message SnapshotEntry {
+    string snapshot_id = 1;
+    string tag = 2;
+    string description = 3;
+    string created_at = 4;
+}
+
+message ListSnapshotsResponse {
+    repeated SnapshotEntry snapshots = 1;
 }
