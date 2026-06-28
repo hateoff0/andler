@@ -361,7 +361,12 @@ impl AndlerService for DaemonService {
 
         let record = self
             .daemon
-            .create_snapshot(id, req.tag, Some(req.description).filter(|s| !s.is_empty()))
+            .create_snapshot(
+                id,
+                req.tag,
+                Some(req.description).filter(|s| !s.is_empty()),
+                req.timeout_secs,
+            )
             .await?;
 
         Ok(Response::new(CreateSnapshotResponse {
@@ -378,7 +383,7 @@ impl AndlerService for DaemonService {
         let req = request.into_inner();
         let id = convert::parse_instance_id(&req.instance_id)?;
 
-        self.daemon.restore_snapshot(id, req.tag).await?;
+        self.daemon.restore_snapshot(id, req.tag, req.timeout_secs).await?;
 
         Ok(Response::new(Empty {}))
     }
@@ -390,7 +395,7 @@ impl AndlerService for DaemonService {
         let req = request.into_inner();
         let id = convert::parse_instance_id(&req.instance_id)?;
 
-        self.daemon.delete_snapshot(id, req.tag).await?;
+        self.daemon.delete_snapshot(id, req.tag, req.timeout_secs).await?;
 
         Ok(Response::new(Empty {}))
     }

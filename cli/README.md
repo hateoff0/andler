@@ -8,8 +8,9 @@ The `andler` binary — a thin gRPC client to `andlerd` via `andler-rpc`. No bus
 
 | Command | Description |
 |---------|-------------|
-| `andler create --file instance.toml` | Create a LinuxVm from a TOML config file |
-| `andler create --name <name> --android-version <ver> --base-image-path <path> --ovmf-vars-template <path>` | Create an AndroidVm with CLI flags |
+| `andler create --file instance.toml` | Create LinuxVm or AndroidVm from TOML (auto-detected) |
+| `andler create --kind linux --name <name> --iso-path <path> --disk-path <path> --ovmf-vars-template <path>` | Create LinuxVm with CLI flags |
+| `andler create --kind android --name <name> --android-version <ver> --base-image-path <path> --ovmf-vars-template <path>` | Create AndroidVm with CLI flags |
 | `andler start <instance-id>` | Start an instance |
 | `andler stop <instance-id> [--graceful]` | Stop an instance (without `--graceful`, kills immediately) |
 | `andler pause <instance-id>` | Pause a running instance |
@@ -42,9 +43,9 @@ The `andler` binary — a thin gRPC client to `andlerd` via `andler-rpc`. No bus
 
 | Command | Description |
 |---------|-------------|
-| `andler snapshot <id> create --tag <name> [--description <text>]` | Create snapshot (requires Running/Paused) |
-| `andler snapshot <id> restore --tag <name>` | Restore from snapshot (requires Stopped) |
-| `andler snapshot <id> delete --tag <name>` | Delete snapshot (requires Stopped) |
+| `andler snapshot <id> create --tag <name> [--description <text>] [--timeout <secs>]` | Create snapshot (requires Running/Paused). `--timeout` overrides instance default. |
+| `andler snapshot <id> restore --tag <name> [--timeout <secs>]` | Restore from snapshot (requires Stopped). `--timeout` overrides instance default. |
+| `andler snapshot <id> delete --tag <name> [--timeout <secs>]` | Delete snapshot (requires Stopped). `--timeout` overrides instance default. |
 | `andler snapshot <id> list` | List all snapshots |
 
 ## Daemon Address
@@ -53,7 +54,7 @@ Override with `--daemon-addr <url>` before the subcommand, or `ANDLERD_ADDR` env
 
 ## TOML Instance File Format
 
-Minimal file — only required top-level fields. Everything else uses `reference_default()`:
+### Linux VM (minimal)
 
 ```toml
 name = "my-linux-vm"
@@ -62,11 +63,44 @@ disk_path = "/home/user/.local/share/andler/my-linux-vm/disk.qcow2"
 ovmf_vars_path = "/home/user/.local/share/andler/my-linux-vm/VARS.fd"
 ```
 
-Optional fields:
+### Android VM (minimal)
 
 ```toml
-disk_size_gib = 100              # Override default 40 GiB
-snapshot_timeout_secs = 60       # Override default 30s
+name = "my-android"
+android_version = 13
+base_image_path = "/path/to/base.qcow2"
+ovmf_vars_path = "/path/to/VARS.fd"
+```
+
+**Auto-detection**: if `android_version` or `base_image_path` is present, the TOML file is treated as an AndroidVm config. Otherwise, it's a LinuxVm.
+
+### Android VM (full example)
+
+```toml
+name = "my-android"
+android_version = 13
+base_image_path = "/path/to/base.qcow2"
+ovmf_vars_path = "/path/to/VARS.fd"
+
+overlay_size_gib = 20
+root = "magisk"
+magisk_dir = "/path/to/magisk/"
+gapps = false
+microg = false
+libndk = false
+instances_root = "/home/user/.local/share/andler/instances"
+```
+
+### Linux VM (full example)
+
+```toml
+name = "my-linux-vm"
+iso_path = "/home/user/isos/cachyos.iso"
+disk_path = "/home/user/.local/share/andler/my-linux-vm/disk.qcow2"
+ovmf_vars_path = "/home/user/.local/share/andler/my-linux-vm/VARS.fd"
+
+disk_size_gib = 100
+snapshot_timeout_secs = 60
 
 [cpu]
 cores = 8
@@ -139,20 +173,25 @@ backend = "None"
 
 ## TOML Parsing (`instance_file.rs`)
 
-**`InstanceFile`**: TOML mirror of `CreateInstanceRequest`. Fields that overlap with domain types (`cpu`, `memory`, etc.) reuse `andler_core::config::*` directly via `Deserialize` — not separate CLI-specific copies.
+**`InstanceFile`**: TOML mirror of `CreateInstanceRequest` / `CreateAndroidInstanceRequest`. Fields that overlap with domain types (`cpu`, `memory`, etc.) reuse `andler_core::config::*` directly via `Deserialize` — not separate CLI-specific copies.
 
 - `InstanceFile::load(path)`: Reads and parses TOML file.
-- `InstanceFile::into_request()`: Builds `CreateInstanceRequest`, applying `reference_default()` for any missing section.
+- `InstanceFile::into_result()`: Returns `InstanceFileResult::Linux(req)` or `InstanceFileResult::Android(req)`, auto-detected from TOML content.
+
+**`InstanceFileResult`**: `Linux(CreateInstanceRequest)` | `Android(CreateAndroidInstanceRequest)`.
 
 **`InstanceFileError`**: `Read { path, source }` | `Parse { path, source }`.
 
-### Tests (7)
+### Tests
 
-- Minimal file parses with all defaults
+- Minimal Linux file parses with all defaults
 - Custom disk size honored
-- Custom CPU fields honored
-- GPU Passthrough round-trips
-- Missing required field fails
+- Android file with all options
+- Android 11 version parses
+- Auto-detect: `android_version` field → Android mode
+- Auto-detect: `base_image_path` field → Android mode
+- Auto-detect: no Android fields → Linux mode
+- Missing required Linux field fails
 - Missing file → `Read` error
 - Invalid TOML → `Parse` error
 
@@ -166,7 +205,7 @@ backend = "None"
  11.20   1.24 GiB   44.1 MB/s  11.9 MB/s  1.1 MB/s   0.4 MB/s   513 MiB    68.2%
 ```
 
-GPU columns (VRAM, GPU%) only appear when AMD sysfs data is available.
+GPU columns (VRAM, GPU%) appear when AMD, NVIDIA, or Intel GPU data is available.
 
 ## Clone Modes
 

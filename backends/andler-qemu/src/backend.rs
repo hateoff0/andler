@@ -345,7 +345,12 @@ impl HypervisorBackend for QemuBackend {
         }
     }
 
-    async fn snapshot(&self, handle: &BackendHandle, tag: &str) -> Result<(), BackendError> {
+    async fn snapshot(
+        &self,
+        handle: &BackendHandle,
+        tag: &str,
+        timeout: Option<std::time::Duration>,
+    ) -> Result<(), BackendError> {
         let mut instances = self.instances.lock().await;
         let instance = instances
             .get_mut(handle)
@@ -361,14 +366,20 @@ impl HypervisorBackend for QemuBackend {
             .await
             .map_err(qmp_error_to_backend_error)?;
 
-        qmp.wait_job_completion(&job_id, instance.snapshot_timeout)
+        let effective_timeout = timeout.unwrap_or(instance.snapshot_timeout);
+        qmp.wait_job_completion(&job_id, effective_timeout)
             .await
             .map_err(qmp_error_to_backend_error)?;
 
         Ok(())
     }
 
-    async fn snapshot_restore(&self, handle: &BackendHandle, tag: &str) -> Result<(), BackendError> {
+    async fn snapshot_restore(
+        &self,
+        handle: &BackendHandle,
+        tag: &str,
+        timeout: Option<std::time::Duration>,
+    ) -> Result<(), BackendError> {
         let mut instances = self.instances.lock().await;
         let instance = instances
             .get_mut(handle)
@@ -384,14 +395,20 @@ impl HypervisorBackend for QemuBackend {
             .await
             .map_err(qmp_error_to_backend_error)?;
 
-        qmp.wait_job_completion(&job_id, instance.snapshot_timeout)
+        let effective_timeout = timeout.unwrap_or(instance.snapshot_timeout);
+        qmp.wait_job_completion(&job_id, effective_timeout)
             .await
             .map_err(qmp_error_to_backend_error)?;
 
         Ok(())
     }
 
-    async fn snapshot_delete(&self, handle: &BackendHandle, tag: &str) -> Result<(), BackendError> {
+    async fn snapshot_delete(
+        &self,
+        handle: &BackendHandle,
+        tag: &str,
+        timeout: Option<std::time::Duration>,
+    ) -> Result<(), BackendError> {
         let mut instances = self.instances.lock().await;
         let instance = instances
             .get_mut(handle)
@@ -407,7 +424,8 @@ impl HypervisorBackend for QemuBackend {
             .await
             .map_err(qmp_error_to_backend_error)?;
 
-        qmp.wait_job_completion(&job_id, instance.snapshot_timeout)
+        let effective_timeout = timeout.unwrap_or(instance.snapshot_timeout);
+        qmp.wait_job_completion(&job_id, effective_timeout)
             .await
             .map_err(qmp_error_to_backend_error)?;
 

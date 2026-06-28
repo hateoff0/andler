@@ -1,6 +1,6 @@
-//! Бинарник `andler` — тонкий gRPC-клиент к `andlerd`. Никакой
-//! бизнес-логики здесь: каждая подкоманда формирует один gRPC-запрос через
-//! `andler-rpc`/`tonic` и печатает ответ. См. README.md этого крейта.
+//! ANDLER CLI — thin gRPC client to `andlerd`. No business logic here:
+//! each subcommand builds a single gRPC request via `andler-rpc`/`tonic`
+//! and prints the response. See the crate's README.md.
 
 mod instance_file;
 
@@ -8,13 +8,13 @@ use andler_rpc::proto::andler_service_client::AndlerServiceClient;
 use andler_rpc::proto::{
     instance_kind, network_mode, render_backend, AndroidProfile as ProtoAndroidProfile,
     AndroidVersion as ProtoAndroidVersion, AudioBackend, BackendKind, CloneInstanceRequest,
-    CpuPriority, CreateAndroidInstanceRequest, CreateSnapshotRequest, DeleteSnapshotRequest,
-    DiskFormat, DisplayEngine, Empty, ExportInstanceDiskRequest, GetInstanceConfigResponse,
-    InstanceIdRequest, InstanceStateKind, LogStreamSource,
+    CpuPriority, CreateAndroidInstanceRequest, CreateInstanceRequest, CreateSnapshotRequest,
+    DeleteSnapshotRequest, DiskFormat, DisplayEngine, Empty, ExportInstanceDiskRequest,
+    GetInstanceConfigResponse, InstanceIdRequest, InstanceStateKind, LogStreamSource,
     RemoveInstanceRequest, RestoreSnapshotRequest, RootMode as ProtoRootMode, StopInstanceRequest,
 };
 use clap::{Parser, Subcommand, ValueEnum};
-use instance_file::InstanceFile;
+use instance_file::{InstanceFile, InstanceFileResult};
 use std::path::PathBuf;
 
 const DEFAULT_DAEMON_ADDR: &str = "http://127.0.0.1:50051";
@@ -28,10 +28,15 @@ fn default_instances_root() -> String {
 }
 
 #[derive(Parser)]
-#[command(name = "andler", about = "Тонкий CLI-клиент к andlerd")]
+#[command(
+    name = "andler",
+    about = "Thin CLI client to andlerd",
+    long_about = "ANDLER CLI — create, manage and monitor Android/Linux VMs.\n\n\
+                   Communicates with andlerd over gRPC (default: http://127.0.0.1:50051).\n\
+                   Set ANDLERD_ADDR env var or use --daemon-addr to override."
+)]
 struct Cli {
-    /// Адрес andlerd. По умолчанию берётся ANDLERD_ADDR, иначе
-    /// http://127.0.0.1:50051 (см. andler-daemon/src/main.rs).
+    /// andlerd address. Defaults to $ANDLERD_ADDR or http://127.0.0.1:50051.
     #[arg(long, global = true)]
     daemon_addr: Option<String>,
 
@@ -41,152 +46,149 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Создаёт новый инстанс. Два режима:
+    /// Create a new VM instance.
     ///
-    /// **TOML-режим** (`--file`): создаёт LinuxVm из TOML-файла конфигурации
-    /// — см. `andler-cli/src/instance_file.rs` за полем `InstanceFile` и
-    /// README этого крейта за примером файла.
+    /// Two modes:
     ///
-    /// Пример: `andler create --file instance.toml`
+    /// TOML mode (--file): create from a config file (LinuxVm or AndroidVm,
+    /// auto-detected by content). Example:
+    ///   andler create --file instance.toml
     ///
-    /// **CLI-режим** (`--android-version`): создаёт AndroidVm через
-    /// CLI-флаги. Обязательны `--name`, `--base-image-path`,
-    /// `--ovmf-vars-template`.
+    /// CLI mode (--kind): create via flags. --kind selects the VM type.
+    /// LinuxVm example:
+    ///   andler create --kind linux --name my-vm \
+    ///     --iso-path /path/to/installer.iso \
+    ///     --disk-path /path/to/disk.qcow2 \
+    ///     --ovmf-vars-template /path/to/VARS.fd
     ///
-    /// Пример: `andler create --name my-android --android-version 13 --base-image-path /path/to/base.qcow2 --ovmf-vars-template /path/to/VARS.fd`
+    /// AndroidVm example:
+    ///   andler create --kind android --name my-android \
+    ///     --android-version 13 \
+    ///     --base-image-path /path/to/base.qcow2 \
+    ///     --ovmf-vars-template /path/to/VARS.fd
     Create {
-        /// Путь к TOML-файлу (TOML-режим). Укажите либо `--file`,
-        /// либо `--android-version` — оба одновременно нельзя.
+        /// Path to TOML config file (TOML mode). Mutually exclusive with --kind.
         #[arg(long)]
         file: Option<PathBuf>,
 
-        // --- Android-режим (CLI-флаги) ---
+        // --- CLI mode ---
 
-        /// Имя инстанса (обязательно в Android-режиме).
+        /// VM type selector: "linux" or "android". Enables CLI mode
+        /// where you specify all parameters as flags instead of TOML.
+        #[arg(long)]
+        kind: Option<CliKind>,
+
+        /// Instance name (required in CLI mode).
         #[arg(long)]
         name: Option<String>,
 
-        /// Версия Android — дискриминатор режима: если указан,
-        /// создаётся AndroidVm (CLI-режим).
-        #[arg(long, value_enum)]
-        android_version: Option<CliAndroidVersion>,
-
-        #[arg(long)]
-        gapps: bool,
-        #[arg(long)]
-        microg: bool,
-        #[arg(long)]
-        libndk: bool,
-
-        #[arg(long, value_enum, default_value_t = CliRootMode::None)]
-        root: CliRootMode,
-
-        /// Путь к базовому образу Android (обязательно в Android-режиме).
-        #[arg(long)]
-        base_image_path: Option<String>,
-
-        #[arg(long, default_value_t = default_instances_root())]
-        instances_root: String,
-
-        /// Размер overlay-диска в GiB (не байтах — удобнее для CLI).
-        #[arg(long, default_value_t = 20)]
-        overlay_size_gib: u64,
-
-        /// Путь к шаблону OVMF_VARS (обязательно в Android-режиме).
+        /// OVMF VARS template path (required in CLI mode).
         #[arg(long)]
         ovmf_vars_template: Option<String>,
 
-        /// Каталог с бинарниками Magisk (обязательно при --root magisk).
-        /// Должен содержать как минимум `magisk` и `magiskinit` — результат
-        /// распаковки Magisk release ZIP.
+        // --- Linux-specific (required when --kind linux) ---
+
+        /// Path to installer ISO (required for --kind linux).
+        #[arg(long)]
+        iso_path: Option<String>,
+
+        /// Path to disk file (required for --kind linux).
+        #[arg(long)]
+        disk_path: Option<String>,
+
+        /// Disk size in GiB (optional, default: 40). Linux only.
+        #[arg(long)]
+        disk_size_gib: Option<u64>,
+
+        // --- Android-specific (required when --kind android) ---
+
+        /// Android version (required for --kind android).
+        #[arg(long, value_enum)]
+        android_version: Option<CliAndroidVersion>,
+
+        /// Path to Android base image (required for --kind android).
+        #[arg(long)]
+        base_image_path: Option<String>,
+
+        /// Include Google Apps.
+        #[arg(long)]
+        gapps: bool,
+
+        /// Include microG.
+        #[arg(long)]
+        microg: bool,
+
+        /// Include ARM->x86 translation (libhoudini/libndk).
+        #[arg(long)]
+        libndk: bool,
+
+        /// Root mode: none or magisk.
+        #[arg(long, value_enum, default_value_t = CliRootMode::None)]
+        root: CliRootMode,
+
+        /// Instance directory root (default: ~/.local/share/andler/instances).
+        #[arg(long, default_value_t = default_instances_root())]
+        instances_root: String,
+
+        /// Overlay disk size in GiB (default: 20). Android only.
+        #[arg(long, default_value_t = 20)]
+        overlay_size_gib: u64,
+
+        /// Path to Magisk binaries directory (required when --root magisk).
         #[arg(long)]
         magisk_dir: Option<PathBuf>,
     },
-    /// Запускает ранее созданный инстанс.
+    /// Start a previously created instance.
     Start { instance_id: String },
-    /// Останавливает инстанс.
+    /// Stop a running instance.
     Stop {
         instance_id: String,
-        /// Без этого флага останавливает не дожидаясь graceful shutdown —
-        /// см. HypervisorBackend::stop и текущие ограничения andler-qemu
-        /// (нет полноценного ACPI-сигнала, см. README andler-qemu).
+        /// Force stop without waiting for graceful shutdown.
         #[arg(long)]
         graceful: bool,
     },
-    /// Приостанавливает работающий инстанс.
+    /// Pause a running instance.
     Pause { instance_id: String },
-    /// Возобновляет приостановленный инстанс.
+    /// Resume a paused instance.
     Resume { instance_id: String },
-    /// Печатает текущий статус инстанса.
+    /// Print current instance status.
     Status { instance_id: String },
-    /// Печатает список всех зарегистрированных инстансов
-    /// (id/имя/состояние). См. `Daemon::list_instances` — состояние тут
-    /// грубое (запись демона, не live backend-статус); для точного
-    /// статуса конкретного инстанса используй `status`.
+    /// List all registered instances (id / name / state).
     List,
-    /// Удаляет запись инстанса. Требует, чтобы инстанс был остановлен
-    /// (`Created`/`Stopped`/`Error`) — см. `Daemon::remove_instance` за
-    /// тем, почему запущенный инстанс нужно сначала явно `stop`нуть.
-    /// По умолчанию не удаляет файлы инстанса с диска — добавь `--purge`,
-    /// чтобы дополнительно удалить disk.path и firmware.ovmf_vars_path
-    /// (никогда base_image/ovmf_code_path — общие файлы, см.
-    /// `Daemon::remove_instance`).
+    /// Remove an instance record. Instance must be stopped first.
+    /// Without --purge, only removes the record; with --purge, also
+    /// deletes disk and OVMF VARS files.
     Remove {
         instance_id: String,
-        /// Дополнительно удалить файлы инстанса с диска (диск, личная
-        /// копия OVMF_VARS). См. описание команды выше.
+        /// Also delete instance files from disk.
         #[arg(long)]
         purge: bool,
     },
-    /// Печатает полную конфигурацию инстанса (все 9 секций), не только
-    /// сводку из `list`. См. `Daemon::get_instance_config`.
+    /// Print full instance configuration (all sections).
     Config { instance_id: String },
-    /// Стримит stdout/stderr процесса гипервизора инстанса в реальном
-    /// времени (live-tail) — см. `Daemon::stream_instance_logs`. Не
-    /// показывает строки, написанные до подключения (нет истории, см.
-    /// документацию там же), и завершается сразу же без ошибки, если у
-    /// инстанса сейчас нет запущенного backend'а (ещё не стартовал, либо
-    /// уже остановлен) — в этом случае печатает предупреждение в stderr
-    /// и завершается с кодом 0, не как при невалидном запросе.
+    /// Stream stdout/stderr from the instance's hypervisor process.
     Logs { instance_id: String },
-    /// Стримит метрики ресурсов инстанса (CPU%, RAM, disk I/O, net I/O)
-    /// в реальном времени — см. `Daemon::stream_resource_metrics`.
-    /// Метрики обновляются каждую секунду из `/proc/<pid>/`. Завершается
-    /// сразу без ошибки, если инстанс не найден или не имеет запущенного
-    /// backend'а.
+    /// Stream resource metrics (CPU%, RAM, disk I/O, net I/O, GPU) in real time.
     Metrics { instance_id: String },
-    /// Клонирует инстанс (AndroidVm или LinuxVm) в новый, независимый
-    /// инстанс. `LinuxVm` поддерживается для режимов `linked`/
-    /// `full-standalone`; `shared-base` только для `AndroidVm` (см.
-    /// `Daemon::clone_instance`). Источник должен быть остановлен
-    /// (`Created`/`Stopped`/`Error`), как и для `remove`.
+    /// Clone an instance into a new independent instance.
     Clone {
         source_instance_id: String,
-        /// Имя нового инстанса.
+        /// Name for the new instance.
         #[arg(long)]
         name: String,
-        /// Каталог, под которым создаётся `<instances_root>/<новый_id>/`
-        /// для файлов клона — тот же смысл, что у `instances_root` в
-        /// Android-режиме `create` (см. там).
+        /// Instance directory root for clone files.
         #[arg(long, default_value_t = default_instances_root())]
         instances_root: String,
-        /// Режим клонирования диска — см. `CliCloneMode` за описанием
-        /// каждого варианта.
+        /// Clone mode: linked, full-standalone, or shared-base (Android only).
         #[arg(long, value_enum)]
         mode: CliCloneMode,
     },
-    /// Экспортирует диск инстанса (AndroidVm или LinuxVm) в
-    /// самостоятельный файл по указанному пути — для переноса между
-    /// хостами или бэкапа, не создаёт новый инстанс (в отличие от
-    /// `clone --mode full-standalone`, который создаёт). См.
-    /// `Daemon::export_instance_disk`.
+    /// Export instance disk to a standalone file for transfer/backup.
     Export {
         source_instance_id: String,
         dest_path: String,
     },
-    /// Управление снапшотами инстанса. Инстанс должен быть запущен
-    /// (`Running`/`Paused`) для создания снапшота, или остановлен
-    /// (`Stopped`/`Created`/`Error`) для восстановления/удаления.
+    /// Manage instance snapshots (create/restore/delete/list).
     Snapshot {
         instance_id: String,
         #[command(subcommand)]
@@ -194,48 +196,57 @@ enum Command {
     },
 }
 
-/// Действия со снапшотами.
+/// VM type selector for CLI mode.
+#[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum CliKind {
+    /// Linux VM — requires --iso-path, --disk-path, --ovmf-vars-template.
+    Linux,
+    /// Android VM — requires --android-version, --base-image-path, --ovmf-vars-template.
+    Android,
+}
+
+/// Snapshot subcommands.
 #[derive(Subcommand)]
 enum SnapshotAction {
-    /// Создать снапшот текущего состояния (требует Running/Paused).
+    /// Create a snapshot of the current state (requires Running/Paused).
     Create {
-        /// Имя снапшота (уникальное в пределах инстанса).
         #[arg(long)]
         tag: String,
-        /// Необязательное описание.
         #[arg(long)]
         description: Option<String>,
+        /// Per-operation timeout in seconds. Overrides instance default (30s).
+        #[arg(long)]
+        timeout: Option<u64>,
     },
-    /// Восстановить инстанс из снапшота (требует остановленный инстанс).
+    /// Restore from a snapshot (requires stopped instance).
     Restore {
-        /// Имя снапшота для восстановления.
         #[arg(long)]
         tag: String,
+        /// Per-operation timeout in seconds. Overrides instance default (30s).
+        #[arg(long)]
+        timeout: Option<u64>,
     },
-    /// Удалить снапшот (требует остановленный инстанс).
+    /// Delete a snapshot (requires stopped instance).
     Delete {
-        /// Имя снапшота для удаления.
         #[arg(long)]
         tag: String,
+        /// Per-operation timeout in seconds. Overrides instance default (30s).
+        #[arg(long)]
+        timeout: Option<u64>,
     },
-    /// Показать список снапшотов инстанса.
+    /// List all snapshots.
     List,
 }
 
-/// Соответствует `andler_core::CloneMode` (через `andler_rpc::proto::CloneMode`)
-/// один-к-одному — см. документацию `CloneMode` за полным обоснованием
-/// каждого варианта; здесь только краткое напоминание для `--help`.
+/// Clone modes — maps to `andler_core::CloneMode` one-to-one.
 #[derive(Clone, Copy, ValueEnum)]
 enum CliCloneMode {
-    /// Дёшево и быстро, но клон зависит от источника — `remove --purge`
-    /// источника откажет, пока клон жив.
+    /// Cheap, fast; clone depends on source.
     Linked,
-    /// Полностью самостоятельный файл, дороже по месту/времени — не
-    /// зависит ни от источника, ни от общего базового образа.
+    /// Fully standalone; independent but more expensive.
     #[value(name = "full-standalone")]
     FullStandalone,
-    /// Не зависит от источника физически, но остаётся тонким
-    /// относительно общего базового образа профиля.
+    /// Thin relative to shared profile base image.
     #[value(name = "shared-base")]
     SharedBase,
 }
@@ -303,7 +314,7 @@ fn backend_kind_name(kind: BackendKind) -> &'static str {
     }
 }
 
-/// Форматирует байты в человекочитаемый вид (KB/MB/GB).
+/// Format bytes to human-readable (KB/MB/GB).
 fn format_bytes(bytes: u64) -> String {
     const KB: u64 = 1024;
     const MB: u64 = 1024 * KB;
@@ -319,16 +330,12 @@ fn format_bytes(bytes: u64) -> String {
     }
 }
 
-/// Форматирует байты/сек в человекочитаемый вид.
+/// Format bytes/sec to human-readable.
 fn format_bytes_per_sec(bps: u64) -> String {
     format!("{}/s", format_bytes(bps))
 }
 
-/// Печатает `GetInstanceConfigResponse` человекочитаемо — не валидный
-/// TOML 1:1 (не претендует на формат `InstanceFile`/`andler create
-/// --file`), но достаточно структурированный, чтобы можно было вручную
-/// перенести значения в новый файл конфигурации, если нужно создать
-/// похожий инстанс.
+/// Print `GetInstanceConfigResponse` in a human-readable format.
 fn print_instance_config(config: GetInstanceConfigResponse) {
     println!("instance_id: {}", config.instance_id);
     println!("name: {}", config.name);
@@ -474,6 +481,80 @@ fn print_instance_config(config: GetInstanceConfigResponse) {
     }
 }
 
+/// Build `CreateInstanceRequest` from CLI flags (LinuxVm).
+fn build_linux_request(
+    name: String,
+    iso_path: String,
+    disk_path: String,
+    disk_size_gib: Option<u64>,
+    ovmf_vars_template: String,
+) -> CreateInstanceRequest {
+    let mut disk = andler_core::DiskConfig::reference_default(std::path::PathBuf::from(&disk_path));
+    if let Some(gib) = disk_size_gib {
+        disk.size_bytes = gib * andler_core::DiskConfig::GIB;
+    }
+
+    CreateInstanceRequest {
+        name,
+        iso_path,
+        cpu: Some(andler_core::CpuConfig::reference_default().into()),
+        memory: Some(andler_core::MemoryConfig::reference_default().into()),
+        disk: Some(disk.into()),
+        display: Some(andler_core::DisplayConfig::reference_default().into()),
+        gpu: Some(andler_core::GpuConfig::reference_default().into()),
+        network: Some(andler_core::NetworkConfig::reference_default().into()),
+        firmware: Some(
+            andler_core::FirmwareConfig::reference_default(std::path::PathBuf::from(
+                &ovmf_vars_template,
+            ))
+            .into(),
+        ),
+        audio: Some(andler_core::AudioConfig::reference_default().into()),
+        input: Some(andler_core::InputConfig::reference_default().into()),
+    }
+}
+
+/// Build `CreateAndroidInstanceRequest` from CLI flags.
+fn build_android_request(
+    name: String,
+    android_version: CliAndroidVersion,
+    base_image_path: String,
+    ovmf_vars_template: String,
+    gapps: bool,
+    microg: bool,
+    libndk: bool,
+    root: CliRootMode,
+    instances_root: String,
+    overlay_size_gib: u64,
+    magisk_dir: Option<PathBuf>,
+) -> CreateAndroidInstanceRequest {
+    let mut profile = ProtoAndroidProfile {
+        gapps,
+        microg,
+        libndk,
+        ..Default::default()
+    };
+    profile.set_android_version(android_version.into());
+    profile.set_root(root.into());
+
+    CreateAndroidInstanceRequest {
+        name,
+        profile: Some(profile),
+        base_image_path,
+        instances_root,
+        overlay_size_bytes: overlay_size_gib * 1024 * 1024 * 1024,
+        ovmf_vars_template,
+        magisk_dir: magisk_dir
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+    }
+}
+
+fn err_exit(msg: &str) -> ! {
+    eprintln!("{msg}");
+    std::process::exit(2);
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
@@ -487,87 +568,84 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     match cli.command {
         Command::Create {
             file,
+            kind,
             name,
+            ovmf_vars_template,
+            iso_path,
+            disk_path,
+            disk_size_gib,
             android_version,
+            base_image_path,
             gapps,
             microg,
             libndk,
             root,
-            base_image_path,
             instances_root,
             overlay_size_gib,
-            ovmf_vars_template,
             magisk_dir,
         } => {
             let has_file = file.is_some();
-            let has_android = android_version.is_some();
+            let has_kind = kind.is_some();
 
-            if has_file == has_android {
-                eprintln!(
-                    "уточните режим: либо --file (LinuxVm из TOML), либо --android-version (AndroidVm из CLI-флагов)"
-                );
-                std::process::exit(2);
+            if has_file && has_kind {
+                err_exit("error: --file and --kind are mutually exclusive");
+            }
+            if !has_file && !has_kind {
+                err_exit("error: specify either --file <path> or --kind linux|android");
             }
 
             if has_file {
+                // --- TOML mode: auto-detect Linux/Android ---
                 let file = file.unwrap();
                 let instance_file = InstanceFile::load(&file)?;
-                let response = client
-                    .create_instance(instance_file.into_request())
-                    .await?;
-                println!("{}", response.into_inner().instance_id);
-            } else {
-                let name = match name {
-                    Some(n) => n,
-                    None => {
-                        eprintln!("--name обязателен в Android-режиме (--android-version)");
-                        std::process::exit(2);
+                match instance_file.into_result() {
+                    InstanceFileResult::Linux(req) => {
+                        let response = client.create_instance(req).await?;
+                        println!("{}", response.into_inner().instance_id);
                     }
-                };
-                let base_image_path = match base_image_path {
-                    Some(p) => p,
-                    None => {
-                        eprintln!("--base-image-path обязателен в Android-режиме");
-                        std::process::exit(2);
+                    InstanceFileResult::Android(req) => {
+                        let response = client.create_android_instance(req).await?;
+                        println!("{}", response.into_inner().instance_id);
                     }
-                };
-                let ovmf_vars_template = match ovmf_vars_template {
-                    Some(t) => t,
-                    None => {
-                        eprintln!("--ovmf-vars-template обязателен в Android-режиме");
-                        std::process::exit(2);
-                    }
-                };
-                let android_version = android_version.unwrap();
-
-                if root == CliRootMode::Magisk && magisk_dir.is_none() {
-                    eprintln!("--magisk-dir обязателен при --root magisk");
-                    std::process::exit(2);
                 }
+            } else {
+                // --- CLI mode: validate required flags per kind ---
+                let kind = kind.unwrap();
+                let name = name.unwrap_or_else(|| err_exit("error: --name is required"));
+                let ovmf = ovmf_vars_template
+                    .unwrap_or_else(|| err_exit("error: --ovmf-vars-template is required"));
 
-                let mut profile = ProtoAndroidProfile {
-                    gapps,
-                    microg,
-                    libndk,
-                    ..Default::default()
-                };
-                profile.set_android_version(android_version.into());
-                profile.set_root(root.into());
+                match kind {
+                    CliKind::Linux => {
+                        let iso = iso_path
+                            .unwrap_or_else(|| err_exit("error: --iso-path is required for --kind linux"));
+                        let disk = disk_path
+                            .unwrap_or_else(|| err_exit("error: --disk-path is required for --kind linux"));
 
-                let response = client
-                    .create_android_instance(CreateAndroidInstanceRequest {
-                        name,
-                        profile: Some(profile),
-                        base_image_path,
-                        instances_root,
-                        overlay_size_bytes: overlay_size_gib * 1024 * 1024 * 1024,
-                        ovmf_vars_template,
-                        magisk_dir: magisk_dir
-                            .map(|p| p.to_string_lossy().into_owned())
-                            .unwrap_or_default(),
-                    })
-                    .await?;
-                println!("{}", response.into_inner().instance_id);
+                        let req = build_linux_request(name, iso, disk, disk_size_gib, ovmf);
+                        let response = client.create_instance(req).await?;
+                        println!("{}", response.into_inner().instance_id);
+                    }
+                    CliKind::Android => {
+                        let av = android_version.unwrap_or_else(|| {
+                            err_exit("error: --android-version is required for --kind android")
+                        });
+                        let bip = base_image_path.unwrap_or_else(|| {
+                            err_exit("error: --base-image-path is required for --kind android")
+                        });
+
+                        if root == CliRootMode::Magisk && magisk_dir.is_none() {
+                            err_exit("error: --magisk-dir is required when --root magisk");
+                        }
+
+                        let req = build_android_request(
+                            name, av, bip, ovmf, gapps, microg, libndk, root,
+                            instances_root, overlay_size_gib, magisk_dir,
+                        );
+                        let response = client.create_android_instance(req).await?;
+                        println!("{}", response.into_inner().instance_id);
+                    }
+                }
             }
         }
         Command::Start { instance_id } => {
@@ -651,28 +729,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .await?
                 .into_inner();
 
-            // Первое сообщение решает, печатать ли предупреждение о
-            // пустом потоке — нельзя просто проверить "пуст ли стрим" до
-            // первого `.message()`, у tonic-клиента нет такого метода
-            // отдельно от попытки прочитать. Если первый `.message()`
-            // сразу `None` — это и есть случай "нет запущенного
-            // backend'а", см. документацию `Daemon::stream_instance_logs`
-            // за тем, почему это не ошибка и не InvalidArgument.
             let mut got_any_line = false;
             while let Some(line) = stream.message().await? {
                 got_any_line = true;
                 let prefix = match line.source() {
                     LogStreamSource::Stdout => "stdout",
                     LogStreamSource::Stderr => "stderr",
-                    // `prost` всегда требует первый вариант enum'а как
-                    // значение 0 (см. комментарий у `enum LogStreamSource`
-                    // в `andler.proto`) — сервер никогда сознательно не
-                    // отправляет `Unspecified` (см. `convert.rs`:
-                    // `From<LogLine>` всегда вызывает `set_source` с
-                    // `Stdout`/`Stderr`), но компилятор не знает об этом
-                    // инварианте на уровне типов, поэтому ветка всё равно
-                    // обязательна. Печатаем как есть, не падаем — это не
-                    // повод обрывать стрим клиенту.
                     LogStreamSource::Unspecified => "unspecified",
                 };
                 println!("[{prefix}] {}", line.line);
@@ -775,12 +837,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             instance_id,
             action,
         } => match action {
-            SnapshotAction::Create { tag, description } => {
+            SnapshotAction::Create { tag, description, timeout } => {
                 let response = client
                     .create_snapshot(CreateSnapshotRequest {
                         instance_id,
                         tag: tag.clone(),
                         description: description.unwrap_or_default(),
+                        timeout_secs: timeout,
                     })
                     .await?
                     .into_inner();
@@ -789,20 +852,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     response.tag, response.snapshot_id, response.created_at
                 );
             }
-            SnapshotAction::Restore { tag } => {
+            SnapshotAction::Restore { tag, timeout } => {
                 client
                     .restore_snapshot(RestoreSnapshotRequest {
                         instance_id,
                         tag: tag.clone(),
+                        timeout_secs: timeout,
                     })
                     .await?;
                 println!("snapshot {} restored", tag);
             }
-            SnapshotAction::Delete { tag } => {
+            SnapshotAction::Delete { tag, timeout } => {
                 client
                     .delete_snapshot(DeleteSnapshotRequest {
                         instance_id,
                         tag: tag.clone(),
+                        timeout_secs: timeout,
                     })
                     .await?;
                 println!("snapshot {} deleted", tag);

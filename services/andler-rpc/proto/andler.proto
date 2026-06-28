@@ -510,6 +510,9 @@ message CreateSnapshotRequest {
     string instance_id = 1;
     string tag = 2;
     string description = 3;
+    // Per-operation timeout in seconds. If omitted, uses the instance's
+    // disk.snapshot_timeout_secs (default 30s).
+    optional uint64 timeout_secs = 4;
 }
 
 message CreateSnapshotResponse {
@@ -521,11 +524,17 @@ message CreateSnapshotResponse {
 message RestoreSnapshotRequest {
     string instance_id = 1;
     string tag = 2;
+    // Per-operation timeout in seconds. If omitted, uses the instance's
+    // disk.snapshot_timeout_secs (default 30s).
+    optional uint64 timeout_secs = 3;
 }
 
 message DeleteSnapshotRequest {
     string instance_id = 1;
     string tag = 2;
+    // Per-operation timeout in seconds. If omitted, uses the instance's
+    // disk.snapshot_timeout_secs (default 30s).
+    optional uint64 timeout_secs = 3;
 }
 
 message SnapshotEntry {

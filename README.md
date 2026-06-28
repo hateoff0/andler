@@ -8,7 +8,7 @@ A Rust daemon and thin CLI client for managing QEMU virtual machines on Linux/KV
 
 ### Instance Management
 
-- **Unified `create` command** — Linux VMs from TOML config, Android VMs from CLI flags
+- **Unified `create` command** — Linux/Android VMs from TOML (auto-detected) or CLI flags (`--kind linux|android`)
 - **Full lifecycle control** — start, stop, pause, resume, status
 - **Factory reset** — `remove --purge` deletes instance files (disk + OVMF vars)
 - **Clone & export** — three clone modes (linked, full-standalone, shared-base) for both Linux and Android VMs
@@ -54,10 +54,22 @@ cargo build --release
 
 Listens on `127.0.0.1:50051` by default. Override with `ANDLERD_ADDR` env var.
 
+### Create a Linux VM
+
+```bash
+./target/release/andler create \
+  --kind linux \
+  --name my-linux \
+  --iso-path /path/to/installer.iso \
+  --disk-path /path/to/disk.qcow2 \
+  --ovmf-vars-template /path/to/VARS.fd
+```
+
 ### Create an Android VM
 
 ```bash
 ./target/release/andler create \
+  --kind android \
   --name my-android \
   --android-version 13 \
   --base-image-path /path/to/base.qcow2 \
@@ -66,18 +78,14 @@ Listens on `127.0.0.1:50051` by default. Override with `ANDLERD_ADDR` env var.
   --magisk-dir /path/to/magisk/
 ```
 
-### Create a Linux VM from TOML
-
-```toml
-# instance.toml
-name = "my-linux-vm"
-iso_path = "/home/user/isos/cachyos.iso"
-disk_path = "/home/user/.local/share/andler/my-linux-vm/disk.qcow2"
-ovmf_vars_path = "/home/user/.local/share/andler/my-linux-vm/VARS.fd"
-```
+### Create from TOML (auto-detected type)
 
 ```bash
+# LinuxVm (no android_version field)
 ./target/release/andler create --file instance.toml
+
+# AndroidVm (has android_version field)
+./target/release/andler create --file android.toml
 ```
 
 ### Manage the Instance
@@ -109,7 +117,7 @@ ovmf_vars_path = "/home/user/.local/share/andler/my-linux-vm/VARS.fd"
 
 | Command | Description |
 |---------|-------------|
-| `create` | Create instance (TOML or CLI flags) |
+| `create` | Create instance (TOML auto-detect, or `--kind linux`/`--kind android` CLI flags) |
 | `start` | Start instance |
 | `stop` | Stop instance (`--graceful` for SIGTERM) |
 | `pause` | Pause running instance |

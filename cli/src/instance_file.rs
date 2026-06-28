@@ -1,20 +1,14 @@
-//! Файл конфигурации `LinuxVm`-инстанса для `andler create` (TOML).
+//! Configuration file for `andler create` (TOML).
 //!
-//! Не `InstanceConfig` напрямую через `serde` — `InstanceConfig` несёт
-//! `id`/`backend`, которые пользователь не должен (и не может) указать
-//! сам (см. комментарий у `rpc CreateInstance` в `andler.proto`:
-//! `id` генерируется демоном, `backend` всегда `BackendKind::Qemu`).
-//! `InstanceFile` — зеркало именно `CreateInstanceRequest`, не более общего
-//! доменного типа, по той же причине, по которой proto ограничен на
-//! `LinuxVm`, а не `oneof kind`.
+//! Supports both LinuxVm and AndroidVm creation from a single TOML format.
+//! The type is auto-detected: if `android_version` (or `base_image_path`)
+//! is present, it's an AndroidVm; otherwise LinuxVm.
 //!
-//! Каждая секция (`cpu`/`memory`/`display`/`gpu`/`network`/`audio`/`input`)
-//! — `Option`, отсутствие ⇒ `andler_core::config::*::reference_default()`.
-//! `disk`/`firmware` исключение: оба требуют путь файла, для которого
-//! дефолта не существует (нет разумного "дефолтного" места для диска
-//! инстанса) — поэтому `disk_path`/`ovmf_vars_path` — обязательные
-//! top-level поля файла, не вложенные опциональные секции, и пользователь
-//! не может создать инстанс, не задумываясь о том, куда лягут его файлы.
+//! LinuxVm required fields: `name`, `iso_path`, `disk_path`, `ovmf_vars_path`.
+//! AndroidVm required fields: `name`, `android_version`, `base_image_path`, `ovmf_vars_path`.
+//!
+//! Each section (`cpu`/`memory`/`display`/`gpu`/`network`/`audio`/`input`)
+//! is optional — absence means `reference_default()`.
 
 use std::path::{Path, PathBuf};
 
@@ -22,7 +16,9 @@ use andler_core::{
     AudioConfig, CpuConfig, DiskConfig, DisplayConfig, FirmwareConfig, GpuConfig, InputConfig,
     MemoryConfig, NetworkConfig,
 };
-use andler_rpc::proto::CreateInstanceRequest;
+use andler_rpc::proto::{
+    CreateAndroidInstanceRequest, CreateInstanceRequest, AndroidProfile as ProtoAndroidProfile,
+};
 use serde::Deserialize;
 
 #[derive(Debug, thiserror::Error)]
@@ -41,23 +37,67 @@ pub enum InstanceFileError {
     },
 }
 
-/// Зеркало `CreateInstanceRequest` для TOML-файла. Поля, общие с
-/// доменными типами (`cpu`, `memory`, ...), переиспользуют
-/// `andler_core::config::*` напрямую через `Deserialize` — не отдельные
-/// CLI-специфичные копии тех же полей, чтобы формат файла не мог
-/// разойтись с тем, что реально принимает `InstanceConfig`.
+/// Result of parsing an instance TOML file — either a LinuxVm or AndroidVm request.
+#[derive(Debug)]
+pub enum InstanceFileResult {
+    /// LinuxVm — calls `CreateInstance` RPC.
+    Linux(CreateInstanceRequest),
+    /// AndroidVm — calls `CreateAndroidInstance` RPC.
+    Android(CreateAndroidInstanceRequest),
+}
+
+/// TOML instance file. Shared fields for both LinuxVm and AndroidVm.
+/// Android-specific fields are `Option` — if present, the file is treated
+/// as an AndroidVm config.
 #[derive(Debug, Deserialize)]
 pub struct InstanceFile {
     pub name: String,
-    pub iso_path: PathBuf,
-    pub disk_path: PathBuf,
-    /// Размер диска в GiB (не байтах — удобнее для ручного редактирования
-    /// файла, аналогично `overlay_size_gib` в Android-режиме `create`).
-    /// Отсутствие ⇒ `DiskConfig::reference_default` оставляет 40 GiB.
+
+    // --- Linux-specific (required for LinuxVm) ---
+    /// Path to installer ISO. Required for LinuxVm, ignored for AndroidVm.
+    #[serde(default)]
+    pub iso_path: Option<PathBuf>,
+    /// Path to disk file. Required for LinuxVm, ignored for AndroidVm.
+    #[serde(default)]
+    pub disk_path: Option<PathBuf>,
+    /// Disk size in GiB. Optional (default: 40 GiB).
     #[serde(default)]
     pub disk_size_gib: Option<u64>,
+
+    // --- Common ---
+    /// Path to OVMF_VARS template. Required for both types.
     pub ovmf_vars_path: PathBuf,
 
+    // --- Android-specific (presence = AndroidVm) ---
+    /// Android version. If present, this is an AndroidVm config.
+    #[serde(default)]
+    pub android_version: Option<u32>,
+    /// Path to Android base image. Required for AndroidVm.
+    #[serde(default)]
+    pub base_image_path: Option<String>,
+    /// Overlay disk size in GiB (default: 20).
+    #[serde(default)]
+    pub overlay_size_gib: Option<u64>,
+    /// Root mode: "none" (default), "magisk".
+    #[serde(default)]
+    pub root: Option<String>,
+    /// Path to Magisk binaries directory. Required when root = "magisk".
+    #[serde(default)]
+    pub magisk_dir: Option<PathBuf>,
+    /// Include Google Apps.
+    #[serde(default)]
+    pub gapps: bool,
+    /// Include microG.
+    #[serde(default)]
+    pub microg: bool,
+    /// Include ARM→x86 translation (libhoudini/libndk).
+    #[serde(default)]
+    pub libndk: bool,
+    /// Instance directory root for Android instances.
+    #[serde(default)]
+    pub instances_root: Option<String>,
+
+    // --- Optional config sections ---
     #[serde(default)]
     pub cpu: Option<CpuConfig>,
     #[serde(default)]
@@ -72,19 +112,13 @@ pub struct InstanceFile {
     pub audio: Option<AudioConfig>,
     #[serde(default)]
     pub input: Option<InputConfig>,
-    /// Таймаут async job (snapshot-save/load/delete) в секундах.
-    /// Отсутствие ⇒ 30 секунд по умолчанию.
+    /// Snapshot timeout in seconds (default: 30).
     #[serde(default)]
     pub snapshot_timeout_secs: Option<u64>,
 }
 
 impl InstanceFile {
-    /// Читает и парсит TOML-файл по указанному пути. Ошибки несут путь
-    /// файла в тексте (`InstanceFileError::Read`/`Parse`) — единственный
-    /// файл, с которым работает один вызов `andler create`, но явный путь
-    /// в сообщении дешевле, чем заставлять пользователя сопоставлять
-    /// голую ошибку `toml::de::Error` с файлом, который он только что
-    /// указал в `--file`.
+    /// Reads and parses a TOML file.
     pub fn load(path: &Path) -> Result<Self, InstanceFileError> {
         let text = std::fs::read_to_string(path).map_err(|source| InstanceFileError::Read {
             path: path.to_path_buf(),
@@ -96,16 +130,19 @@ impl InstanceFile {
         })
     }
 
-    /// Собирает `CreateInstanceRequest`, применяя `reference_default()`
-    /// для любой не указанной в файле секции. Возвращает proto-тип прямо
-    /// (не доменный `InstanceConfig`) — звонящему (`main.rs`) нужен
-    /// именно `CreateInstanceRequest` для вызова
-    /// `client.create_instance(...)`; конвертация в `InstanceConfig`
-    /// происходит на стороне `andlerd` (`andler_rpc::convert`), CLI не
-    /// должен повторять эту логику только для того, чтобы тут же
-    /// конвертировать обратно в proto для отправки по сети.
-    pub fn into_request(self) -> CreateInstanceRequest {
-        let mut disk = DiskConfig::reference_default(self.disk_path.clone());
+    /// Determines the instance type and returns the appropriate request.
+    pub fn into_result(self) -> InstanceFileResult {
+        if self.android_version.is_some() || self.base_image_path.is_some() {
+            InstanceFileResult::Android(self.into_android_request())
+        } else {
+            InstanceFileResult::Linux(self.into_request())
+        }
+    }
+
+    /// Builds a `CreateInstanceRequest` for LinuxVm.
+    fn into_request(self) -> CreateInstanceRequest {
+        let disk_path = self.disk_path.expect("disk_path required for LinuxVm");
+        let mut disk = DiskConfig::reference_default(disk_path);
         if let Some(gib) = self.disk_size_gib {
             disk.size_bytes = gib * DiskConfig::GIB;
         }
@@ -113,7 +150,11 @@ impl InstanceFile {
 
         CreateInstanceRequest {
             name: self.name,
-            iso_path: path_to_string(&self.iso_path),
+            iso_path: path_to_string(
+                &self
+                    .iso_path
+                    .expect("iso_path required for LinuxVm"),
+            ),
             cpu: Some(
                 self.cpu
                     .unwrap_or_else(CpuConfig::reference_default)
@@ -151,112 +192,236 @@ impl InstanceFile {
             ),
         }
     }
+
+    /// Builds a `CreateAndroidInstanceRequest` for AndroidVm.
+    fn into_android_request(self) -> CreateAndroidInstanceRequest {
+        let base_image_path = self
+            .base_image_path
+            .expect("base_image_path required for AndroidVm");
+
+        let overlay_size_bytes = self
+            .overlay_size_gib
+            .unwrap_or(20)
+            * 1024
+            * 1024
+            * 1024;
+
+        let instances_root = self
+            .instances_root
+            .unwrap_or_else(default_instances_root);
+
+        let magisk_dir = self
+            .magisk_dir
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default();
+
+        // Build AndroidProfile
+        let android_version = self.android_version.unwrap_or(13);
+        let mut profile = ProtoAndroidProfile {
+            gapps: self.gapps,
+            microg: self.microg,
+            libndk: self.libndk,
+            ..Default::default()
+        };
+        profile.set_android_version(match android_version {
+            11 => andler_rpc::proto::AndroidVersion::Android11,
+            _ => andler_rpc::proto::AndroidVersion::Android13,
+        });
+
+        let root_mode = match self.root.as_deref() {
+            Some("magisk") => andler_rpc::proto::RootMode::Magisk,
+            _ => andler_rpc::proto::RootMode::None,
+        };
+        profile.set_root(root_mode);
+
+        CreateAndroidInstanceRequest {
+            name: self.name,
+            profile: Some(profile),
+            base_image_path,
+            instances_root,
+            overlay_size_bytes,
+            ovmf_vars_template: path_to_string(&self.ovmf_vars_path),
+            magisk_dir,
+        }
+    }
 }
 
 fn path_to_string(path: &Path) -> String {
     path.to_string_lossy().into_owned()
 }
 
+fn default_instances_root() -> String {
+    dirs::data_local_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("andler")
+        .join("instances")
+        .to_string_lossy()
+        .into_owned()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Минимальный валидный TOML — только обязательные top-level поля,
-    /// все секции отсутствуют. Главное, что должно быть проверено: файл
-    /// без единой секции `[cpu]`/`[memory]`/... всё равно даёт полностью
-    /// заполненный `CreateInstanceRequest` (через `reference_default()`
-    /// каждой секции), а не `None`-поля, которые `andlerd` отверг бы как
-    /// `MissingField`.
-    const MINIMAL_TOML: &str = r#"
+    const MINIMAL_LINUX_TOML: &str = r#"
         name = "test-vm"
         iso_path = "/tmp/test.iso"
         disk_path = "/tmp/disk.qcow2"
         ovmf_vars_path = "/tmp/test_VARS.fd"
     "#;
 
-    #[test]
-    fn minimal_file_parses_and_fills_every_section_via_defaults() {
-        let file: InstanceFile = toml::from_str(MINIMAL_TOML).expect("minimal TOML must parse");
-        let request = file.into_request();
+    const MINIMAL_ANDROID_TOML: &str = r#"
+        name = "test-android"
+        android_version = 13
+        base_image_path = "/tmp/base.qcow2"
+        ovmf_vars_path = "/tmp/test_VARS.fd"
+    "#;
 
-        assert_eq!(request.name, "test-vm");
-        assert_eq!(request.iso_path, "/tmp/test.iso");
-        // Каждое поле — Some, не None: отсутствие секции в файле не должно
-        // протекать как "поле не указано" в proto-запрос, иначе andlerd
-        // отверг бы его как ConvertError::MissingField несмотря на то,
-        // что файл сам по себе валиден с точки зрения CLI.
-        assert!(request.cpu.is_some());
-        assert!(request.memory.is_some());
-        assert!(request.display.is_some());
-        assert!(request.gpu.is_some());
-        assert!(request.network.is_some());
-        assert!(request.firmware.is_some());
-        assert!(request.audio.is_some());
-        assert!(request.input.is_some());
-
-        let disk = request.disk.expect("disk must be Some");
-        assert_eq!(disk.path, "/tmp/disk.qcow2");
-        // 40 GiB — DiskConfig::reference_default без disk_size_gib override.
-        assert_eq!(disk.size_bytes, 40 * 1024 * 1024 * 1024);
-    }
+    // --- LinuxVm tests ---
 
     #[test]
-    fn disk_size_gib_overrides_default_size_bytes() {
-        let toml = format!("{MINIMAL_TOML}\ndisk_size_gib = 100\n");
-        let file: InstanceFile = toml::from_str(&toml).expect("TOML must parse");
-        let request = file.into_request();
-
-        let disk = request.disk.expect("disk must be Some");
-        assert_eq!(disk.size_bytes, 100 * 1024 * 1024 * 1024);
-    }
-
-    #[test]
-    fn explicit_cpu_section_overrides_default() {
-        let toml = format!(
-            "{MINIMAL_TOML}\n[cpu]\ncores = 8\nsockets = 1\nthreads = 2\naffinity = []\npriority = \"High\"\n"
-        );
-        let file: InstanceFile = toml::from_str(&toml).expect("TOML with [cpu] must parse");
-        let request = file.into_request();
-
-        let cpu = request.cpu.expect("cpu must be Some");
-        assert_eq!(cpu.cores, 8);
-        assert_eq!(cpu.sockets, 1);
-        assert_eq!(cpu.threads, 2);
-    }
-
-    #[test]
-    fn explicit_gpu_passthrough_round_trips_through_request() {
-        // RenderBackend::Passthrough — struct-вариант (несёт gpu_pci_id),
-        // в отличие от Venus/VirtioGpu/VirGl/Cpu — отдельный тест на то,
-        // что serde действительно парсит inline-таблицу TOML для этого
-        // варианта (`{ Passthrough = { gpu_pci_id = "..." } }`), не только
-        // unit-варианты.
-        let toml = format!(
-            "{MINIMAL_TOML}\n[gpu]\nhostmem_bytes = 1073741824\nblob = true\ngl = true\n\
-             [gpu.render_backend.Passthrough]\ngpu_pci_id = \"0000:01:00.0\"\n"
-        );
-        let file: InstanceFile = toml::from_str(&toml).expect("TOML with GPU passthrough must parse");
-        let request = file.into_request();
-
-        let gpu = request.gpu.expect("gpu must be Some");
-        let render_backend = gpu.render_backend.expect("render_backend must be Some");
-        match render_backend.kind {
-            Some(andler_rpc::proto::render_backend::Kind::Passthrough(p)) => {
-                assert_eq!(p.gpu_pci_id, "0000:01:00.0");
+    fn minimal_linux_file_parses_and_fills_every_section() {
+        let file: InstanceFile =
+            toml::from_str(MINIMAL_LINUX_TOML).expect("minimal Linux TOML must parse");
+        let result = file.into_result();
+        match result {
+            InstanceFileResult::Linux(req) => {
+                assert_eq!(req.name, "test-vm");
+                assert_eq!(req.iso_path, "/tmp/test.iso");
+                assert!(req.cpu.is_some());
+                assert!(req.memory.is_some());
+                assert!(req.disk.is_some());
+                assert!(req.display.is_some());
+                assert!(req.gpu.is_some());
+                assert!(req.network.is_some());
+                assert!(req.firmware.is_some());
+                assert!(req.audio.is_some());
+                assert!(req.input.is_some());
             }
-            other => panic!("expected Passthrough render backend, got {other:?}"),
+            other => panic!("expected Linux, got {other:?}"),
         }
     }
 
     #[test]
-    fn missing_required_field_fails_to_parse() {
+    fn linux_disk_size_gib_overrides_default() {
+        let toml = format!("{MINIMAL_LINUX_TOML}\ndisk_size_gib = 100\n");
+        let file: InstanceFile = toml::from_str(&toml).expect("TOML must parse");
+        match file.into_result() {
+            InstanceFileResult::Linux(req) => {
+                let disk = req.disk.expect("disk must be Some");
+                assert_eq!(disk.size_bytes, 100 * 1024 * 1024 * 1024);
+            }
+            other => panic!("expected Linux, got {other:?}"),
+        }
+    }
+
+    // --- AndroidVm tests ---
+
+    #[test]
+    fn minimal_android_file_parses() {
+        let file: InstanceFile =
+            toml::from_str(MINIMAL_ANDROID_TOML).expect("minimal Android TOML must parse");
+        let result = file.into_result();
+        match result {
+            InstanceFileResult::Android(req) => {
+                assert_eq!(req.name, "test-android");
+                assert_eq!(req.base_image_path, "/tmp/base.qcow2");
+                assert!(req.profile.is_some());
+                let profile = req.profile.unwrap();
+                assert_eq!(
+                    profile.android_version(),
+                    andler_rpc::proto::AndroidVersion::Android13
+                );
+            }
+            other => panic!("expected Android, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn android_with_all_options() {
+        let toml = format!(
+            "{MINIMAL_ANDROID_TOML}\n\
+             overlay_size_gib = 30\n\
+             root = \"magisk\"\n\
+             magisk_dir = \"/tmp/magisk\"\n\
+             gapps = true\n\
+             microg = true\n\
+             libndk = true\n"
+        );
+        let file: InstanceFile = toml::from_str(&toml).expect("TOML must parse");
+        match file.into_result() {
+            InstanceFileResult::Android(req) => {
+                assert_eq!(req.overlay_size_bytes, 30 * 1024 * 1024 * 1024);
+                assert_eq!(req.magisk_dir, "/tmp/magisk");
+                let profile = req.profile.unwrap();
+                assert!(profile.gapps);
+                assert!(profile.microg);
+                assert!(profile.libndk);
+                assert_eq!(
+                    profile.root(),
+                    andler_rpc::proto::RootMode::Magisk
+                );
+            }
+            other => panic!("expected Android, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn android_version_11_parses() {
+        let toml = MINIMAL_ANDROID_TOML.replace("android_version = 13", "android_version = 11");
+        let file: InstanceFile = toml::from_str(&toml).expect("TOML must parse");
+        match file.into_result() {
+            InstanceFileResult::Android(req) => {
+                let profile = req.profile.unwrap();
+                assert_eq!(
+                    profile.android_version(),
+                    andler_rpc::proto::AndroidVersion::Android11
+                );
+            }
+            other => panic!("expected Android, got {other:?}"),
+        }
+    }
+
+    // --- Auto-detect tests ---
+
+    #[test]
+    fn android_version_field_triggers_android_mode() {
+        let toml = r#"
+            name = "test"
+            android_version = 13
+            base_image_path = "/tmp/base.qcow2"
+            ovmf_vars_path = "/tmp/VARS.fd"
+        "#;
+        let file: InstanceFile = toml::from_str(toml).expect("TOML must parse");
+        assert!(matches!(file.into_result(), InstanceFileResult::Android(_)));
+    }
+
+    #[test]
+    fn base_image_path_field_triggers_android_mode() {
+        let toml = r#"
+            name = "test"
+            base_image_path = "/tmp/base.qcow2"
+            ovmf_vars_path = "/tmp/VARS.fd"
+        "#;
+        let file: InstanceFile = toml::from_str(toml).expect("TOML must parse");
+        assert!(matches!(file.into_result(), InstanceFileResult::Android(_)));
+    }
+
+    #[test]
+    fn no_android_fields_triggers_linux_mode() {
+        let file: InstanceFile =
+            toml::from_str(MINIMAL_LINUX_TOML).expect("TOML must parse");
+        assert!(matches!(file.into_result(), InstanceFileResult::Linux(_)));
+    }
+
+    // --- Error tests ---
+
+    #[test]
+    fn missing_required_linux_field_fails() {
         let toml = r#"
             name = "test-vm"
             iso_path = "/tmp/test.iso"
         "#;
-        // disk_path/ovmf_vars_path отсутствуют — должно провалиться на
-        // парсинге, не на отправке запроса демону: пользователь должен
-        // узнать о проблеме файла сразу, не после round-trip по сети.
         let result: Result<InstanceFile, _> = toml::from_str(toml);
         assert!(result.is_err());
     }

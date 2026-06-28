@@ -837,6 +837,7 @@ impl Daemon {
         id: InstanceId,
         tag: String,
         description: Option<String>,
+        timeout_secs: Option<u64>,
     ) -> Result<SnapshotRecord, DaemonError> {
         let (backend, handle) = {
             let instances = self.instances.read().await;
@@ -866,7 +867,8 @@ impl Daemon {
             )
         };
 
-        backend.snapshot(&handle, &tag).await?;
+        let timeout = timeout_secs.map(std::time::Duration::from_secs);
+        backend.snapshot(&handle, &tag, timeout).await?;
 
         let record = SnapshotRecord {
             id: uuid::Uuid::new_v4(),
@@ -901,6 +903,7 @@ impl Daemon {
         &self,
         id: InstanceId,
         tag: String,
+        timeout_secs: Option<u64>,
     ) -> Result<(), DaemonError> {
         let (backend, handle) = {
             let instances = self.instances.read().await;
@@ -930,7 +933,8 @@ impl Daemon {
             )
         };
 
-        backend.snapshot_restore(&handle, &tag).await?;
+        let timeout = timeout_secs.map(std::time::Duration::from_secs);
+        backend.snapshot_restore(&handle, &tag, timeout).await?;
         Ok(())
     }
 
@@ -941,6 +945,7 @@ impl Daemon {
         &self,
         id: InstanceId,
         tag: String,
+        timeout_secs: Option<u64>,
     ) -> Result<(), DaemonError> {
         let (backend, handle) = {
             let instances = self.instances.read().await;
@@ -970,7 +975,8 @@ impl Daemon {
             )
         };
 
-        backend.snapshot_delete(&handle, &tag).await?;
+        let timeout = timeout_secs.map(std::time::Duration::from_secs);
+        backend.snapshot_delete(&handle, &tag, timeout).await?;
 
         if let Some(store) = &self.store {
             if let Err(e) = store.delete_snapshot(id, &tag).await {

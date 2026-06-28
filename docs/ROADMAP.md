@@ -15,6 +15,8 @@
 - [x] Factory reset with file cleanup (`remove --purge`)
 - [x] Clone/export for Linux and Android VMs (3 modes)
 - [x] Configurable per-instance snapshot timeout
+- [x] Snapshot timeout per-operation override (`--timeout` flag)
+- [x] Unified `create` command with `--kind linux`/`--kind android` + Android TOML
 - [x] Monorepo restructure (core/backends/services/daemon/cli)
 - [x] Comprehensive documentation in English
 
@@ -28,7 +30,6 @@
 
 - [ ] Network modes (Bridge/Isolated) in `andler-net`
 - [ ] Host-side bridge creation and nftables rules
-- [ ] Snapshot timeout per-operation override (not just per-instance)
 
 ### Medium-term
 

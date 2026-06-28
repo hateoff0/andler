@@ -6,18 +6,33 @@ All commands connect to the daemon via gRPC. Pass `--daemon-addr <url>` before t
 
 ### `create`
 
-Creates a new instance. Two modes:
+Creates a new instance. Three modes:
 
-**TOML mode** (`--file`): reads instance config from a TOML file. Creates a `LinuxVm`.
+**TOML mode** (`--file`): reads instance config from a TOML file. Creates a `LinuxVm` or `AndroidVm`, auto-detected by content (presence of `android_version` or `base_image_path` → AndroidVm).
 
 ```bash
+# LinuxVm from TOML
 andler create --file instance.toml
+
+# AndroidVm from TOML
+andler create --file android.toml
 ```
 
-**CLI mode** (`--android-version`): creates an AndroidVm with CLI flags.
+**CLI mode** (`--kind`): creates an instance via flags. `--kind` selects the VM type.
 
 ```bash
+# LinuxVm via CLI
 andler create \
+  --kind linux \
+  --name my-linux \
+  --iso-path /path/to/installer.iso \
+  --disk-path /path/to/disk.qcow2 \
+  --ovmf-vars-template /path/to/VARS.fd \
+  [--disk-size-gib 100]
+
+# AndroidVm via CLI
+andler create \
+  --kind android \
   --name my-android \
   --android-version 13 \
   --base-image-path /path/to/base.qcow2 \
@@ -32,17 +47,21 @@ andler create \
 
 | Flag | Required | Description |
 |------|----------|-------------|
-| `--file <path>` | Yes* | Path to TOML config file (*mutually exclusive with `--android-version`) |
-| `--name <name>` | Yes** | Instance name (**required in Android mode) |
-| `--android-version <ver>` | Yes** | Android version discriminator: `11` or `13` (**selects Android mode) |
-| `--base-image-path <path>` | Yes** | Path to Android base image qcow2 (**required in Android mode) |
-| `--ovmf-vars-template <path>` | Yes** | Path to OVMF_VARS template (**required in Android mode) |
+| `--file <path>` | Yes* | Path to TOML config file (*mutually exclusive with `--kind`) |
+| `--kind <type>` | Yes* | VM type: `linux` or `android` (*mutually exclusive with `--file`) |
+| `--name <name>` | Yes** | Instance name (**required in CLI mode) |
+| `--ovmf-vars-template <path>` | Yes** | Path to OVMF_VARS template (**required in CLI mode) |
+| `--iso-path <path>` | Yes*** | Path to installer ISO (***required for `--kind linux`) |
+| `--disk-path <path>` | Yes*** | Path to disk file (***required for `--kind linux`) |
+| `--disk-size-gib <size>` | No | Disk size in GiB (default: 40, Linux only) |
+| `--android-version <ver>` | Yes**** | Android version: `11` or `13` (****required for `--kind android`) |
+| `--base-image-path <path>` | Yes**** | Path to Android base image qcow2 (****required for `--kind android`) |
 | `--gapps` | No | Include Google Apps |
 | `--microg` | No | Include microG |
 | `--libndk` | No | Include ARM→x86 translation (libhoudini/libndk) |
 | `--root <mode>` | No | Root mode: `none` (default), `magisk` |
 | `--magisk-dir <path>` | No | Path to Magisk binaries (required when `--root magisk`) |
-| `--overlay-size-gib <size>` | No | Overlay disk size in GiB (default: 20) |
+| `--overlay-size-gib <size>` | No | Overlay disk size in GiB (default: 20, Android only) |
 | `--instances-root <path>` | No | Instance directory root (default: `~/.local/share/andler/instances`) |
 
 ### `start`
@@ -171,27 +190,29 @@ Streams resource metrics every second:
  11.20   1.24 GiB   44.1 MB/s  11.9 MB/s  1.1 MB/s   0.4 MB/s   513 MiB    68.2%
 ```
 
-GPU columns (VRAM, GPU%) only appear when AMD sysfs data is available.
+GPU columns (VRAM, GPU%) appear when AMD, NVIDIA, or Intel GPU data is available.
 
 ### `snapshot`
 
 ```bash
 # Create (requires Running/Paused instance)
-andler snapshot <instance-id> create --tag before-update --description "Pre-upgrade state"
+andler snapshot <instance-id> create --tag before-update --description "Pre-upgrade state" --timeout 120
 
 # Restore (requires Stopped instance)
-andler snapshot <instance-id> restore --tag before-update
+andler snapshot <instance-id> restore --tag before-update --timeout 10
 
 # Delete (requires Stopped instance)
-andler snapshot <instance-id> delete --tag before-update
+andler snapshot <instance-id> delete --tag before-update --timeout 5
 
 # List (any state)
 andler snapshot <instance-id> list
 ```
 
+The `--timeout` flag overrides the per-instance `snapshot_timeout_secs` for a single operation. If not specified, uses the instance default (30s).
+
 ## Instance TOML File
 
-### Minimal File
+### Linux VM (minimal)
 
 ```toml
 name = "my-linux-vm"
@@ -200,7 +221,36 @@ disk_path = "/home/user/.local/share/andler/my-linux-vm/disk.qcow2"
 ovmf_vars_path = "/home/user/.local/share/andler/my-linux-vm/VARS.fd"
 ```
 
-### Full Example
+### Android VM (minimal)
+
+```toml
+name = "my-android"
+android_version = 13
+base_image_path = "/path/to/base.qcow2"
+ovmf_vars_path = "/path/to/VARS.fd"
+```
+
+**Auto-detection**: if `android_version` or `base_image_path` is present, the TOML file is treated as an AndroidVm config. Otherwise, it's a LinuxVm.
+
+### Android VM (full example)
+
+```toml
+name = "my-android"
+android_version = 13
+base_image_path = "/path/to/base.qcow2"
+ovmf_vars_path = "/path/to/VARS.fd"
+
+# Optional
+overlay_size_gib = 20
+root = "magisk"
+magisk_dir = "/path/to/magisk/"
+gapps = false
+microg = false
+libndk = false
+instances_root = "/home/user/.local/share/andler/instances"
+```
+
+### Linux VM (full example)
 
 ```toml
 name = "my-linux-vm"

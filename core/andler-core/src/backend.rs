@@ -142,11 +142,18 @@ pub trait HypervisorBackend: Send + Sync {
 
     /// Создаёт снимок состояния инстанса с заданным тегом.
     ///
+    /// `timeout` — per-operation timeout override. If `None`, the backend
+    /// uses its own default (e.g. `DiskConfig::snapshot_timeout_secs`).
     /// Для QEMU: `snapshot-save` job API (async). Дефолтная реализация
     /// возвращает `BackendError::NotImplemented` — backend без snapshot-
     /// поддержки не обязан переопределять этот метод.
-    async fn snapshot(&self, handle: &BackendHandle, tag: &str) -> Result<(), BackendError> {
-        let _ = (handle, tag);
+    async fn snapshot(
+        &self,
+        handle: &BackendHandle,
+        tag: &str,
+        timeout: Option<std::time::Duration>,
+    ) -> Result<(), BackendError> {
+        let _ = (handle, tag, timeout);
         Err(BackendError::NotImplemented {
             backend: self.name(),
             operation: "snapshot",
@@ -155,10 +162,17 @@ pub trait HypervisorBackend: Send + Sync {
 
     /// Восстанавливает инстанс из снапшота по тегу.
     ///
+    /// `timeout` — per-operation timeout override. If `None`, the backend
+    /// uses its own default.
     /// Инстанс должен быть в терминальном состоянии (`Stopped`/`Created`/
     /// `Error`). После восстановления инстанс остаётся остановленным.
-    async fn snapshot_restore(&self, handle: &BackendHandle, tag: &str) -> Result<(), BackendError> {
-        let _ = (handle, tag);
+    async fn snapshot_restore(
+        &self,
+        handle: &BackendHandle,
+        tag: &str,
+        timeout: Option<std::time::Duration>,
+    ) -> Result<(), BackendError> {
+        let _ = (handle, tag, timeout);
         Err(BackendError::NotImplemented {
             backend: self.name(),
             operation: "snapshot_restore",
@@ -167,10 +181,17 @@ pub trait HypervisorBackend: Send + Sync {
 
     /// Удаляет снапшот по тегу.
     ///
+    /// `timeout` — per-operation timeout override. If `None`, the backend
+    /// uses its own default.
     /// Инстанс должен быть в терминальном состоянии. Нельзя удалить
     /// снапшот, на который ссылается текущее состояние диска.
-    async fn snapshot_delete(&self, handle: &BackendHandle, tag: &str) -> Result<(), BackendError> {
-        let _ = (handle, tag);
+    async fn snapshot_delete(
+        &self,
+        handle: &BackendHandle,
+        tag: &str,
+        timeout: Option<std::time::Duration>,
+    ) -> Result<(), BackendError> {
+        let _ = (handle, tag, timeout);
         Err(BackendError::NotImplemented {
             backend: self.name(),
             operation: "snapshot_delete",
