@@ -2,52 +2,348 @@
 
 **ANDLER** = *Android Linux Emulator & Runtime*
 
-Демон и CLI для управления QEMU-инстансами (Linux VM с 3D-ускорением и, в перспективе,
-готовые Android-инстансы на базе Waydroid) через единый gRPC API.
+A Rust daemon and thin CLI client for managing QEMU virtual machines on Linux/KVM. Supports Linux guests with 3D GPU acceleration and Android guests (via Waydroid) with offline Magisk root provisioning. Communicates over gRPC with real-time metrics streaming.
 
-## Статус
+## Features
 
-Раннняя стадия. Сейчас в работе: `andler-core` — доменная модель и абстракция backend'а
-гипервизора. GPU passthrough, GUI, guest-image и пресеты — позже (см. `docs/`).
+### Instance Management
 
-## Структура репозитория
+- **Unified `create` command** — Linux VMs from TOML config, Android VMs from CLI flags
+- **Full lifecycle control** — start, stop, pause, resume, status
+- **Factory reset** — `remove --purge` deletes instance files (disk + OVMF vars)
+- **Clone & export** — three clone modes (linked, full-standalone, shared-base) for both Linux and Android VMs
+- **Default XDG paths** — all data under `~/.local/share/andler/`, no root required
 
-| Путь | Что там |
-|---|---|
-| `crates/` | весь Rust-код: core, backend'ы (qemu/vmm), демон, CLI |
-| `frontend/` | Tauri GUI-клиент (пока не начат) |
-| `guest-image/` | пайплайны сборки гостевых образов с Waydroid (пока не начат) |
-| `presets/` | пресеты под игры/приложения — ANDLER-Proton (пока не начат) |
-| `packaging/` | сборка .deb/.rpm/AUR/AppImage (пока не начат) |
-| `docs/` | архитектурная документация всего проекта |
+### Snapshots
 
-Каждая папка внутри `crates/`, а также `frontend/`, `guest-image/`, `presets/`,
-`packaging/` содержит свой `README.md` с конкретикой: что лежит здесь, что не лежит,
-на какой раздел `docs/architecture/` ориентироваться.
+- **QEMU job-based snapshots** — async create/restore/delete/list via `snapshot-save`/`snapshot-load` job API
+- **Per-instance timeout** — configurable `snapshot_timeout_secs` (default 30s)
+- **SQLite metadata** — tag, description, creation time stored with `ON DELETE CASCADE`
 
-## Документация
+### Monitoring
 
-Общие планы и архитектурные решения — в [`docs/`](docs/). Начать стоит с
-[`docs/architecture/MASTER_PLAN.md`](docs/architecture/MASTER_PLAN.md) (обзор всего
-проекта) и [`docs/architecture/CORE_ARCHITECTURE_PLAN.md`](docs/architecture/CORE_ARCHITECTURE_PLAN.md)
-(то, что разрабатывается прямо сейчас).
+- **Real-time metrics** — CPU%, RAM, disk I/O, network I/O streamed every second from `/proc`
+- **GPU metrics (AMD)** — VRAM used/total and GPU load % from sysfs
+- **Live logs** — tail QEMU stdout/stderr in real-time
 
-## Сборка
+### Android Support
+
+- **Offline Magisk provisioning** — root access via `qemu-nbd` without booting the VM
+- **Android profiles** — Android 11/13, GApps, microG, libndk, root mode selection
+- **Overlay disks** — cheap per-instance overlays over shared base image
+
+### Hypervisor Abstraction
+
+- **`HypervisorBackend` trait** — pluggable backend architecture
+- **QEMU backend** — full implementation with QMP control, snapshot API, metrics
+- **Cloud Hypervisor stub** — reserved for future `rust-vmm` integration
+
+## Quick Start
+
+### Install
+
+```bash
+cargo build --release
+```
+
+### Start the Daemon
+
+```bash
+./target/release/andlerd
+```
+
+Listens on `127.0.0.1:50051` by default. Override with `ANDLERD_ADDR` env var.
+
+### Create an Android VM
+
+```bash
+./target/release/andler create \
+  --name my-android \
+  --android-version 13 \
+  --base-image-path /path/to/base.qcow2 \
+  --ovmf-vars-template /path/to/VARS.fd \
+  --root magisk \
+  --magisk-dir /path/to/magisk/
+```
+
+### Create a Linux VM from TOML
+
+```toml
+# instance.toml
+name = "my-linux-vm"
+iso_path = "/home/user/isos/cachyos.iso"
+disk_path = "/home/user/.local/share/andler/my-linux-vm/disk.qcow2"
+ovmf_vars_path = "/home/user/.local/share/andler/my-linux-vm/VARS.fd"
+```
+
+```bash
+./target/release/andler create --file instance.toml
+```
+
+### Manage the Instance
+
+```bash
+# Start
+./target/release/andler start <instance-id>
+
+# Stream metrics (CPU%, RAM, disk, net, GPU)
+./target/release/andler metrics <instance-id>
+
+# Tail logs
+./target/release/andler logs <instance-id>
+
+# Create a snapshot
+./target/release/andler snapshot <instance-id> create --tag before-update
+
+# Stop
+./target/release/andler stop <instance-id>
+
+# Restore from snapshot
+./target/release/andler snapshot <instance-id> restore --tag before-update
+
+# Remove with file cleanup
+./target/release/andler remove <instance-id> --purge
+```
+
+## CLI Commands
+
+| Command | Description |
+|---------|-------------|
+| `create` | Create instance (TOML or CLI flags) |
+| `start` | Start instance |
+| `stop` | Stop instance (`--graceful` for SIGTERM) |
+| `pause` | Pause running instance |
+| `resume` | Resume paused instance |
+| `status` | Print instance state |
+| `list` | List all instances |
+| `config` | Print full instance configuration |
+| `remove` | Remove instance (`--purge` to delete files) |
+| `clone` | Clone instance (linked/full-standalone/shared-base) |
+| `export` | Export disk as standalone file |
+| `logs` | Live-tail QEMU stdout/stderr |
+| `metrics` | Stream resource metrics (CPU/RAM/disk/net/GPU) |
+| `snapshot` | Snapshot CRUD (create/restore/delete/list) |
+
+See [`docs/API.md`](docs/API.md) for full command reference with all flags.
+
+## Configuration
+
+### TOML Instance File
+
+Minimal — only required fields:
+
+```toml
+name = "my-vm"
+iso_path = "/path/to/installer.iso"
+disk_path = "/path/to/disk.qcow2"
+ovmf_vars_path = "/path/to/VARS.fd"
+```
+
+Optional sections with defaults:
+
+```toml
+disk_size_gib = 40
+snapshot_timeout_secs = 30
+
+[cpu]
+cores = 4
+sockets = 1
+threads = 1
+priority = "Normal"
+
+[memory]
+size_bytes = 8589934592  # 8 GiB
+
+[gpu]
+render_backend = "Venus"
+hostmem_bytes = 4294967296  # 4 GiB
+blob = true
+gl = true
+
+[display]
+resolution = { width = 1920, height = 1080 }
+display_engine = "Sdl"
+
+[network]
+mode = "Nat"
+
+[audio]
+backend = "Pipewire"
+
+[input]
+tablet_mode = true
+clipboard_enabled = true
+```
+
+### Render Backends
+
+| Backend | Description | Status |
+|---------|-------------|--------|
+| `Venus` | Vulkan via Venus (virtio-gpu) | Implemented |
+| `VirtioGpu` | VirtIO-GPU without Venus | Implemented |
+| `VirGl` | VirGL (OpenGL over virtio-gpu) | Implemented |
+| `Cpu` | Software rendering (`-vga std`) | Implemented |
+| `Passthrough` | VFIO GPU passthrough | Not implemented |
+
+### Display Engines
+
+| Engine | Description |
+|--------|-------------|
+| `Sdl` | Direct SDL window |
+| `Spice` | SPICE server for remote GUI |
+| `Dbus` | D-Bus compositor integration |
+| `None` | Headless (`-display none`) |
+
+### Network Modes
+
+| Mode | Description |
+|------|-------------|
+| `Nat` | QEMU user-mode networking (default) |
+| `Bridge` | Connect to host bridge interface |
+| `Isolated` | No network connectivity |
+
+### Root Modes
+
+| Mode | Description |
+|------|-------------|
+| `None` | No root access |
+| `Magisk` | Offline Magisk provisioning (requires `--magisk-dir`) |
+| `KernelSu` | KernelSu (planned) |
+
+## Repository Structure
+
+```
+andler/
+├── core/                          Domain types, backend trait, config, FSM
+│   └── andler-core/               22 unit tests, no external dependencies
+│
+├── backends/                      Hypervisor implementations
+│   ├── andler-qemu/               QEMU backend (50 tests)
+│   │   ├── cmdline.rs             QEMU CLI argument builder
+│   │   ├── process.rs             Process spawn/terminate/logs
+│   │   ├── qmp.rs                 QMP protocol client
+│   │   ├── backend.rs             HypervisorBackend implementation
+│   │   ├── metrics.rs             /proc-based resource metrics
+│   │   └── gpu_metrics.rs         AMD sysfs GPU metrics
+│   └── andler-vmm/                Stub for future Cloud Hypervisor
+│
+├── services/                      Infrastructure services
+│   ├── andler-disk/               qemu-img wrapper + Magisk provisioning
+│   ├── andler-net/                Stub for networking
+│   ├── andler-store/              SQLite state persistence
+│   └── andler-rpc/                gRPC protocol + conversions
+│
+├── daemon/                        Background service (90+ tests)
+│   └── src/
+│       ├── daemon.rs              Core orchestration logic
+│       ├── service.rs             gRPC service wrapper
+│       └── grpc_roundtrip_test.rs Integration tests
+│
+├── cli/                           Command-line client
+│   └── src/
+│       ├── main.rs                CLI commands
+│       └── instance_file.rs       TOML parser
+│
+├── docker/                        Build & test infrastructure
+├── docs/                          Project documentation
+└── scripts/                       Development helpers
+```
+
+## Default Paths
+
+All data under `~/.local/share/andler/` (XDG data directory):
+
+```
+~/.local/share/andler/
+├── state.db                    SQLite state store
+├── instances/
+│   └── <uuid>/
+│       ├── instance.toml       Instance configuration
+│       ├── disk.qcow2          Instance disk (or overlay)
+│       └── VARS.fd             Per-instance OVMF vars copy
+└── images/                     Base images (future)
+```
+
+## Building
+
+### Local
 
 ```bash
 cargo build --workspace
 cargo test --workspace
 ```
 
-Требуется `/dev/kvm` (пользователь в группе `kvm`) для интеграционных тестов с реальным
-QEMU; юнит-тесты `andler-core` от этого не зависят.
+Requires `/dev/kvm` (user in `kvm` group) for integration tests. Unit tests do not depend on KVM.
 
-### В Docker (рекомендуется для воспроизводимости)
+### Docker
 
 ```bash
+# Unit tests (no KVM required)
+docker compose -f docker/docker-compose.yml build --no-cache unit-test
 docker compose -f docker/docker-compose.yml run --rm unit-test
-docker compose -f docker/docker-compose.yml run --rm integration-test  # требует /dev/kvm
+
+# E2E smoke test (requires KVM)
+docker compose -f docker/docker-compose.yml build --no-cache e2e
+docker compose -f docker/docker-compose.yml run --rm e2e
 ```
 
-Подробности и обоснование разделения таргетов — [`docker/README.md`](docker/README.md)
-и [`docs/adr/0002-docker-build-and-test-targets.md`](docs/adr/0002-docker-build-and-test-targets.md).
+## Documentation
+
+| Document | Description |
+|----------|-------------|
+| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | System design, crate responsibilities, data flow, FSM diagram |
+| [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md) | Build, test, and development workflows |
+| [`docs/API.md`](docs/API.md) | CLI commands, TOML config format, gRPC protocol |
+| [`docs/CHANGELOG.md`](docs/CHANGELOG.md) | Feature history by version |
+| [`docs/ROADMAP.md`](docs/ROADMAP.md) | Short/medium/long-term development plans |
+
+### Crate Documentation
+
+Each crate has its own README with detailed API reference:
+
+- [`core/andler-core/README.md`](core/andler-core/README.md) — Domain types, 27 public types, 22 tests
+- [`backends/andler-qemu/README.md`](backends/andler-qemu/README.md) — QEMU backend, 50 tests
+- [`backends/andler-vmm/README.md`](backends/andler-vmm/README.md) — Cloud Hypervisor stub
+- [`services/andler-disk/README.md`](services/andler-disk/README.md) — Disk ops + Magisk provisioning
+- [`services/andler-net/README.md`](services/andler-net/README.md) — Networking stub
+- [`services/andler-store/README.md`](services/andler-store/README.md) — SQLite persistence
+- [`services/andler-rpc/README.md`](services/andler-rpc/README.md) — gRPC protocol + conversions
+- [`daemon/README.md`](daemon/README.md) — Daemon orchestration, 90+ tests
+- [`cli/README.md`](cli/README.md) — CLI commands + TOML parser
+
+## Metrics
+
+Real-time resource monitoring from host `/proc` (no QMP required):
+
+```
+  CPU%   RAM        Disk R     Disk W     Net RX     Net TX     VRAM       GPU%
+ 12.34   1.23 GiB   45.6 MB/s  12.3 MB/s  1.2 MB/s   0.5 MB/s   512 MiB    67.8%
+```
+
+| Metric | Source | Calculation |
+|--------|--------|-------------|
+| CPU% | `/proc/<pid>/stat` | Delta-based utime+stime / uptime / num_cpus |
+| RAM | `/proc/<pid>/status` | VmRSS direct read |
+| Disk I/O | `/sys/block/<dev>/stat` | Delta-based bytes/sec |
+| Network I/O | `/proc/<net/dev>` | Delta-based bytes/sec |
+| VRAM | AMD sysfs | `mem_info_vram_used/total` |
+| GPU Load | AMD sysfs | `gpu_busy_percent` |
+
+Polling interval: 1 second. GPU metrics: AMD only (other vendors return None).
+
+## Requirements
+
+- Linux with KVM (`/dev/kvm`)
+- QEMU with OVMF/UEFI support
+- Rust stable (via rustup)
+- Docker + Docker Compose (for reproducible builds)
+- `nbd` kernel module + `qemu-nbd` (for Magisk provisioning)
+- `protobuf-compiler` (`protoc`) for gRPC code generation
+
+## Roadmap
+
+See [`docs/ROADMAP.md`](docs/ROADMAP.md) for full roadmap with short/medium/long-term plans.
+
+## License
+
+GPL-3.0

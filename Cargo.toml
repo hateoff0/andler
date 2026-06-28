@@ -1,15 +1,15 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/andler-core",
-    "crates/andler-qemu",
-    "crates/andler-vmm",
-    "crates/andler-disk",
-    "crates/andler-net",
-    "crates/andler-store",
-    "crates/andler-rpc",
-    "crates/andler-daemon",
-    "crates/andler-cli",
+    "core/andler-core",
+    "backends/andler-qemu",
+    "backends/andler-vmm",
+    "services/andler-disk",
+    "services/andler-net",
+    "services/andler-store",
+    "services/andler-rpc",
+    "daemon",
+    "cli",
 ]
 
 [workspace.package]

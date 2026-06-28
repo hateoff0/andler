@@ -52,31 +52,35 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # проектов вроде andlerd/andler-cli — фиксирует точные версии зависимостей
 # для воспроизводимой сборки) и копируется явно, как и Cargo.toml.
 COPY Cargo.toml Cargo.lock ./
-COPY crates/andler-core/Cargo.toml crates/andler-core/Cargo.toml
-COPY crates/andler-qemu/Cargo.toml crates/andler-qemu/Cargo.toml
-COPY crates/andler-vmm/Cargo.toml crates/andler-vmm/Cargo.toml
-COPY crates/andler-disk/Cargo.toml crates/andler-disk/Cargo.toml
-COPY crates/andler-net/Cargo.toml crates/andler-net/Cargo.toml
-COPY crates/andler-store/Cargo.toml crates/andler-store/Cargo.toml
-COPY crates/andler-rpc/Cargo.toml crates/andler-rpc/Cargo.toml
-COPY crates/andler-daemon/Cargo.toml crates/andler-daemon/Cargo.toml
-COPY crates/andler-cli/Cargo.toml crates/andler-cli/Cargo.toml
+COPY core/andler-core/Cargo.toml core/andler-core/Cargo.toml
+COPY backends/andler-qemu/Cargo.toml backends/andler-qemu/Cargo.toml
+COPY backends/andler-vmm/Cargo.toml backends/andler-vmm/Cargo.toml
+COPY services/andler-disk/Cargo.toml services/andler-disk/Cargo.toml
+COPY services/andler-net/Cargo.toml services/andler-net/Cargo.toml
+COPY services/andler-store/Cargo.toml services/andler-store/Cargo.toml
+COPY services/andler-rpc/Cargo.toml services/andler-rpc/Cargo.toml
+COPY daemon/Cargo.toml daemon/Cargo.toml
+COPY cli/Cargo.toml cli/Cargo.toml
 
 # Фиктивные src/main.rs|lib.rs, чтобы `cargo fetch` мог разрезолвить граф
 # зависимостей без реального кода — реальный код копируется ниже и
 # инвалидирует только компиляцию, а не повторное скачивание crates.io.
 RUN for crate in andler-core andler-qemu andler-vmm andler-disk andler-net andler-store andler-rpc; do \
-        mkdir -p crates/$crate/src && echo "// placeholder" > crates/$crate/src/lib.rs; \
+        dir="core/$crate"; [ -d "backends/$crate" ] && dir="backends/$crate"; [ -d "services/$crate" ] && dir="services/$crate"; \
+        mkdir -p "$dir/src" && echo "// placeholder" > "$dir/src/lib.rs"; \
     done && \
-    for crate in andler-daemon andler-cli; do \
-        mkdir -p crates/$crate/src && echo "fn main() {}" > crates/$crate/src/main.rs; \
-    done
+    mkdir -p daemon/src && echo "fn main() {}" > daemon/src/main.rs && \
+    mkdir -p cli/src && echo "fn main() {}" > cli/src/main.rs
 
 RUN cargo fetch
 
 # Теперь реальный код — этот слой инвалидируется при изменении исходников,
 # но не дёргает сеть повторно (зависимости уже в локальном registry-кэше).
-COPY crates/ crates/
+COPY core/ core/
+COPY backends/ backends/
+COPY services/ services/
+COPY daemon/ daemon/
+COPY cli/ cli/
 
 # --bins обязателен наравне с --tests: cargo build НЕ объединяет дефолтный
 # набор целей (lib+bins) с явно указанным --tests — указание любого
@@ -114,7 +118,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # (andler-disk qcow2/overlay — реальное создание файлов). Оба запускаются
 # здесь явно через --ignored, так как оба недоступны в unit-test (там нет
 # ни /dev/kvm, ни qemu-utils). Конвенция тегирования — см. README
-# crates/andler-qemu и crates/andler-disk.
+# backends/andler-qemu и services/andler-disk.
 CMD ["cargo", "test", "--workspace", "--", "--ignored"]
 
 # ---------------------------------------------------------------------------

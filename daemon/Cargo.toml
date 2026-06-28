@@ -1,0 +1,31 @@
+[package]
+name = "daemon"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "andlerd"
+path = "src/main.rs"
+
+[dependencies]
+andler-core = { path = "../core/andler-core" }
+andler-qemu = { path = "../backends/andler-qemu" }
+andler-disk = { path = "../services/andler-disk" }
+andler-rpc = { path = "../services/andler-rpc" }
+andler-store = { path = "../services/andler-store" }
+tonic = { workspace = true }
+tokio = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+futures-core = "0.3"
+futures-util = "0.3"
+async-stream = "0.3"
+dirs = { workspace = true }
+uuid = { version = "1", features = ["v4"] }
+chrono = { version = "0.4", features = ["serde"] }
+
+[dev-dependencies]
+tokio-stream = { version = "0.1", features = ["net"] }
+uuid = { version = "1" }

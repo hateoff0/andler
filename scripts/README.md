@@ -1,8 +1,7 @@
 # scripts
 
-Вспомогательные dev-скрипты, не часть продукта.
+Helper development scripts, not part of the product.
 
-`start.sh` — референсный рабочий скрипт запуска QEMU с 3D-ускорением через
-Venus. Это источник истины для `crates/andler-qemu/src/cmdline.rs`: любое
-расхождение между тем, что генерирует `cmdline.rs`, и этим скриптом — повод
-проверить, что не сломалось при переносе в Rust.
+## `start.sh`
+
+Reference QEMU launch script with 3D acceleration via Venus. This is the source of truth for `backends/andler-qemu/src/cmdline.rs` — any discrepancy between what `cmdline.rs` generates and this script should be investigated as a potential regression.
