@@ -19,7 +19,7 @@ use std::sync::Arc;
 use andler_core::{
     AndroidProfile, BackendError, BackendHandle, BackendKind, BackendStatus, CloneMode,
     HypervisorBackend, InstanceConfig, InstanceEvent, InstanceId, InstanceKind, InstanceState,
-    LogLine,
+    LogLine, ResourceMetrics,
 };
 use andler_qemu::QemuBackend;
 use andler_store::{Store, StoreError};
@@ -1268,6 +1268,36 @@ impl Daemon {
             let mut inner = backend.log_stream(&handle);
             while let Some(line) = inner.next().await {
                 yield line;
+            }
+        }))
+    }
+
+    /// Стрим метрик ресурсов для инстанса — аналог `stream_instance_logs`
+    /// по паттерну: сервер-стриминг через `broadcast`-канал процесса.
+    ///
+    /// Если инстанс не найден, не имеет запущенного backend, или backend
+    /// не реализует `metrics_stream` — возвращает пустой поток (не ошибку),
+    /// как и `stream_instance_logs` (см. документацию
+    /// `HypervisorBackend::metrics_stream` за контрактом).
+    pub async fn stream_resource_metrics(
+        &self,
+        id: InstanceId,
+    ) -> Result<BoxStream<'static, ResourceMetrics>, DaemonError> {
+        let instances = self.instances.read().await;
+        let record = instances
+            .get(&id)
+            .ok_or(DaemonError::InstanceNotFound(id))?;
+
+        let handle = match record.handle.clone() {
+            Some(handle) => handle,
+            None => return Ok(Box::pin(futures_util::stream::empty())),
+        };
+        let backend = self.backend_for(record.config.backend)?.clone();
+
+        Ok(Box::pin(async_stream::stream! {
+            let mut inner = backend.metrics_stream(&handle);
+            while let Some(metrics) = inner.next().await {
+                yield metrics;
             }
         }))
     }

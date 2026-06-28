@@ -7,9 +7,8 @@
 //! §2.1).
 //!
 //! `spawn`/`stop`/`pause`/`resume`/`status`/`snapshot`/`snapshot_restore`/
-//! `snapshot_delete`/`snapshot_list`/`log_stream` реализованы полноценно.
-//! `metrics_stream` остаётся пустым потоком (требует QMP polling нескольких
-//! разных команд, см. §6.1.1 архитектурного плана).
+//! `snapshot_delete`/`snapshot_list`/`log_stream`/`metrics_stream`
+//! реализованы полноценно.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -436,12 +435,31 @@ impl HypervisorBackend for QemuBackend {
             .collect())
     }
 
-    fn metrics_stream(&self, _handle: &BackendHandle) -> BoxStream<'_, ResourceMetrics> {
-        // Требует QMP polling (query-balloon/query-blockstats/...), см.
-        // §6.1.1 архитектурного плана. Контракт для metrics_stream без
-        // реализации (см. andler_core::backend) — немедленно завершающийся
-        // поток, не паника: сигнатура метода не позволяет вернуть Result.
-        Box::pin(futures_util::stream::empty())
+    fn metrics_stream(&self, handle: &BackendHandle) -> BoxStream<'_, ResourceMetrics> {
+        // Полная реализация: подписывается на broadcast-канал метрик,
+        // который публикуется фоновой задачей metrics::spawn_metrics_poller
+        // (запущена при spawn в process.rs). Паттерн идентичен log_stream
+        // (см. там за обоснованием try_lock / обработки Lagged).
+        let receiver = match self.instances.try_lock() {
+            Ok(mut instances) => {
+                instances.get_mut(handle).map(|i| i.process.subscribe_metrics())
+            }
+            Err(_would_block) => None,
+        };
+
+        match receiver {
+            Some(receiver) => Box::pin(
+                tokio_stream::wrappers::BroadcastStream::new(receiver).filter_map(|item| async {
+                    match item {
+                        Ok(metrics) => Some(metrics),
+                        Err(tokio_stream::wrappers::errors::BroadcastStreamRecvError::Lagged(
+                            _,
+                        )) => None,
+                    }
+                }),
+            ),
+            None => Box::pin(futures_util::stream::empty()),
+        }
     }
 
     fn log_stream(&self, handle: &BackendHandle) -> BoxStream<'_, LogLine> {

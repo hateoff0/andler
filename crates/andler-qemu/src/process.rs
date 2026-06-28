@@ -16,7 +16,7 @@ use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::Duration;
 
-use andler_core::{LogLine, LogStreamSource};
+use andler_core::{LogLine, LogStreamSource, ResourceMetrics};
 use thiserror::Error;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
@@ -49,6 +49,13 @@ const GRACEFUL_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
 /// предназначено как история для уже отключённого клиента (live-tail —
 /// явное решение первой версии, см. `andler_core::HypervisorBackend::log_stream`).
 const LOG_CHANNEL_CAPACITY: usize = 256;
+
+/// Емкость `broadcast`-канала метрик ресурсов (см.
+/// `QemuProcess::metrics_sender`/`subscribe_metrics`).
+/// Метрики публикуются раз в ~1 секунду (см.
+/// `andler_qemu::metrics::DEFAULT_POLL_INTERVAL`), 64 выборки — ~1 минута
+/// буфера; нового подписчика не должны терять свежие данные.
+const METRICS_CHANNEL_CAPACITY: usize = 64;
 
 #[derive(Debug, Error)]
 pub enum ProcessError {
@@ -94,6 +101,16 @@ pub struct QemuProcess {
     /// `QemuProcess` (см. документацию `backend::RunningInstance`, где
     /// живёт сам `QemuProcess`).
     log_sender: broadcast::Sender<LogLine>,
+    /// Канал метрик ресурсов — публикуется раз в секунду фоновой задачей
+    /// `spawn_metrics_poller` (см. `andler_qemu::metrics`). Аналогичен
+    /// `log_sender` по паттерну: несколько gRPC-клиентов подписываются
+    /// одновременно, broadcast обеспечивает fan-out.
+    metrics_sender: broadcast::Sender<ResourceMetrics>,
+    /// Хэндл фоновой задачи поллинга метрик — хранится здесь, чтобы
+    /// `JoinHandle` не был drop'нут ( drop отменяет задачу в tokio); сам
+    /// `.await` на нём никогда не вызывается — `QemuProcess` живёт столько
+    /// же, сколько и поллер.
+    _metrics_task: tokio::task::JoinHandle<()>,
 }
 
 impl QemuProcess {
@@ -164,11 +181,25 @@ impl QemuProcess {
             ));
         }
 
+        // Фоновая задача поллинга метрик из /proc/<pid>/ — аналогична
+        // drain_to_tracing по жизненному циклу: живёт столько же, сколько
+        // и QemuProcess, автоматически завершается при его завершении.
+        let (metrics_sender, _) = broadcast::channel(METRICS_CHANNEL_CAPACITY);
+        let ticks_per_sec = crate::metrics::ticks_per_second();
+        let metrics_task = crate::metrics::spawn_metrics_poller(
+            pid,
+            ticks_per_sec,
+            crate::metrics::DEFAULT_POLL_INTERVAL,
+            metrics_sender.clone(),
+        );
+
         Ok(QemuProcess {
             child,
             pid,
             qmp_socket_path,
             log_sender,
+            metrics_sender,
+            _metrics_task: metrics_task,
         })
     }
 
@@ -223,6 +254,16 @@ impl QemuProcess {
     /// сознательный выбор первой версии, не упущение.
     pub fn subscribe_logs(&self) -> broadcast::Receiver<LogLine> {
         self.log_sender.subscribe()
+    }
+
+    /// Подписывает нового слушателя на live-tail метрик ресурсов этого
+    /// процесса (см. документацию `metrics_sender`).
+    ///
+    /// Новый подписчик получает только выборки, опубликованные *после*
+    /// вызова `subscribe_metrics` — `broadcast::Sender::subscribe()` не
+    /// отдаёт историю (аналогично `subscribe_logs`).
+    pub fn subscribe_metrics(&self) -> broadcast::Receiver<ResourceMetrics> {
+        self.metrics_sender.subscribe()
     }
 
     pub fn pid(&self) -> u32 {

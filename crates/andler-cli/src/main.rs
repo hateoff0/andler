@@ -41,37 +41,60 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Создаёт LinuxVm-инстанс из TOML-файла конфигурации — см.
-    /// `andler-cli/src/instance_file.rs` за полем `InstanceFile` и
+    /// Создаёт новый инстанс. Два режима:
+    ///
+    /// **TOML-режим** (`--file`): создаёт LinuxVm из TOML-файла конфигурации
+    /// — см. `andler-cli/src/instance_file.rs` за полем `InstanceFile` и
     /// README этого крейта за примером файла.
+    ///
+    /// Пример: `andler create --file instance.toml`
+    ///
+    /// **CLI-режим** (`--android-version`): создаёт AndroidVm через
+    /// CLI-флаги. Обязательны `--name`, `--base-image-path`,
+    /// `--ovmf-vars-template`.
+    ///
+    /// Пример: `andler create --name my-android --android-version 13 --base-image-path /path/to/base.qcow2 --ovmf-vars-template /path/to/VARS.fd`
     Create {
-        /// Путь к TOML-файлу, описывающему инстанс (см. `InstanceFile`).
+        /// Путь к TOML-файлу (TOML-режим). Укажите либо `--file`,
+        /// либо `--android-version` — оба одновременно нельзя.
         #[arg(long)]
-        file: PathBuf,
-    },
-    /// Резолвит AndroidProfile в инстанс и регистрирует его в andlerd.
-    CreateAndroid {
+        file: Option<PathBuf>,
+
+        // --- Android-режим (CLI-флаги) ---
+
+        /// Имя инстанса (обязательно в Android-режиме).
         #[arg(long)]
-        name: String,
-        #[arg(long, value_enum, default_value_t = CliAndroidVersion::Android13)]
-        android_version: CliAndroidVersion,
+        name: Option<String>,
+
+        /// Версия Android — дискриминатор режима: если указан,
+        /// создаётся AndroidVm (CLI-режим).
+        #[arg(long, value_enum)]
+        android_version: Option<CliAndroidVersion>,
+
         #[arg(long)]
         gapps: bool,
         #[arg(long)]
         microg: bool,
         #[arg(long)]
         libndk: bool,
+
         #[arg(long, value_enum, default_value_t = CliRootMode::None)]
         root: CliRootMode,
+
+        /// Путь к базовому образу Android (обязательно в Android-режиме).
         #[arg(long)]
-        base_image_path: String,
+        base_image_path: Option<String>,
+
         #[arg(long, default_value_t = default_instances_root())]
         instances_root: String,
+
         /// Размер overlay-диска в GiB (не байтах — удобнее для CLI).
         #[arg(long, default_value_t = 20)]
         overlay_size_gib: u64,
+
+        /// Путь к шаблону OVMF_VARS (обязательно в Android-режиме).
         #[arg(long)]
-        ovmf_vars_template: String,
+        ovmf_vars_template: Option<String>,
     },
     /// Запускает ранее созданный инстанс.
     Start { instance_id: String },
@@ -120,6 +143,12 @@ enum Command {
     /// уже остановлен) — в этом случае печатает предупреждение в stderr
     /// и завершается с кодом 0, не как при невалидном запросе.
     Logs { instance_id: String },
+    /// Стримит метрики ресурсов инстанса (CPU%, RAM, disk I/O, net I/O)
+    /// в реальном времени — см. `Daemon::stream_resource_metrics`.
+    /// Метрики обновляются каждую секунду из `/proc/<pid>/`. Завершается
+    /// сразу без ошибки, если инстанс не найден или не имеет запущенного
+    /// backend'а.
+    Metrics { instance_id: String },
     /// Клонирует инстанс (AndroidVm или LinuxVm) в новый, независимый
     /// инстанс. `LinuxVm` поддерживается для режимов `linked`/
     /// `full-standalone`; `shared-base` только для `AndroidVm` (см.
@@ -132,7 +161,7 @@ enum Command {
         name: String,
         /// Каталог, под которым создаётся `<instances_root>/<новый_id>/`
         /// для файлов клона — тот же смысл, что у `instances_root` в
-        /// `create-android` (см. там).
+        /// Android-режиме `create` (см. там).
         #[arg(long, default_value_t = default_instances_root())]
         instances_root: String,
         /// Режим клонирования диска — см. `CliCloneMode` за описанием
@@ -268,6 +297,27 @@ fn backend_kind_name(kind: BackendKind) -> &'static str {
         BackendKind::Qemu => "Qemu",
         BackendKind::Vmm => "Vmm",
     }
+}
+
+/// Форматирует байты в человекочитаемый вид (KB/MB/GB).
+fn format_bytes(bytes: u64) -> String {
+    const KB: u64 = 1024;
+    const MB: u64 = 1024 * KB;
+    const GB: u64 = 1024 * MB;
+    if bytes >= GB {
+        format!("{:.1}GB", bytes as f64 / GB as f64)
+    } else if bytes >= MB {
+        format!("{:.1}MB", bytes as f64 / MB as f64)
+    } else if bytes >= KB {
+        format!("{:.1}KB", bytes as f64 / KB as f64)
+    } else {
+        format!("{bytes}B")
+    }
+}
+
+/// Форматирует байты/сек в человекочитаемый вид.
+fn format_bytes_per_sec(bps: u64) -> String {
+    format!("{}/s", format_bytes(bps))
 }
 
 /// Печатает `GetInstanceConfigResponse` человекочитаемо — не валидный
@@ -431,14 +481,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut client = AndlerServiceClient::connect(addr).await?;
 
     match cli.command {
-        Command::Create { file } => {
-            let instance_file = InstanceFile::load(&file)?;
-            let response = client
-                .create_instance(instance_file.into_request())
-                .await?;
-            println!("{}", response.into_inner().instance_id);
-        }
-        Command::CreateAndroid {
+        Command::Create {
+            file,
             name,
             android_version,
             gapps,
@@ -450,26 +494,68 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             overlay_size_gib,
             ovmf_vars_template,
         } => {
-            let mut profile = ProtoAndroidProfile {
-                gapps,
-                microg,
-                libndk,
-                ..Default::default()
-            };
-            profile.set_android_version(android_version.into());
-            profile.set_root(root.into());
+            let has_file = file.is_some();
+            let has_android = android_version.is_some();
 
-            let response = client
-                .create_android_instance(CreateAndroidInstanceRequest {
-                    name,
-                    profile: Some(profile),
-                    base_image_path,
-                    instances_root,
-                    overlay_size_bytes: overlay_size_gib * 1024 * 1024 * 1024,
-                    ovmf_vars_template,
-                })
-                .await?;
-            println!("{}", response.into_inner().instance_id);
+            if has_file == has_android {
+                eprintln!(
+                    "уточните режим: либо --file (LinuxVm из TOML), либо --android-version (AndroidVm из CLI-флагов)"
+                );
+                std::process::exit(2);
+            }
+
+            if has_file {
+                let file = file.unwrap();
+                let instance_file = InstanceFile::load(&file)?;
+                let response = client
+                    .create_instance(instance_file.into_request())
+                    .await?;
+                println!("{}", response.into_inner().instance_id);
+            } else {
+                let name = match name {
+                    Some(n) => n,
+                    None => {
+                        eprintln!("--name обязателен в Android-режиме (--android-version)");
+                        std::process::exit(2);
+                    }
+                };
+                let base_image_path = match base_image_path {
+                    Some(p) => p,
+                    None => {
+                        eprintln!("--base-image-path обязателен в Android-режиме");
+                        std::process::exit(2);
+                    }
+                };
+                let ovmf_vars_template = match ovmf_vars_template {
+                    Some(t) => t,
+                    None => {
+                        eprintln!("--ovmf-vars-template обязателен в Android-режиме");
+                        std::process::exit(2);
+                    }
+                };
+                let android_version = android_version.unwrap();
+
+                let mut profile = ProtoAndroidProfile {
+                    gapps,
+                    microg,
+                    libndk,
+                    ..Default::default()
+                };
+                profile.set_android_version(android_version.into());
+                profile.set_root(root.into());
+
+                let response = client
+                    .create_android_instance(CreateAndroidInstanceRequest {
+                        name,
+                        profile: Some(profile),
+                        base_image_path,
+                        instances_root,
+                        overlay_size_bytes: overlay_size_gib * 1024 * 1024 * 1024,
+                        ovmf_vars_template,
+                    })
+                    .await?;
+                println!("{}", response.into_inner().instance_id);
+            }
         }
         Command::Start { instance_id } => {
             client
@@ -583,6 +669,50 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 eprintln!(
                     "no log lines received (instance may have no running backend right now, \
                      or simply hasn't written anything to stdout/stderr yet)"
+                );
+            }
+        }
+        Command::Metrics { instance_id } => {
+            let mut stream = client
+                .stream_resource_metrics(InstanceIdRequest { instance_id })
+                .await?
+                .into_inner();
+
+            let mut got_any_sample = false;
+            while let Some(m) = stream.message().await? {
+                got_any_sample = true;
+                let cpu = m
+                    .cpu_percent
+                    .map(|v| format!("{:.1}%", v))
+                    .unwrap_or_else(|| "N/A".to_string());
+                let rss = m
+                    .memory_used_bytes
+                    .map(|v| format_bytes(v))
+                    .unwrap_or_else(|| "N/A".to_string());
+                let dr = m
+                    .disk_read_bytes_per_sec
+                    .map(|v| format_bytes_per_sec(v))
+                    .unwrap_or_else(|| "N/A".to_string());
+                let dw = m
+                    .disk_write_bytes_per_sec
+                    .map(|v| format_bytes_per_sec(v))
+                    .unwrap_or_else(|| "N/A".to_string());
+                let nr = m
+                    .net_rx_bytes_per_sec
+                    .map(|v| format_bytes_per_sec(v))
+                    .unwrap_or_else(|| "N/A".to_string());
+                let nt = m
+                    .net_tx_bytes_per_sec
+                    .map(|v| format_bytes_per_sec(v))
+                    .unwrap_or_else(|| "N/A".to_string());
+                println!(
+                    "cpu={cpu:<8} rss={rss:<10} disk_r={dr:<12} disk_w={dw:<12} net_rx={nr:<12} net_tx={nt:<12}"
+                );
+            }
+
+            if !got_any_sample {
+                eprintln!(
+                    "no metrics received (instance may have no running backend right now)"
                 );
             }
         }

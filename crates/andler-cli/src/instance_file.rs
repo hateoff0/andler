@@ -52,7 +52,7 @@ pub struct InstanceFile {
     pub iso_path: PathBuf,
     pub disk_path: PathBuf,
     /// Размер диска в GiB (не байтах — удобнее для ручного редактирования
-    /// файла, аналогично `overlay_size_gib` в `Command::CreateAndroid`).
+    /// файла, аналогично `overlay_size_gib` в Android-режиме `create`).
     /// Отсутствие ⇒ `DiskConfig::reference_default` оставляет 40 GiB.
     #[serde(default)]
     pub disk_size_gib: Option<u64>,

@@ -99,6 +99,13 @@ service AndlerService {
     rpc RestoreSnapshot(RestoreSnapshotRequest) returns (Empty);
     rpc DeleteSnapshot(DeleteSnapshotRequest) returns (Empty);
     rpc ListSnapshots(InstanceIdRequest) returns (ListSnapshotsResponse);
+
+    // Соответствует Daemon::stream_resource_metrics. Server-streaming —
+    // соединение остаётся открытым, пока клиент не отключится, процесс
+    // не завершится, или не исчезнут подписчики (аналогично
+    // StreamInstanceLogs). Метрики публикуются каждую секунду из
+    // /proc/<pid>/ (CPU%, RAM, disk I/O, network I/O).
+    rpc StreamResourceMetrics(InstanceIdRequest) returns (stream ResourceMetricsResponse);
 }
 
 message Empty {}
@@ -522,4 +529,18 @@ message SnapshotEntry {
 
 message ListSnapshotsResponse {
     repeated SnapshotEntry snapshots = 1;
+}
+
+// --- Resource Metrics ----------------------------------------------------
+
+// Одна выборка метрик ресурсов через `rpc StreamResourceMetrics`.
+// Все поля опциональны — если источник недоступен (процесс завершился,
+// /proc не читается), поле опущено (proto3 optional).
+message ResourceMetricsResponse {
+    optional float cpu_percent = 1;
+    optional uint64 memory_used_bytes = 2;
+    optional uint64 disk_read_bytes_per_sec = 3;
+    optional uint64 disk_write_bytes_per_sec = 4;
+    optional uint64 net_rx_bytes_per_sec = 5;
+    optional uint64 net_tx_bytes_per_sec = 6;
 }

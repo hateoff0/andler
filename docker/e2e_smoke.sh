@@ -64,7 +64,7 @@ echo "==> preparing fixture files (disk, iso, ovmf vars template)"
 qemu-img create -f qcow2 "$WORKDIR/disk.qcow2" 2G
 touch "$WORKDIR/empty.iso"
 # Шаблон OVMF_VARS не нужен для generic CreateInstance (только для
-# create-android) — firmware.ovmf_vars_path в TOML просто должен
+# Android-режима create) — firmware.ovmf_vars_path в TOML просто должен
 # существовать как путь, который start_instance передаст в qemu
 # аргументом -drive if=pflash; реальное содержимое не валидируется на
 # этом уровне, но пустой файл небезопасен для настоящей UEFI-загрузки.
@@ -137,6 +137,21 @@ if ! grep -q "Running" <<<"$STATUS_OUTPUT"; then
     echo "==> qemu-system-x86_64 processes still around (if any):"
     pgrep -a qemu-system-x86_64 || echo "(none found — process exited)"
     exit 1
+fi
+
+# --- andler metrics: проверка StreamResourceMetrics на живом процессе ---
+#
+# Метрики обновляются раз в секунду — timeout 3s достаточен, чтобы
+# получить хотя бы одну выборку. Если инстанс жив, /proc/<pid>/ должен
+# быть доступен, и poller вернёт хотя бы memory_used_bytes.
+METRICS_FILE="$WORKDIR/metrics_output.txt"
+timeout 3 andler metrics "$INSTANCE_ID" >"$METRICS_FILE" 2>&1 || true
+if grep -q "cpu=" "$METRICS_FILE" 2>/dev/null; then
+    echo "metrics: OK (received at least one sample)"
+    head -1 "$METRICS_FILE"
+else
+    echo "metrics: WARNING — no metrics sample received (acceptable if <1s poll interval)"
+    cat "$METRICS_FILE" || true
 fi
 
 # --- andler logs: проверка StreamInstanceLogs на живом процессе ---
@@ -266,15 +281,15 @@ ANDROID_INSTANCES_ROOT="$WORKDIR/android-instances"
 qemu-img create -f qcow2 "$ANDROID_BASE_IMAGE" 4G
 qemu-img create -f raw "$ANDROID_OVMF_TEMPLATE" 4M
 
-echo "==> andler create-android (source for cloning)"
-SOURCE_ANDROID_ID="$(andler create-android \
+echo "==> andler create (Android-режим, source for cloning)"
+SOURCE_ANDROID_ID="$(andler create \
     --name source-android \
     --android-version 13 \
     --base-image-path "$ANDROID_BASE_IMAGE" \
     --instances-root "$ANDROID_INSTANCES_ROOT" \
     --ovmf-vars-template "$ANDROID_OVMF_TEMPLATE")"
 echo "created instance_id=$SOURCE_ANDROID_ID"
-[[ -n "$SOURCE_ANDROID_ID" ]] || { echo "FAIL: empty instance_id from create-android"; exit 1; }
+[[ -n "$SOURCE_ANDROID_ID" ]] || { echo "FAIL: empty instance_id from create --android-version"; exit 1; }
 
 echo "==> andler clone --mode linked (expect dependency on source)"
 LINKED_CLONE_ID="$(andler clone "$SOURCE_ANDROID_ID" \

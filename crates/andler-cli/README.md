@@ -9,7 +9,7 @@
 - `andler create --file instance.toml` — создаёт `LinuxVm`-инстанс из
   TOML-файла (см. "Формат файла `create`" ниже). Соответствует
   `rpc CreateInstance`.
-- `andler create-android --name ... --android-version 13 --gapps --base-image-path ... --instances-root ... --ovmf-vars-template ...`
+- `andler create --name ... --android-version 13 --gapps --base-image-path ... --ovmf-vars-template ...` — создаёт `AndroidVm` из CLI-флагов.
 - `andler start <instance_id>`
 - `andler pause <instance_id>`
 - `andler resume <instance_id>`
@@ -152,8 +152,7 @@ X11/Wayland хоста вообще (не то же самое, что `Spice`/`
 
 ## Команды
 
-- `create` — создание LinuxVm-инстанса из TOML-файла
-- `create-android` — создание AndroidVm-инстанса из профиля
+- `create` — создание инстанса (LinuxVm из TOML или AndroidVm из CLI-флагов)
 - `start`/`stop`/`pause`/`resume` — управление жизненным циклом
 - `status` — текущий статус инстанса
 - `list` — список всех инстансов

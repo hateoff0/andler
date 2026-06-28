@@ -15,8 +15,8 @@ use andler_rpc::proto::{
     CreateInstanceResponse, CreateSnapshotRequest, CreateSnapshotResponse, DeleteSnapshotRequest,
     Empty, ExportInstanceDiskRequest, ExportInstanceDiskResponse, GetInstanceConfigResponse,
     InstanceIdRequest, InstanceListEntry, InstanceStatusResponse, ListInstancesResponse,
-    ListSnapshotsResponse, LogLineResponse, RemoveInstanceRequest, RestoreSnapshotRequest,
-    SnapshotEntry, StopInstanceRequest,
+    ListSnapshotsResponse, LogLineResponse, RemoveInstanceRequest, ResourceMetricsResponse,
+    RestoreSnapshotRequest, SnapshotEntry, StopInstanceRequest,
 };
 use futures_core::Stream;
 use futures_util::StreamExt;
@@ -120,6 +120,9 @@ impl AndlerService for DaemonService {
     /// документацию `Daemon::stream_instance_logs` за тем, почему).
     type StreamInstanceLogsStream =
         Pin<Box<dyn Stream<Item = Result<LogLineResponse, Status>> + Send + 'static>>;
+
+    type StreamResourceMetricsStream =
+        Pin<Box<dyn Stream<Item = Result<ResourceMetricsResponse, Status>> + Send + 'static>>;
 
     /// Создаёт `LinuxVm`-инстанс из явного `InstanceConfig`, переданного
     /// клиентом целиком. В отличие от `create_android_instance`, здесь нет
@@ -282,6 +285,19 @@ impl AndlerService for DaemonService {
         let id = convert::parse_instance_id(&request.into_inner().instance_id)?;
         let inner = self.daemon.stream_instance_logs(id).await?;
         let mapped = inner.map(|line| Ok(LogLineResponse::from(line)));
+        Ok(Response::new(Box::pin(mapped)))
+    }
+
+    /// Соответствует `Daemon::stream_resource_metrics`. Server-streaming —
+    /// идентичен `stream_instance_logs` по паттерну: конвертирует
+    /// `ResourceMetrics -> ResourceMetricsResponse` по каждому элементу.
+    async fn stream_resource_metrics(
+        &self,
+        request: Request<InstanceIdRequest>,
+    ) -> Result<Response<Self::StreamResourceMetricsStream>, Status> {
+        let id = convert::parse_instance_id(&request.into_inner().instance_id)?;
+        let inner = self.daemon.stream_resource_metrics(id).await?;
+        let mapped = inner.map(|m| Ok(ResourceMetricsResponse::from(m)));
         Ok(Response::new(Box::pin(mapped)))
     }
 

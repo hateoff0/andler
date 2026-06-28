@@ -10,7 +10,7 @@ use andler_core::{
     AndroidProfile, AndroidVersion, AudioBackend, AudioConfig, BackendKind, CloneMode, CpuConfig,
     CpuPriority, DiskConfig, DiskFormat, DisplayConfig, DisplayEngine, FirmwareConfig, GpuConfig,
     InputConfig, InstanceConfig, InstanceId, InstanceKind, InstanceState, LogLine, LogStreamSource,
-    MemoryConfig, NetworkConfig, NetworkMode, RenderBackend, Resolution, RootMode,
+    MemoryConfig, NetworkConfig, NetworkMode, RenderBackend, Resolution, ResourceMetrics, RootMode,
 };
 
 /// Ошибка конвертации proto-сообщения в доменный тип — на практике сейчас
@@ -764,6 +764,19 @@ impl From<LogLine> for proto::LogLineResponse {
     }
 }
 
+impl From<ResourceMetrics> for proto::ResourceMetricsResponse {
+    fn from(m: ResourceMetrics) -> Self {
+        proto::ResourceMetricsResponse {
+            cpu_percent: m.cpu_percent,
+            memory_used_bytes: m.memory_used_bytes,
+            disk_read_bytes_per_sec: m.disk_read_bytes_per_sec,
+            disk_write_bytes_per_sec: m.disk_write_bytes_per_sec,
+            net_rx_bytes_per_sec: m.net_rx_bytes_per_sec,
+            net_tx_bytes_per_sec: m.net_tx_bytes_per_sec,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1140,5 +1153,36 @@ mod tests {
     fn unspecified_clone_mode_is_rejected() {
         let err = CloneMode::try_from(proto::CloneMode::Unspecified).unwrap_err();
         assert!(matches!(err, ConvertError::MissingCloneMode));
+    }
+
+    #[test]
+    fn resource_metrics_converts_to_proto_preserving_all_fields() {
+        let metrics = ResourceMetrics {
+            cpu_percent: Some(42.5),
+            memory_used_bytes: Some(1024 * 1024 * 512),
+            disk_read_bytes_per_sec: Some(1024 * 100),
+            disk_write_bytes_per_sec: Some(1024 * 50),
+            net_rx_bytes_per_sec: Some(1024 * 200),
+            net_tx_bytes_per_sec: Some(1024 * 150),
+        };
+        let msg: proto::ResourceMetricsResponse = metrics.into();
+        assert!((msg.cpu_percent.unwrap() - 42.5).abs() < f32::EPSILON);
+        assert_eq!(msg.memory_used_bytes, Some(1024 * 1024 * 512));
+        assert_eq!(msg.disk_read_bytes_per_sec, Some(1024 * 100));
+        assert_eq!(msg.disk_write_bytes_per_sec, Some(1024 * 50));
+        assert_eq!(msg.net_rx_bytes_per_sec, Some(1024 * 200));
+        assert_eq!(msg.net_tx_bytes_per_sec, Some(1024 * 150));
+    }
+
+    #[test]
+    fn resource_metrics_with_none_fields_converts_to_empty_proto() {
+        let metrics = ResourceMetrics::default();
+        let msg: proto::ResourceMetricsResponse = metrics.into();
+        assert!(msg.cpu_percent.is_none());
+        assert!(msg.memory_used_bytes.is_none());
+        assert!(msg.disk_read_bytes_per_sec.is_none());
+        assert!(msg.disk_write_bytes_per_sec.is_none());
+        assert!(msg.net_rx_bytes_per_sec.is_none());
+        assert!(msg.net_tx_bytes_per_sec.is_none());
     }
 }
