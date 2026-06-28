@@ -95,6 +95,12 @@ enum Command {
         /// Путь к шаблону OVMF_VARS (обязательно в Android-режиме).
         #[arg(long)]
         ovmf_vars_template: Option<String>,
+
+        /// Каталог с бинарниками Magisk (обязательно при --root magisk).
+        /// Должен содержать как минимум `magisk` и `magiskinit` — результат
+        /// распаковки Magisk release ZIP.
+        #[arg(long)]
+        magisk_dir: Option<PathBuf>,
     },
     /// Запускает ранее созданный инстанс.
     Start { instance_id: String },
@@ -261,7 +267,7 @@ impl From<CliAndroidVersion> for ProtoAndroidVersion {
     }
 }
 
-#[derive(Clone, Copy, ValueEnum)]
+#[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum CliRootMode {
     None,
     Magisk,
@@ -493,6 +499,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             instances_root,
             overlay_size_gib,
             ovmf_vars_template,
+            magisk_dir,
         } => {
             let has_file = file.is_some();
             let has_android = android_version.is_some();
@@ -535,6 +542,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 };
                 let android_version = android_version.unwrap();
 
+                if root == CliRootMode::Magisk && magisk_dir.is_none() {
+                    eprintln!("--magisk-dir обязателен при --root magisk");
+                    std::process::exit(2);
+                }
+
                 let mut profile = ProtoAndroidProfile {
                     gapps,
                     microg,
@@ -552,6 +564,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         instances_root,
                         overlay_size_bytes: overlay_size_gib * 1024 * 1024 * 1024,
                         ovmf_vars_template,
+                        magisk_dir: magisk_dir
+                            .map(|p| p.to_string_lossy().into_owned())
+                            .unwrap_or_default(),
                     })
                     .await?;
                 println!("{}", response.into_inner().instance_id);
@@ -705,8 +720,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .net_tx_bytes_per_sec
                     .map(|v| format_bytes_per_sec(v))
                     .unwrap_or_else(|| "N/A".to_string());
+                let vram = match (m.vram_used_bytes, m.vram_total_bytes) {
+                    (Some(used), Some(total)) => {
+                        format!("{}/{}", format_bytes(used), format_bytes(total))
+                    }
+                    (Some(used), None) => format_bytes(used),
+                    _ => "N/A".to_string(),
+                };
+                let gpu_load = m
+                    .gpu_load_percent
+                    .map(|v| format!("{:.0}%", v))
+                    .unwrap_or_else(|| "N/A".to_string());
                 println!(
-                    "cpu={cpu:<8} rss={rss:<10} disk_r={dr:<12} disk_w={dw:<12} net_rx={nr:<12} net_tx={nt:<12}"
+                    "cpu={cpu:<8} rss={rss:<10} disk_r={dr:<12} disk_w={dw:<12} \
+                     net_rx={nr:<12} net_tx={nt:<12} vram={vram:<16} gpu={gpu_load:<6}"
                 );
             }
 

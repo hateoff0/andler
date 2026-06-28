@@ -72,6 +72,10 @@ pub struct InstanceFile {
     pub audio: Option<AudioConfig>,
     #[serde(default)]
     pub input: Option<InputConfig>,
+    /// Таймаут async job (snapshot-save/load/delete) в секундах.
+    /// Отсутствие ⇒ 30 секунд по умолчанию.
+    #[serde(default)]
+    pub snapshot_timeout_secs: Option<u64>,
 }
 
 impl InstanceFile {
@@ -105,6 +109,7 @@ impl InstanceFile {
         if let Some(gib) = self.disk_size_gib {
             disk.size_bytes = gib * DiskConfig::GIB;
         }
+        disk.snapshot_timeout_secs = self.snapshot_timeout_secs;
 
         CreateInstanceRequest {
             name: self.name,

@@ -47,6 +47,9 @@ const QMP_SOCKET_DIR: &str = "/tmp/andler/qmp";
 struct RunningInstance {
     process: QemuProcess,
     qmp_client: Option<QmpClient>,
+    /// Таймаут ожидания завершения async job (snapshot), считанный из
+    /// `InstanceConfig.disk.snapshot_timeout_secs` при `spawn`.
+    snapshot_timeout: std::time::Duration,
 }
 
 /// Backend гипервизора поверх процесса QEMU.
@@ -126,8 +129,10 @@ fn qmp_error_to_backend_error(err: QmpError) -> BackendError {
 /// Соответствует `id=drive-disk0` в cmdline (см. `cmdline.rs`).
 const DISK_DEVICE: &str = "drive-disk0";
 
-/// Таймаут ожидания завершения async job (snapshot-save/load/delete).
-const JOB_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+/// Таймаут ожидания завершения async job (snapshot-save/load/delete)
+/// по умолчанию. Используется, если `InstanceConfig.disk.snapshot_timeout_secs`
+/// не задан (`None`).
+const DEFAULT_JOB_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// `VmStatus` (наблюдение QMP) -> `InstanceState` (домен `andler-core`).
 ///
@@ -200,6 +205,9 @@ impl HypervisorBackend for QemuBackend {
             RunningInstance {
                 process,
                 qmp_client: None,
+                snapshot_timeout: std::time::Duration::from_secs(
+                    cfg.disk.snapshot_timeout_secs.unwrap_or(30),
+                ),
             },
         );
 
@@ -353,7 +361,7 @@ impl HypervisorBackend for QemuBackend {
             .await
             .map_err(qmp_error_to_backend_error)?;
 
-        qmp.wait_job_completion(&job_id, JOB_TIMEOUT)
+        qmp.wait_job_completion(&job_id, instance.snapshot_timeout)
             .await
             .map_err(qmp_error_to_backend_error)?;
 
@@ -376,7 +384,7 @@ impl HypervisorBackend for QemuBackend {
             .await
             .map_err(qmp_error_to_backend_error)?;
 
-        qmp.wait_job_completion(&job_id, JOB_TIMEOUT)
+        qmp.wait_job_completion(&job_id, instance.snapshot_timeout)
             .await
             .map_err(qmp_error_to_backend_error)?;
 
@@ -399,7 +407,7 @@ impl HypervisorBackend for QemuBackend {
             .await
             .map_err(qmp_error_to_backend_error)?;
 
-        qmp.wait_job_completion(&job_id, JOB_TIMEOUT)
+        qmp.wait_job_completion(&job_id, instance.snapshot_timeout)
             .await
             .map_err(qmp_error_to_backend_error)?;
 

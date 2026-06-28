@@ -13,6 +13,7 @@
 
 pub mod clone;
 pub mod error;
+pub mod magisk;
 pub mod overlay;
 pub mod qcow2;
 

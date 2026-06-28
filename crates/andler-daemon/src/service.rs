@@ -162,6 +162,11 @@ impl AndlerService for DaemonService {
                 req.instances_root.into(),
                 req.overlay_size_bytes,
                 req.ovmf_vars_template.into(),
+                if req.magisk_dir.is_empty() {
+                    None
+                } else {
+                    Some(req.magisk_dir.into())
+                },
             )
             .await?;
 

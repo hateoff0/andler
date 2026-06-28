@@ -530,6 +530,7 @@ impl Daemon {
         instances_root: PathBuf,
         overlay_size_bytes: u64,
         ovmf_vars_template: PathBuf,
+        magisk_dir: Option<PathBuf>,
     ) -> Result<InstanceId, DaemonError> {
         let id = InstanceId::new();
         let instance_dir = instances_root.join(id.0.to_string());
@@ -556,6 +557,22 @@ impl Daemon {
             overlay_size_bytes,
         )
         .await?;
+
+        // Magisk provisioning — offline-установка root-доступа в overlay
+        // перед первым запуском. Выполняется до регистрации инстанса, чтобы
+        // при ошибке provisioning instance_dir был автоматически очищен
+        // через dir_guard (инстанс не остаётся в битом состоянии).
+        if profile.root == andler_core::RootMode::Magisk {
+            let magisk_dir = magisk_dir.ok_or_else(|| DaemonError::Disk(
+                andler_disk::DiskError::NbdSetupFailed(
+                    "--magisk-dir is required when root=magisk".to_string(),
+                ),
+            ))?;
+            andler_disk::magisk::provision_magisk(
+                &overlay.overlay_path,
+                &magisk_dir,
+            ).await?;
+        }
 
         let mut cfg = profile.resolve(
             instance_name,
@@ -1774,6 +1791,7 @@ mod tests {
                 instances_root.clone(),
                 20 * 1024 * 1024 * 1024,
                 ovmf_template,
+                None,
             )
             .await
             .unwrap();
@@ -1829,6 +1847,7 @@ mod tests {
                 instances_root.clone(),
                 20 * 1024 * 1024 * 1024,
                 ovmf_template,
+                None,
             )
             .await
             .unwrap_err();
@@ -1882,6 +1901,7 @@ mod tests {
                 instances_root.clone(),
                 20 * 1024 * 1024 * 1024,
                 missing_ovmf_template,
+                None,
             )
             .await
             .unwrap_err();
@@ -2738,6 +2758,7 @@ mod tests {
                 instances_root.clone(),
                 20 * 1024 * 1024 * 1024,
                 ovmf_template,
+                None,
             )
             .await
             .unwrap();
@@ -2810,6 +2831,7 @@ mod tests {
                 instances_root.clone(),
                 20 * 1024 * 1024 * 1024,
                 ovmf_template,
+                None,
             )
             .await
             .unwrap();
@@ -2865,6 +2887,7 @@ mod tests {
                 instances_root.clone(),
                 20 * 1024 * 1024 * 1024,
                 ovmf_template,
+                None,
             )
             .await
             .unwrap();
@@ -2926,6 +2949,7 @@ mod tests {
                 instances_root.clone(),
                 20 * 1024 * 1024 * 1024,
                 ovmf_template,
+                None,
             )
             .await
             .unwrap();
@@ -2994,6 +3018,7 @@ mod tests {
                 instances_root,
                 20 * 1024 * 1024 * 1024,
                 ovmf_template,
+                None,
             )
             .await
             .unwrap();

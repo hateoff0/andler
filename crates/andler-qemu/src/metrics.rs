@@ -247,6 +247,7 @@ pub fn read_metrics_sample(pid: u32) -> Option<ResourceMetrics> {
         disk_write_bytes_per_sec: Some(disk_write),
         net_rx_bytes_per_sec: Some(net_rx),
         net_tx_bytes_per_sec: Some(net_tx),
+        ..ResourceMetrics::default()
     })
 }
 
@@ -329,7 +330,14 @@ pub fn spawn_metrics_poller(
                 disk_write_bytes_per_sec: Some(disk_write_rate),
                 net_rx_bytes_per_sec: Some(net_rx_rate),
                 net_tx_bytes_per_sec: Some(net_tx_rate),
+                ..ResourceMetrics::default()
             };
+
+            // GPU-метрики из sysfs (AMD только) — читаются каждую секунду
+            // вместе с host-метриками и отправляются единым сообщением.
+            let mut metrics = metrics;
+            let gpu = crate::gpu_metrics::read_gpu_metrics();
+            crate::gpu_metrics::merge_gpu_metrics(&mut metrics, &gpu);
 
             let _ = sender.send(metrics);
 

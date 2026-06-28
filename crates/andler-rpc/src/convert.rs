@@ -279,6 +279,7 @@ impl TryFrom<proto::DiskConfig> for DiskConfig {
             },
             thin_provisioning: value.thin_provisioning,
             trim_on_shutdown: value.trim_on_shutdown,
+            snapshot_timeout_secs: value.snapshot_timeout_secs,
         })
     }
 }
@@ -294,6 +295,7 @@ impl From<DiskConfig> for proto::DiskConfig {
                 .unwrap_or_default(),
             thin_provisioning: value.thin_provisioning,
             trim_on_shutdown: value.trim_on_shutdown,
+            snapshot_timeout_secs: value.snapshot_timeout_secs,
             ..Default::default()
         };
         msg.set_format(value.format.into());
@@ -773,6 +775,9 @@ impl From<ResourceMetrics> for proto::ResourceMetricsResponse {
             disk_write_bytes_per_sec: m.disk_write_bytes_per_sec,
             net_rx_bytes_per_sec: m.net_rx_bytes_per_sec,
             net_tx_bytes_per_sec: m.net_tx_bytes_per_sec,
+            vram_used_bytes: m.vram_used_bytes,
+            vram_total_bytes: m.vram_total_bytes,
+            gpu_load_percent: m.gpu_load_percent,
         }
     }
 }
@@ -1164,6 +1169,9 @@ mod tests {
             disk_write_bytes_per_sec: Some(1024 * 50),
             net_rx_bytes_per_sec: Some(1024 * 200),
             net_tx_bytes_per_sec: Some(1024 * 150),
+            vram_used_bytes: Some(1024 * 1024 * 256),
+            vram_total_bytes: Some(1024 * 1024 * 1024 * 8),
+            gpu_load_percent: Some(73.0),
         };
         let msg: proto::ResourceMetricsResponse = metrics.into();
         assert!((msg.cpu_percent.unwrap() - 42.5).abs() < f32::EPSILON);
@@ -1172,6 +1180,9 @@ mod tests {
         assert_eq!(msg.disk_write_bytes_per_sec, Some(1024 * 50));
         assert_eq!(msg.net_rx_bytes_per_sec, Some(1024 * 200));
         assert_eq!(msg.net_tx_bytes_per_sec, Some(1024 * 150));
+        assert_eq!(msg.vram_used_bytes, Some(1024 * 1024 * 256));
+        assert_eq!(msg.vram_total_bytes, Some(1024 * 1024 * 1024 * 8));
+        assert!((msg.gpu_load_percent.unwrap() - 73.0).abs() < f32::EPSILON);
     }
 
     #[test]
@@ -1184,5 +1195,8 @@ mod tests {
         assert!(msg.disk_write_bytes_per_sec.is_none());
         assert!(msg.net_rx_bytes_per_sec.is_none());
         assert!(msg.net_tx_bytes_per_sec.is_none());
+        assert!(msg.vram_used_bytes.is_none());
+        assert!(msg.vram_total_bytes.is_none());
+        assert!(msg.gpu_load_percent.is_none());
     }
 }

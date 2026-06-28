@@ -52,6 +52,11 @@ pub struct DiskConfig {
     /// `andler-qemu` принимает на основе этого флага плюс самого факта
     /// `discard=on` устройства (см. TODO в `andler-qemu` README).
     pub trim_on_shutdown: bool,
+    /// Таймаут ожидания завершения async job (snapshot-save/load/delete)
+    /// в секундах. `None` — 30 секунд по умолчанию. Увеличьте для
+    /// очень больших дисков (сотни GiB), где snapshot-операции занимают
+    /// больше времени.
+    pub snapshot_timeout_secs: Option<u64>,
 }
 
 impl DiskConfig {
@@ -68,6 +73,7 @@ impl DiskConfig {
             base_image: None,
             thin_provisioning: true,
             trim_on_shutdown: true,
+            snapshot_timeout_secs: None,
         }
     }
 
@@ -84,6 +90,7 @@ impl DiskConfig {
             base_image: Some(base_image),
             thin_provisioning: true,
             trim_on_shutdown: true,
+            snapshot_timeout_secs: None,
         }
     }
 }

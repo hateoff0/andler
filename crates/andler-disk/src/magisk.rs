@@ -39,10 +39,10 @@ use crate::error::DiskError;
 /// Опциональные файлы: `busybox`, `magiskboot`, `util-linux/`.
 ///
 /// Проверяется до начала монтирования, чтобы не оставаться в
-//! полузвёрзнутом состоянии при невалидном входе.
+/// полузвёрзнутом состоянии при невалидном входе.
 const REQUIRED_MAGISK_FILES: &[&str] = &["magisk", "magiskinit"];
 
-/// Префикс имени точки монтирования — создаётся в `/tmp/andler-mount-<uuid>`.
+/// Префикс имени точки монтирования — создаётся в `/tmp/andler-mount-<id>`.
 const MOUNT_PREFIX: &str = "/tmp/andler-mount-";
 
 // ---------------------------------------------------------------------------
@@ -67,31 +67,11 @@ impl NbdGuard {
 
 impl Drop for NbdGuard {
     fn drop(&mut self) {
-        let status = std::process::Command::new("qemu-nbd")
+        let _ = std::process::Command::new("qemu-nbd")
             .args(["--disconnect", self.device_path.to_str().unwrap()])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::piped())
             .status();
-
-        match status {
-            Ok(s) if s.success() => {
-                tracing::debug!(device = %self.device_path.display(), "nbd device disconnected");
-            }
-            Ok(s) => {
-                tracing::warn!(
-                    device = %self.device_path.display(),
-                    status = %s,
-                    "qemu-nbd --disconnect failed"
-                );
-            }
-            Err(e) => {
-                tracing::warn!(
-                    device = %self.device_path.display(),
-                    error = %e,
-                    "failed to run qemu-nbd --disconnect"
-                );
-            }
-        }
     }
 }
 
@@ -112,31 +92,11 @@ impl MountGuard {
 
 impl Drop for MountGuard {
     fn drop(&mut self) {
-        let status = std::process::Command::new("umount")
+        let _ = std::process::Command::new("umount")
             .args(["-l", self.mount_point.to_str().unwrap()])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::piped())
             .status();
-
-        match status {
-            Ok(s) if s.success() => {
-                tracing::debug!(point = %self.mount_point.display(), "mount point unmounted");
-            }
-            Ok(s) => {
-                tracing::warn!(
-                    point = %self.mount_point.display(),
-                    status = %s,
-                    "umount failed"
-                );
-            }
-            Err(e) => {
-                tracing::warn!(
-                    point = %self.mount_point.display(),
-                    error = %e,
-                    "failed to run umount"
-                );
-            }
-        }
 
         // Удаляем каталог точки монтирования (best-effort)
         let _ = std::fs::remove_dir(&self.mount_point);
@@ -191,7 +151,6 @@ fn find_free_nbd_device() -> Result<PathBuf, DiskError> {
             let name = entry.file_name();
             let dev_path = PathBuf::from(format!("/dev/{}", name.to_str().unwrap()));
             if dev_path.exists() {
-                tracing::debug!(device = %dev_path.display(), "found free nbd device");
                 return Ok(dev_path);
             }
         }
@@ -235,12 +194,6 @@ fn connect_nbd(overlay_path: &Path) -> Result<NbdGuard, DiskError> {
             stderr.trim()
         )));
     }
-
-    tracing::debug!(
-        device = %device.display(),
-        image = %overlay_path.display(),
-        "nbd device connected"
-    );
 
     Ok(NbdGuard::new(device))
 }
@@ -295,8 +248,7 @@ fn wait_for_partitions(nbd_dev: &Path) -> Result<Vec<PathBuf>, DiskError> {
 }
 
 /// Определяет раздел с rootfs (Linux/Android filesystem) из списка
-/// разделов. Ищет раздел с типом Linux (0x83) через чтение
-/// `/sys/block/<dev>/<part>/partition` или проверку `file -s`.
+/// разделов.
 ///
 /// Для простоты берём первый раздел (typical Android image layout:
 /// single partition с full rootfs).
@@ -315,12 +267,25 @@ fn find_root_partition(partitions: &[PathBuf]) -> Result<PathBuf, DiskError> {
 // Монтирование
 // ---------------------------------------------------------------------------
 
+/// Генерирует уникальное имя для точки монтирования на основе PID и
+/// счётчика вызовов (не требует внешних зависимостей).
+fn unique_mount_name() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let id = COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("{}-{}-{}", std::process::id(), id, unsafe {
+        // Safety: monotonic timestamp — не используется как crypto nonce
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        ts
+    })
+}
+
 /// Монтирует раздел в точку монтирования и возвращает guard.
 fn mount_partition(partition: &Path) -> Result<MountGuard, DiskError> {
-    let mount_point = PathBuf::from(format!(
-        "{MOUNT_PREFIX}{}",
-        uuid::Uuid::new_v4()
-    ));
+    let mount_point = PathBuf::from(format!("{MOUNT_PREFIX}{}", unique_mount_name()));
 
     std::fs::create_dir_all(&mount_point).map_err(|e| DiskError::NbdSetupFailed(format!(
         "failed to create mount point {}: {e}",
@@ -348,12 +313,6 @@ fn mount_partition(partition: &Path) -> Result<MountGuard, DiskError> {
             stderr.trim()
         )));
     }
-
-    tracing::debug!(
-        partition = %partition.display(),
-        mount = %mount_point.display(),
-        "partition mounted"
-    );
 
     Ok(MountGuard::new(mount_point))
 }
@@ -426,12 +385,6 @@ fn copy_magisk_files(mount_point: &Path, magisk_dir: &Path) -> Result<(), DiskEr
         }
     }
 
-    tracing::info!(
-        magisk_dir = %magisk_dir.display(),
-        target = %magisk_target.display(),
-        "magisk files copied"
-    );
-
     Ok(())
 }
 
@@ -479,7 +432,6 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), DiskError> {
 fn patch_boot_image(mount_point: &Path, magisk_dir: &Path) -> Result<(), DiskError> {
     let magiskboot = magisk_dir.join("magiskboot");
     if !magiskboot.exists() {
-        tracing::info!("magiskboot not found in magisk-dir, skipping boot image patching");
         return Ok(());
     }
 
@@ -489,22 +441,12 @@ fn patch_boot_image(mount_point: &Path, magisk_dir: &Path) -> Result<(), DiskErr
         mount_point.join("boot/boot.img"),
     ];
 
-    let boot_img = boot_img_candidates
-        .iter()
-        .find(|p| p.exists())
-        .ok_or_else(|| {
-            tracing::info!("boot.img not found in image, skipping boot patching");
-            // Не ошибка — некоторые образы не имеют отдельного boot.img
-            return DiskError::NbdSetupFailed("boot.img not found".to_string());
-        })?;
+    let boot_img = match boot_img_candidates.iter().find(|p| p.exists()) {
+        Some(p) => p.clone(),
+        None => return Ok(()),
+    };
 
-    tracing::info!(boot_img = %boot_img.display(), "found boot.img, patching with magiskboot");
-
-    // magiskboot unpack boot.img /tmp/andler-magisk-patch-<uuid>
-    let patch_dir = PathBuf::from(format!(
-        "/tmp/andler-magisk-patch-{}",
-        uuid::Uuid::new_v4()
-    ));
+    let patch_dir = PathBuf::from(format!("/tmp/andler-magisk-patch-{}", unique_mount_name()));
     std::fs::create_dir_all(&patch_dir).map_err(|e| DiskError::NbdSetupFailed(format!(
         "failed to create patch dir: {e}"
     )))?;
@@ -519,14 +461,11 @@ fn patch_boot_image(mount_point: &Path, magisk_dir: &Path) -> Result<(), DiskErr
         .map_err(|e| DiskError::NbdSetupFailed(format!("magiskboot unpack failed: {e}")))?;
 
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        tracing::warn!(stderr = %stderr.trim(), "magiskboot unpack failed, skipping");
         let _ = std::fs::remove_dir_all(&patch_dir);
         return Ok(());
     }
 
-    // Patch — magiskboot patch boot.img patched_boot.img
-    // (uses magisk's default patching logic)
+    // Patch
     let patched_boot = patch_dir.join("patched_boot.img");
     let output = std::process::Command::new(&magiskboot)
         .args([
@@ -541,8 +480,6 @@ fn patch_boot_image(mount_point: &Path, magisk_dir: &Path) -> Result<(), DiskErr
         .map_err(|e| DiskError::NbdSetupFailed(format!("magiskboot patch failed: {e}")))?;
 
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        tracing::warn!(stderr = %stderr.trim(), "magiskboot patch failed, skipping");
         let _ = std::fs::remove_dir_all(&patch_dir);
         return Ok(());
     }
@@ -561,16 +498,11 @@ fn patch_boot_image(mount_point: &Path, magisk_dir: &Path) -> Result<(), DiskErr
         .map_err(|e| DiskError::NbdSetupFailed(format!("magiskboot repack failed: {e}")))?;
 
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        tracing::warn!(stderr = %stderr.trim(), "magiskboot repack failed, skipping");
         let _ = std::fs::remove_dir_all(&patch_dir);
         return Ok(());
     }
 
-    // Очищаем временный каталог патча
     let _ = std::fs::remove_dir_all(&patch_dir);
-
-    tracing::info!(boot_img = %boot_img.display(), "boot image patched successfully");
 
     Ok(())
 }
@@ -599,12 +531,6 @@ pub async fn provision_magisk(
     overlay_path: &Path,
     magisk_dir: &Path,
 ) -> Result<(), DiskError> {
-    tracing::info!(
-        overlay = %overlay_path.display(),
-        magisk_dir = %magisk_dir.display(),
-        "starting magisk provisioning"
-    );
-
     // Валидация входных данных до начала тяжёлых операций
     validate_magisk_dir(magisk_dir)?;
 
@@ -617,7 +543,6 @@ pub async fn provision_magisk(
 
     // Шаг 2: Ожидание появления partitions
     let partitions = wait_for_partitions(nbd_guard.path())?;
-    tracing::debug!(partitions = ?partitions, "partitions detected");
 
     // Шаг 3: Определение root-раздела
     let root_partition = find_root_partition(&partitions)?;
@@ -629,14 +554,10 @@ pub async fn provision_magisk(
     copy_magisk_files(mount_guard.path(), magisk_dir)?;
 
     // Шаг 6: Патчинг boot image (best-effort)
-    if let Err(e) = patch_boot_image(mount_guard.path(), magisk_dir) {
-        tracing::warn!(error = %e, "boot image patching failed (continuing)");
-    }
+    let _ = patch_boot_image(mount_guard.path(), magisk_dir);
 
     // mount_guard и nbd_guard будут drop'нуты автоматически при выходе
     // из функции — unmount + disconnect происходит в любом случае.
-
-    tracing::info!("magisk provisioning completed successfully");
 
     Ok(())
 }
@@ -709,5 +630,12 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&src);
         let _ = std::fs::remove_dir_all(&dst);
+    }
+
+    #[test]
+    fn unique_mount_name_is_unique() {
+        let a = unique_mount_name();
+        let b = unique_mount_name();
+        assert_ne!(a, b);
     }
 }

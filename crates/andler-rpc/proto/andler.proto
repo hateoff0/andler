@@ -167,6 +167,9 @@ message DiskConfig {
     string base_image = 4;
     bool thin_provisioning = 5;
     bool trim_on_shutdown = 6;
+    // Таймаут async job (snapshot-save/load/delete) в секундах.
+    // 0 или отсутствие = 30 секунд по умолчанию.
+    optional uint64 snapshot_timeout_secs = 7;
 }
 
 message Resolution {
@@ -316,6 +319,11 @@ message CreateAndroidInstanceRequest {
     string instances_root = 4;
     uint64 overlay_size_bytes = 5;
     string ovmf_vars_template = 6;
+    // Каталог с бинарниками Magisk (результат распаковки Magisk release ZIP).
+    // Обязателен, если profile.root == ROOT_MODE_MAGISK. Если не указан при
+    // root=magisk, daemon вернёт INVALID_ARGUMENT. Игнорируется при root !=
+    // Magisk (поле просто не используется, даже если передано).
+    string magisk_dir = 7;
 }
 
 message CreateInstanceResponse {
@@ -543,4 +551,9 @@ message ResourceMetricsResponse {
     optional uint64 disk_write_bytes_per_sec = 4;
     optional uint64 net_rx_bytes_per_sec = 5;
     optional uint64 net_tx_bytes_per_sec = 6;
+    // GPU metrics — доступны только для AMD GPU (через sysfs DRM).
+    // Для других вендоров или virtio-gpu без passthrough — опущены.
+    optional uint64 vram_used_bytes = 7;
+    optional uint64 vram_total_bytes = 8;
+    optional float gpu_load_percent = 9;
 }

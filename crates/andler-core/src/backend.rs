@@ -57,6 +57,12 @@ pub struct ResourceMetrics {
     pub disk_write_bytes_per_sec: Option<u64>,
     pub net_rx_bytes_per_sec: Option<u64>,
     pub net_tx_bytes_per_sec: Option<u64>,
+    /// VRAM used in bytes (AMD via sysfs `mem_info_vram_used`, None for other vendors).
+    pub vram_used_bytes: Option<u64>,
+    /// VRAM total in bytes (AMD via sysfs `mem_info_vram_total`, None for other vendors).
+    pub vram_total_bytes: Option<u64>,
+    /// GPU utilization % (AMD via sysfs `gpu_busy_percent`, None for other vendors).
+    pub gpu_load_percent: Option<f32>,
 }
 
 /// Откуда взялась конкретная строка `LogLine` — на этом этапе только
