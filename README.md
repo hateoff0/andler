@@ -2,9 +2,35 @@
 
 **ANDLER** = *Android Linux Emulator & Runtime*
 
-A Rust daemon and thin CLI client for managing QEMU virtual machines on Linux/KVM. Supports Linux guests with 3D GPU acceleration and Android guests (via Waydroid) with offline Magisk root provisioning. Communicates over gRPC with real-time metrics streaming.
+A Rust daemon and thin CLI client for creating and managing QEMU virtual machines on Linux/KVM. The core value proposition: **full 3D GPU acceleration for Linux and Android guests** via Venus (Vulkan), VirGL (OpenGL), and VFIO passthrough — running graphics-intensive workloads (games, Android apps, Waydroid, development environments) with near-native GPU performance inside VMs.
+
+## What ANDLER Does
+
+ANDLER manages the complete lifecycle of QEMU-based virtual machines with a focus on **GPU-accelerated guests**:
+
+- **Linux guests** with 3D GPU acceleration — install from ISO, get full Vulkan/OpenGL support via Venus/VirGL render backends, use as a daily-driver desktop or development environment
+- **Android guests** (Waydroid) — run Android apps with GPU acceleration on Linux hardware, with libndk/libhoudini for ARM→x86 translation
+- **Real-time monitoring** — CPU, RAM, disk, network, and GPU metrics (VRAM usage, GPU load) streamed every second
+- **Snapshots** — save/restore VM state instantly via QEMU's async job API
+- **Clone & export** — duplicate VMs cheaply (linked overlays) or create standalone copies
+
+All managed through a single `andler` CLI or gRPC API, with data stored under `~/.local/share/andler/` (no root required).
 
 ## Features
+
+### 3D GPU Acceleration
+
+The primary feature. ANDLER configures QEMU's GPU passthrough and virtualized rendering:
+
+| Backend | How It Works | Best For |
+|---------|-------------|----------|
+| **Venus** | Vulkan via Venus virtio-gpu protocol | Vulkan-native apps, games, Waydroid |
+| **VirGL** | OpenGL over virtio-gpu (virtio-gpu + virglrenderer) | OpenGL apps, desktop compositing |
+| **VirtioGpu** | Basic virtio-gpu without 3D acceleration | Lightweight VMs, headless servers |
+| **Cpu** | Software rendering (`-vga std`) | CI/CD, headless workloads |
+| **Passthrough** | VFIO GPU passthrough (full host GPU to guest) | Maximum performance, gaming |
+
+Venus and VirGL provide **paravirtualized 3D acceleration** — the guest sees a standard GPU driver, and QEMU translates rendering commands to the host GPU. This gives near-native performance for most workloads without requiring GPU passthrough hardware.
 
 ### Instance Management
 
@@ -18,6 +44,7 @@ A Rust daemon and thin CLI client for managing QEMU virtual machines on Linux/KV
 
 - **QEMU job-based snapshots** — async create/restore/delete/list via `snapshot-save`/`snapshot-load` job API
 - **Per-instance timeout** — configurable `snapshot_timeout_secs` (default 30s)
+- **Per-operation override** — `--timeout` flag on snapshot commands
 - **SQLite metadata** — tag, description, creation time stored with `ON DELETE CASCADE`
 
 ### Monitoring
@@ -28,9 +55,9 @@ A Rust daemon and thin CLI client for managing QEMU virtual machines on Linux/KV
 
 ### Android Support
 
-- **Offline Magisk provisioning** — root access via `qemu-nbd` without booting the VM
-- **Android profiles** — Android 11/13, GApps, microG, libndk, root mode selection
+- **Android profiles** — Android 11/13, GApps, microG, libndk/libhoudini (ARM→x86 translation), root mode selection
 - **Overlay disks** — cheap per-instance overlays over shared base image
+- **Offline Magisk provisioning** — root access via `qemu-nbd` without booting the VM
 
 ### Hypervisor Abstraction
 
@@ -54,7 +81,7 @@ cargo build --release
 
 Listens on `127.0.0.1:50051` by default. Override with `ANDLERD_ADDR` env var.
 
-### Create a Linux VM
+### Create a Linux VM (with 3D GPU)
 
 ```bash
 ./target/release/andler create \
@@ -65,7 +92,17 @@ Listens on `127.0.0.1:50051` by default. Override with `ANDLERD_ADDR` env var.
   --ovmf-vars-template /path/to/VARS.fd
 ```
 
-### Create an Android VM
+After installation, configure GPU acceleration in the TOML:
+
+```toml
+[gpu]
+render_backend = "Venus"    # or "VirGl" for OpenGL
+hostmem_bytes = 4294967296  # 4 GiB VRAM
+blob = true
+gl = true
+```
+
+### Create an Android VM (Waydroid)
 
 ```bash
 ./target/release/andler create \
@@ -74,9 +111,10 @@ Listens on `127.0.0.1:50051` by default. Override with `ANDLERD_ADDR` env var.
   --android-version 13 \
   --base-image-path /path/to/base.qcow2 \
   --ovmf-vars-template /path/to/VARS.fd \
-  --root magisk \
-  --magisk-dir /path/to/magisk/
+  --libndk
 ```
+
+`--libndk` enables ARM→x86 translation (libhoudini/libndk) for running ARM-only Android apps.
 
 ### Create from TOML (auto-detected type)
 
