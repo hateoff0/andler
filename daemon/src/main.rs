@@ -62,6 +62,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let store_path =
         std::env::var("ANDLERD_STORE_PATH").unwrap_or_else(|_| default_store_path());
 
+    if let Some(parent) = std::path::Path::new(&store_path).parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
     let store = Store::open(&store_path).await?;
     let daemon = Daemon::restore(store).await?;
     tracing::info!(store_path = %store_path, "restored instances from store");

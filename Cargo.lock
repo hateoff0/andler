@@ -44,6 +44,7 @@ license = "GPL-3.0"
 dependencies = [
  "thiserror",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -363,6 +364,7 @@ version = "0.1.0"
 license = "GPL-3.0"
 dependencies = [
  "andler-core",
+ "andler-disk",
  "andler-rpc",
  "clap",
  "dirs",

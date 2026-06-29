@@ -26,7 +26,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use andler_core::{
-    BackendError, BackendKind, HypervisorBackend, InstanceConfig,
+    BackendKind, HypervisorBackend, InstanceConfig,
     InstanceId, InstanceState,
 };
 use andler_qemu::QemuBackend;
