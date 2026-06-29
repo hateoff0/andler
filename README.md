@@ -262,6 +262,24 @@ clipboard_enabled = true
 andler/
 ├── core/                          Domain types, backend trait, config, FSM
 │   └── andler-core/               22 unit tests, no external dependencies
+│       ├── lib.rs                  Re-exports
+│       ├── error.rs                BackendError, FsmError
+│       ├── backend.rs              HypervisorBackend trait, BackendHandle, BackendKind
+│       ├── fsm.rs                  InstanceState enum (FSM transitions)
+│       ├── clone.rs                CloneMode enum (Linked, FullStandalone, SharedBase)
+│       ├── android_profile.rs      AndroidProfile, AndroidVersion
+│       └── config/
+│           ├── mod.rs              InstanceConfig, InstanceId, InstanceKind
+│           ├── instance.rs         InstanceKind (LinuxVm, AndroidVm)
+│           ├── cpu.rs              CpuConfig (cores, sockets, threads, affinity, priority)
+│           ├── memory.rs           MemoryConfig (size_bytes)
+│           ├── disk.rs             DiskConfig (path, format, base_image, snapshot_timeout_secs)
+│           ├── gpu.rs              GpuConfig (render_backend, gpu_type)
+│           ├── display.rs          DisplayConfig (headless, width, height, bpp)
+│           ├── network.rs          NetworkConfig, NetworkMode (None, Bridge, Isolated)
+│           ├── firmware.rs         FirmwareConfig (bios, ovmf_vars)
+│           ├── audio.rs            AudioConfig (backend)
+│           └── input.rs            InputConfig (keyboard, mouse)
 │
 ├── backends/                      Hypervisor implementations
 │   ├── andler-qemu/               QEMU backend (50 tests)
@@ -279,16 +297,31 @@ andler/
 │   ├── andler-store/              SQLite state persistence
 │   └── andler-rpc/                gRPC protocol + conversions
 │
-├── daemon/                        Background service (90+ tests)
+├── daemon/                        Background service (80 unit + 25 integration tests)
 │   └── src/
-│       ├── daemon.rs              Core orchestration logic
+│       ├── daemon/
+│       │   ├── mod.rs             Core orchestration logic (~250 lines)
+│       │   ├── error.rs           DaemonError enum (14 variants)
+│       │   ├── types.rs           InstanceRecord, SnapshotRecord, InstanceDirGuard
+│       │   ├── instance_ops.rs    create/start/stop/pause/resume/remove
+│       │   ├── clone_ops.rs       clone_instance, export, find_live_clones
+│       │   ├── snapshot_ops.rs    create/restore/delete/list snapshots
+│       │   ├── query_ops.rs       status, list, get_config, stream
+│       │   └── tests/             80 unit tests across 8 modules
 │       ├── service.rs             gRPC service wrapper
 │       └── grpc_roundtrip_test.rs Integration tests
 │
 ├── cli/                           Command-line client
 │   └── src/
-│       ├── main.rs                CLI commands
-│       └── instance_file.rs       TOML parser
+│       ├── main.rs                CLI dispatch + enums (431 lines)
+│       ├── instance_file.rs       TOML parser (452 lines)
+│       ├── create.rs              Create command
+│       ├── status.rs              Status, List, Config, Logs, Metrics
+│       ├── snapshot.rs            Snapshot commands
+│       ├── disk.rs                Disk commands
+│       ├── lifecycle.rs           Start, Stop, Pause, Resume, Remove
+│       ├── clone.rs               Clone, Export
+│       └── helpers.rs             parse_size, format_size, format_bytes
 │
 ├── docker/                        Build & test infrastructure
 ├── docs/                          Project documentation
@@ -354,7 +387,7 @@ Each crate has its own README with detailed API reference:
 - [`services/andler-net/README.md`](services/andler-net/README.md) — Networking stub
 - [`services/andler-store/README.md`](services/andler-store/README.md) — SQLite persistence
 - [`services/andler-rpc/README.md`](services/andler-rpc/README.md) — gRPC protocol + conversions
-- [`daemon/README.md`](daemon/README.md) — Daemon orchestration, 90+ tests
+- [`daemon/README.md`](daemon/README.md) — Daemon orchestration, 80 unit tests + 25 integration tests
 - [`cli/README.md`](cli/README.md) — CLI commands + TOML parser
 
 ## Metrics

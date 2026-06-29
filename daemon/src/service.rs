@@ -85,9 +85,6 @@ impl From<DaemonError> for Status {
             DaemonError::SnapshotOperationRequiresRunningInstance(_, _) => {
                 Status::failed_precondition(err.to_string())
             }
-            DaemonError::SnapshotOperationRequiresStoppedInstance(_, _) => {
-                Status::failed_precondition(err.to_string())
-            }
             DaemonError::Backend(andler_core::BackendError::NotImplemented { .. }) => {
                 Status::unimplemented(err.to_string())
             }

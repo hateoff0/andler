@@ -144,7 +144,8 @@ impl InstanceFile {
         let disk_path = self.disk_path.expect("disk_path required for LinuxVm");
         let mut disk = DiskConfig::reference_default(disk_path);
         if let Some(gib) = self.disk_size_gib {
-            disk.size_bytes = gib * DiskConfig::GIB;
+            disk.size_bytes = gib.checked_mul(DiskConfig::GIB)
+                .expect("disk size overflow");
         }
         disk.snapshot_timeout_secs = self.snapshot_timeout_secs;
 
@@ -202,9 +203,8 @@ impl InstanceFile {
         let overlay_size_bytes = self
             .overlay_size_gib
             .unwrap_or(20)
-            * 1024
-            * 1024
-            * 1024;
+            .checked_mul(1024 * 1024 * 1024)
+            .expect("overlay size overflow");
 
         let instances_root = self
             .instances_root

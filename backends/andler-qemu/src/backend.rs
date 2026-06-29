@@ -130,10 +130,6 @@ fn qmp_error_to_backend_error(err: QmpError) -> BackendError {
 const DISK_DEVICE: &str = "drive-disk0";
 
 /// Таймаут ожидания завершения async job (snapshot-save/load/delete)
-/// по умолчанию. Используется, если `InstanceConfig.disk.snapshot_timeout_secs`
-/// не задан (`None`).
-const DEFAULT_JOB_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
-
 /// `VmStatus` (наблюдение QMP) -> `InstanceState` (домен `andler-core`).
 ///
 /// `VmStatus::Shutdown`/`Other` намеренно не маппятся на `InstanceState`

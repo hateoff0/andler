@@ -60,6 +60,8 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 - **Monorepo restructure**: `crates/andler-*` reorganized into `core/`, `backends/`, `services/`, `daemon/`, `cli/` directories. Package names keep `andler-` prefix.
 - **Documentation language**: All docs now in English. Historical/future docs moved to `docs/archive/`.
+- **Daemon module decomposition**: `daemon/src/daemon.rs` (3209 lines) decomposed into 9 files under `daemon/src/daemon/`. Core `mod.rs` reduced to 250 lines (92% reduction). Error types, instance lifecycle, clone/export, snapshots, and queries each in separate modules. Tests split into 8 domain-specific test files.
+- **CLI module decomposition**: `cli/src/main.rs` (1185 lines) decomposed into 8 modules. Main dispatch reduced to 431 lines. Commands extracted to domain-specific files: `create.rs`, `status.rs`, `snapshot.rs`, `disk.rs`, `lifecycle.rs`, `clone.rs`, `helpers.rs`.
 
 ### Fixed
 

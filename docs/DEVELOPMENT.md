@@ -212,14 +212,29 @@ andler/
 ├── daemon/
 │   └── src/
 │       ├── main.rs               # Entry point, tonic server setup
-│       ├── daemon.rs             # Daemon struct, lifecycle, persistence
+│       ├── daemon/
+│       │   ├── mod.rs            # Daemon struct, constructors, persist helpers (~250 lines)
+│       │   ├── error.rs          # DaemonError enum (14 variants)
+│       │   ├── types.rs          # InstanceRecord, SnapshotRecord, InstanceDirGuard
+│       │   ├── instance_ops.rs   # create/start/stop/pause/resume/remove
+│       │   ├── clone_ops.rs      # clone_instance, export, find_live_clones
+│       │   ├── snapshot_ops.rs   # create/restore/delete/list snapshots
+│       │   ├── query_ops.rs      # status, list, get_config, stream
+│       │   └── tests/            # 80 unit tests across 8 modules
 │       ├── service.rs            # DaemonService (gRPC wrapper)
 │       └── grpc_roundtrip_test.rs # Integration tests
 │
 ├── cli/
 │   └── src/
-│       ├── main.rs               # CLI commands, gRPC client calls
-│       └── instance_file.rs      # TOML config parser
+│       ├── main.rs               # CLI dispatch + clap enums
+│       ├── instance_file.rs      # TOML config parser
+│       ├── create.rs             # Create command
+│       ├── status.rs             # Status, List, Config, Logs, Metrics
+│       ├── snapshot.rs           # Snapshot commands
+│       ├── disk.rs               # Disk commands
+│       ├── lifecycle.rs          # Start, Stop, Pause, Resume, Remove
+│       ├── clone.rs              # Clone, Export
+│       └── helpers.rs            # parse_size, format_size, format_bytes
 │
 ├── docker/
 │   ├── Dockerfile.dev            # Build environment
@@ -245,7 +260,7 @@ andler/
 2. Add `reference_default()` update if needed
 3. Add proto field in `services/andler-rpc/proto/andler.proto`
 4. Add conversion in `services/andler-rpc/src/convert.rs`
-5. Add CLI flag in `cli/src/main.rs` if applicable
+5. Add CLI flag in the appropriate module (`cli/src/create.rs`, `cli/src/lifecycle.rs`, etc.) if applicable
 6. Add TOML field in `cli/src/instance_file.rs` if applicable
 7. Add test for the new field
 
@@ -254,7 +269,7 @@ andler/
 1. Create `backends/andler-newbackend/` crate
 2. Add to `Cargo.toml` workspace members
 3. Implement `HypervisorBackend` trait from `andler-core`
-4. Register in `Daemon::new()` / `default_backends()` in `daemon/src/daemon.rs`
+4. Register in `Daemon::new()` / `default_backends()` in `daemon/src/daemon/mod.rs`
 5. Add `BackendKind` variant if needed in `andler-core`
 6. Write tests (unit + integration)
 
@@ -263,9 +278,9 @@ andler/
 1. Add RPC definition in `services/andler-rpc/proto/andler.proto`
 2. Add request/response message types if new
 3. Add conversion functions in `services/andler-rpc/src/convert.rs`
-4. Add daemon method in `daemon/src/daemon.rs`
+4. Add daemon method in `daemon/src/daemon/mod.rs` (or appropriate ops file)
 5. Add gRPC handler in `daemon/src/service.rs`
-6. Add CLI command in `cli/src/main.rs`
+6. Add CLI command in the appropriate module (`cli/src/create.rs`, `cli/src/lifecycle.rs`, etc.)
 7. Add tests (daemon unit test + gRPC round-trip test)
 
 ### Adding a New Disk Operation
@@ -282,7 +297,7 @@ andler/
 3. Update `ResourceMetrics` in `core/andler-core/src/backend.rs` if adding fields
 4. Update proto `ResourceMetricsResponse` in `proto/andler.proto`
 5. Update conversion in `services/andler-rpc/src/convert.rs`
-6. Update CLI display format in `cli/src/main.rs`
+6. Update CLI display format in `cli/src/status.rs`
 
 ### Running Specific Test Suites
 

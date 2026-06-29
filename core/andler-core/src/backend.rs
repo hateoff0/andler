@@ -164,8 +164,8 @@ pub trait HypervisorBackend: Send + Sync {
     ///
     /// `timeout` — per-operation timeout override. If `None`, the backend
     /// uses its own default.
-    /// Инстанс должен быть в терминальном состоянии (`Stopped`/`Created`/
-    /// `Error`). После восстановления инстанс остаётся остановленным.
+    /// Инстанс должен быть запущен (`Running`/`Paused`) — QEMU snapshot-load
+    /// выполняется через QMP, который требует живой процесс.
     async fn snapshot_restore(
         &self,
         handle: &BackendHandle,
@@ -183,8 +183,9 @@ pub trait HypervisorBackend: Send + Sync {
     ///
     /// `timeout` — per-operation timeout override. If `None`, the backend
     /// uses its own default.
-    /// Инстанс должен быть в терминальном состоянии. Нельзя удалить
-    /// снапшот, на который ссылается текущее состояние диска.
+    /// Инстанс должен быть запущен (`Running`/`Paused`) — QEMU snapshot-delete
+    /// выполняется через QMP, который требует живой процесс.
+    /// Нельзя удалить снапшот, на который ссылается текущее состояние диска.
     async fn snapshot_delete(
         &self,
         handle: &BackendHandle,

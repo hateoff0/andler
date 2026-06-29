@@ -89,14 +89,6 @@ static PREV_INTEL_SAMPLE: Mutex<Option<(u64, Instant)>> = Mutex::new(None);
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Enum representing detected GPU vendor.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum GpuVendor {
-    Amd,
-    Nvidia,
-    Intel,
-}
-
 /// Reads a `u64` from a sysfs file. Returns `None` on any error.
 fn read_sysfs_u64(base: &Path, relative: &str) -> Option<u64> {
     let content = std::fs::read_to_string(base.join(relative)).ok()?;

@@ -9,7 +9,14 @@ main.rs  →  tonic::transport::Server
                ↓
 service.rs  →  DaemonService (thin gRPC wrapper)
                ↓
-daemon.rs  →  Daemon (backend registry + instance state + optional persistence)
+daemon/
+├── mod.rs          →  Daemon (backend registry + instance state + optional persistence)
+├── error.rs        →  DaemonError enum (14 variants)
+├── types.rs        →  InstanceRecord, SnapshotRecord, InstanceDirGuard, InstanceSummary
+├── instance_ops.rs →  create, start, stop, pause, resume, remove
+├── clone_ops.rs    →  clone_instance, export_instance_disk, find_live_clones
+├── snapshot_ops.rs →  create/restore/delete/list snapshots
+└── query_ops.rs    →  status, list_instances, get_instance_config, stream logs/metrics
                ↓
            HypervisorBackend trait → QemuBackend / VmmBackend
 ```
@@ -28,7 +35,7 @@ Overridable via:
 - `ANDLERD_ADDR` env var or `--daemon-addr` CLI flag (for the CLI client)
 - `ANDLERD_STORE_PATH` env var (for the daemon)
 
-### `daemon.rs` — Core Daemon Logic
+### `daemon/mod.rs` — Core Daemon Logic
 
 **`Daemon`**: Holds the backend registry, instance state, and optional persistence.
 
@@ -90,6 +97,39 @@ Overridable via:
 
 **`InstanceDirGuard`** (RAII): Deletes `instance_dir` on drop if the creation sequence didn't complete. Used by `create_android_instance` and `clone_instance` for cleanup on partial failure.
 
+### `daemon/error.rs` — Error Types
+
+14 error variants mapping domain failures to gRPC status codes:
+- `InstanceNotFound`, `NoBackendRegistered`, `InvalidTransition`
+- `Backend`, `Disk`, `Io`, `Restore`
+- `InstanceNotRemovable`, `InstanceNotClonable`
+- `SharedBaseNotSupportedForLinuxVm`, `InstanceHasLiveClones`
+- `SnapshotNotFound`, `SnapshotAlreadyExists`
+- `SnapshotOperationRequiresRunningInstance`, `SnapshotOperationRequiresStoppedInstance`
+
+### `daemon/types.rs` — Internal Types
+
+- **`InstanceRecord`**: State + backend handle + config snapshot + filesystem paths
+- **`SnapshotRecord`**: Tag, label, creation timestamp
+- **`InstanceDirGuard`**: RAII cleanup — deletes instance directory on drop if creation sequence didn't complete
+- **`InstanceSummary`**: Compact view for list operations
+
+### `daemon/instance_ops.rs` — Instance Lifecycle
+
+Handles: `create_instance`, `create_android_instance`, `start_instance`, `stop_instance`, `pause_instance`, `resume_instance`, `remove_instance`.
+
+### `daemon/clone_ops.rs` — Clone & Export
+
+Handles: `clone_instance` (Linked/FullStandalone/SharedBase modes), `export_instance_disk`, `find_live_clones`.
+
+### `daemon/snapshot_ops.rs` — Snapshot Management
+
+Handles: `create_snapshot`, `restore_snapshot`, `delete_snapshot`, `list_snapshots`.
+
+### `daemon/query_ops.rs` — Status & Streaming
+
+Handles: `status`, `stream_instance_logs`, `stream_resource_metrics`, `list_instances`, `get_instance_config`.
+
 ### `service.rs` — gRPC Service
 
 **`DaemonService`**: Thin wrapper over `Daemon`. One `tonic::async_trait` method per `Daemon` method, no additional business logic.
@@ -121,7 +161,18 @@ Real TCP gRPC round-trip tests (no `qemu-img`/`/dev/kvm` required). Uses ephemer
 
 ### `daemon::tests` (unit tests, no network)
 
-65+ tests covering:
+80 tests across 8 modules:
+
+| Module | Focus | Tests |
+|--------|-------|-------|
+| `helpers.rs` | Test infrastructure (TestTempDir, sample configs) | — |
+| `create.rs` | Instance creation, Android overlay, TOML parsing | 5 |
+| `start_stop.rs` | Start, pause, resume, stop lifecycle | 6 |
+| `persistence.rs` | with_store, restore, without_store | 9 |
+| `remove.rs` | Remove, purge, file cleanup, clone protection | 13 |
+| `clone.rs` | Clone (3 modes), export, find_live_clones | 19 |
+| `list_config.rs` | list_instances, get_instance_config | 6 |
+| `status.rs` | Status queries, log/metrics streaming | 3 |
 
 - **Instance lifecycle**: create, start (with Passthrough validation), pause/resume before start, stop before start, double create overwrite
 - **Android instance creation**: Profile resolution, overlay creation (`#[ignore]`), missing base image (verifies `InstanceDirGuard` cleanup), missing OVMF template (verifies cleanup)

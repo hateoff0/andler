@@ -1,0 +1,183 @@
+use super::common::*;
+use super::*;
+use andler_core::{AndroidProfile, InstanceKind};
+
+#[tokio::test]
+async fn create_instance_registers_with_created_state() {
+    let daemon = Daemon::new();
+    let cfg = sample_config();
+    let id = cfg.id;
+
+    let returned_id = daemon.create_instance(cfg).await.unwrap();
+    assert_eq!(returned_id, id);
+
+    let status = daemon.status(id).await.unwrap();
+    assert_eq!(status.state, InstanceState::Created);
+}
+
+#[tokio::test]
+async fn double_create_with_same_id_overwrites_record() {
+    let daemon = Daemon::new();
+    let cfg1 = sample_config();
+    let id = cfg1.id;
+    daemon.create_instance(cfg1).await.unwrap();
+
+    let mut cfg2 = sample_config();
+    cfg2.id = id;
+    cfg2.name = "renamed".to_string();
+    daemon.create_instance(cfg2).await.unwrap();
+
+    let instances = daemon.instances.read().await;
+    assert_eq!(instances.get(&id).unwrap().config.name, "renamed");
+}
+
+#[tokio::test]
+#[ignore = "requires qemu-img binary, see docker/README.md integration-test target"]
+async fn create_android_instance_resolves_profile_and_creates_overlay() {
+    let dir = std::env::temp_dir().join("andler-daemon-test-android-e2e");
+    tokio::fs::create_dir_all(&dir).await.unwrap();
+
+    let base_image = dir.join("base.qcow2");
+    andler_disk::qcow2::create(&base_image, 10 * 1024 * 1024 * 1024)
+        .await
+        .unwrap();
+    let ovmf_template = dir.join("OVMF_VARS.template.fd");
+    tokio::fs::write(&ovmf_template, b"fake-ovmf-vars")
+        .await
+        .unwrap();
+
+    let instances_root = dir.join("instances");
+    let daemon = Daemon::new();
+
+    let profile = AndroidProfile {
+        android_version: AndroidVersion::Android13,
+        gapps: true,
+        microg: false,
+        libndk: true,
+        root: RootMode::None,
+    };
+
+    let id = daemon
+        .create_android_instance(
+            profile.clone(),
+            "my-android".to_string(),
+            base_image.clone(),
+            instances_root.clone(),
+            20 * 1024 * 1024 * 1024,
+            ovmf_template,
+            None,
+        )
+        .await
+        .unwrap();
+
+    let status = daemon.status(id).await.unwrap();
+    assert_eq!(status.state, InstanceState::Created);
+
+    let instance_dir = instances_root.join(id.0.to_string());
+    assert!(instance_dir.join("disk.qcow2").exists());
+    assert!(instance_dir.join("VARS.fd").exists());
+
+    let instances = daemon.instances.read().await;
+    let record = instances.get(&id).unwrap();
+    assert_eq!(record.config.id, id);
+    assert_eq!(record.config.disk.base_image, Some(base_image));
+    match &record.config.kind {
+        InstanceKind::AndroidVm { android_profile } => {
+            assert_eq!(*android_profile, profile);
+        }
+        InstanceKind::LinuxVm { .. } => panic!("expected AndroidVm"),
+    }
+
+    tokio::fs::remove_dir_all(&dir).await.ok();
+}
+
+#[tokio::test]
+async fn create_android_instance_fails_when_base_image_missing() {
+    let dir = std::env::temp_dir().join("andler-daemon-test-android-missing-base");
+    tokio::fs::create_dir_all(&dir).await.unwrap();
+
+    let ovmf_template = dir.join("OVMF_VARS.template.fd");
+    tokio::fs::write(&ovmf_template, b"fake-ovmf-vars")
+        .await
+        .unwrap();
+
+    let missing_base = dir.join("does-not-exist.qcow2");
+    let instances_root = dir.join("instances");
+    let daemon = Daemon::new();
+
+    let profile = AndroidProfile {
+        android_version: AndroidVersion::Android13,
+        gapps: false,
+        microg: true,
+        libndk: false,
+        root: RootMode::None,
+    };
+
+    let err = daemon
+        .create_android_instance(
+            profile,
+            "my-android".to_string(),
+            missing_base,
+            instances_root.clone(),
+            20 * 1024 * 1024 * 1024,
+            ovmf_template,
+            None,
+        )
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        err,
+        DaemonError::Disk(andler_disk::DiskError::BackingFileNotFound(_))
+    ));
+
+    let mut instance_dirs = tokio::fs::read_dir(&instances_root).await.unwrap();
+    assert!(
+        instance_dirs.next_entry().await.unwrap().is_none(),
+        "instances_root must be empty after a failed create_android_instance"
+    );
+
+    tokio::fs::remove_dir_all(&dir).await.ok();
+}
+
+#[tokio::test]
+async fn create_android_instance_cleans_up_instance_dir_on_missing_ovmf_template() {
+    let dir = std::env::temp_dir().join("andler-daemon-test-android-missing-ovmf");
+    tokio::fs::create_dir_all(&dir).await.unwrap();
+
+    let missing_ovmf_template = dir.join("does-not-exist-template.fd");
+    let base_image = dir.join("base.qcow2");
+    let instances_root = dir.join("instances");
+    let daemon = Daemon::new();
+
+    let profile = AndroidProfile {
+        android_version: AndroidVersion::Android13,
+        gapps: false,
+        microg: true,
+        libndk: false,
+        root: RootMode::None,
+    };
+
+    let err = daemon
+        .create_android_instance(
+            profile,
+            "my-android".to_string(),
+            base_image,
+            instances_root.clone(),
+            20 * 1024 * 1024 * 1024,
+            missing_ovmf_template,
+            None,
+        )
+        .await
+        .unwrap_err();
+
+    assert!(matches!(err, DaemonError::Io { .. }));
+
+    let mut instance_dirs = tokio::fs::read_dir(&instances_root).await.unwrap();
+    assert!(
+        instance_dirs.next_entry().await.unwrap().is_none(),
+        "instances_root must be empty after copy(ovmf_vars_template) fails"
+    );
+
+    tokio::fs::remove_dir_all(&dir).await.ok();
+}
