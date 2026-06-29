@@ -169,6 +169,7 @@ gl = true
 | `logs` | Live-tail QEMU stdout/stderr |
 | `metrics` | Stream resource metrics (CPU/RAM/disk/net/GPU) |
 | `snapshot` | Snapshot CRUD (create/restore/delete/list) |
+| `disk` | Disk management (create/info/resize/compact) |
 
 See [`docs/API.md`](docs/API.md) for full command reference with all flags.
 

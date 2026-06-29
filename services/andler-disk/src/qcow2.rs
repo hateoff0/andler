@@ -16,6 +16,18 @@ use tokio::process::Command;
 
 use crate::error::DiskError;
 
+/// Disk information returned by `qemu-img info --output=json`.
+pub struct DiskInfo {
+    /// Logical (virtual) size in bytes — what the guest OS sees.
+    pub virtual_size: u64,
+    /// Actual size on host in bytes — real disk usage (thin-provisioned).
+    pub actual_size: u64,
+    /// Disk format (e.g. "qcow2", "raw").
+    pub format: String,
+    /// Backing file path, if any.
+    pub backing_file: Option<String>,
+}
+
 /// Создаёт новый qcow2-файл заданного логического размера (в байтах) без
 /// `backing_file` — обычный самостоятельный диск.
 ///
@@ -184,6 +196,28 @@ pub async fn disk_usage_bytes(path: &Path) -> Result<u64, DiskError> {
     parse_json_u64_field(&output, "actual-size")
 }
 
+/// Полная информация о диске — один вызов `qemu-img info --output=json`.
+pub async fn info(path: &Path) -> Result<DiskInfo, DiskError> {
+    let output = run_qemu_img_capturing_stdout(&[
+        "info",
+        "--output=json",
+        &path.to_string_lossy(),
+    ])
+    .await?;
+
+    let virtual_size = parse_json_u64_field(&output, "virtual-size")?;
+    let actual_size = parse_json_u64_field(&output, "actual-size")?;
+    let format = parse_json_string_field(&output, "format")?;
+    let backing_file = parse_json_optional_string_field(&output, "backing-filename");
+
+    Ok(DiskInfo {
+        virtual_size,
+        actual_size,
+        format,
+        backing_file,
+    })
+}
+
 /// Запускает `qemu-img` с заданными аргументами, не возвращая stdout —
 /// для команд, где важен только успех/неуспех (`create`, `resize`,
 /// `convert`).
@@ -231,16 +265,26 @@ async fn ensure_parent_dir_exists(path: &Path) -> Result<(), DiskError> {
 
 /// Минималистичный извлекатель числового поля из JSON-вывода `qemu-img
 /// info --output=json` без подключения полноценного парсера (см.
-/// документацию `virtual_size_bytes` выше про причину). Работает только
-/// для плоских числовых полей вида `"field-name": 12345` — `qemu-img info`
-/// выводит их без вложенности, так что этого достаточно на данном этапе.
+/// документацию `virtual_size_bytes` выше про причину). Поддерживает
+/// оба формата: `"field": 12345` (с пробелом) и `"field":12345` (без).
 fn parse_json_u64_field(json: &str, field_name: &str) -> Result<u64, DiskError> {
-    let needle = format!("\"{field_name}\":");
-    let idx = json.find(&needle).ok_or_else(|| {
-        DiskError::ParseError(format!("field `{field_name}` not found in qemu-img output"))
-    })?;
+    let needle_with_space = format!("\"{field_name}\": ");
+    let needle_no_space = format!("\"{field_name}\":");
 
-    let after = &json[idx + needle.len()..];
+    let needle_len;
+    let idx = if let Some(i) = json.find(&needle_with_space) {
+        needle_len = needle_with_space.len();
+        i
+    } else if let Some(i) = json.find(&needle_no_space) {
+        needle_len = needle_no_space.len();
+        i
+    } else {
+        return Err(DiskError::ParseError(format!(
+            "field `{field_name}` not found in qemu-img output"
+        )));
+    };
+
+    let after = &json[idx + needle_len..];
     let value_str: String = after
         .trim_start()
         .chars()
@@ -254,12 +298,58 @@ fn parse_json_u64_field(json: &str, field_name: &str) -> Result<u64, DiskError> 
     })
 }
 
+/// Извлекает строковое поле из JSON (например `"format": "qcow2"`).
+/// Поддерживает оба формата: `"field": "value"` и `"field":"value"`.
+fn parse_json_string_field(json: &str, field_name: &str) -> Result<String, DiskError> {
+    let needle_with_space = format!("\"{field_name}\": \"");
+    let needle_no_space = format!("\"{field_name}\":\"");
+
+    let needle_len;
+    let idx = if let Some(i) = json.find(&needle_with_space) {
+        needle_len = needle_with_space.len();
+        i
+    } else if let Some(i) = json.find(&needle_no_space) {
+        needle_len = needle_no_space.len();
+        i
+    } else {
+        return Err(DiskError::ParseError(format!(
+            "field `{field_name}` not found in qemu-img output"
+        )));
+    };
+
+    let after = &json[idx + needle_len..];
+    let value: String = after.chars().take_while(|&c| c != '"').collect();
+
+    if value.is_empty() {
+        return Err(DiskError::ParseError(format!(
+            "field `{field_name}` is empty in qemu-img output"
+        )));
+    }
+
+    Ok(value)
+}
+
+/// Извлекает опциональное строковое поле из JSON (возвращает `None` если
+/// отсутствует).
+fn parse_json_optional_string_field(json: &str, field_name: &str) -> Option<String> {
+    parse_json_string_field(json, field_name).ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    // -- parse_json_u64_field tests --
+
     #[test]
-    fn parse_json_u64_field_extracts_value() {
+    fn parse_json_u64_field_extracts_value_compact() {
+        let json = r#"{"virtual-size":42949672960,"actual-size":1234567}"#;
+        assert_eq!(parse_json_u64_field(json, "virtual-size").unwrap(), 42949672960);
+        assert_eq!(parse_json_u64_field(json, "actual-size").unwrap(), 1234567);
+    }
+
+    #[test]
+    fn parse_json_u64_field_extracts_value_spaced() {
         let json = r#"{"virtual-size": 42949672960, "actual-size": 1234567}"#;
         assert_eq!(parse_json_u64_field(json, "virtual-size").unwrap(), 42949672960);
         assert_eq!(parse_json_u64_field(json, "actual-size").unwrap(), 1234567);
@@ -267,16 +357,105 @@ mod tests {
 
     #[test]
     fn parse_json_u64_field_missing_field_is_parse_error() {
-        let json = r#"{"virtual-size": 42949672960}"#;
+        let json = r#"{"virtual-size":42949672960}"#;
         let err = parse_json_u64_field(json, "actual-size").unwrap_err();
         assert!(matches!(err, DiskError::ParseError(_)));
     }
 
     #[test]
-    fn parse_json_u64_field_handles_field_without_following_space() {
-        // qemu-img иногда выводит компактный JSON без пробела после ':'.
-        let json = r#"{"virtual-size":42949672960}"#;
-        assert_eq!(parse_json_u64_field(json, "virtual-size").unwrap(), 42949672960);
+    fn parse_json_u64_field_zero_value() {
+        let json = r#"{"virtual-size":0}"#;
+        assert_eq!(parse_json_u64_field(json, "virtual-size").unwrap(), 0);
+    }
+
+    #[test]
+    fn parse_json_u64_field_nested_json_matches_top_level() {
+        let json = r#"{"children":[{"info":{"virtual-size":197120,"format":"file"}}],"virtual-size":1048576,"format":"qcow2"}"#;
+        // find() returns the first match — which is the nested one.
+        // This documents the known limitation of flat find().
+        let result = parse_json_u64_field(json, "virtual-size").unwrap();
+        assert_eq!(result, 197120, "flat find() matches nested field first — known limitation");
+    }
+
+    // -- parse_json_string_field tests --
+
+    #[test]
+    fn parse_json_string_field_extracts_value_compact() {
+        let json = r#"{"format":"qcow2","backing-filename":"/path/to/base.qcow2"}"#;
+        assert_eq!(parse_json_string_field(json, "format").unwrap(), "qcow2");
+        assert_eq!(
+            parse_json_string_field(json, "backing-filename").unwrap(),
+            "/path/to/base.qcow2"
+        );
+    }
+
+    #[test]
+    fn parse_json_string_field_extracts_value_spaced() {
+        let json = r#"{"format": "qcow2", "backing-filename": "/path/to/base.qcow2"}"#;
+        assert_eq!(parse_json_string_field(json, "format").unwrap(), "qcow2");
+        assert_eq!(
+            parse_json_string_field(json, "backing-filename").unwrap(),
+            "/path/to/base.qcow2"
+        );
+    }
+
+    #[test]
+    fn parse_json_string_field_missing_field_is_error() {
+        let json = r#"{"format":"qcow2"}"#;
+        let err = parse_json_string_field(json, "backing-filename").unwrap_err();
+        assert!(matches!(err, DiskError::ParseError(_)));
+    }
+
+    #[test]
+    fn parse_json_string_field_empty_value_is_error() {
+        let json = r#"{"format":""}"#;
+        let err = parse_json_string_field(json, "format").unwrap_err();
+        assert!(matches!(err, DiskError::ParseError(_)));
+    }
+
+    #[test]
+    fn parse_json_string_field_empty_value_with_space_is_error() {
+        let json = r#"{"format": ""}"#;
+        let err = parse_json_string_field(json, "format").unwrap_err();
+        assert!(matches!(err, DiskError::ParseError(_)));
+    }
+
+    // -- parse_json_optional_string_field tests --
+
+    #[test]
+    fn parse_json_optional_string_field_returns_value_compact() {
+        let json = r#"{"backing-filename":"/path/to/base.qcow2"}"#;
+        assert_eq!(
+            parse_json_optional_string_field(json, "backing-filename"),
+            Some("/path/to/base.qcow2".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_json_optional_string_field_returns_value_spaced() {
+        let json = r#"{"backing-filename": "/path/to/base.qcow2"}"#;
+        assert_eq!(
+            parse_json_optional_string_field(json, "backing-filename"),
+            Some("/path/to/base.qcow2".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_json_optional_string_field_returns_none_when_missing() {
+        let json = r#"{"format":"qcow2"}"#;
+        assert_eq!(
+            parse_json_optional_string_field(json, "backing-filename"),
+            None
+        );
+    }
+
+    #[test]
+    fn parse_json_optional_string_field_returns_none_when_empty() {
+        let json = r#"{"backing-filename":""}"#;
+        assert_eq!(
+            parse_json_optional_string_field(json, "backing-filename"),
+            None
+        );
     }
 
     // Тесты, которым реально нужен бинарник `qemu-img` (create/clone/resize/

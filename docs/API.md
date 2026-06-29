@@ -210,6 +210,35 @@ andler snapshot <instance-id> list
 
 The `--timeout` flag overrides the per-instance `snapshot_timeout_secs` for a single operation. If not specified, uses the instance default (30s).
 
+### `disk`
+
+Disk management commands — wraps `qemu-img` operations.
+
+```bash
+# Create a new empty disk
+andler disk create --path /path/to/disk.qcow2 --size 64GB
+andler disk create --path /path/to/disk.qcow2 --size 128000MB
+andler disk create --path /path/to/disk.qcow2 --size 1T
+
+# Show disk information
+andler disk info /path/to/disk.qcow2
+
+# Resize an existing disk
+andler disk resize /path/to/disk.qcow2 --size 80GB
+
+# Compact a disk (reclaim unused space)
+andler disk compact /path/to/disk.qcow2
+```
+
+**Size format**: Supports `GB`, `GiB`, `MB`, `MiB`, `TB`, `TiB` (case-insensitive). Space between number and unit is optional. Plain number = bytes.
+
+| Command | Description |
+|---------|-------------|
+| `create --path <path> --size <size>` | Create a new empty qcow2 disk |
+| `info <path>` | Show disk info (virtual size, actual usage, format, backing file) |
+| `resize <path> --size <size>` | Resize an existing disk |
+| `compact <path>` | Compact a disk (reclaim unused space via `qemu-img convert`) |
+
 ## Instance TOML File
 
 ### Linux VM (minimal)

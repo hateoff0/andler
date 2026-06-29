@@ -50,6 +50,7 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - **Android VM from TOML**: `--file android.toml` with `android_version` field creates AndroidVm — no CLI flags needed.
 - **`--magisk-dir` flag**: For offline Magisk provisioning.
 - **Snapshot `--timeout` flag**: Override per-instance snapshot timeout for a single operation.
+- **`andler disk` commands**: `create`, `info`, `resize`, `compact` for disk management. Flexible size format (`64GB`, `128000MB`, `1T`).
 - **Metrics display**: GPU columns (VRAM, GPU%) when AMD/NVIDIA/Intel data available. Human-readable byte formatting.
 - **Snapshot subcommands**: `create`, `restore`, `delete`, `list` under `andler snapshot`.
 - **`clone` and `export`**: Commands for LinuxVm + AndroidVm.

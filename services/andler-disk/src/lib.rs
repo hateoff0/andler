@@ -20,4 +20,5 @@ pub mod qcow2;
 pub use clone::{full_standalone_clone, linked_clone, shared_base_clone, ClonedDisk};
 pub use error::DiskError;
 pub use overlay::{create_overlay, factory_reset, OverlayDisk};
+pub use qcow2::DiskInfo;
 

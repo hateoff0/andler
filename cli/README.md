@@ -48,6 +48,17 @@ The `andler` binary — a thin gRPC client to `andlerd` via `andler-rpc`. No bus
 | `andler snapshot <id> delete --tag <name> [--timeout <secs>]` | Delete snapshot (requires Stopped). `--timeout` overrides instance default. |
 | `andler snapshot <id> list` | List all snapshots |
 
+### Disk Management
+
+| Command | Description |
+|---------|-------------|
+| `andler disk create --path <path> --size <size>` | Create a new empty qcow2 disk |
+| `andler disk info <path>` | Show disk info (virtual size, actual usage, format, backing file) |
+| `andler disk resize <path> --size <size>` | Resize an existing disk |
+| `andler disk compact <path>` | Compact a disk (reclaim unused space) |
+
+Size format: `64GB`, `128000MB`, `1T`, `512000` (bytes). Case-insensitive.
+
 ## Daemon Address
 
 Override with `--daemon-addr <url>` before the subcommand, or `ANDLERD_ADDR` env var. Default: `http://127.0.0.1:50051`.
