@@ -2,15 +2,33 @@
 //!
 //! Реализует команды управления инстансами: `stop`/`cont`/`query-status`
 //! (pause/resume/status) и `snapshot-save`/`snapshot-load`/`snapshot-delete`/
-//! `query-block`/`query-jobs` (снапшоты). Snapshot-команды используют
-//! async job API QEMU: `snapshot-save/load/delete` запускают асинхронный job,
-//! который завершается через `wait_job_completion` (polling `query-jobs`).
+//! `query-block`/`query-jobs`/`job-dismiss` (снапшоты). Snapshot-команды
+//! используют job-based API QEMU (доступен с QEMU 6.0+, см. README этого
+//! крейта за обоснованием выбора в пользу него, не
+//! `human-monitor-command`+`savevm`): `snapshot-save`/`-load` принимают
+//! `vmstate`+`devices` (массив node-name, **не** `device` единственного
+//! числа — реальная QAPI-схема, см. `qemu-qmp-ref`), `snapshot-delete`
+//! принимает только `devices`, без `vmstate`. Все три запускают
+//! асинхронный job, завершение которого ожидается через
+//! `wait_job_completion` (polling `query-jobs` до статуса `"concluded"` —
+//! единственного реального терминального статуса job в QEMU; успех/провал
+//! различается по полю `error`, не отдельным значением `status`) с
+//! последующим обязательным `job-dismiss`.
 //!
 //! Протокол: newline-delimited JSON поверх unix-сокета. При подключении
 //! QEMU сразу присылает greeting (`{"QMP": {...}}`); клиент обязан
 //! отправить `{"execute": "qmp_capabilities"}` прежде чем слать любые
 //! другие команды — без этого QEMU отвечает ошибкой на всё, кроме
 //! `qmp_capabilities` (режим "capabilities negotiation").
+//!
+//! Snapshot-job'ы асинхронно шлют события `JOB_STATUS_CHANGE` по тому же
+//! сокету, перемежая их с обычными `return`/`error`-ответами на команды
+//! во время поллинга `query-jobs`. `execute_raw` пропускает любое
+//! сообщение без `return`/`error` (то есть событие) через
+//! `read_reply_skipping_events`, не считает его ошибкой парсинга — это не
+//! полноценная подписка на события (нет очереди, нет публичного API для
+//! их чтения), только минимальный "пропускатель шума" для синхронного
+//! query/response цикла.
 
 use std::path::Path;
 
@@ -164,11 +182,22 @@ impl QmpClient {
         Ok(parsed.status)
     }
 
-    /// `snapshot-save` — создаёт внутренний снапшот qcow2-диска (async job).
+    /// `snapshot-save` — job-based snapshot API (QEMU 6.0+): сохраняет
+    /// состояние гостя (CPU/RAM, поле `vmstate`) и состояние диска
+    /// (поле `devices`, список node-name/id блочных узлов) под тегом
+    /// `tag`. **Не** старый `human-monitor-command`+`savevm` — решение
+    /// принято явно (см. README этого крейта).
     ///
-    /// После вызова нужно ждать завершения через `wait_job_completion`.
-    /// `device` — имя устройства (например, `"drive-disk0"`, как в cmdline).
-    /// `tag` — пользовательский идентификатор снапшота.
+    /// `device` — имя устройства (например, `"drive-disk0"`, как в
+    /// `cmdline.rs`). И `vmstate`, и единственный элемент `devices`
+    /// сейчас указывают на этот же узел — у инстанса один диск, второго
+    /// места для хранения vmstate нет (см. doc-comment `DISK_DEVICE` в
+    /// `backend.rs`: VARS-pflash сознательно не участвует в снапшоте).
+    ///
+    /// После вызова нужно ждать завершения через `wait_job_completion` —
+    /// это асинхронный job, не синхронная команда: сам `snapshot-save`
+    /// возвращает `{"return": {}}` сразу после постановки job в очередь,
+    /// не после его реального завершения.
     pub async fn snapshot_save(
         &mut self,
         device: &str,
@@ -177,14 +206,17 @@ impl QmpClient {
         let job_id = format!("snap-{tag}");
         let args = json!({
             "job-id": &job_id,
-            "device": device,
             "tag": tag,
+            "vmstate": device,
+            "devices": [device],
         });
         self.execute_raw("snapshot-save", Some(args)).await?;
         Ok(job_id)
     }
 
-    /// `snapshot-load` — восстанавливает инстанс из внутреннего снапшота (async job).
+    /// `snapshot-load` — восстанавливает состояние гостя и диска из
+    /// снапшота `tag` (async job, та же схема аргументов, что у
+    /// `snapshot-save`: `vmstate`+`devices`, не `device`).
     ///
     /// После вызова нужно ждать завершения через `wait_job_completion`.
     pub async fn snapshot_load(
@@ -195,14 +227,18 @@ impl QmpClient {
         let job_id = format!("load-{tag}");
         let args = json!({
             "job-id": &job_id,
-            "device": device,
             "tag": tag,
+            "vmstate": device,
+            "devices": [device],
         });
         self.execute_raw("snapshot-load", Some(args)).await?;
         Ok(job_id)
     }
 
-    /// `snapshot-delete` — удаляет внутренний снапшот qcow2-диска (async job).
+    /// `snapshot-delete` — удаляет снапшот `tag` с перечисленных
+    /// `devices` (async job). В отличие от `snapshot-save`/`-load`, эта
+    /// команда не принимает `vmstate` — снапшот стирается только с
+    /// блочных узлов, нет отдельного состояния ОЗУ/CPU для удаления.
     ///
     /// После вызова нужно ждать завершения через `wait_job_completion`.
     pub async fn snapshot_delete(
@@ -213,14 +249,25 @@ impl QmpClient {
         let job_id = format!("del-{tag}");
         let args = json!({
             "job-id": &job_id,
-            "device": device,
             "tag": tag,
+            "devices": [device],
         });
         self.execute_raw("snapshot-delete", Some(args)).await?;
         Ok(job_id)
     }
 
     /// Ожидает завершения async job по `job_id`, poll-я через `query-jobs`.
+    ///
+    /// QEMU job-модель знает единственный терминальный статус —
+    /// `"concluded"` (`created`/`running`/`paused`/`ready`/`standby`/
+    /// `waiting`/`pending`/`aborting` — все промежуточные, не `"completed"`/
+    /// `"failed"`/`"aborted"`, которых в реальном протоколе не существует).
+    /// Успех/неудача неконкluded-job различается по полю `error`: оно
+    /// отсутствует при успехе, содержит текст ошибки при провале job'а.
+    /// После того как job дошёл до `"concluded"` (в любом исходе), нужно
+    /// явно вызвать `job-dismiss` — иначе он навечно останется в
+    /// `query-jobs`, заняв слот и оставшись видимым там же при следующем
+    /// поллинге другого job'а.
     ///
     /// Максимальное время ожидания — `timeout`. Возвращает ошибку при
     /// таймауте или если job завершился с ошибкой.
@@ -238,17 +285,21 @@ impl QmpClient {
                 serde_json::from_value(value).map_err(QmpError::ParseError)?;
 
             if let Some(job) = jobs.iter().find(|j| j.id == job_id) {
-                match job.status.as_deref() {
-                    Some("completed") => return Ok(()),
-                    Some("failed") | Some("aborted") => {
-                        return Err(QmpError::CommandFailed {
+                if job.status.as_deref() == Some("concluded") {
+                    self.execute_raw("job-dismiss", Some(json!({ "id": job_id })))
+                        .await?;
+
+                    return match &job.error {
+                        Some(error) => Err(QmpError::CommandFailed {
                             command: format!("job {job_id}"),
-                            class: job.error.clone().unwrap_or_default(),
-                            desc: job.error.clone().unwrap_or_else(|| "job failed".to_string()),
-                        });
-                    }
-                    _ => {} // running, pending, etc. — keep polling
+                            class: "GenericError".to_string(),
+                            desc: error.clone(),
+                        }),
+                        None => Ok(()),
+                    };
                 }
+                // created/running/paused/ready/standby/waiting/pending/
+                // aborting — все промежуточные, продолжаем поллинг.
             }
 
             if start.elapsed() > timeout {
@@ -256,7 +307,7 @@ impl QmpClient {
                     command: format!("wait for job {job_id}"),
                     class: "Timeout".to_string(),
                     desc: format!(
-                        "job {job_id} did not complete within {:?}",
+                        "job {job_id} did not reach status \"concluded\" within {:?}",
                         timeout
                     ),
                 });
@@ -306,7 +357,7 @@ impl QmpClient {
             .map_err(QmpError::Io)?;
         self.stream.flush().await.map_err(QmpError::Io)?;
 
-        let reply: QmpReply = self.read_line_as_json().await?;
+        let reply: QmpReply = self.read_reply_skipping_events().await?;
 
         match (reply.return_value, reply.error) {
             (Some(value), _) => Ok(value),
@@ -315,20 +366,34 @@ impl QmpClient {
                 class: err.class,
                 desc: err.desc,
             }),
-            // QMP-сообщение без return и без error — это либо событие
-            // (asynchronous event, например VNC_CONNECTED), не ответ на
-            // команду, либо нарушение протокола. На этом этапе клиент не
-            // различает события от ответов на команды (нет очереди
-            // событий) — такое сообщение считается ошибкой парсинга,
-            // а не тихо игнорируется, чтобы не маскировать реальные
-            // протокольные баги.
             (None, None) => {
                 use serde::de::Error as _;
                 Err(QmpError::ParseError(serde_json::Error::custom(format!(
-                    "QMP reply to `{command}` has neither `return` nor `error` field; \
-                     possibly an asynchronous event, not yet supported by this client"
+                    "QMP reply to `{command}` has neither `return` nor `error` field"
                 ))))
             }
+        }
+    }
+
+    /// Читает строки до тех пор, пока не встретит сообщение, являющееся
+    /// настоящим ответом на команду (`return`/`error`), пропуская любые
+    /// промежуточные события (`{"event": ..., ...}`, например
+    /// `JOB_STATUS_CHANGE`, которые QEMU присылает асинхронно по тому же
+    /// сокету во время `snapshot-save`/`snapshot-load`/`snapshot-delete`
+    /// job'ов — единственное место в этом клиенте, где события и ответы
+    /// на команды могут перемежаться на одном соединении). Это не
+    /// полноценная подписка на события — пропущенные события просто
+    /// отбрасываются, недоступны вызывающей стороне; достаточно для
+    /// синхронного query/response цикла с поллингом в
+    /// `wait_job_completion`.
+    async fn read_reply_skipping_events(&mut self) -> Result<QmpReply, QmpError> {
+        loop {
+            let raw: Value = self.read_line_as_json().await?;
+            if raw.get("event").is_some() {
+                continue;
+            }
+            let reply: QmpReply = serde_json::from_value(raw).map_err(QmpError::ParseError)?;
+            return Ok(reply);
         }
     }
 
@@ -429,15 +494,255 @@ mod tests {
 
     #[test]
     fn qmp_reply_with_neither_return_nor_error_parses_as_valid_struct() {
-        // Сам QmpReply парсится без ошибки в этом случае (оба поля Option) —
-        // именно поэтому проверка "ни return, ни error" происходит в
-        // execute_raw после парсинга, не на уровне serde. Этот тест
-        // фиксирует то, что приходит в execute_raw для построения
-        // QmpError::ParseError через serde::de::Error::custom.
+        // Сам QmpReply парсится без ошибки в этом случае (оба поля Option).
+        // Раньше execute_raw трактовал такое сообщение как ошибку парсинга
+        // (считая, что событий не бывает); теперь read_reply_skipping_events
+        // (см. execute_raw_skips_async_events_before_the_real_reply ниже)
+        // отфильтровывает события до парсинга в QmpReply вообще — этот тест
+        // фиксирует только то, что сам тип не паникует/не падает на таком
+        // JSON, если до него всё-таки дойдёт парсинг.
         let json = r#"{"event": "VNC_CONNECTED"}"#;
         let parsed: QmpReply = serde_json::from_str(json).unwrap();
         assert!(parsed.return_value.is_none());
         assert!(parsed.error.is_none());
+    }
+
+    /// Создаёт пару `QmpClient`+"фейковый QEMU" поверх `UnixStream::pair`
+    /// — без реального `qemu-system-x86_64`, но с настоящим wire-форматом
+    /// QMP (newline-delimited JSON). Пропускает greeting/`qmp_capabilities`
+    /// handshake — конструирует `QmpClient` напрямую из готового сокета
+    /// (доступно из `tests`-модуля того же файла), не через `connect`,
+    /// так что фейковому концу не нужно изображать greeting.
+    fn fake_qmp_pair() -> (QmpClient, UnixStream) {
+        let (client_side, server_side) = UnixStream::pair().expect("unix socket pair");
+        let client = QmpClient {
+            stream: BufReader::new(client_side),
+        };
+        (client, server_side)
+    }
+
+    #[tokio::test]
+    async fn snapshot_save_sends_devices_array_and_vmstate_not_singular_device() {
+        // Регрессионный тест на реальный баг: первая версия этого кода
+        // слала `"device": "drive-disk0"` (единственное число, без
+        // `vmstate`) — реальный QEMU QMP `snapshot-save` (job-based API,
+        // QEMU 6.0+) ожидает `"devices": [...]` (массив node-name) и
+        // обязательный `"vmstate"`, иначе сразу отвечает `{"error": ...}`,
+        // не запуская job вообще.
+        let (mut client, server) = fake_qmp_pair();
+        let (mut server_read, mut server_write) = tokio::io::split(server);
+
+        let request_fut = tokio::spawn(async move {
+            let mut buf = BufReader::new(&mut server_read);
+            let mut line = String::new();
+            buf.read_line(&mut line).await.expect("read request");
+            let req: Value = serde_json::from_str(&line).expect("valid JSON");
+            server_write
+                .write_all(b"{\"return\": {}}\n")
+                .await
+                .expect("write reply");
+            req
+        });
+
+        let job_id = client
+            .snapshot_save("drive-disk0", "my-tag")
+            .await
+            .expect("snapshot_save should send the request and parse the reply");
+        assert_eq!(job_id, "snap-my-tag");
+
+        let req = request_fut.await.expect("server task did not panic");
+        assert_eq!(req["execute"], "snapshot-save");
+        let args = &req["arguments"];
+        assert_eq!(args["job-id"], "snap-my-tag");
+        assert_eq!(args["tag"], "my-tag");
+        assert_eq!(args["vmstate"], "drive-disk0");
+        assert_eq!(args["devices"], serde_json::json!(["drive-disk0"]));
+        assert!(
+            args.get("device").is_none(),
+            "must not send the old singular `device` field"
+        );
+    }
+
+    #[tokio::test]
+    async fn snapshot_delete_sends_devices_array_without_vmstate() {
+        let (mut client, server) = fake_qmp_pair();
+        let (mut server_read, mut server_write) = tokio::io::split(server);
+
+        let request_fut = tokio::spawn(async move {
+            let mut buf = BufReader::new(&mut server_read);
+            let mut line = String::new();
+            buf.read_line(&mut line).await.expect("read request");
+            let req: Value = serde_json::from_str(&line).expect("valid JSON");
+            server_write
+                .write_all(b"{\"return\": {}}\n")
+                .await
+                .expect("write reply");
+            req
+        });
+
+        client
+            .snapshot_delete("drive-disk0", "old-tag")
+            .await
+            .expect("snapshot_delete should succeed");
+
+        let req = request_fut.await.expect("server task did not panic");
+        assert_eq!(req["execute"], "snapshot-delete");
+        let args = &req["arguments"];
+        assert_eq!(args["devices"], serde_json::json!(["drive-disk0"]));
+        assert!(
+            args.get("vmstate").is_none(),
+            "snapshot-delete has no vmstate parameter, unlike snapshot-save/-load"
+        );
+    }
+
+    #[tokio::test]
+    async fn wait_job_completion_treats_concluded_without_error_as_success() {
+        // Регрессионный тест: первая версия проверяла статусы
+        // "completed"/"failed"/"aborted", которых не существует в
+        // реальной job-модели QEMU — единственный терминальный статус
+        // "concluded", успех/провал различается по полю `error`.
+        let (mut client, server) = fake_qmp_pair();
+        let (mut server_read, mut server_write) = tokio::io::split(server);
+
+        tokio::spawn(async move {
+            let mut buf = BufReader::new(&mut server_read);
+
+            // Первый запрос — query-jobs, отвечаем "concluded" без error.
+            let mut line = String::new();
+            buf.read_line(&mut line).await.unwrap();
+            let req: Value = serde_json::from_str(&line).unwrap();
+            assert_eq!(req["execute"], "query-jobs");
+            server_write
+                .write_all(
+                    b"{\"return\": [{\"id\": \"snap-tag\", \"status\": \"concluded\"}]}\n",
+                )
+                .await
+                .unwrap();
+
+            // Второй запрос — job-dismiss, обязателен после concluded.
+            let mut line = String::new();
+            buf.read_line(&mut line).await.unwrap();
+            let req: Value = serde_json::from_str(&line).unwrap();
+            assert_eq!(req["execute"], "job-dismiss");
+            assert_eq!(req["arguments"]["id"], "snap-tag");
+            server_write
+                .write_all(b"{\"return\": {}}\n")
+                .await
+                .unwrap();
+        });
+
+        client
+            .wait_job_completion("snap-tag", std::time::Duration::from_secs(5))
+            .await
+            .expect("concluded job without error must be reported as success");
+    }
+
+    #[tokio::test]
+    async fn wait_job_completion_treats_concluded_with_error_as_failure() {
+        let (mut client, server) = fake_qmp_pair();
+        let (mut server_read, mut server_write) = tokio::io::split(server);
+
+        tokio::spawn(async move {
+            let mut buf = BufReader::new(&mut server_read);
+
+            let mut line = String::new();
+            buf.read_line(&mut line).await.unwrap();
+            server_write
+                .write_all(
+                    b"{\"return\": [{\"id\": \"snap-tag\", \"status\": \"concluded\", \"error\": \"device is in use\"}]}\n",
+                )
+                .await
+                .unwrap();
+
+            // job-dismiss всё равно должен быть вызван, даже при ошибке.
+            let mut line = String::new();
+            buf.read_line(&mut line).await.unwrap();
+            let req: Value = serde_json::from_str(&line).unwrap();
+            assert_eq!(req["execute"], "job-dismiss");
+            server_write
+                .write_all(b"{\"return\": {}}\n")
+                .await
+                .unwrap();
+        });
+
+        let err = client
+            .wait_job_completion("snap-tag", std::time::Duration::from_secs(5))
+            .await
+            .expect_err("concluded job with `error` field must be reported as failure");
+        assert!(matches!(err, QmpError::CommandFailed { .. }));
+    }
+
+    #[tokio::test]
+    async fn wait_job_completion_keeps_polling_through_non_terminal_statuses() {
+        let (mut client, server) = fake_qmp_pair();
+        let (mut server_read, mut server_write) = tokio::io::split(server);
+
+        tokio::spawn(async move {
+            let mut buf = BufReader::new(&mut server_read);
+
+            for status in ["created", "running", "pending"] {
+                let mut line = String::new();
+                buf.read_line(&mut line).await.unwrap();
+                let reply = format!(
+                    "{{\"return\": [{{\"id\": \"snap-tag\", \"status\": \"{status}\"}}]}}\n"
+                );
+                server_write.write_all(reply.as_bytes()).await.unwrap();
+            }
+
+            let mut line = String::new();
+            buf.read_line(&mut line).await.unwrap();
+            server_write
+                .write_all(b"{\"return\": [{\"id\": \"snap-tag\", \"status\": \"concluded\"}]}\n")
+                .await
+                .unwrap();
+
+            let mut line = String::new();
+            buf.read_line(&mut line).await.unwrap();
+            server_write.write_all(b"{\"return\": {}}\n").await.unwrap();
+        });
+
+        client
+            .wait_job_completion("snap-tag", std::time::Duration::from_secs(5))
+            .await
+            .expect("must keep polling through non-terminal statuses and conclude eventually");
+    }
+
+    #[tokio::test]
+    async fn execute_raw_skips_async_events_before_the_real_reply() {
+        // Регрессионный тест: первая версия `execute_raw` трактовала любое
+        // сообщение без `return`/`error` как ошибку парсинга — включая
+        // легитимные асинхронные события (`JOB_STATUS_CHANGE` и другие),
+        // которые QEMU может прислать по тому же сокету между отправкой
+        // команды и получением её ответа, особенно во время
+        // snapshot-job-поллинга.
+        let (mut client, server) = fake_qmp_pair();
+        let (mut server_read, mut server_write) = tokio::io::split(server);
+
+        tokio::spawn(async move {
+            let mut buf = BufReader::new(&mut server_read);
+            let mut line = String::new();
+            buf.read_line(&mut line).await.unwrap();
+
+            // Шлём событие, затем ещё одно, затем настоящий ответ.
+            server_write
+                .write_all(b"{\"event\": \"JOB_STATUS_CHANGE\", \"data\": {}}\n")
+                .await
+                .unwrap();
+            server_write
+                .write_all(b"{\"event\": \"STOP\"}\n")
+                .await
+                .unwrap();
+            server_write
+                .write_all(b"{\"return\": {\"status\": \"running\"}}\n")
+                .await
+                .unwrap();
+        });
+
+        let value = client
+            .execute_raw("query-status", None)
+            .await
+            .expect("events before the real reply must be skipped, not treated as errors");
+        assert_eq!(value["status"], "running");
     }
 
     // Тесты, которым нужно реальное соединение с живым QMP-сокетом
@@ -508,19 +813,33 @@ mod tests {
     }
 
     #[test]
-    fn query_job_info_parses_completed() {
-        let json = r#"[{"id": "snap-backup1", "status": "completed"}]"#;
+    fn query_job_info_parses_concluded_without_error() {
+        // "concluded" — единственный реальный терминальный статус job в
+        // QEMU QMP; "completed"/"failed"/"aborted" (прошлая версия этого
+        // теста) не существуют в протоколе.
+        let json = r#"[{"id": "snap-backup1", "status": "concluded"}]"#;
         let jobs: Vec<QueryJobInfo> = serde_json::from_str(json).unwrap();
         assert_eq!(jobs.len(), 1);
         assert_eq!(jobs[0].id, "snap-backup1");
-        assert_eq!(jobs[0].status.as_deref(), Some("completed"));
+        assert_eq!(jobs[0].status.as_deref(), Some("concluded"));
+        assert!(jobs[0].error.is_none());
     }
 
     #[test]
-    fn query_job_info_parses_failed_with_error() {
-        let json = r#"[{"id": "snap-backup1", "status": "failed", "error": "device is in use"}]"#;
+    fn query_job_info_parses_concluded_with_error() {
+        // Провал job'а различается по присутствию `error`, не по
+        // отдельному значению `status` — "concluded" одинаков для успеха
+        // и провала.
+        let json = r#"[{"id": "snap-backup1", "status": "concluded", "error": "device is in use"}]"#;
         let jobs: Vec<QueryJobInfo> = serde_json::from_str(json).unwrap();
-        assert_eq!(jobs[0].status.as_deref(), Some("failed"));
+        assert_eq!(jobs[0].status.as_deref(), Some("concluded"));
         assert_eq!(jobs[0].error.as_deref(), Some("device is in use"));
+    }
+
+    #[test]
+    fn query_job_info_parses_non_terminal_status() {
+        let json = r#"[{"id": "snap-backup1", "status": "running"}]"#;
+        let jobs: Vec<QueryJobInfo> = serde_json::from_str(json).unwrap();
+        assert_eq!(jobs[0].status.as_deref(), Some("running"));
     }
 }

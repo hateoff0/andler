@@ -60,6 +60,52 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - **Monorepo restructure**: `crates/andler-*` reorganized into `core/`, `backends/`, `services/`, `daemon/`, `cli/` directories. Package names keep `andler-` prefix.
 - **Documentation language**: All docs now in English. Historical/future docs moved to `docs/archive/`.
 
+### Fixed
+
+- **`andler-qemu` snapshot QMP wire protocol**: `snapshot-save`/`snapshot-load`/`snapshot-delete`
+  were sending a singular `"device"` argument and, for save/load, omitting the required
+  `"vmstate"` field — real QEMU (job-based API, 6.0+) expects a `"devices"` array plus
+  `"vmstate"` for save/load, and rejects the malformed request immediately with `{"error": ...}`
+  without ever starting the job. Fixed to send the correct schema.
+- **`wait_job_completion` terminal status check**: was matching on `"completed"`/`"failed"`/
+  `"aborted"`, none of which exist in QEMU's real job status enum (the only terminal status is
+  `"concluded"`; success/failure is distinguished by the presence of an `error` field, not by a
+  separate status value). This meant every snapshot operation — even a successful one — would
+  poll until timeout rather than ever detecting completion. Fixed, and `job-dismiss` is now
+  called after a job concludes (previously never called, leaving concluded jobs visible in
+  `query-jobs` forever).
+- **`execute_raw` no longer errors on async QMP events** (e.g. `JOB_STATUS_CHANGE`) received
+  between sending a command and reading its reply — these can legitimately interleave with
+  command/response traffic during job polling. Previously any such message was treated as a
+  parse error.
+- None of the above were caught by the existing test suite — `snapshot_save`/`load`/`delete` had
+  no tests asserting on the actual JSON sent, and `wait_job_completion`'s tests encoded the same
+  incorrect status strings as the implementation. New tests cover the real wire protocol using a
+  `UnixStream::pair`-based fake QMP peer (see `andler-qemu/src/qmp.rs`).
+- **`andler-qemu` Intel GPU metrics**: the sysfs path used for GPU load
+  (`device/gt/gt0/attrs/busyiffies`) and the two used for VRAM
+  (`mem_info_dev_local_mem_alloc`, `mem_info_stolen_local_mem`) do not exist anywhere in the real
+  i915 sysfs tree — confirmed against `i915_sysfs.c` and the upstream `gt/` sysfs reorganization.
+  On real Intel hardware this silently returned `None` for both metrics, with no error, and no
+  test exercised the path string itself (only the delta arithmetic, with hand-picked numbers).
+  Fixed to read `device/power/rc6_residency_ms` (a real, documented, long-standing i915 ABI) for
+  GPU load, computed from a real elapsed-time delta (`Instant`) rather than an assumed fixed
+  1-second polling interval. VRAM is now honestly `None` for Intel rather than read from
+  nonexistent paths — there is no equivalently simple, stable `sysfs` ABI for it (stolen-memory
+  accounting lives in `debugfs`).
+- **`andler-disk` magisk provisioning** (`magisk.rs`): removed a pointless `unsafe` block around
+  plain `SystemTime::now().duration_since(...)` (entirely safe Rust; the `unsafe` did nothing and
+  the accompanying safety comment justified nothing real). `NbdGuard`/`MountGuard`'s `Drop` impls
+  previously discarded the result of `qemu-nbd --disconnect`/`umount -l` entirely (`let _ = ...`)
+  — neither a failed spawn nor a non-zero exit status was ever observed, which could leave
+  `/dev/nbd*` devices connected indefinitely with no diagnostic trail. Both now log via
+  `tracing::warn!` on failure (added `tracing` as a dependency of `andler-disk`, which it
+  previously lacked). Also replaced `.to_str().unwrap()` with `.to_string_lossy()` in both `Drop`
+  impls so a non-UTF-8 path can't turn an already-failing cleanup into a panic during unwind.
+  Separately, found and fixed two stray CJK characters embedded in Russian-language doc comments
+  in `magisk.rs` and `metrics.rs` (`分区`, `不同的`, `开场的`) — encoding/generation artifacts, not
+  intentional text.
+
 ### Removed
 
 - Dead stub crates: `frontend/`, `guest-image/`, `packaging/`, `presets/`

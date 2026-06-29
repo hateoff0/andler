@@ -180,9 +180,15 @@ Any active state (Created/Starting/Running/Paused/Stopping) can transition to `E
 
 Uses QEMU's async job API (not filesystem-level snapshots):
 
-1. **Create**: `snapshot-save` job → poll `query-jobs` until complete (configurable timeout per-instance, default 30s)
-2. **Restore**: `snapshot-load` job → poll `query-jobs`
-3. **Delete**: `snapshot-delete` job → poll `query-jobs`
+1. **Create**: `snapshot-save` job (`{job-id, tag, vmstate, devices: [...]}` — note `devices` is a
+   list, and `vmstate` is required; there's no singular `device` field in the real protocol) →
+   poll `query-jobs` until status `"concluded"` (the only real terminal status — there's no
+   `"completed"`/`"failed"` string; success vs. failure is the presence of an `error` field) →
+   `job-dismiss` (configurable timeout per-instance, default 30s)
+2. **Restore**: `snapshot-load` job (same `vmstate`+`devices` schema) → poll `query-jobs` →
+   `job-dismiss`
+3. **Delete**: `snapshot-delete` job (`devices` only, no `vmstate`) → poll `query-jobs` →
+   `job-dismiss`
 4. **List**: `query-block` → extract snapshot metadata
 
 Snapshot metadata (tag, description, created_at) stored in SQLite `snapshots` table with `ON DELETE CASCADE` from `instances`.
@@ -197,13 +203,13 @@ All host-side metrics from `/proc` — no QMP communication needed for metrics:
 | RAM | `/proc/<pid>/status` (VmRSS) | Direct read |
 | Disk I/O | `/sys/block/<dev>/stat` | Delta-based bytes/sec |
 | Net I/O | `/proc/<net/dev>` | Delta-based bytes/sec |
-| VRAM Used | AMD: `mem_info_vram_used`, NVIDIA: `nvidia-smi`, Intel: `mem_info_dev_local_mem_alloc` | Vendor-specific |
-| VRAM Total | AMD: `mem_info_vram_total`, NVIDIA: `nvidia-smi`, Intel: `mem_info_stolen_local_mem` | Vendor-specific |
-| GPU Load | AMD: `gpu_busy_percent`, NVIDIA: `nvidia-smi`, Intel: `busyiffies` delta | Vendor-specific |
+| VRAM Used | AMD: `mem_info_vram_used`, NVIDIA: `nvidia-smi`, Intel: not available | Vendor-specific |
+| VRAM Total | AMD: `mem_info_vram_total`, NVIDIA: `nvidia-smi`, Intel: not available | Vendor-specific |
+| GPU Load | AMD: `gpu_busy_percent`, NVIDIA: `nvidia-smi`, Intel: `power/rc6_residency_ms` idle-time delta | Vendor-specific |
 
 Polling interval: 1 second. Broadcast via `tokio::sync::broadcast`.
 
-GPU vendor detection priority: AMD → NVIDIA → Intel (first found wins). AMD uses direct sysfs reads. NVIDIA uses `nvidia-smi` CLI. Intel uses `i915` sysfs with delta-based busyiffies for GPU load.
+GPU vendor detection priority: AMD → NVIDIA → Intel (first found wins). AMD uses direct sysfs reads. NVIDIA uses `nvidia-smi` CLI. Intel uses `i915` sysfs `power/rc6_residency_ms` (documented idle-time ABI) for GPU load, derived from a real elapsed-time delta; Intel has no VRAM metric (stolen-memory accounting is a `debugfs`, not `sysfs`, interface).
 
 ## Magisk Provisioning
 

@@ -27,7 +27,7 @@
 //! 4. Патчит boot image (если доступен) через `magiskboot`.
 //!
 //! Конкретные пути внутри образа зависят от того, как упакован
-//! guest-image (отдельный `/boot`分区 или единый rootfs). Модуль
+//! guest-image (отдельный `/boot`-раздел или единый rootfs). Модуль
 //! определяет layout автоматически.
 
 use std::path::{Path, PathBuf};
@@ -67,11 +67,38 @@ impl NbdGuard {
 
 impl Drop for NbdGuard {
     fn drop(&mut self) {
-        let _ = std::process::Command::new("qemu-nbd")
-            .args(["--disconnect", self.device_path.to_str().unwrap()])
+        // Раньше результат полностью игнорировался (`let _ = ...status()`) —
+        // это означало, что ни ошибка запуска `qemu-nbd`, ни ненулевой код
+        // возврата самого `--disconnect` никогда не были видны: проблема
+        // (повисшее `/dev/nbd*`-устройство) обнаруживалась бы только
+        // постфактум, при следующей попытке занять то же устройство.
+        // `Drop` не может вернуть `Result` вызывающей стороне — но может
+        // хотя бы залогировать, не маскируя ошибку полностью.
+        let result = std::process::Command::new("qemu-nbd")
+            .args(["--disconnect", &self.device_path.to_string_lossy()])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::piped())
             .status();
+
+        match result {
+            Ok(status) if !status.success() => {
+                tracing::warn!(
+                    device = %self.device_path.display(),
+                    exit_status = %status,
+                    "qemu-nbd --disconnect exited with a non-zero status; \
+                     /dev/nbd* device may remain connected"
+                );
+            }
+            Err(error) => {
+                tracing::warn!(
+                    device = %self.device_path.display(),
+                    %error,
+                    "failed to spawn qemu-nbd --disconnect; \
+                     /dev/nbd* device may remain connected"
+                );
+            }
+            Ok(_) => {}
+        }
     }
 }
 
@@ -92,14 +119,47 @@ impl MountGuard {
 
 impl Drop for MountGuard {
     fn drop(&mut self) {
-        let _ = std::process::Command::new("umount")
-            .args(["-l", self.mount_point.to_str().unwrap()])
+        // `umount -l` (lazy unmount) практически никогда не проваливается
+        // синхронно — он отделяет точку монтирования от дерева сразу,
+        // даже если она ещё занята, и реально освобождается позже в фоне.
+        // Поэтому риск "повисшего" монтирования здесь ниже, чем у
+        // qemu-nbd --disconnect выше, но всё равно стоит логировать, не
+        // молчать — например, если `umount` вообще не нашёлся в `$PATH`.
+        let result = std::process::Command::new("umount")
+            .args(["-l", &self.mount_point.to_string_lossy()])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::piped())
             .status();
 
-        // Удаляем каталог точки монтирования (best-effort)
-        let _ = std::fs::remove_dir(&self.mount_point);
+        match result {
+            Ok(status) if !status.success() => {
+                tracing::warn!(
+                    mount_point = %self.mount_point.display(),
+                    exit_status = %status,
+                    "umount -l exited with a non-zero status"
+                );
+            }
+            Err(error) => {
+                tracing::warn!(
+                    mount_point = %self.mount_point.display(),
+                    %error,
+                    "failed to spawn umount -l"
+                );
+            }
+            Ok(_) => {}
+        }
+
+        // Удаляем каталог точки монтирования (best-effort) — если внутри
+        // ещё что-то смонтировано (umount -l не успел отвязать), `rmdir`
+        // просто провалится с EBUSY, что безопасно проигнорировать: каталог
+        // останется, не более того, никакого риска для данных.
+        if let Err(error) = std::fs::remove_dir(&self.mount_point) {
+            tracing::warn!(
+                mount_point = %self.mount_point.display(),
+                %error,
+                "failed to remove mount point directory"
+            );
+        }
     }
 }
 
@@ -273,14 +333,17 @@ fn unique_mount_name() -> String {
     use std::sync::atomic::{AtomicU64, Ordering};
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let id = COUNTER.fetch_add(1, Ordering::Relaxed);
-    format!("{}-{}-{}", std::process::id(), id, unsafe {
-        // Safety: monotonic timestamp — не используется как crypto nonce
-        let ts = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos();
-        ts
-    })
+    // PID + monotonic process-wide counter + nanosecond timestamp — все три
+    // вычисляются через safe Rust (`SystemTime::now()`/`duration_since` не
+    // требуют `unsafe`). PID+counter уже достаточны для уникальности внутри
+    // одного процесса andlerd; timestamp добавлен только для лучшей
+    // диагностируемости имени каталога при ручном осмотре `/tmp`, не для
+    // самой уникальности.
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    format!("{}-{}-{}", std::process::id(), id, ts)
 }
 
 /// Монтирует раздел в точку монтирования и возвращает guard.

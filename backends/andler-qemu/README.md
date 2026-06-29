@@ -74,12 +74,43 @@ QMP client over a unix socket. Handles handshake, command execution, and async j
 | `snapshot_save` | `async fn(&mut self, device, tag) -> Result<String, QmpError>` | Async `snapshot-save` job |
 | `snapshot_load` | `async fn(&mut self, device, tag) -> Result<String, QmpError>` | Async `snapshot-load` job |
 | `snapshot_delete` | `async fn(&mut self, device, tag) -> Result<String, QmpError>` | Async `snapshot-delete` job |
-| `wait_job_completion` | `async fn(&mut self, job_id, timeout) -> Result<(), QmpError>` | Polls `query-jobs` until done |
+| `wait_job_completion` | `async fn(&mut self, job_id, timeout) -> Result<(), QmpError>` | Polls `query-jobs` until `"concluded"`, then `job-dismiss` |
 | `query_block_snapshots` | `async fn(&mut self, device) -> Result<Vec<SnapshotInfo>, QmpError>` | Lists snapshots for a block device |
 
 **`VmStatus`**: `Running` | `Paused` | `Shutdown` | `Other`.
 
 **`QmpError`**: `ConnectFailed`, `Io`, `ConnectionClosed`, `ParseError`, `CommandFailed { command, class, desc }`.
+
+**QMP wire schema for `snapshot-save`/`-load`/`-delete` (job-based API, QEMU 6.0+)** — this is
+the part that's easy to get wrong and previously *was* wrong in this crate, so it's documented
+here explicitly:
+
+```text
+snapshot-save:   {"job-id": ..., "tag": ..., "vmstate": <node-name>, "devices": [<node-name>, ...]}
+snapshot-load:   {"job-id": ..., "tag": ..., "vmstate": <node-name>, "devices": [<node-name>, ...]}
+snapshot-delete: {"job-id": ..., "tag": ..., "devices": [<node-name>, ...]}               (no vmstate)
+```
+
+`devices` is a **list**, not a singular `device` field — QEMU rejects the command outright
+(`{"error": ...}`, job never starts) if you send `device` instead. `snapshot-save`/`-load` also
+require `vmstate` (the node where CPU/RAM state is stored); `snapshot-delete` does not. This
+crate's `device: &str` parameter on `snapshot_save`/`snapshot_load`/`snapshot_delete` is used to
+build both `vmstate` and the single-element `devices` array internally — the public method
+signatures didn't need to change, only the JSON they construct.
+
+**Job status polling** — QEMU's job state machine has exactly one terminal status,
+`"concluded"` (`created`/`running`/`paused`/`ready`/`standby`/`waiting`/`pending`/`aborting` are
+all non-terminal). There is no `"completed"`/`"failed"`/`"aborted"` status string in the real
+protocol — an earlier version of `wait_job_completion` checked for those, which meant it always
+fell through to the timeout branch even on a successful snapshot. Success vs. failure of a
+`"concluded"` job is distinguished by the presence of an `error` field, not by a different status
+value. After a job reaches `"concluded"` (either outcome), `job-dismiss` must be called
+explicitly — otherwise it stays visible in `query-jobs` forever.
+
+**Event skipping** — `JOB_STATUS_CHANGE` (and other) events can arrive on the same socket
+between sending a command and receiving its reply, especially during the `query-jobs` polling
+loop. `execute_raw` reads through any message lacking `return`/`error` (i.e. an event) via
+`read_reply_skipping_events` instead of treating it as a parse error.
 
 ### `backend` — QemuBackend Implementation
 
@@ -90,7 +121,7 @@ QMP client over a unix socket. Handles handshake, command execution, and async j
 
 **`QmpClient` lazy connection**: QMP socket isn't ready immediately after `spawn`. The client connects on first `pause`/`resume`/`status`/`snapshot` call via `ensure_qmp_connected`.
 
-**Snapshot device name**: Hardcoded as `drive-disk0` (matches `cmdline.rs`). If multi-disk support is added in the future, this must become a parameter.
+**Snapshot device name**: Hardcoded as `drive-disk0` (matches `cmdline.rs`). If multi-disk support is added in the future, this must become a parameter. This same name is used both as the `vmstate` node and as the sole entry of `devices` — there's only one disk, so there's nowhere else to put the VM state.
 
 ### `metrics` — Host Metrics Collection
 
@@ -120,7 +151,7 @@ Reads GPU metrics from host-side sysfs and vendor CLI tools. Supports three vend
 |--------|--------|---------|
 | AMD | sysfs `mem_info_vram_*`, `gpu_busy_percent` | VRAM used/total, GPU load % |
 | NVIDIA | `nvidia-smi` CLI | VRAM used/total, GPU load % |
-| Intel | sysfs `i915` `busyiffies`, `mem_info_*` | GPU load % (delta-based), VRAM (stolen, approximate) |
+| Intel | sysfs `i915` `power/rc6_residency_ms` | GPU load % (idle-time-based), no VRAM |
 
 **Public API**:
 
@@ -138,25 +169,40 @@ Reads GPU metrics from host-side sysfs and vendor CLI tools. Supports three vend
 
 **NVIDIA**: Runs `nvidia-smi --query-gpu=memory.used,memory.total,utilization.gpu --format=csv,noheader,nounits`. Values in MiB, converted to bytes. If `nvidia-smi` not found, returns None (no retry).
 
-**Intel sysfs paths** (i915 driver):
-- `device/gt/gt0/attrs/busyiffies` → GPU load % (delta between consecutive calls, `AtomicU64` for state)
-- `device/mem_info_dev_local_mem_alloc` → `vram_used_bytes` (stolen memory, approximate)
-- `device/mem_info_stolen_local_mem` → `vram_total_bytes` (stolen memory, approximate)
+**Intel sysfs path** (i915 driver): `device/power/rc6_residency_ms` — cumulative
+milliseconds spent in the RC6 idle power state since boot, a long-standing
+documented i915 ABI (kept as a top-level compat path pointing at `gt/gt0/`
+even after the upstream per-tile `gt/` sysfs reorganization). GPU load % is
+derived as `100 - (Δrc6_residency_ms / Δwall_clock_ms * 100)` between two
+calls, using a real elapsed-time delta (`Instant`), not an assumed fixed
+polling interval. **No VRAM metric for Intel** — integrated Intel GPUs share
+system RAM via "stolen memory" accounting that lives in `debugfs`, not a
+stable `sysfs` ABI, so `vram_used_bytes`/`vram_total_bytes` are always `None`.
+
+> An earlier version of this crate read a sysfs path that doesn't exist —
+> `device/gt/gt0/attrs/busyiffies` for load, and `mem_info_dev_local_mem_alloc`/
+> `mem_info_stolen_local_mem` for VRAM. None of those three paths are present
+> anywhere in the real i915 sysfs tree (checked against `i915_sysfs.c` and the
+> upstream `gt` sysfs reorganization commit). The bug shipped silently because
+> the unit tests only exercised the delta-calculation arithmetic with
+> hand-picked numbers, never the sysfs path string itself — on real Intel
+> hardware, `read_intel_metrics` would have always returned `None` for both
+> load and VRAM, with no error. Fixed to use the documented `rc6_residency_ms`
+> ABI for load, and to honestly return `None` for VRAM rather than read from
+> a path that was never real.
 
 **Integration**: `spawn_metrics_poller` in `metrics.rs` calls `read_gpu_metrics()` and merges into the base metrics sample every tick. Single merged `ResourceMetrics` message per tick — no separate GPU channel.
 
 ## Tests
 
-75 tests across 6 test modules.
-
 ### Without `/dev/kvm` or QEMU binary
 
 - **`cmdline`** (22 tests): All argument blocks tested independently against `scripts/start.sh` reference. Includes edge cases: `Passthrough` panic, `None` display engine, clipboard disabled, size suffixes.
-- **`qmp`** (12 tests): JSON parsing of QMP responses (`QmpReply`, `VmStatus`, `QueryStatusReturn`, `SnapshotInfo`, `QueryJobInfo`).
+- **`qmp`**: JSON parsing of QMP responses (`QmpReply`, `VmStatus`, `QueryStatusReturn`, `SnapshotInfo`, `QueryJobInfo`), plus `UnixStream::pair`-based fake-QMP-peer tests covering the real `snapshot-save`/`-load`/`-delete` wire schema (`devices`+`vmstate`, not the previously-buggy singular `device`), `wait_job_completion`'s `"concluded"`+`error` semantics (not the nonexistent `"completed"`/`"failed"`/`"aborted"` strings an earlier version checked), `job-dismiss`, and async-event skipping during polling.
 - **`backend`** (9 tests): `Passthrough` validation, unknown handle handling, `NotImplemented` branches, `VmStatus → InstanceState` mapping, empty `metrics_stream`/`log_stream`.
 - **`process`** (3 tests): `SpawnFailed` via missing binary, `drain_to_tracing` line publishing, subscriber tolerance.
 - **`metrics`** (7 tests): CPU stat parsing, CPU% computation, I/O rates, RSS parsing, net_dev parsing.
-- **`gpu_metrics`** (15 tests): AMD/NVIDIA/Intel detection, NVIDIA output parsing, Intel busyiffies delta (first call, second call, zero delta, clamping, None input), merge behavior, panic safety.
+- **`gpu_metrics`**: AMD/NVIDIA/Intel detection, NVIDIA output parsing, a regression test asserting the Intel sysfs path is the real `rc6_residency_ms` ABI (not `busyiffies`), the `intel_gpu_load_from_delta` pure-arithmetic core tested deterministically (fully idle/fully busy/partial/clamping/non-positive-elapsed) without sleeping or mocking `Instant`, plus a real-time-based `compute_intel_gpu_load` round-trip test, merge behavior, panic safety.
 
 ### With `/dev/kvm` and `qemu-system-x86_64` (integration tests, `#[ignore]`)
 

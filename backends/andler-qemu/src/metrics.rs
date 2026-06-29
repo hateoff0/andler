@@ -18,7 +18,7 @@
 //!
 //! Паттерн вычисления CPU% — классический `delta(proc_time) / delta(uptime)`
 //! (см. `man proc` раздел `/proc/[pid]/stat`). Без этого дельта-метода
-//! значение CPU% будет некорректным на SMP и при不同的 процессорных частотах.
+//! значение CPU% будет некорректным на SMP и при разных процессорных частотах.
 
 use andler_core::ResourceMetrics;
 
@@ -75,7 +75,7 @@ fn read_proc_cpu(pid: u32) -> Option<CpuSample> {
     let stat_content = std::fs::read_to_string(&stat_path).ok()?;
 
     // Поле 2 (comm) может содержать пробелы и скобки — пропускаем до
-    // первого `)` после开场的 `pid (`:
+    // первого `)` после открывающей `pid (`:
     let after_comm = stat_content.rfind(')')?;
     let fields: Vec<&str> = stat_content[after_comm + 2..].split_whitespace().collect();
 
