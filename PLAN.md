@@ -1,613 +1,1013 @@
-# План улучшений CLI и Daemon
+# План ANDLER — Лаунчер виртуальных машин вокруг QEMU
 
-## 1. Логирование в andlerd
-
-### Проблема
-При запуске `./andlerd` пользователь видит только одну строку `andlerd: listening on 127.0.0.1:50051` и всё. Нет информации о:
-- Какие инстансы восстановлены из БД при старте
-- Какие инстансы создаются/запускаются/останавливаются
-- Какие QEMU-процессы запускаются
-- Какие ошибки 발생ают (если нет `RUST_LOG`)
-- Какие GPU обнаружены
-- Какие snapshot-операции выполняются
-
-Единственный `info!`-вызов в проекте — в `main.rs:71` ("restored instances from store"), но он тоже не выводится потому что `EnvFilter::from_default_env()` без `RUST_LOG` фильтрует на `warn`.
-
-### Что надо
-Чтобы `andlerd` выводил в stderr логи всех ключевых операций на уровне `info` по умолчанию, без необходимости выставлять `RUST_LOG`. Пользователь должен видеть что происходит при старте, при создании/запуске/остановке VM, при snapshot-операциях, при обнаружении GPU.
-
-### Решение
-**Файл `daemon/src/main.rs`** — изменить дефолт фильтра:
-```rust
-// Было:
-tracing_subscriber::fmt()
-    .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-    .init();
-
-// Стало:
-let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
-    .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
-tracing_subscriber::fmt()
-    .with_env_filter(env_filter)
-    .init();
-```
-
-**Файл `daemon/src/daemon/instance_ops.rs`** — добавить `tracing::info!` в каждый метод:
-- `create_instance`: `"created instance {id} ({kind_name})"`
-- `start_instance`: `"starting instance {id}"`
-- `stop_instance`: `"stopping instance {id} (graceful={graceful})"`
-- `pause_instance`: `"pausing instance {id}"`
-- `resume_instance`: `"resuming instance {id}"`
-- `remove_instance`: `"removing instance {id} (purge={purge})"`
-
-**Файл `daemon/src/daemon/snapshot_ops.rs`** — добавить `tracing::info!`:
-- `create_snapshot`: `"creating snapshot tag={tag} for instance {id}"`
-- `restore_snapshot`: `"restoring snapshot tag={tag} for instance {id}"`
-- `delete_snapshot`: `"deleting snapshot tag={tag} for instance {id}"`
-
-**Файл `backends/andler-qemu/src/backend.rs`** — добавить `tracing::info!`:
-- `spawn`: `"spawning QEMU for instance {id}, render={render_backend}"`
-- `stop`: `"stopping QEMU for instance {id}"`
-- `pause`: `"pausing QEMU for instance {id}"`
-- `resume`: `"resuming QEMU for instance {id}"`
-
-**Файл `backends/andler-qemu/src/gpu_metrics.rs`** — добавить `tracing::debug!` при обнаружении GPU vendor.
-
-**Результат при запуске без RUST_LOG:**
-```
-info: restored instances from store (2 instances)
-info: andlerd: listening on 127.0.0.1:50051
-info: starting instance abc123-def456
-info: spawning QEMU for instance abc123-def456, render=Venus
-info: creating snapshot tag=snap1 for instance abc123-def456
-info: stopping instance abc123-def456 (graceful=true)
-```
+> Эта версия плана сверена с актуальной QEMU-документацией (2025–2026) и с
+> текущим кодом репозитория (`andler-core::config::*`, `andler-qemu`,
+> `andler-daemon`). Каждое изменение относительно предыдущей версии плана
+> отмечено блоком **«Что изменилось и почему»** в конце соответствующего
+> раздела — не убирайте эти блоки при дальнейшей правке, это единственная
+> защита от повторного внесения той же ошибки другим ИИ/исполнителем.
 
 ---
 
-## 2. OVMF VARS по умолчанию
+## Содержание
 
-### Проблема
-При создании Linux VM через CLI пользователь ОБЯЗАН указывать `--ovmf-vars-template`, хотя путь стандартный: `/usr/share/edk2-ovmf/x64/OVMF_VARS.4m.fd`. Это лишний аргумент в 99% случаев. Пользователь не понимает зачем это нужно и что это за "VARS".
-
-В start.sh это решается автоматически — скрипт копирует шаблон в текущую директорию.
-
-### Что надо
-Чтобы `--ovmf-vars-template` имел дефолтное значение и не был обязателен. Если пользователь не указывает путь — используется стандартный системный шаблон.
-
-### Решение
-**Файл `core/andler-core/src/config/firmware.rs`** — вынести дефолты в константы:
-```rust
-pub const DEFAULT_OVMF_CODE: &str = "/usr/share/edk2-ovmf/x64/OVMF_CODE.4m.fd";
-pub const DEFAULT_OVMF_VARS_TEMPLATE: &str = "/usr/share/edk2-ovmf/x64/OVMF_VARS.4m.fd";
-```
-
-**Файл `cli/src/main.rs`** — изменить CLI-аргумент:
-```rust
-// Было:
-#[arg(long)]
-ovmf_vars_template: Option<String>,
-
-// Стало:
-#[arg(long, default_value = DEFAULT_OVMF_VARS_TEMPLATE)]
-ovmf_vars_template: String,
-```
-
-**Файл `cli/src/create.rs`** — убрать проверку `err_exit` для `ovmf_vars_template`:
-```rust
-// Было:
-let ovmf = ovmf_vars_template
-    .unwrap_or_else(|| err_exit("error: --ovmf-vars-template is required"));
-
-// Стало:
-// ovmf_vars_template уже имеет дефолтное значение, unwrap не нужен
-```
-
-**Файл `cli/src/instance_file.rs`** — если `ovmf_vars_path` не указан в TOML, использовать дефолт:
-```rust
-pub ovmf_vars_path: Option<PathBuf>,  // было PathBuf (обязательный)
-
-// В into_request():
-let ovmf_path = self.ovmf_vars_path
-    .unwrap_or_else(|| PathBuf::from(FirmwareConfig::DEFAULT_OVMF_VARS_TEMPLATE));
-```
+1. [Видение](#видение)
+2. [Структура хранения](#структура-хранения)
+3. [Disk management](#disk-management)
+4. [Монтирование ISO / CD-ROM](#монтирование-iso--cd-rom)
+5. [Wizard (interactive create)](#wizard-interactive-create)
+6. [UEFI / BIOS](#uefi--bios)
+7. [Настройки рендера (GPU)](#настройки-рендера-gpu)
+8. [Настройки дисплея](#настройки-дисплея)
+9. [Настройки звука](#настройки-звука)
+10. [Настройки ввода](#настройки-ввода)
+11. [Настройки сети](#настройки-сети)
+12. [CPU и память](#cpu-и-память)
+13. [Снапшоты](#снапшоты)
+14. [Клонирование VM](#клонирование-vm)
+15. [Удаление VM](#удаление-vm)
+16. [Partial instance ID](#partial-instance-id)
+17. [Logging](#logging)
+18. [NVIDIA metrics](#nvidia-metrics)
+19. [Boot priority](#boot-priority)
+20. [Backend'ы (гипервизоры)](#backend-ы)
+21. [CLI vs GUI](#cli-vs-gui)
+22. [Modern QEMU arguments (2026)](#modern-qemu-arguments-2026)
+23. [Приоритеты реализации](#приоритеты-реализации)
+24. [Принцип для GUI/CLI: явный выбор + объяснение разницы](#принцип-для-guicli-явный-выбор--объяснение-разницы-не-скрытая-магия)
 
 ---
 
-## 3. ISO path опционален для Linux
+## Видение
 
-### Проблема
-При создании Linux VM через `--kind linux` пользователь ОБЯЗАН указывать `--iso-path`, даже если у него уже есть готовый диск. Это неудобно если:
-- Пользователь уже установил ОС и просто хочет запустить VM
-- Пользователь импортировал диск извне
-- Пользователь клонировал инстанс
+ANDLER — **лаунчер и менеджер виртуальных машин** вокруг QEMU. Аналог VirtualBox/VMware, но с фокусом на 3D-ускорение через Venus/VirtioGPU и простоту использования.
 
-### Что надо
-Чтобы `--iso-path` был опциональным. Если указан только `--disk-path` без ISO — VM создаётся с готовым диском без установки. Если не указан ни ISO ни диск — ошибка.
-
-### Решение
-**Файл `cli/src/create.rs`** — изменить валидацию:
-```rust
-// Было:
-let iso = iso_path
-    .unwrap_or_else(|| err_exit("error: --iso-path is required for --kind linux"));
-let disk = disk_path
-    .unwrap_or_else(|| err_exit("error: --disk-path is required for --kind linux"));
-
-// Стало:
-let disk = disk_path
-    .unwrap_or_else(|| err_exit("error: --disk-path is required for --kind linux"));
-let iso = iso_path.unwrap_or_default();  // пустая строка если не указан
-```
-
-**Файл `cli/src/create.rs`** — в `build_linux_request` передавать `iso_path` как пустую строку:
-```rust
-fn build_linux_request(
-    name: String,
-    iso_path: String,      // может быть пустой
-    disk_path: String,
-    disk_size_gib: Option<u64>,
-    ovmf_vars_template: String,
-) -> CreateInstanceRequest {
-    // ...
-    CreateInstanceRequest {
-        name,
-        iso_path,  // пустая строка = нет ISO
-        // ...
-    }
-}
-```
-
-**Файл `backends/andler-qemu/src/cmdline.rs`** — если `iso_path` пустой, не генерировать IDE-CD:
-```rust
-fn disk_args(cfg: &InstanceConfig) -> Vec<String> {
-    // ... disk args ...
-
-    // CD-ROM только если есть ISO
-    if !cfg.iso_path.is_empty() {
-        args.push("-drive".to_string());
-        args.push(format!("file={},if=none,id=drive-cd0,format=raw,readonly=on", cfg.iso_path));
-        args.push("-device".to_string());
-        args.push("ide-cd,drive=drive-cd0,id=cd0,bootindex=2".to_string());
-    }
-
-    args
-}
-```
+Ключевой принцип: **пользователь не парится**. ANDLER сам находит OVMF, создаёт диск, оптимально настраивает QEMU. Пользователь отвечает на простые вопросы (или скипает дефолты). При этом ANDLER поддерживает полный функционал QEMU для продвинутых пользователей.
 
 ---
 
-## 4. Boot priority (приоритет загрузки)
+## Структура хранения
 
-### Проблема
-Нет возможности менять приоритет загрузки. В QEMU это делается через `-boot menu=on` + `bootindex=N` на устройствах. Сейчас хардкод: disk=1, cdrom=2. Пользователь не может:
-- Загрузиться с CD-ROM для установки ОС
-- Загрузиться по сети (PXE)
-- Изменить порядок без редактирования TOML
+### Директория по умолчанию
 
-### Что надо
-Добавить флаг `--boot-order` в CLI и секцию `boot` в TOML. Варианты:
-- `disk` — диск первый, CD-ROM второй (дефолт, текущее поведение)
-- `cdrom` — CD-ROM первый, диск второй (для установки ОС)
-- `network` — сеть первая, диск второй (для PXE-загрузки)
+`~/.local/share/andler/` — все файлы ANDLER хранит здесь. Пользователь не думает о путях.
 
-### Решение
-**Новый файл `core/andler-core/src/config/boot.rs`**:
-```rust
-use serde::{Deserialize, Serialize};
-
-/// Приоритет загрузки.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum BootOrder {
-    /// Disk first, CD-ROM second (default).
-    Disk,
-    /// CD-ROM first, disk second (for OS installation).
-    Cdrom,
-    /// Network first, disk second (for PXE boot).
-    Network,
-}
-
-impl Default for BootOrder {
-    fn default() -> Self {
-        BootOrder::Disk
-    }
-}
+```
+~/.local/share/andler/
+├── instances/
+│   ├── a1b2c3d4/
+│   │   ├── disk.qcow2            # основной диск VM
+│   │   ├── VARS.fd               # UEFI переменные (персональные)
+│   │   └── snapshots/            # внешние снапшоты — не используется по умолчанию,
+│   │                              # см. раздел «Снапшоты»: дефолт — internal qcow2
+│   └── e5f6g7h8/
+│       ├── disk.qcow2
+│       └── VARS.fd
+├── base-images/
+│   ├── android-13.qcow2          # базовые образы для Android
+│   └── ubuntu-24.04.qcow2        # базовые образы для Linux
+├── ovmf/
+│   ├── OVMF_CODE.fd              # кэшированный код UEFI
+│   └── OVMF_VARS.fd              # шаблон переменных UEFI
+├── venus-cache/                  # кэш шейдеров Venus
+└── andlerd.db                    # SQLite база состояния
 ```
 
-**Файл `core/andler-core/src/config/instance.rs`** — добавить поле:
-```rust
-pub struct InstanceConfig {
-    // ... существующие поля ...
-    #[serde(default)]
-    pub boot_order: BootOrder,
-}
-```
+### Почему именно так
 
-**Файл `backends/andler-qemu/src/cmdline.rs`** — использовать `boot_order`:
-```rust
-fn disk_args(cfg: &InstanceConfig, qmp_socket_path: &Path) -> Vec<String> {
-    // ... disk device ...
-    let disk_bootindex = match cfg.boot_order {
-        BootOrder::Disk | BootOrder::Network => 1,
-        BootOrder::Cdrom => 2,
-    };
-    args.push(format!(
-        "virtio-blk-pci,drive=drive-disk0,id=disk0,bootindex={disk_bootindex},num-queues=4"
-    ));
+- `instances/<id>/` — каждый инстанс изолирован, всё в одной папке
+- `base-images/` — разделяемые базовые образы (Android, Linux), не дублируются
+- `ovmf/` — кэш OVMF файлов, ANDLER ищет системные копии и кэширует здесь
+- `venus-cache/` — кэш шейдеров для Venus, ускоряет повторный запуск
+- `andlerd.db` — одна БД для всех инстансов (не per-instance)
 
-    // ... cdrom device ...
-    if !cfg.iso_path.is_empty() {
-        let cdrom_bootindex = match cfg.boot_order {
-            BootOrder::Cdrom => 1,
-            BootOrder::Disk | BootOrder::Network => 2,
-        };
-        args.push(format!(
-            "ide-cd,drive=drive-cd0,id=cd0,bootindex={cdrom_bootindex}"
-        ));
-    }
-    // ...
-}
-```
+### Пользователь может изменить
 
-**Файл `cli/src/main.rs`** — добавить флаг:
-```rust
-#[arg(long, value_enum, default_value_t = CliBootOrder::Disk)]
-boot_order: CliBootOrder,
-```
+- `--disk-path` — указать свой путь для диска (вне `~/.local/share/andler/`)
+- `ANDLER_HOME` — env переменная для изменения корневой директории
 
-**Файл `cli/src/create.rs`** — передавать `boot_order` в запрос.
+### Состояние реализации (важно для исполнителя)
 
-**Файл `cli/src/instance_file.rs`** — добавить в TOML:
-```rust
-#[serde(default)]
-pub boot_order: Option<String>,  // "disk", "cdrom", "network"
-```
+Это не разработка с нуля — часть инфраструктуры уже есть:
+
+| Компонент | Статус | Где |
+|---|---|---|
+| SQLite-стор для `InstanceConfig`/`InstanceState` | ✅ Реализован | `services/andler-store` |
+| Дефолтный `instances_root` через `dirs::data_local_dir()` | 🔶 Частично — есть только для Android/clone-путей создания | `cli/src/main.rs`, `cli/src/instance_file.rs` |
+| Единая точка резолва `ANDLER_HOME` → все подкаталоги (`base-images/`, `ovmf/`, `venus-cache/`, путь к `andlerd.db`) | ❌ Не существует | — |
+
+**Задача реализации**: один модуль (например `andler-core::paths` или аналог) с функциями вида `andler_home() -> PathBuf`, `instances_root()`, `base_images_dir()`, `ovmf_cache_dir()`, `venus_cache_dir()`, `db_path()` — всё построено над `ANDLER_HOME` с фоллбэком на `dirs::data_local_dir()/andler`. Сейчас каждый потребитель (`cli`, `daemon`) резолвит свой кусок пути отдельно — после рефакторинга должен быть один источник истины, иначе изменение дефолтного пути потребует правок в N местах.
+
+### Что не описано и нужно добавить
+
+- **Миграция при смене `ANDLER_HOME`**: если пользователь сменил переменную или обновил ANDLER на версию с другим дефолтным путём — что происходит с уже созданными VM по старым путям? План должен явно сказать: автоматической миграции нет, путь фиксируется на момент создания инстанса (хранится в `InstanceConfig`), `ANDLER_HOME` влияет только на *новые* инстансы.
 
 ---
 
-## 5. Partial instance ID
+## Disk management
 
-### Проблема
-Пользователь ОБЯЗАН указывать полный UUID инстанса (36 символов). Это неудобно:
-- UUID генерируется автоматически и пользователь его не знает
-- Приходится копировать из вывода `andler list`
-- Docker позволяет указывать первые символы UUID
+### Автоматическое создание диска
 
-### Что надо
-Чтобы все команды принимали prefix UUID (минимум 4 символа) (ai написал что минимум 4 символа почему так, в docker можно 2 символа точно указать или даже 1 я бы хотел чтобы также можно было). Если prefix однозначен — используется. Если несколько инстансов match'ятся — ошибка с подсказкой.
+При создании VM **без указанного диска** — ANDLER автоматически создаёт диск:
 
-### Решение
-**Файл `daemon/src/daemon/error.rs`** — добавить вариант:
-```rust
-pub enum DaemonError {
-    // ... существующие варианты ...
+- Формат: **qcow2** (дефолт, поддерживает снапшоты, thin provisioning)
+- Размер: **256 GiB** (единый дефолт для Linux и Android — см. обоснование ниже)
+- Путь: `~/.local/share/andler/instances/<id>/disk.qcow2`
 
-    /// Multiple instances match the given prefix.
-    #[error("ambiguous prefix '{0}': matches {1:?}")]
-    AmbiguousPrefix(String, Vec<InstanceId>),
+Пользователь может изменить через wizard или CLI-аргументы.
 
-    /// Prefix is too short (less than 4 characters).
-    #[error("prefix '{0}' is too short, use at least 4 characters")]
-    PrefixTooShort(String),
-}
-```
+### Почему единый дефолт 256 GiB, а не раздельный 64/128 GiB
 
-**Файл `daemon/src/daemon/mod.rs`** — добавить метод:
-```rust
-impl Daemon {
-    /// Находит инстанс по prefix UUID (минимум 4 символа).
-    /// Возвращает ошибку если prefix слишком короткий, не найден, или неоднозначен.
-    pub async fn find_instance_by_prefix(&self, prefix: &str) -> Result<InstanceId, DaemonError> {
-        if prefix.len() < 4 {
-            return Err(DaemonError::PrefixTooShort(prefix.to_string()));
-        }
+### Где менять в коде
 
-        let instances = self.instances.read().await;
-        let matches: Vec<InstanceId> = instances.keys()
-            .filter(|id| id.0.starts_with(prefix))
-            .copied()
-            .collect();
+Текущий дефолт (40 GiB) зашит не на уровне CLI-флага (`disk_size_gib: Option<u64>` в `cli/src/main.rs` — лишь опциональное переопределение), а внутри `andler-core::config::DiskConfig::reference_default()` (`core/andler-core/src/config/disk.rs`), откуда его подхватывает `build_linux_request` в `cli/src/create.rs`, если CLI-флаг не передан. Существующий тест `reference_default_matches_start_sh` явно фиксирует, что дефолт равен значению из `start.sh` (40 GiB) — при смене дефолта на 256 GiB этот тест нужно обновить вместе с самим значением, иначе он начнёт ложно падать (или, что хуже, кто-то "исправит" тест обратно на 40, не заметив, что это было намеренное изменение плана).
 
-        match matches.len() {
-            0 => Err(DaemonError::InstanceNotFound(InstanceId::from_str(prefix))),
-            1 => Ok(matches[0]),
-            _ => Err(DaemonError::AmbiguousPrefix(prefix.to_string(), matches)),
-        }
-    }
-}
-```
+Раньше план разводил дефолты по типу гостя (64 GiB Linux / 128 GiB Android) — это усложняло и UX (два разных числа без явной причины для пользователя), и реализацию (нужно было ветвление по `InstanceKind` в коде создания диска без явной пользы). Единый дефолт **256 GiB** проще для пользователя и достаточен с запасом для обоих сценариев:
 
-**Файл `daemon/src/service.rs`** — использовать `find_instance_by_prefix`:
-```rust
-// Было:
-let id = InstanceId::from_str(&request.instance_id)?;
+- **Современный Linux-дистрибутив** (база системы + DE + типичный набор приложений) обычно укладывается в 20–40 GiB после установки — 256 GiB оставляет огромный запас под пользовательские данные, игры (Steam-библиотеки легко занимают десятки–сотни ГБ), контейнеры и т.д.
+- **Android-образ** с GApps/магазином приложений и установленными приложениями тоже на практике укладывается в существенно меньший объём, чем 256 GiB.
+- Благодаря **thin provisioning у qcow2** номинальный размер диска (256 GiB) — это **верхний предел**, а не сразу занятое место на хосте: реальный расход места на физическом носителе растёт только по мере фактической записи данных внутри гостя. На старте новый qcow2-файл занимает считаные килобайты, не 256 ГБ. Это нужно явно показывать пользователю в wizard ("256 GiB — это максимум, реальное место на диске хоста расходуется только по факту использования"), иначе у части пользователей возникнет ложное опасение, что ANDLER сразу займёт четверть терабайта.
+- Если пользователю всё же нужно меньше (например, ограниченное место на SSD хоста) — `--disk-size-gib` или wizard позволяют задать любое значение, дефолт не блокирует выбор меньшего размера.
 
-// Стало:
-let id = daemon.find_instance_by_prefix(&request.instance_id).await?;
-```
+### Авто-добавление .qcow2
 
-**Важно:** `InstanceId::from_str` должен поддерживать prefix — сейчас он ожидает полный UUID. Нужно изменить `from_str` чтобы он принимал prefix как `InstanceId(prefix.to_string())`.
+Если пользователь указал путь без расширения (`--disk-path ~/my-disk`) — ANDLER автоматически добавляет `.qcow2`. Если указано другое расширение (`.img`, `.raw`) — использует как есть.
+
+### Команды диска
+
+| Команда | Описание |
+|---------|----------|
+| `andler disk create --size 256GB ~/my-disk` | Создание диска (авто .qcow2; размер — пример, любое значение пользователя) |
+| `andler disk info ~/my-disk.qcow2` | Информация о диске |
+| `andler disk resize ~/my-disk.qcow2 512GB` | Расширение диска |
+| `andler disk compact ~/my-disk.qcow2` | Компактификация (qemu-img convert) |
+
+### Форматы
+
+| Формат | Описание | Когда использовать |
+|--------|----------|-------------------|
+| **qcow2** | Современный. Снапшоты, thin provisioning, клонирование. | Дефолт. Для большинства VM |
+| **raw** | Простой. Быстрый, но без снапшотов. | Максимальная производительность |
+
+### `disk resize`/`disk compact` зависят от формата — нужно развести поведение
+
+- **qcow2**: `resize` — это `qemu-img resize`, работает на лету за счёт thin provisioning. `compact` — `qemu-img convert -O qcow2` в новый файл (или `virt-sparsify`), освобождает место от удалённых внутри гостя данных.
+- **raw**: `resize` создаёт sparse-файл иначе — нужно расширять файл (`truncate`/`fallocate`), внутри гостя нет thin provisioning, и **`compact` для raw не имеет смысла** в qcow2-понятии (нет метаданных для компактификации) — для raw это либо no-op с понятным сообщением, либо конвертация в sparse через `cp --sparse=always`.
+
+Команды `disk resize`/`disk compact` должны проверять формат файла перед выполнением и явно сообщать пользователю, если операция не применима к raw.
+
+### Что не описано и нужно добавить
+
+- **Поведение `disk resize` уменьшения размера**: `qemu-img resize` не уменьшает qcow2 без `--shrink`, и уменьшение требует, чтобы файловая система внутри гостя была заранее уменьшена — иначе риск потери данных. План должен прямо предупреждать об этом в CLI-сообщении при попытке уменьшения, а не просить передать флаг.
 
 ---
 
-## 6. NVIDIA metrics (nvidia-smi парсинг)
+## Монтирование ISO / CD-ROM
 
-### Проблема
-`andler metrics <id>` не выводит GPU-метрики для NVIDIA. Причина: `read_nvidia_metrics()` возвращает `None` если nvidia-smi выводит что-то неожиданное:
-- `[Not Supported]` для некоторых полей
-- `[N/A]` или `N/A`
-- Пустые строки
-- Дополнительные строки (заголовок,-footer)
+### Диск ≠ привод — это разные устройства с разными правилами выбора
 
-### Что надо
-Чтобы `andler metrics` показывал VRAM и GPU load для NVIDIA. Если конкретное поле не поддерживается — показывать `N/A` для него, а не терять все метрики.
+`virtio-blk-pci` (основной диск, см. раздел Disk management) **не способен монтировать CD-ROM вообще** — по официальной документации QEMU, CD-ROM и любое устройство, требующее SCSI-команд, обслуживается отдельным путём. Поэтому выбор для ISO — это отдельная ось, не "тот же virtio, что и у диска":
 
-### Решение
-**Файл `backends/andler-qemu/src/gpu_metrics.rs`** — улучшить `read_nvidia_metrics()`:
-```rust
-fn read_nvidia_metrics() -> Option<ResourceMetrics> {
-    let output = std::process::Command::new("nvidia-smi")
-        .args([
-            "--query-gpu=memory.used,memory.total,utilization.gpu",
-            "--format=csv,noheader,nounits",
-        ])
-        .output()
-        .ok()?;
+| Вариант привода | Скорость | Требование к загрузочной среде | Когда использовать |
+|---|---|---|---|
+| **virtio-scsi-pci + scsi-cd** | Быстрее монтирование/чтение | Initrd/загрузчик на самом ISO должен уже включать virtio-scsi модуль | Известные современные Linux-дистрибутивы (CachyOS, Ubuntu, Fedora, Arch и т.п.), Android base-images |
+| **ide-cd** | Медленнее, но разница для разового прочтения установочных файлов не ощутима на практике | Работает без каких-либо virtio-драйверов в загрузочной среде — IDE поддерживается на уровне firmware/BIOS любой ОС | Неизвестный/произвольный ISO, Windows, любой гость, для которого нет подтверждённой virtio-scsi поддержки на этапе раннего boot |
 
-    if !output.status.success() {
-        tracing::warn!("nvidia-smi failed with exit code: {:?}", output.status.code());
-        return None;
-    }
+### Почему дефолт условный, а не один статичный выбор
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
+Риск асимметричен между диском и приводом. Если `virtio-blk` для основного диска почему-то не сработает — это крайне маловероятно (почти все современные ОС несут этот драйвер inbox), и пользователь в любом случае получит ошибку уже внутри загруженной системы, которую можно исправить через CLI. Но если `virtio-scsi`-привод для ISO не сработает, инсталлятор **не сможет прочитать установочные файлы на этапе самого раннего boot** — то есть пользователь застрянет до того, как у него появится возможность что-либо поменять, потому что система ещё не загрузилась настолько, чтобы взаимодействовать с ней.
 
-    // Фильтруем пустые строки и ищем строку с данными
-    let line = stdout.lines()
-        .map(|l| l.trim())
-        .find(|l| !l.is_empty() && !l.starts_with('#'))?;
+Подтверждение этому правилу — практика самой индустрии: официальные инструкции Red Hat/OKD для монтирования virtio-win.iso (диск с драйверами для Windows-гостя) явно рекомендуют монтировать именно как **IDE/SATA CD-ROM**, не через virtio-scsi — потому что курица-и-яйцо: virtio-scsi драйвер не может быть прочитан с CD-привода, который сам требует virtio-scsi драйвер для чтения.
 
-    let parts: Vec<&str> = line.split(',').map(|s| s.trim()).collect();
-    if parts.len() < 3 {
-        tracing::warn!("nvidia-smi: expected 3 fields, got {}: {:?}", parts.len(), line);
-        return None;
-    }
+### Правило выбора дефолта
 
-    // Обрабатываем "Not Supported", "N/A", "[N/A]" как None
-    let vram_used_mib = parse_nvidia_field(&parts[0]);
-    let vram_total_mib = parse_nvidia_field(&parts[1]);
-    let gpu_load = parse_nvidia_field_f32(&parts[2]);
+- **Известный Linux-дистрибутив** (распознан wizard'ом по имени файла ISO или выбран пользователем из списка поддерживаемых) → `virtio-scsi-pci` + `scsi-cd` дефолтом — современные LiveISO почти всегда включают virtio-scsi в initrd, риск минимален, выигрыш в скорости монтирования реален.
+- **Android base-image** (создаётся и контролируется самим ANDLER) → `virtio-scsi-pci` + `scsi-cd` дефолтом — образ заведомо современный.
+- **Неизвестный/произвольный ISO или явно отмеченный как Windows/другая ОС** → `ide-cd` дефолтом — риск застрять на раннем boot реален и пользователь не всегда может его сразу распознать.
+- В любом случае — явная опция переключения между двумя вариантами через CLI (`--cdrom-bus virtio|ide`) и через wizard, с понятным описанием разницы ("virtio быстрее, но требует, чтобы сам установочный носитель поддерживал virtio-scsi на этапе загрузки — если установка не стартует, переключитесь на ide").
 
-    Some(ResourceMetrics {
-        vram_used_bytes: vram_used_mib.map(|v| v * 1024 * 1024),
-        vram_total_bytes: vram_total_mib.map(|v| v * 1024 * 1024),
-        gpu_load_percent: gpu_load.map(|v| v.clamp(0.0, 100.0)),
-        ..ResourceMetrics::default()
-    })
-}
+### Что изменилось и почему
 
-/// Парсит поле nvidia-smi: возвращает None для "Not Supported", "N/A", "[N/A]".
-fn parse_nvidia_field(s: &str) -> Option<u64> {
-    let s = s.trim();
-    if s.is_empty() || s == "[Not Supported]" || s == "N/A" || s == "[N/A]" {
-        return None;
-    }
-    s.parse().ok()
-}
-
-fn parse_nvidia_field_f32(s: &str) -> Option<f32> {
-    let s = s.trim();
-    if s.is_empty() || s == "[Not Supported]" || s == "N/A" || s == "[N/A]" {
-        return None;
-    }
-    s.parse().ok()
-}
-```
+Это новый раздел — предыдущая версия плана не выделяла монтирование ISO как отдельную тему с собственным правилом выбора, упоминая лишь сам факт "как монтируется ISO" в общей таблице аргументов. Дефолт сделан условным (от типа гостя/ISO), а не одним статичным значением — потому что риск ошибки при virtio-scsi для привода асимметричен относительно риска при virtio-blk для диска: ошибка с приводом блокирует загрузку раньше, чем у пользователя появляется способ её исправить.
 
 ---
 
-## 7. disk create: аргументы и документация
+## Wizard (interactive create)
 
-### Проблема
-1. Порядок аргументов `andler disk create 64GB disk.qcow2` неочевиден — пользователь ожидает `--size` как named arg
-2. Если указать `andler disk create --size 64GB disk` (без расширения) — создаётся файл `disk` без `.qcow2`
-3. `disk info` показывает мало информации — нет format, dirty, refcount
+### Три пути создания VM — wizard не заменяет остальные два
 
-### Что надо
-1. Порядок `--size` как named arg, путь как позиционный: `andler disk create --size 64GB ~/my-disk`
-2. Автоматическое добавление `.qcow2` если расширение не указано
-3. `disk info` показывает всё: format, virtual_size, actual_size, backing_file, dirty, refcount
+Текущий код (`cli/src/main.rs`) уже поддерживает два режима `andler create`:
 
-### Решение
-**Файл `cli/src/main.rs`** — поменять порядок аргументов:
-```rust
-// Было:
-Create {
-    path: PathBuf,
-    #[arg(long)]
-    size: String,
-},
+1. **TOML-режим** (`--file instance.toml`) — конфиг целиком из файла, тип (`LinuxVm`/`AndroidVm`) определяется автоматически по содержимому.
+2. **CLI-режим** (`--kind linux/android --name ... --iso-path ... `и т.д.) — все параметры флагами, без интерактивности; именно этот путь сейчас единственный реализован.
 
-// Стало:
-Create {
-    /// Disk size (e.g. "64GB", "128000MB", "1T", or plain bytes).
-    #[arg(long)]
-    size: String,
-    /// Path for the new disk file.
-    path: PathBuf,
-},
+**Wizard — это третий, новый режим**, не замена двух существующих: интерактивный путь для случая, когда пользователь не передал (или передал частично) флаги CLI-режима. План должен явно зафиксировать, что все три пути остаются доступны параллельно — TOML для воспроизводимых/скриптуемых конфигураций (CI, документированные шаблоны), CLI-флаги для быстрого создания со знанием всех параметров заранее, wizard для первого знакомства/случаев, когда пользователь не помнит все нужные флаги наизусть.
+
+### Когда запускается
+
+Wizard запускается, когда пользователь вызвал `andler create` **без `--file`** и **без обязательных параметров CLI-режима** ИЛИ ЖЕ вызвал просто `andler`, `andler --help ИЛИ andler help` - не должен вызывать TUI. Обязательные параметры CLI-режима (как уже зафиксировано в коде):
+
+- `--kind` (linux/android)
+- `--name` (имя VM)
+- для `--kind linux`: `--iso-path`, `--disk-path`
+- для `--kind android`: `--android-version`, `--base-image-path`
+- `--ovmf-vars-template` (опционален, если включён авто-детект OVMF — см. раздел UEFI/BIOS; пока авто-детект не реализован, остаётся обязательным)
+
+Если переданы `--kind` и `--name`, но не хватает специфичных для типа полей — wizard спрашивает **только недостающее**, не повторяет уже переданные через флаги значения. Если переданы все обязательные параметры — wizard не запускается вовсе (полная обратная совместимость с текущим неинтерактивным путём, важно для скриптов/CI).
+
+### Архитектурное замечание (важно для реализации)
+
+Текущий CLI (`cli/src/create.rs`) реализует **только** строгий неинтерактивный путь: отсутствие обязательного флага приводит к немедленному `err_exit` и завершению процесса. Wizard — это **новая ветка логики**, не доработка существующей: нужно либо
+
+1. ввести отдельный режим внутри `Command::Create` (проверка "если интерактивный терминал и не все обязательные флаги — войти в REPL вместо `err_exit`"), либо
+2. ввести отдельную CLI-команду (`andler create` без аргументов = wizard, `andler create --kind ... --name ...` = текущий путь).
+
+Вариант 2 проще тестировать и не ломает существующий неинтерактивный путь — рекомендуется он. План должен явно зафиксировать это решение, а не оставлять "wizard сам разберётся, чего не хватает" как неявное поведение одной команды.
+
+### Флаг пропуска
+
+`--quick` — пропуск wizard, все дефолты. Эквивалент `andler create --kind linux --name my-vm --quick`.
+
+### Два уровня вопросов — Basic и Advanced
+
+Полный список из 10+ категорий настроек (диск, ISO, UEFI, GPU, дисплей, звук, ввод, сеть, CPU, память) при показе **всех** вопросов подряд каждому новому пользователю превращает wizard в долгую и утомительную анкету — это противоречит цели "пользователь не парится". Поэтому wizard разделён на два уровня:
+
+- **Basic** (дефолтный путь wizard) — спрашивает только то, что действительно нужно для конкретного типа гостя и не может быть надёжно угадано: тип (linux/android), имя, путь к ISO/base-image, размер диска (с дефолтом 256 GiB, Enter принимает). Всё остальное (GPU, дисплей, звук, ввод, сеть, CPU, память, ISO-bus) берётся из авто-детектированных/условных дефолтов согласно соответствующим разделам плана, без отдельных вопросов.
+- **Advanced** (`andler create --advanced`, либо отдельный пункт меню в начале wizard: "Использовать рекомендуемые настройки? [Да] / Настроить вручную") — задаёт полный список вопросов по всем категориям, как было описано в исходном порядке ниже.
+
+Это явное архитектурное решение, которого не было в исходной версии плана: без разделения на уровни Wizard рискует стать длиннее, чем просто передача всех флагов через `--file`/CLI-режим, что обесценивает саму идею "простого" пути для новичка.
+
+### Порядок вопросов (Advanced-режим)
+
+1. **Тип и имя** — `--kind` (linux/android), `--name`
+2. **Источник** — путь к ISO (Linux) или base-image (Android); пусто для Linux = нет ISO, VM запустится с существующим диском
+3. **ISO-bus** *(задаётся только если ISO/base-image указан на предыдущем шаге)* — `virtio-scsi` (быстрее) / `ide` (совместимее), дефолт зависит от распознанного дистрибутива/типа гостя — см. раздел "Монтирование ISO / CD-ROM". Дефолт показывается в скобках и сразу переопределяем на этом же шаге, как и остальные вопросы (см. формат ниже).
+4. **Диск** — формат (qcow2/raw), размер (дефолт 256 GiB), путь (автоматически)
+5. **UEFI** — OVMF VARS путь (автоматически находит, или Legacy BIOS)
+6. **GPU** — рендер (venus/virtio/virgl/cpu), host memory; если хост не соответствует минимальным требованиям Venus — этот вариант не предлагается как дефолт (см. раздел GPU)
+7. **Дисплей** — движок (sdl/gtk/spice/none), разрешение; дефолт зависит от GPU-вендора хоста (см. раздел Дисплей)
+8. **Звук** — устройство (virtio-sound/ich9-hda) и backend (pipewire/pulseaudio/none) — см. раздел Звук
+9. **Ввод** — указатель (tablet/mouse/usb), мультитouch
+10. **Сеть** — nat (passt/slirp)/isolated/bridge, опционально port forwarding
+11. **CPU** — ядра, сокеты, потоки
+12. **Память** — объём, balloon, zram
+13. *(только для `--kind android`)* **Android-опции** — `--gapps`, `--microg`, ARM-транслятор (`libndk`/`libhoudini`, дефолт по CPU-вендору хоста — см. раздел Настройки ввода), root-режим (`none`/`magisk`, путь к Magisk-бинарям при выборе `magisk`)
+14. **Итоговая сводка** (см. ниже) — финальное подтверждение перед фактическим созданием
+
+Шаги 6–12 в Basic-режиме пропускаются полностью — задаются только шаги 1, 2, 3 (если применимо), 4.
+
+### Интерфейс взаимодействия — стрелки/Enter/Space, не ввод номера/текста руками
+
+Каждый вопрос с выбором из вариантов (формат диска, ISO-bus, GPU-рендер, дисплей и т.д.) использует **навигацию стрелками вверх/вниз с подсветкой текущего пункта и подтверждением по Enter**, а не ввод номера или текста вручную, как было в более ранней версии плана. Для вопросов, допускающих несколько одновременных значений (например, если в будущем появятся опциональные дополнительные устройства, которые можно включить пачкой) — выбор конкретных пунктов через **Space** (переключает отметку у текущего выделенного пункта, можно отметить несколько), подтверждение всего набора через **Enter**.
+
+**Конкретная библиотека**: крейт `inquire` (`crates.io`) реализует ровно это поведение "из коробки" — `Select` для одиночного выбора (стрелки + Enter), `MultiSelect` для множественного (стрелки для навигации, Space для отметки/снятия отметки текущего пункта, стрелка влево — снять все отметки, стрелка вправо — отметить все, Enter — подтвердить). Поддерживает кроссплатформенный backend через `crossterm` (UNIX и Windows терминалы), что важно, если ANDLER когда-либо будет собираться не только под Linux. Это **не** полноценный full-screen TUI в духе `ratatui` (с рамками, несколькими панелями одновременно, как у `htop`) — это последовательность интерактивных prompt'ов, что точно соответствует и желаемому UX (один вопрос за раз, можно листать назад), и не требует значительно более тяжёлой реализации, которую дал бы full-screen TUI framework.
+
+### Краткое описание различия — встроенный механизм `help message`
+
+У каждого `Select`/`MultiSelect`-вопроса должна быть включена строка с кратким объяснением разницы между вариантами простым языком, отображаемая под самим списком вариантов (не отдельным экраном, не require дополнительного нажатия для просмотра — видна сразу). В `inquire` для этого есть встроенный параметр (`with_help_message`), не нужно реализовывать собственный механизм показа подсказок поверх библиотеки.
+
+Пример (ISO-bus, тот же шаг, что и раньше, но в новом интерфейсе):
+
+```
+Носитель установки обнаружен: cachyos-desktop-linux.iso (распознан как CachyOS)
+
+CD-ROM привод:
+❯ virtio-scsi  (рекомендуется)
+  ide
+
+Быстрее монтирование и чтение установочных файлов. Подходит, если установочный
+носитель — современный Linux-дистрибутив (initrd почти всегда поддерживает
+virtio-scsi). Если установка не загружается — переключитесь на ide ниже.
+
+[↑↓ выбор · Enter подтвердить · Esc назад]
 ```
 
-**Файл `cli/src/disk.rs`** — авто-добавление `.qcow2`:
-```rust
-DiskAction::Create { size, mut path } => {
-    // Авто-добавление .qcow2 если расширение не указано
-    if path.extension().is_none() {
-        path.set_extension("qcow2");
-    }
-    let bytes = parse_size(&size)?;
-    andler_disk::qcow2::create(&path, bytes).await?;
-    println!("created {} ({})", path.display(), format_size(bytes));
-}
+При перемещении выделения стрелками вниз/вверх текст-объяснение меняется вместе с выделенным пунктом — пользователь видит описание именно того варианта, на котором сейчас стоит курсор, не общий текст сразу для всех вариантов одним блоком.
+
+### Единый источник текста описаний — связь с принципом "явный выбор + объяснение разницы"
+
+Чтобы текст описания каждого варианта не дублировался отдельно для wizard, `--help` CLI и будущих GUI-тултипов (см. раздел "Принцип для GUI/CLI" в конце плана) — каждый enum конфигурации (`RenderBackend`, `DisplayEngine`, `AudioDevice`, `CdromBus` и т.п.) должен нести doc-комментарий на каждом варианте, из которого `with_help_message` в wizard берёт текст напрямую (через derive-макрос или простую функцию-маппер `variant -> &str`), а не через отдельно поддерживаемую строку, прописанную в коде самого wizard-промпта. Если у `inquire` есть `Selectable`-derive для enum-типов — этим стоит воспользоваться, чтобы список вариантов для `Select`/`MultiSelect` тоже генерировался из самого типа конфигурации, а не дублировался вручную при каждом новом вопросе wizard.
+
+### Что происходит, если терминал не интерактивный (TTY недоступен)
+
+`inquire` явно возвращает типизированную ошибку `NotTTY`, если устройство ввода не TTY (например, `andler create | other-command`, запуск в неинтерактивном CI-окружении, или сам процесс не присоединён к терминалу). Это нужно явно обработать, не дать пользователю увидеть сырую ошибку библиотеки:
+
+- Если Wizard не может запуститься из-за `NotTTY` **и** все обязательные параметры CLI-режима переданы флагами — просто выполнить неинтерактивный путь, как будто wizard не запускался вовсе (это уже базовое условие запуска wizard, см. выше — здесь лишь явное напоминание, что `NotTTY` не должен ломать уже работающий неинтерактивный сценарий).
+- Если Wizard не может запуститься из-за `NotTTY` **и** обязательные параметры не переданы — понятная ошибка: "не удалось запустить интерактивный wizard (нет TTY) — передайте обязательные параметры явно через флаги или используйте `--file <config.toml>`", со ссылкой на список обязательных флагов, не просто текст исключения `NotTTY` из библиотеки.
+
+### Формат вопросов с текстовым/числовым вводом (не выбор из списка)
+
+Для вопросов без заранее известного списка вариантов (имя VM, путь к диску, размер в GiB) — обычный текстовый prompt (`inquire::Text`/`CustomType` для чисел с валидацией) с дефолтным значением, видимым в строке ввода или рядом с ней, принимаемым по `Enter` без ввода:
+
+```
+Размер диска (GiB): 256
+> _
 ```
 
-**Файл `services/andler-disk/src/qcow2.rs`** — расширить `DiskInfo`:
-```rust
-pub struct DiskInfo {
-    pub format: String,
-    pub virtual_size: u64,
-    pub actual_size: u64,
-    pub backing_file: Option<String>,
-    pub dirty: bool,           // новый
-    pub refcount: Option<u32>, // новый
-}
+Если пользователь начинает печатать — заменяет дефолтное значение; если сразу нажимает `Enter` — дефолт принимается как есть. Это поведение тоже встроено в `inquire::CustomType`/`Text` через `with_default`, не требует отдельной реализации.
+
+### Итоговая сводка перед созданием — обязательный финальный шаг
+
+Перед фактическим вызовом `create_instance`/`create_android_instance` wizard показывает **полную сводку** всех выбранных (и дефолтных, не запрошенных явно в Basic-режиме) значений одним экраном, и просит финального подтверждения:
+
+```
+Сводка перед созданием:
+  Тип:        Linux, имя "my-vm"
+  Диск:       qcow2, 256 GiB, ~/.local/share/andler/instances/<id>/disk.qcow2
+  ISO:        cachyos-desktop-linux.iso, привод: virtio-scsi
+  UEFI:       OVMF найден автоматически (/usr/share/edk2-ovmf/x64/...)
+  GPU:        Venus, host memory 256M
+  Дисплей:    SDL (выбран автоматически — обнаружен GPU NVIDIA)
+  Звук:       virtio-sound + PipeWire
+  Сеть:       NAT (passt)
+
+❯ Создать VM
+  Изменить
+  Отмена
 ```
 
-**Файл `cli/src/disk.rs`** — выводить больше информации:
-```rust
-DiskAction::Info { path } => {
-    let info = andler_disk::qcow2::info(&path).await?;
-    println!("path:         {}", path.display());
-    println!("format:       {}", info.format);
-    println!("virtual_size: {}", format_size(info.virtual_size));
-    println!("actual_usage: {} ({:.1}%)", format_size(info.actual_size), pct);
-    if let Some(bf) = &info.backing_file {
-        println!("backing_file: {bf}");
-    }
-    println!("dirty:        {}", info.dirty);
-    if let Some(rc) = info.refcount {
-        println!("refcount:     {rc}");
-    }
-}
-```
+Это особенно важно для Basic-режима — пользователь не отвечал на большинство вопросов явно, и без сводки не увидит, какие именно дефолты были применены, до момента, когда VM уже создана. "Изменить" возвращает к Advanced-режиму с уже введёнными значениями как текущими, не начинает заново с нуля.
+
+### Навигация
+
+- `↑`/`↓` (стрелки) — перемещение по вариантам списка
+- `Enter` — подтвердить текущий выбор (или принять дефолт, если поле текстовое и ничего не введено)
+- `Space` — отметить/снять отметку текущего пункта (только для вопросов с множественным выбором)
+- `←`/`→` (для множественного выбора) — снять все отметки / отметить все
+- `Esc` — вернуться на шаг назад
+- `Ctrl+C` — отмена создания целиком, без побочных эффектов (никакие файлы/записи не создаются, если отмена произошла до финального подтверждения сводки)
+
+### Error UX
+
+- Диск уже существует по указанному пути → wizard спрашивает: перезаписать / выбрать другой путь / отмена.
+- OVMF не найден и Legacy BIOS не годится (Android требует UEFI) → понятное сообщение с конкретной командой установки пакета для текущего дистрибутива (см. раздел UEFI/BIOS).
+- Venus выбран, но хост не соответствует минимальным требованиям (см. раздел GPU) → wizard предупреждает заранее, до создания VM, и предлагает fallback на VirGL/CPU, а не даёт инстансу зависнуть при первом запуске.
+- `--root magisk` выбран, но `--magisk-dir` не передан и не может быть авто-определён → wizard запрашивает путь явно, не позволяет продолжить с пустым значением (текущий код уже требует это как обязательный параметр при выборе magisk).
+- Терминал не TTY → см. отдельный под-раздел выше, не сырая ошибка библиотеки.
+
+### Что изменилось и почему
+
+Зафиксировано, что wizard — третий путь создания VM, не замена существующих TOML/CLI-режимов. Добавлено разделение на Basic/Advanced — без этого wizard со всеми ~13 категориями вопросов для каждого нового пользователя был бы длиннее, чем просто передача флагов напрямую. Добавлен шаг ISO-bus в порядок вопросов (отвечает на вопрос: да, дефолт показывается в скобках и сразу переопределяем тем же способом, что и остальные вопросы). Добавлены Android-специфичные вопросы (gapps/microg/ARM-транслятор/root), которых не было в исходном плане, хотя они уже существуют как флаги в реальном CLI. Добавлен обязательный финальный шаг "Итоговая сводка" — без него пользователь, прошедший Basic-режим, не видит, какие дефолты были к нему применены, до момента, когда VM уже создана. Интерфейс взаимодействия переработан с "ввод номера/текста руками" на стрелки+Enter+Space (как у `docker`/`apt`/большинства современных интерактивных CLI), с конкретным выбором библиотеки (`inquire`) и обработкой `NotTTY`-случая, которого исходная версия плана не учитывала вовсе.
+
+
+## UEFI / BIOS
+
+### Авто-детект OVMF
+
+ANDLER ищет OVMF файла в системе автоматически:
+
+1. **Дефолтный путь**: `/usr/share/edk2-ovmf/x64/OVMF_CODE.4m.fd`
+2. **Расширенный поиск** (если дефолт не найден):
+   - `/usr/share/edk2/x64/OVMF_CODE.4m.fd`
+   - `/usr/share/OVMF/OVMF_CODE_4M.fd`
+   - `/usr/share/edk2/ovmf/OVMF_CODE.fd`
+3. **Legacy BIOS fallback**: если OVMF вообще не найден — ANDLER предлагает Legacy BIOS (если VM не требует UEFI; Android-инстансы **требуют** UEFI и не имеют этого фоллбэка — см. ниже)
+
+Если OVMF не найден и Legacy BIOS не подходит — **ошибка с инструкцией**: "Установите пакет edk2-ovmf" (конкретная команда зависит от дистрибутива — см. ниже).
+
+### Порядок при нескольких найденных путях
+
+Если найдено несколько валидных OVMF_CODE (например, после обновления пакета остался старый путь) — берётся **первый найденный** по списку выше (он отражает приоритет дистрибутивов: Fedora/RHEL → Debian/Ubuntu → generic edk2). Не реализуется выбор "самого нового по mtime" — это создаёт неочевидное для пользователя поведение при параллельной установке нескольких пакетов. Если нужна предсказуемость — пользователь переопределяет путь явно через `--ovmf-code-path`.
+
+### Поведение для уже существующих VM при обновлении системного OVMF
+
+Авто-детект и пересоздание `VARS.fd` из шаблона применяется **только при создании нового инстанса**. У существующих инстансов `ovmf_code_path` зафиксирован в `InstanceConfig` на момент создания (см. `FirmwareConfig` в коде) и не меняется автоматически — иначе обновление пакета `edk2-ovmf` на хосте могло бы незаметно изменить поведение загрузки уже работающих VM. Если пользователь хочет обновить путь для существующего инстанса — отдельная явная команда (`andler config <id> --ovmf-code-path ...`), не побочный эффект апдейта пакета.
+
+### Инструкция по установке — по дистрибутиву
+
+| Дистрибутив | Команда |
+|---|---|
+| Fedora/RHEL/CentOS | `sudo dnf install edk2-ovmf` |
+| Debian/Ubuntu | `sudo apt install ovmf` |
+| Arch Linux | `sudo pacman -S edk2-ovmf` |
+
+Сообщение об ошибке должно определять дистрибутив (через `/etc/os-release`) и показывать конкретную команду, а не общее "Установите пакет edk2-ovmf" — иначе новичок не знает, как называется пакет в его системе.
+
+### OVMF VARS
+
+- **Шаблон**: найденный системный OVMF_VARS
+- **Персональная копия**: `~/.local/share/andler/instances/<id>/VARS.fd`
+- **Авто-восстановление**: если VARS.fd повреждён (размер 0, невалидный) — пересоздаётся из шаблона
+- **Сброс**: `--reset-boot` — удаляет VARS.fd и создаёт свежий (сброс boot order)
+
+### Legacy BIOS
+
+Если пользователь выбрал Legacy BIOS:
+- OVMF не используется
+- VARS.fd не создаётся
+- QEMU запускается с `-bios` или без firmware
+
+### Что изменилось и почему
+
+Убрана строка `/usr/share/edk2-ovmf/x64/OVMF_CODE.4m.fd` из списка "расширенного поиска" — она дублировала дефолтный путь (была в плане дважды). Добавлены: порядок разрешения конфликтов при нескольких найденных файлах, поведение при обновлении системного пакета (чтобы не сломать работающие VM), и дистрибутив-специфичные команды установки.
 
 ---
 
-## 8. CLI flags для GPU/display и других параметров
+## Настройки рендера (GPU)
 
-### Проблема
-При создании VM через CLI (`--kind linux`) невозможно выбрать:
-- Render backend (venus/virtiogpu/virgl/cpu)
-- Display engine (sdl/spice/dbus/none)
-- Разрешение, DPI, FPS limit
-- Количество ядер, объём памяти
-- Тип сети, bridge interface
-- Включить balloon/zram/ksm
+### Варианты
 
-Единственный способ — через TOML файл, что неудобно для быстрого создания.
+| Рендер | Описание | Дефолт | Когда использовать |
+|--------|----------|--------|-------------------|
+| **Venus** | 3D через Vulkan, через `virtio-gpu-gl`. Самый быстрый из доступных при поддержке хоста. | **Да** (если хост соответствует требованиям, см. ниже) | Игры, 3D, Android |
+| **VirGL** | 3D через OpenGL поверх того же `virtio-gpu-gl`. | Нет | Приложения с OpenGL, хосты без поддержки Venus |
+| **VirtioGPU** (без 3D) | Базовый 2D/VGA-совместимый вывод без host GPU offloading. | Нет | Минимальная совместимость, серверный 2D |
+| **CPU** | Без аппаратного ускорения, программный VGA. | Нет | Серверы, headless, отсутствие пригодного GPU |
 
-### Что надо
-Добавить CLI-флаги для всех параметров которые можно задать в TOML. Дефолты — те же что в `reference_default()`.
+### Как это работает в QEMU — устройство одно, режимы — это набор флагов
 
-### Решение
-**Файл `cli/src/main.rs`** — добавить флаги в `Command::Create`:
-```rust
-Create {
-    // ... существующие флаги ...
+**Важно:** `virtio-gpu-gl` и `virtio-vga-gl` — это два разных PCI-устройства, не два названия одного и того же:
 
-    // GPU
-    #[arg(long, value_enum, default_value_t = CliRenderBackend::Venus)]
-    render: CliRenderBackend,
-    #[arg(long, value_enum, default_value_t = CliDisplayEngine::Sdl)]
-    display: CliDisplayEngine,
-    #[arg(long)]
-    hostmem: Option<String>,     // "4G", "4096M"
-    #[arg(long)]
-    resolution: Option<String>,  // "1920x1080"
-    #[arg(long)]
-    dpi: Option<u32>,
-    #[arg(long)]
-    fps_limit: Option<u32>,
-    #[arg(long)]
-    fullscreen: bool,
+- `virtio-gpu-gl` — чистое VirtIO-GPU устройство без VGA-совместимости. Это устройство, которое использует вся официальная QEMU-документация для Venus/VirGL/DRM native context.
+- `virtio-vga-gl` — то же самое, но с VGA-совместимым режимом "впереди" — нужно только когда важно видеть стандартный VGA-вывод до того, как в госте загрузится GPU-драйвер (актуально в основном для Windows-гостей без 3D-драйверов, либо BIOS/Legacy-режима).
 
-    // CPU
-    #[arg(long, default_value_t = 4)]
-    cores: u32,
-    #[arg(long, default_value_t = 1)]
-    sockets: u32,
-    #[arg(long, default_value_t = 1)]
-    threads: u32,
-    #[arg(long, value_enum, default_value_t = CliCpuPriority::Normal)]
-    cpu_priority: CliCpuPriority,
+**Для проекта (UEFI, Linux/Android-гости) дефолт — `virtio-gpu-gl`, не `virtio-vga-gl`.** Это уже верно реализовано в коде (`andler-core::config::gpu::RenderBackend`), но было неверно описано в более ранней версии этого плана и в скриптах `start.sh`/`start2.sh` — переход на `virtio-vga-gl` в одном из экспериментов снизил производительность и привёл к зависанию VM, что согласуется с тем, что VGA-совместимый режим добавляет накладные расходы эмуляции legacy framebuffer, которых нет у чистого GPU-устройства.
 
-    // Memory
-    #[arg(long, default_value = "4G")]
-    memory: String,
-    #[arg(long)]
-    balloon: bool,
-    #[arg(long)]
-    zram: bool,
-
-    // Network
-    #[arg(long, value_enum, default_value_t = CliNetworkMode::Nat)]
-    net: CliNetworkMode,
-}
+```
+Venus:      -device virtio-gpu-gl,hostmem=256M,blob=true,venus=true
+VirGL:      -device virtio-gpu-gl   (тот же device; OpenGL offloading включается
+                                      через -display ...,gl=on, без venus=true)
+VirtioGPU:  -device virtio-gpu-gl   (без gl=on на -display — драйвер виден гостю,
+                                      но без host offloading)
+CPU:        -vga std                (НЕ -vga none — none означает "без видеовывода
+                                      вообще", это отдельный headless-режим, см. ниже)
 ```
 
-**Файлы enum'ов** — добавить в `cli/src/main.rs`:
-```rust
-#[derive(Clone, Copy, ValueEnum)]
-enum CliRenderBackend {
-    Venus,
-    Virtiogpu,
-    Virgl,
-    Cpu,
-}
+GL-флаг (`gl=on`) задаётся на **`-display`**, а не на `-device` — если GPU-режим выбран как Venus/VirGL, display-конфигурация обязана прокидывать `gl=on` вместе с выбранным движком (`sdl,gl=on` / `gtk,gl=on`). Сейчас план и код описывали это как независимые настройки — это нужно явно связать в логике сборки cmdline: выбор `RenderBackend::Venus`/`VirGl` должен форсировать `gl=on` на display-устройстве, иначе 3D-ускорение тихо не заработает при правильно выбранном GPU-режиме, но забытом `gl=on`.
 
-#[derive(Clone, Copy, ValueEnum)]
-enum CliDisplayEngine {
-    Sdl,
-    Spice,
-    Dbus,
-    None,
-}
+`-vga none` зарезервирован для отдельного **headless**-кейса (сервер без какого-либо видеовывода вообще, не просящий ни framebuffer, ни X11/Wayland на хосте) — он уже есть в коде как `DisplayEngine::None` и не должен путаться с "CPU-рендер для desktop-юзера".
 
-#[derive(Clone, Copy, ValueEnum)]
-enum CliNetworkMode {
-    Nat,
-    Isolated,
-}
-```
+### Минимальные требования хоста для Venus
 
-**Файл `cli/src/create.rs`** — переопределять `reference_default()`:
-```rust
-fn build_linux_request(/* ... */, args: &CreateArgs) -> CreateInstanceRequest {
-    let mut gpu = andler_core::GpuConfig::reference_default();
-    gpu.render_backend = match args.render {
-        CliRenderBackend::Venus => andler_core::RenderBackend::Venus,
-        CliRenderBackend::Virtiogpu => andler_core::RenderBackend::VirtioGpu,
-        CliRenderBackend::VirGl => andler_core::RenderBackend::VirGl,
-        CliRenderBackend::Cpu => andler_core::RenderBackend::Cpu,
-    };
-    if let Some(ref hostmem) = args.hostmem {
-        gpu.hostmem_bytes = parse_size(hostmem).unwrap();
-    }
+Прежде чем wizard предлагает Venus как дефолт, нужно проверить (или хотя бы предупредить, если проверка недоступна):
 
-    let mut display = andler_core::DisplayConfig::reference_default();
-    display.display_engine = match args.display {
-        CliDisplayEngine::Sdl => andler_core::DisplayEngine::Sdl,
-        CliDisplayEngine::Spice => andler_core::DisplayEngine::Spice,
-        CliDisplayEngine::Dbus => andler_core::DisplayEngine::Dbus,
-        CliDisplayEngine::None => andler_core::DisplayEngine::None,
-    };
-    // ... разрешение, DPI, FPS ...
+- Linux-ядро хоста ≥ 6.13, собранное с `CONFIG_UDMABUF`
+- QEMU ≥ 9.2.0
+- virglrenderer с поддержкой venus
+- Mesa ≥ 24.2.0
+- Рабочий KVM (`/dev/kvm`) и поддержка Vulkan на хосте
 
-    // ... остальные секции ...
-}
-```
+Если хотя бы одно требование не выполняется — wizard **не предлагает Venus как дефолт**, опускается до VirGL (более старая, но стабильнее работающая опция) с пояснением причины. Без этой проверки пользователь рискует получить тот же сценарий зависания VM, который уже был на практике с неподходящей GPU-конфигурацией.
+
+### Параметры Venus
+
+- **Host Memory** — память на хосте для GPU. Дефолт: **256M**. Варианты: 256M, 512M, 1G
+- **Blobs** — включены по умолчанию (`blob=true`) — обязательное условие для Venus capset
+- **Cache** — кэш шейдеров в `~/.local/share/andler/venus-cache/`
+
+### Что изменилось и почему
+
+Заменён `virtio-vga-gl` на `virtio-gpu-gl` во всех примерах — это два разных устройства, и `virtio-vga-gl` был причиной деградации производительности и зависания VM в эксперименте с `start2.sh`. Убран отдельный `-device` для VirGL/VirtioGPU (это один и тот же device, разница в наборе флагов `-display ...,gl=on`, а не в самом устройстве). Заменён `-vga none` для CPU-режима на `-vga std` (`none` — это headless, отдельный, уже существующий в коде `DisplayEngine::None`). Добавлены минимальные версии для Venus и логика fallback при их отсутствии.
 
 ---
 
-## Порядок реализации
+## Настройки дисплея
 
-| # | Задача | Сложность | Время |
-|---|--------|-----------|-------|
-| 1 | Логирование | Простая | 30 мин |
-| 2 | OVMF VARS по умолчанию | Простая | 15 мин |
-| 3 | ISO path опционален | Средняя | 45 мин |
-| 4 | disk create порядок аргументов | Простая | 15 мин |
-| 5 | Partial instance ID | Средняя | 1 час |
-| 6 | Boot priority | Средняя | 1.5 часа |
-| 7 | CLI flags GPU/display | Сложная | 2-3 часа |
-| 8 | NVIDIA metrics | Средняя | 1 час |
+### Варианты
+
+| Движок | Описание | Дефолт | Когда использовать |
+|--------|----------|--------|-------------------|
+| **SDL** | Простое окно, без встроенного меню. | Условный (см. ниже) | NVIDIA-хосты, минимальные зависимости, headless-тесты с Xvfb не нужны |
+| **GTK** | Окно со встроенным меню/UI для управления VM во время работы (снапшоты, монитор и т.д. прямо из интерфейса). | Условный (см. ниже) | Desktop-юзеры на большинстве GPU, кроме NVIDIA |
+| **Spice** | Протокол Spice. Clipboard, audio, нужен для будущего GUI-стриминга. | Нет | Продвинутое использование, удалённый доступ |
+| **None** | Без дисплея. Headless. | Нет | Серверы, CI/Docker smoke-тесты |
+
+### Дефолт зависит от GPU вендора хоста — это не статичный выбор
+
+Подтверждённая на практике проблема: `-display gtk,gl=on` не работает на части NVIDIA-конфигураций (чёрный экран), тогда как `-display sdl,gl=on` на тех же хостах работает. Поэтому:
+
+- **Если GPU-вендор хоста определён как NVIDIA** → дефолт **SDL**.
+- **Иначе (AMD/Intel/неизвестно)** → дефолт **GTK** — у него есть встроенные элементы управления (меню, диалоги), которых нет у "голого" SDL-окна, это лучше соответствует ожиданиям desktop-пользователя.
+
+Авто-детект вендора — через `glxinfo`/`/proc/driver/nvidia` или аналог; если детект не удался — fallback на SDL как более совместимый вариант. Это решение нужно зафиксировать явно, а не оставлять как один статичный дефолт "SDL для всех" — иначе часть NVIDIA-пользователей получит чёрный экран сразу при первом запуске созданной по умолчанию VM.
+
+### Дополнительные параметры
+
+- **Разрешение**: 1280x720 (дефолт), 1920x1080, 2560x1440
+- **Show cursor**: **off** (дефолт, скрывает двойной курсор)
+- **Fullscreen**: off (дефолт)
+- **DPI**: 96 (дефолт), 144 (HiDPI)
+- **FPS limit**: нет (дефолт)
+
+### Clipboard sync — зависит от выбранного движка
+
+- **GTK**: имеет встроенный параметр `-display gtk,clipboard=on` — работает без дополнительных зависимостей в госте.
+- **SDL**: нативная clipboard-поддержка появилась в самих исходниках QEMU только в районе версии 10.0/10.1 (2025) и может отсутствовать в сборках QEMU из репозиториев более старых дистрибутивов. **Для SDL дефолтный и надёжный путь clipboard sync — через `vdagent`** (см. раздел "Настройки ввода"), не через нативный SDL clipboard.
+- **Spice**: clipboard работает через `spice-vdagent` в госте — то же семейство механизма, что и vdagent для SDL/GTK.
+
+### Что изменилось и почему
+
+Уточнён дефолт: вместо статичного "SDL по умолчанию" — выбор в зависимости от GPU-вендора хоста (NVIDIA → SDL, иначе → GTK), так как на практике зафиксированы случаи чёрного экрана при `-display gtk,gl=on` на NVIDIA. Добавлено явное описание зависимости clipboard-механизма от выбранного движка — раньше план говорил "vdagent всегда включён" без учёта, что GTK имеет собственный clipboard-параметр.
+
+---
+
+## Настройки звука
+
+### Звуковое устройство (PCI device) — отдельный выбор от audio backend хоста
+
+Это две независимых оси, которые предыдущая версия плана не разводила: (1) какое **устройство** видит гость (`virtio-sound-pci` или `ich9-intel-hda`), и (2) какой **backend хоста** реально воспроизводит звук (PipeWire/PulseAudio/None). План ниже описывает обе.
+
+| Устройство | Латентность/качество | Требование к госту | Дефолт |
+|---|---|---|---|
+| **virtio-sound-pci** | Современный paravirtualized путь, ниже латентность, чище звук | Ядро гостя ≥5.13 собранное с `CONFIG_SND_VIRTIO` — у многих дистрибутивов опция выключена по умолчанию, гарантии нет | **Да**, с авто-проверкой (см. ниже) |
+| **ich9-intel-hda** | Заметно более терпимое качество и более высокая латентность, чем virtio | Работает с любым стандартным ALSA/HDA-драйвером без специальной пересборки ядра — максимальная совместимость | Fallback |
+
+**Почему дефолт — virtio-sound, а не безусловный ich9-intel-hda:** virtio-sound даёт объективно лучший результат там, где работает, а большинство современных desktop-дистрибутивов (включая CachyOS) с высокой вероятностью собирают `CONFIG_SND_VIRTIO`. Но это не гарантировано для всех гостей — отсюда требование к проверке.
+
+**Как ANDLER проверяет, что virtio-sound реально заработал:** после первого запуска инстанса (через QEMU guest-agent, если установлен, либо через эвристику — отсутствие звукового вывода при тестовом сигнале) предложить пользователю переключиться на `ich9-intel-hda`, если virtio-sound не подхватился. Не делать тихий, незаметный даунгрейд — пользователь должен явно увидеть и подтвердить переключение.
+
+**Для Android-профиля** — virtio-sound безусловный дефолт без сомнений: это официальный, поддерживаемый AOSP путь для звука в виртуализированных Android-средах через TinyALSA HAL, не экспериментальная опция.
+
+### Audio backend хоста
+
+| Звук | Описание | Дефолт |
+|------|----------|--------|
+| **PipeWire** | Современный. | **Да** |
+| **PulseAudio** | Старый. Fallback если PipeWire нет. | Fallback |
+| **None** | Без звука. | Нет |
+
+### Авто-детект
+
+ANDLER проверяет наличие PipeWire. Если PipeWire не установлен — fallback на PulseAudio. Если нет PulseAudio — звук выключен. Это применяется независимо от того, какое звуковое PCI-устройство выбрано выше — оба устройства способны использовать любой из этих backend'ов хоста.
+
+### Что изменилось и почему
+
+Раньше план описывал только backend хоста (PipeWire/PulseAudio), без выбора самого звукового PCI-устройства гостя. Добавлен явный выбор `virtio-sound-pci`/`ich9-intel-hda` с честной оговоркой про зависимость от сборки ядра гостя и механизм проверки/откат на совместимый вариант, а не слепой дефолт без последующей проверки.
+
+---
+
+## Настройки ввода
+
+### Клавиатура и мышь — варианты различаются не только по производительности, но по семантике координат
+
+| Ввод | Тип координат | Когда использовать | Дефолт |
+|------|---|---|--------|
+| **virtio-tablet-pci** | Абсолютные (совпадают с позицией курсора хоста 1:1) | Desktop-использование без захвата окна — курсор переходит границу окна без рывков | **Да** |
+| **virtio-mouse-pci** | Относительные (как у физической мыши) | FPS-игры и любое приложение, которое сам захватывает мышь через relative-движение | Нет, опция |
+| **usb-tablet** / **usb-mouse** / **usb-kbd** | Тот же выбор абсолют/относительное, но через USB, а не virtio | Гости без virtio-input драйверов (Windows без virtio-win, нишевые/старые ОС) | Нет, fallback при недоступности virtio |
+
+**Почему tablet, а не mouse, дефолтом:** tablet-устройство сообщает абсолютные координаты — курсор хоста и курсор гостя совпадают в любой момент, без эффекта "мышь застряла"/"мышь улетела" на границе окна, который возникает при relative-режиме без явного grab окна. Для desktop-сценария ANDLER (не игра, не приложение с собственным захватом курсора) это правильный дефолт.
+
+**Известный нюанс для Android-гостей:** на некоторых старых версиях Android `usb-tablet`/`virtio-tablet` распознавался как touchpad (relative), а не touchscreen (absolute) — современные образы это не затрагивает, но если Android-профиль ведёт себя как "мышь не двигается, пока не зажата кнопка", это симптом именно этой проблемы, не баг конфигурации ANDLER.
+
+Клавиатура: `virtio-keyboard-pci` дефолтом (как и в обоих CPU-настройках выше), `usb-kbd` — fallback для гостей без virtio-input.
+
+### Show cursor — основной видимый курсор только один
+
+`show-cursor=off` на `-display` — скрывает курсор хоста гипервизора (того, что рисует сам QEMU-окно), оставляя видимым только курсор внутри гостевой ОС. Без этого пользователь видит два курсора одновременно при включённом tablet/absolute-режиме. Дефолт: **off**.
+
+### Мультитouch
+
+- Дефолт: **выключен**
+- Включение: `--multitouch` или через wizard
+- Для: Android, touchscreen-ноутбуки
+- Устройство: `virtio-multitouch-pci`
+
+### VdAgent (clipboard + mouse sync)
+
+- Дефолт: **включен, кроме случая GTK-дисплея с `clipboard=on`** (см. раздел "Настройки дисплея" — для GTK нативный clipboard-параметр избыточен с vdagent одновременно)
+- Обеспечивает: обмен буфером обмена, синхронизация курсора — критично именно для SDL-дисплея, где нативной clipboard-поддержки может не быть
+- Через: virtio-serial-pci + vdagent (в госте: spice-vdagent/qemu-vdagent)
+
+### Захват курсора (когда tablet/absolute недоступен и используется relative-режим)
+
+- SDL: `Ctrl+Alt+G`
+- GTK: `Ctrl+Alt+Mouse`
+
+### Android: выбор ARM-транслятора (libndk / libhoudini) — один активный, не оба сразу
+
+Если включена поддержка ARM-приложений на x86_64 Android-профиле:
+
+- **Выбор по вендору CPU хоста**: `libndk` для AMD, `libhoudini` для Intel — это прямая рекомендация поддерживающих эту функциональность проектов, не предположение ANDLER.
+- **Оба транслятора физически можно установить одновременно**, но активен в каждый момент только **один**, через системное свойство гостя (`ro.dalvik.vm.native.bridge`) — это не два параллельно работающих слоя совместимости, а взаимоисключающий выбор. План не предполагает "включить оба для лучшей совместимости" как способ повысить шанс работы приложения — нет подтверждённых данных, что это даёт прирост совместимости, и есть как минимум один задокументированный случай, где проблема (краш конкретных приложений) проявлялась одинаково независимо от того, установлен один транслятор или оба.
+- **Пользователь может вручную переключить** активный транслятор на тот, что не соответствует вендору CPU — для случаев, когда конкретное приложение лучше работает на "не своём" по рекомендации трансляторе (это специфика отдельных приложений, не общее правило).
+- Оба транслятора строго привязаны к конкретной версии Android — их нельзя свободно переносить между разными версиями образа.
+
+### Что изменилось и почему
+
+Добавлена детальная разбивка input-вариантов с указанием семантики координат (абсолютные/относительные), а не просто "Virtio/USB/PS2" без объяснения разницы. Добавлен отдельный под-раздел про ARM-трансляторы для Android — предыдущая версия плана не упоминала эту настройку вовсе; зафиксирован выбор "один активный транслятор по CPU-вендору, с возможностью переключения", а не "оба включены одновременно для совместимости" — последнее не подтверждается источниками.
+
+---
+
+## Настройки сети
+
+### Варианты и их реальные ограничения — не просто три строки таблицы
+
+| Сеть | Backend QEMU | Описание | Дефолт |
+|------|---|----------|--------|
+| **NAT** | `user` (SLIRP) или `passt` (см. ниже) | VM за NAT, доступ в интернет без настройки хоста | **Да** |
+| **Bridge** | `tap` + bridge-интерфейс на хосте | VM напрямую в сети хоста, видна другим устройствам сети | Нет |
+| **Isolated** | `socket`/internal `netdev` без выхода наружу | VM изолирована, доступна только другим VM в той же изолированной сети | Нет |
+
+### NAT — `passt` вместо классического SLIRP, если доступен
+
+Оба исходных скрипта используют `-nic user,model=virtio-net-pci` — это классический SLIRP-бэкенд, у которого есть задокументированные ограничения: высокий overhead и заметно более низкая производительность по сравнению с альтернативами, ICMP (включая `ping` изнутри гостя) в общем случае не работает, гость не виден напрямую с хоста без явного port forwarding, и **IPv6 port forwarding в QEMU не реализован вовсе** (только IPv4).
+
+С QEMU появилась более современная альтернатива — **`passt`**: даёт лучшую производительность, чем SLIRP, полную поддержку IPv6 (включая ICMPv6, которого у SLIRP нет), и работает как непривилегированный демон вне процесса QEMU, что лучше с точки зрения безопасности.
+
+**Дефолт для ANDLER:** `passt`, если бинарь `passt` найден на хосте (через авто-детект, как и для OVMF); fallback на классический `-nic user` (SLIRP), если `passt` не установлен — с понятным предложением установить пакет `passt` для лучшей производительности и IPv6, не молчаливым деградированием.
+
+### Port forwarding (NAT-режимы)
+
+И для SLIRP, и для `passt` доступен `hostfwd` — проброс конкретного порта с хоста на гостя (например, для SSH к VM). Это нужно ANDLER как явная, документированная опция, а не то, что пользователь должен узнавать через чтение QEMU-документации:
+
+```
+andler config <id> --port-forward tcp::2222-:22   # host:2222 → guest:22 (SSH)
+```
+
+Несколько проброшенных портов добавляются повторением флага. **Важная оговорка для wizard/CLI-подсказки**: port forwarding в режиме SLIRP — только IPv4; если пользователю нужен IPv6-проброс, единственный путь — `passt` или `bridge`.
+
+### Bridge — для прямого доступа из локальной сети
+
+Требует настройки моста (`br0`) на хосте — это однократная настройка системы, не специфичная для конкретной VM. ANDLER не настраивает сетевой мост на хосте автоматически (это требует root-прав и постоянного изменения сетевой конфигурации системы, выходит за рамки "лаунчера VM"), но:
+
+- Может **проверить**, существует ли подходящий bridge-интерфейс, и подсказать команду для его создания, если выбран Bridge-режим, а моста нет.
+- Использует `tap`-устройство, подключаемое к существующему мосту, при создании VM.
+- В этом режиме VM получает IP напрямую от DHCP локальной сети (или статически) — полная видимость с других устройств сети, без необходимости в port forwarding.
+
+### Isolated — для multi-VM сценариев без выхода в интернет
+
+VM в этом режиме видят друг друга (если несколько VM подключены к одной isolated-сети), но не имеют выхода ни в интернет, ни в локальную сеть хоста. Полезно для тестовых стендов, изолированных лабораторных окружений. Реализуется через internal/socket netdev без NAT и без моста к физическому интерфейсу.
+
+### Модель сетевой карты
+
+- Дефолт: `virtio-net-pci` (современный, минимальный overhead)
+- Fallback: `e1000` (эмуляция реального Intel-чипа — совместимость со старыми гостями без virtio-драйверов, ценой меньшей производительности)
+
+### Что изменилось и почему
+
+Раздел переписан почти полностью — предыдущая версия описывала NAT/Bridge/Isolated тремя строками без деталей реализации и без упоминания реальных, задокументированных ограничений SLIRP-режима (отсутствие ICMP, отсутствие IPv6 port forwarding, более низкая производительность). Добавлен `passt` как современная альтернатива SLIRP с авто-детектом и понятным fallback, добавлен раздел про port forwarding как явную, нужную пользователю функцию, не подразумеваемую "само собой".
+
+---
+
+## CPU и память
+
+### Дефолты (зависят от типа VM)
+
+| Параметр | Linux | Android |
+|----------|-------|---------|
+| Ядра | 4 | 4 |
+| Сокеты | 1 | 1 |
+| Потоки | 1 | 1 |
+| Память | 4G | 8G |
+
+### CPU флаги
+
+- `host` — pass-through хостового CPU
+- `migratable=no` — для стабильности
+- `+invtsc` — инвариантные таймеры
+- `host-cache-info=on` — информация о кэше
+- `+topoext` — расширенная топология
+
+### Память
+
+- **Balloon**: выключен по умолчанию. Включается через wizard/флаг
+- **ZRAM**: выключен по умолчанию. Включается через wizard/флаг
+- **Huge pages**: выключен по умолчанию. Включается через wizard/флаг
+- **Memory backend**: `memory-backend-memfd`, размер **всегда равен** `-m` (см. ниже — это жёсткое требование, а не рекомендация)
+
+### `share=on` — зависимость от Venus и KSM одновременно (важно!)
+
+Текущий код привязывает `share=on/off` у `memory-backend-memfd` только к флагу KSM (`cfg.memory.ksm`). Но **Venus также требует shared-память** для blob resources — если пользователь включит Venus, но не включит KSM, `share` окажется `off`, и Venus-инициализация может не пройти. План фиксирует правильное условие:
+
+```
+share = on, если ksm == true ИЛИ render_backend ∈ {Venus, VirGl}
+share = off, иначе
+```
+
+Это нужно реализовать как явную проверку при сборке cmdline (`andler-qemu::cmdline::memory_args`), а не оставлять незаметной зависимостью между двумя, казалось бы, не связанными настройками (GPU и Memory) в wizard.
+
+### Жёсткое требование: размер memory-backend должен совпадать с `-m`
+
+Если в будущем добавится Virtio-FS (shared folders, см. раздел "Modern QEMU arguments"), QEMU откажется стартовать при несовпадении размера `-m` и размера `memory-backend-memfd` — это подтверждённое на практике жёсткое требование, не рекомендация. Текущий код уже это соблюдает (оба значения берутся из одного `cfg.memory.size_bytes`) — важно не сломать это при будущих изменениях конфигурации памяти.
+
+### Что изменилось и почему
+
+Добавлена явная связь между Venus/VirGL и `share=on` у memory-backend — без неё включение Venus при выключенном KSM приведёт к скрытой и труднообъяснимой ошибке. Зафиксировано жёсткое (а не желательное) требование совпадения размеров `-m` и memory-backend для будущей поддержки Virtio-FS.
+
+---
+
+## Снапшоты
+
+### Тип
+
+**Internal snapshots** (qcow2) — хранятся внутри `disk.qcow2`. Проще для пользователя, отдельная папка `snapshots/` не нужна.
+
+### Важное ограничение: снапшоты работают только на запущенной VM
+
+В текущей реализации backend'а (`andler-qemu`) `snapshot_restore`/`snapshot_delete`/`snapshot_create` выполняются через **QMP**, протокол управления живым процессом QEMU. Это означает:
+
+- VM должна быть в состоянии **`Running`/`Paused`** для создания, восстановления и удаления снапшота.
+- **Снапшот остановленной VM создать/восстановить нельзя** — это не свойство формата qcow2 (формат поддерживает offline-снапшоты через `qemu-img snapshot`), а следствие конкретной реализации через QMP в этом проекте.
+
+CLI/wizard должны явно сообщать об этом: попытка `andler snapshot restore` на инстансе в состоянии `Stopped`/`Created` должна возвращать понятную ошибку ("инстанс должен быть запущен или на паузе для операций со снапшотами"), а не просто проп propagated backend-ошибку из QMP-уровня.
+
+### Ограничения
+
+**Проверка кода: лимит количества снапшотов на VM нигде не реализован** — ни в `daemon::snapshot_ops`, ни в `andler-core`. Более ранняя версия плана утверждала "максимум 10 снапшотов" как факт — это было либо нереализованное намерение, либо устаревшее упоминание; план должен явно зафиксировать это как **требование к реализации**, не как существующее поведение:
+
+- Дефолтный лимит **10 снапшотов на инстанс** (число можно пересмотреть — это не техническое ограничение qcow2, а UX-решение против неограниченного роста файла снапшотами, каждый из которых занимает место).
+- При попытке создать снапшот сверх лимита — понятная ошибка с предложением удалить старый снапшот первым, не просто "лимит превышен" без указания, что делать дальше. Например: "достигнут лимит снапшотов (10/10) для этого инстанса — удалите один из существующих (`andler snapshot list <id>`) или увеличьте лимит (`andler config <id> --max-snapshots <N>`)".
+- Лимит — настраиваемый параметр конфигурации инстанса, не жёстко зашитое число в коде — пользователь, которому нужно больше 10 точек восстановления, не должен упираться в недокументированный потолок без возможности его изменить.
+- Автоматические снапшоты: **нет** (только вручную) — план не предполагает scheduled/periodic snapshot-функциональность на первом этапе; если она понадобится позже, это отдельная, не входящая в текущий объём задача (нужно решить взаимодействие с тем же лимитом — автоматический снапшот не должен молча упираться в лимит и просто проваливаться без уведомления).
+
+### Команды
+
+| Команда | Описание |
+|---------|----------|
+| `andler snapshot create <id> --tag snap1` | Создание снапшота (VM должна быть Running/Paused) |
+| `andler snapshot list <id>` | Список снапшотов |
+| `andler snapshot restore <id> --tag snap1` | Восстановление (VM должна быть Running/Paused) |
+| `andler snapshot delete <id> --tag snap1` | Удаление (VM должна быть Running/Paused) |
+
+### Что изменилось и почему
+
+Добавлено явное требование к состоянию VM (`Running`/`Paused`) для всех снапшот-операций — это требование самой реализации через QMP, а не опциональная деталь. Без этого пользователь, ожидающий "internal snapshot работает всегда, как в VirtualBox", получит непонятную ошибку при попытке восстановить снапшот выключенной VM.
+
+---
+
+## Клонирование VM
+
+### Типы
+
+| Тип | Описание | Когда использовать |
+|-----|----------|-------------------|
+| **Linked** | QCOW2 backing file. Экономит место. | Быстрое создание копий |
+| **Full** (`FullStandalone`) | Полная копия (qemu-img convert). | Независимые VM |
+| **Shared Base** (`SharedBase`) | Общий backing file. Только Android. | Android-эмуляция |
+
+### Процесс
+
+1. ANDLER спрашивает имя новой VM
+2. Выбирает тип клонирования
+3. Создаёт новый инстанс с скопированным/ссылочным диском
+
+### Источник клонирования может сам быть клоном
+
+Клонирование уже существующего `Linked`/`SharedBase`-клона разрешено и не требует особого случая — с точки зрения операции клонирования источник — это просто инстанс с `disk.path`/`firmware.ovmf_vars_path`, независимо от того, как сам был создан. План должен явно подтвердить, что UI/wizard не блокирует "клонирование клона".
+
+### Источник должен быть остановлен — не описано в плане ранее
+
+Текущая реализация (`daemon::clone_ops::clone_instance`) требует, чтобы источник находился в терминальном состоянии (через внутреннюю проверку `terminal_clonable_instance_config`) — **клонировать запущенную VM нельзя**. Это логично (копирование диска "на лету" у работающей VM дало бы несогласованное состояние файловой системы внутри клона), но план должен явно отражать это в UX: команда `andler clone <id>` на запущенном инстансе должна возвращать понятную ошибку ("инстанс должен быть остановлен для клонирования, сейчас: Running") сразу, а не пропущенную через несколько слоёв общую ошибку backend'а. Wizard/CLI должны предлагать остановить VM перед клонированием как явный шаг, а не молча падать.
+
+### Уникальность имени — не проверяется нигде, нужно явно решить
+
+Проверка кода показывает: `name` инстанса нигде не валидируется на уникальность — ни при `create_instance`, ни при `clone_instance` нет варианта ошибки "имя уже занято". Технически можно создать (или клонировать в) несколько инстансов с одинаковым `name` одновременно. Идентификация всё равно идёт по UUID, так что это не ломает работу daemon'а, но создаёт путаницу в UX: `andler list` покажет несколько строк с одинаковым именем, и partial instance ID (см. соответствующий раздел) не поможет различить их по имени, только по префиксу UUID.
+
+План должен явно зафиксировать решение: либо (а) ANDLER предупреждает (не блокирует) при создании/клонировании с уже занятым именем — "имя 'my-vm' уже используется другим инстансом (abc123...), продолжить?", оставляя финальное решение пользователю, либо (б) имена становятся строго уникальными на уровне daemon (отдельная ошибка `DaemonError::NameAlreadyTaken`). Вариант (а) менее ломающий для существующего поведения (не требует менять daemon-логику валидации), вариант (б) чище для UX в долгосрочной перспективе. Рекомендуется (а) на первом этапе, с переходом к (б) позже, если на практике путаница окажется частой проблемой.
+
+---
+
+## Удаление VM
+
+### Защита — фактическое поведение зависит от `--purge`, не единое правило
+
+- По умолчанию (**без `--purge`**): удаляется только запись (из daemon и БД), файлы диска **остаются на месте**. Если у инстанса есть `Linked`-клоны — удаление **разрешено**, потому что файл диска не тронут, и клон продолжает работать нормально, ссылаясь на него как на `backing_file`.
+- **С `--purge`**: перед удалением файлов проверяются живые `Linked`-клоны этого инстанса. Если они есть — операция **блокируется** (`InstanceHasLiveClones`), потому что удаление файла диска сломало бы все ссылающиеся на него клоны.
+- Показывает **что будет удалено** перед удалением.
+
+Это два разных правила, не одно — план в предыдущей версии описывал единое "если есть linked clones — блокирует удаление", что не совпадает с фактическим (более тонким, и более правильным) поведением: блокировка привязана именно к `--purge`, не к самому факту удаления записи.
+
+### Что изменилось и почему
+
+Разведено поведение `remove` с `--purge` и без — раньше план описывал единое правило блокировки, которое не учитывало, что удаление *записи* без `--purge` безопасно при наличии клонов (диск не трогается), и блокировать его было бы излишним ограничением, не соответствующим уже реализованной (и корректной) логике.
+
+---
+
+## Partial instance ID
+
+### Поведение как у Docker — сокращённый префикс UUID вместо полного
+
+Сейчас (судя по коду) инстансы идентифицируются полным UUID. Это неудобно набирать вручную в CLI. Предлагаемое поведение, аналогичное `docker`/`docker-compose`:
+
+- Команды, принимающие `<id>` (`start`, `stop`, `status`, `remove`, `snapshot`, `clone` и т.д.), принимают **префикс** UUID длиной от 4 символов вместо полного значения.
+- Если префикс однозначно резолвится в один инстанс — команда выполняется как обычно.
+- Если префикс соответствует **нескольким** инстансам — команда завершается ошибкой со списком совпавших полных ID, не выбирает случайный/первый. Это критично: неоднозначность при операциях с потенциально разрушительными последствиями (`remove --purge`) должна всегда требовать явного уточнения, не угадывания.
+- `andler list` показывает сокращённый ID (первые 8 символов, как `docker ps`) по умолчанию, с флагом `--full-id`/`-q` для полного значения, нужного для скриптов.
+
+### Где реализовать
+
+В `daemon::query_ops` — функция резолва префикса в полный `InstanceId` перед тем, как остальные ops-методы (`start_instance`, `stop_instance` и т.д.) получают уже однозначный ID. Не размазывать резолв префикса по каждому отдельному CLI-обработчику — один общий путь, чтобы поведение (включая обработку неоднозначности) было идентичным для всех команд.
+
+---
+
+## Logging
+
+### Уровни и дефолтное поведение
+
+ANDLER (и daemon, и CLI) должен давать информативный вывод по умолчанию — не требовать от пользователя включать verbose-флаги, чтобы понять, что происходит, но и не заваливать консоль низкоуровневым шумом.
+
+| Уровень | Что включает | Дефолт |
+|---|---|---|
+| **info** (дефолт) | Старт/стоп VM, создание/удаление, ошибки, предупреждения (например "virtio-sound не подхватился, fallback на HDA") | Да |
+| **debug** | Полная командная строка QEMU, промежуточные шаги (поиск OVMF, резолв путей) | Через `--verbose`/`-v` |
+| **trace** | QMP-протокол целиком, каждый вызов backend-метода | Через `-vv`, только для отладки самого ANDLER |
+
+### Логи самого QEMU-процесса — отдельно от логов ANDLER
+
+Stdout/stderr запущенного QEMU-процесса нужно перенаправлять в отдельный файл инстанса (`~/.local/share/andler/instances/<id>/qemu.log` или аналог), не смешивать с логами daemon'а — иначе сообщения от разных VM перемешиваются в одном потоке, и отладка конкретного инстанса требует ручной фильтрации. `andler logs <id>` (команда уже есть в плане CLI) должен читать именно этот файл.
+
+### Структурированный формат для daemon
+
+Для daemon (в отличие от CLI, который общается напрямую с человеком в терминале) предпочтительнее структурированные логи (JSON-lines или аналог через `tracing`-экосистему Rust, которая уже, вероятно, используется в проекте) — это даёт возможность в будущем агрегировать логи нескольких daemon-инстансов или подключить внешние системы мониторинга, не парся текстовый вывод регулярками.
+
+---
+
+## NVIDIA metrics
+
+### Не парсить текстовый вывод `nvidia-smi` напрямую — он не гарантирует обратную совместимость
+
+Официальная документация NVIDIA прямо предупреждает: вывод nvidia-smi не гарантирует обратную совместимость между версиями драйвера, тогда как NVML (библиотека на C) и её Python-биндинги — гарантируют, и должны быть первым выбором при написании инструментов, которые должны работать стабильно через релизы драйверов. Это значит: жёсткий построчный/regex-парсинг человекочитаемого вывода `nvidia-smi` — заведомо хрупкое решение, которое может сломаться при обновлении драйвера NVIDIA на хосте.
+
+### Рекомендуемый путь
+
+Два уровня, от предпочтительного к запасному:
+
+1. **NVML через FFI-биндинги** (например крейт `nvml-wrapper` в экосистеме Rust) — программный API, гарантированно стабильный между версиями драйвера. Предпочтительный путь для долгосрочной поддержки.
+2. **`nvidia-smi --query-gpu=... --format=csv,noheader`** — если NVML недоступен (например, упрощённая сборка без биндингов) — структурированный CSV-вывод, а не человекочитаемый текстовый формат по умолчанию. CSV-формат с явно перечисленными полями (`utilization.gpu`, `memory.used`, `memory.total`, `temperature.gpu` и т.д.) подтверждённо поддерживается NVIDIA как способ получения метрик для последующей обработки скриптами — это более устойчивый путь, чем парсинг "человеческого" вывода без флагов, но всё ещё менее надёжный, чем NVML.
+
+### Толерантный парсинг — что это значит конкретно
+
+- Если конкретное поле отсутствует в выводе (например, `power.draw` недоступен на некоторых GPU/в virtualized-режимах) — не падать с ошибкой парсинга всего ответа, отдавать `None`/`null` для этого конкретного поля.
+- Если `nvidia-smi`/NVML вообще недоступны (нет NVIDIA GPU, нет проприетарного драйвера, vGPU-passthrough не настроен) — `andler metrics <id>` явно показывает "GPU-метрики недоступны", не падает и не показывает нулевые/фиктивные значения, которые можно принять за реальные данные.
+- Метрики, полученные от `nvidia-smi` на хосте, относятся к **GPU хоста целиком**, не к конкретной VM — что важно явно показать пользователю, если у него несколько VM одновременно используют GPU-passthrough/виртуализацию: нет встроенного способа разделить нагрузку по VM на уровне самого `nvidia-smi`.
+
+---
+
+## Boot priority
+
+### Что это и зачем
+
+Порядок загрузки определяет, с какого устройства (диск/CD-ROM/сеть) UEFI/BIOS попытается загрузиться в первую очередь. Текущий код (`bootindex=N` на каждом `-device`) уже частично это поддерживает — `start.sh` устанавливает `bootindex=1` диску и `bootindex=2` приводу. План должен зафиксировать, как этим управляет ANDLER, а не оставлять как фиксированную пару чисел в командной строке.
+
+### Поведение
+
+- При создании VM **с ISO** — CD-ROM получает `bootindex=1` (загрузка с установочного носителя), основной диск — `bootindex=2`.
+- После завершения установки (или если ISO не указан изначально) — основной диск получает `bootindex=1`, CD-ROM (если остаётся подключённым) — `bootindex=2` или отключается полностью.
+- **`andler config <id> --boot-order disk,cdrom` / `cdrom,disk`** — явная команда для ручного управления порядком, не требующая пересоздания VM.
+- **`-boot menu=on`** (уже есть в обоих исходных скриптах) сохраняется дефолтом — даёт пользователю возможность вручную выбрать устройство загрузки через boot-меню при старте, не дожидаясь автоматического порядка, что особенно полезно при отладке/переустановке.
+
+### Связь с разделом "Монтирование ISO / CD-ROM"
+
+Boot priority и выбор bus для CD-ROM (`virtio-scsi`/`ide`, см. соответствующий раздел) — независимые настройки, но тесно связаны на практике: если ISO не сможет прочитаться на раннем boot из-за неподходящего bus, то порядок загрузки не имеет значения — проблема возникнет раньше, на этапе чтения самого привода, а не выбора между устройствами.
+
+---
+
+## Backend'ы
+
+| Backend | Описание | Статус |
+|---------|----------|--------|
+| **QEMU** | Полнофункциональный. Максимальная совместимость. | Реализован (`andler-qemu`) |
+| **Cloud Hypervisor** | Лёгкий. Быстрый старт. | Крейт `andler-vmm` существует как пустая заглушка (только doc-комментарий, без единой строки реализации) — это не "почти готово", а полностью открытая задача |
+
+Переключение backend — **при создании VM**. Каждая VM привязана к своему backend.
+
+### Абстракция уже спроектирована правильно — хорошая новость для Cloud Hypervisor
+
+Проверка кода показывает, что QEMU-специфичные детали (QMP-протокол, PID процесса) упоминаются только в doc-комментариях `HypervisorBackend`-трейта как пояснение/пример для конкретной реализации, не протекают в сами сигнатуры методов трейта. Это значит, что добавление Cloud Hypervisor как второго backend'а не должно требовать рефакторинга самого trait'а — реализация `andler-vmm` должна суметь удовлетворить тот же контракт через REST API Cloud Hypervisor вместо QMP.
+
+### Открытый вопрос, который план должен явно зафиксировать перед началом работы над Cloud Hypervisor
+
+Требование "снапшоты работают только при `Running`/`Paused`" (см. раздел Снапшоты) в текущем плане обосновано тем, что QEMU-реализация конкретно использует QMP, который требует живой процесс. **Это не обязательно общее правило для любого backend'а** — у Cloud Hypervisor свой REST API с другой моделью снапшотов, и неизвестно заранее (без отдельного исследования его API), действует ли там то же ограничение. План фиксирует это как открытый вопрос, который нужно явно проверить **до** реализации Cloud Hypervisor backend'а, а не переносить QEMU-специфичное предположение бездумно в общий UX-текст CLI/wizard как если бы оно было универсальным для всех backend'ов.
+
+### Что изменилось и почему
+
+Раздел расширен — раньше он был двумя строками таблицы без какой-либо привязки к реальному состоянию кода. Уточнено, что `andler-vmm` — это полностью пустая заглушка, не частично готовая реализация (важно для оценки объёма работы в приоритетах). Зафиксирован открытый вопрос про переносимость требования "снапшот только на Running/Paused" между backend'ами — без явной фиксации этого вопроса есть риск, что кто-то либо жёстко закодирует QEMU-специфичное предположение в общий UX-слой, либо, наоборот, не заметит, что оно вообще QEMU-специфичное.
+
+---
+
+## CLI vs GUI
+
+### CLI команды — текущий полный набор плюс то, что нужно добавить
+
+Таблица ниже сверена с реальным кодом (`cli/src/main.rs`) — отмечено, что уже реализовано, что нужно расширить под новые настройки из этого плана, и что в коде есть, но план раньше не упоминал.
+
+| Команда | Статус | Описание |
+|---------|--------|----------|
+| `andler create --file <toml>` | ✅ Есть | Создание VM из TOML-конфига |
+| `andler create --kind ... --name ...` | ✅ Есть, нужно расширить | Создание через флаги; нужно добавить флаги под GPU/дисплей/звук/ввод/сеть/CPU/память/ISO-bus, которых сейчас нет (только диск/ISO/Android-опции) |
+| `andler create` (без флагов/файла) | ❌ Нет — это Wizard | См. раздел Wizard |
+| `andler start/stop/pause/resume <id>` | ✅ Есть | Управление жизненным циклом |
+| `andler list` | ✅ Есть | Список VM |
+| `andler remove <id> [--purge]` | ✅ Есть | Удаление, см. раздел "Удаление VM" |
+| `andler status <id>` | ✅ Есть (в коде — отдельная команда, план ранее не указывал явно) | Текущий статус инстанса |
+| `andler config <id>` | ✅ Есть | Полная конфигурация инстанса |
+| `andler logs <id>` | ✅ Есть | Стрим stdout/stderr QEMU-процесса |
+| `andler metrics <id>` | ✅ Есть | CPU/RAM/диск I/O/сеть I/O/GPU в реальном времени |
+| `andler clone <id> --name ... --mode ...` | ✅ Есть | Клонирование (linked/full-standalone/shared-base) |
+| `andler export <id> <dest>` | ✅ Есть | Экспорт диска в standalone-файл |
+| `andler snapshot create/list/restore/delete` | ✅ Есть | См. раздел Снапшоты — требует Running/Paused |
+| `andler disk create/info/resize/compact` | ✅ Есть | См. раздел Disk management |
+| `andler config <id> --explain <field>` | ❌ Нет, нужно добавить | Объясняет, почему выбран текущий дефолт для поля и какие есть альтернативы — см. принцип GUI/CLI ниже |
+| `andler config <id> --set <field>=<value>` | ❌ Нет, нужно добавить | Изменение отдельного поля конфигурации уже существующего инстанса без пересоздания (где это технически возможно — см. оговорку ниже) |
+| `andler config <id> --port-forward ...` | ❌ Нет, нужно добавить | См. раздел Настройки сети |
+
+### Соглашение по флагам — единообразие между командами
+
+Чтобы CLI было предсказуемым (и чтобы будущий GUI мог сгенерировать формы по тем же правилам), вводится единый набор соглашений, которого план раньше не фиксировал явно:
+
+- **`<instance_id>` всегда позиционный аргумент**, не именованный флаг (`andler start abc123`, не `andler start --id abc123`) — уже так в коде, план должен закрепить это как обязательное правило для всех новых команд.
+- **Опции, у которых есть условный/вычисляемый дефолт** (GPU-рендер, display-движок, ISO-bus, aio-режим), задаются длинными `--kebab-case`-флагами без сокращений (`--render-backend`, не `--rb`) — длинное имя самодокументируется в `--help`, что важно при большом количестве опций.
+- **Булевы переключатели** — флаг без значения включает (`--gapps`, уже так в коде), не `--gapps=true`. Для отключения уже включённого по умолчанию — отдельный `--no-<flag>` (например, если `vdagent` станет дефолтным включённым — нужен явный `--no-vdagent`, а не попытка передать `--vdagent=false`).
+- **Enum-флаги используют `value_enum` из `clap`** (как уже сделано для `CliKind`, `CliRootMode`, `CliCloneMode`) — это даёт автоматическую валидацию и список допустимых значений прямо в `--help` без ручного парсинга строк.
+
+### Изменение конфигурации существующего инстанса — что можно "на лету", что требует пересоздания
+
+Это отдельный, не описанный ранее аспект: пользователь, доработавший VM (например, переключивший `ich9-intel-hda` обратно на `virtio-sound-pci` после того, как разобрался с ядром гостя), должен иметь явный путь это сделать, не пересоздавая VM с нуля. Но не все параметры можно поменять без пересоздания:
+
+- **Можно изменить "на лету" через `andler config <id> --set`** на остановленном инстансе: GPU-рендер, дисплей-движок, звуковое устройство, входные устройства, сетевой режим, CPU/память (в пределах того, что поддерживает hot-pluggable конфигурация QEMU при следующем запуске), boot priority, port forwarding. Это все параметры командной строки QEMU, пересобираемые заново при каждом `start`.
+- **Требует явного отдельного флоу, не простого `--set`**: смена формата диска (qcow2↔raw — это конвертация файла, не просто смена параметра), смена размера диска (`disk resize`, отдельная команда уже есть), смена `instances_root`/пути файлов (требует перемещения файлов на диске).
+- Команда `--set` должна явно сообщать пользователю, к какой категории относится конкретное поле, прежде чем что-либо менять — "это изменение применится при следующем запуске VM" против "это изменение требует отдельной команды `disk resize`/`disk convert`".
+
+### GUI
+
+Пока не реализуется, после стабилизации CLI. GTK (нативный для Linux/Rust) — согласуется с выбором GTK как дефолтного display-движка для большинства хостов (см. раздел Настройки дисплея), что даёт консистентный визуальный язык между самим лаунчером и окном VM.
+
+**Связь с принципом "явный выбор + объяснение разницы"**: формы GUI (списки, переключатели — как вы упоминали) должны генерироваться из тех же doc-комментариев на enum-вариантах конфига, что и `--explain`/wizard-подсказки в CLI — единый источник текста для трёх поверхностей (CLI `--help`, wizard, GUI-тултипы), не три отдельных места, которые могут разойтись при будущих правках.
+
+### Что изменилось и почему
+
+Таблица команд сверена с реальным кодом — добавлены команды, которые уже существуют, но план раньше не упоминал (`status` как отдельная команда, явный TOML-режим создания). Добавлены недостающие команды (`--explain`, `--set`, `--port-forward`), которых нет в коде, но план должен их предусмотреть. Добавлен раздел про соглашения по флагам — без него каждая новая команда рискует вводить свой стиль именования, что усложнит и CLI, и генерацию будущего GUI по тем же правилам. Добавлен отдельный разбор "что можно поменять на лету, что требует пересоздания/отдельной команды" — этого не было в плане вовсе, хотя это прямой результат вашего пожелания "можно было много что изменять через CLI".
+
+---
+
+## Modern QEMU arguments (2026)
+
+### Что использует ANDLER
+
+| Аргумент | Описание | Когда |
+|----------|----------|-------|
+| `virtio-gpu-gl` + `venus=true` | 3D-ускорение | Venus render (см. раздел GPU — НЕ `virtio-vga-gl`) |
+| `virtio-blk-pci` + `aio=` (см. ниже) | Основной диск | Всегда (диск не CD-ROM — virtio-blk не умеет монтировать CD-ROM, см. раздел "Монтирование ISO / CD-ROM") |
+| `virtio-scsi-pci` + `scsi-cd` / `ide-cd` | ISO/CD-ROM привод | Условно — см. раздел "Монтирование ISO / CD-ROM"; не тот же путь, что у основного диска |
+| `virtio-sound-pci` / `ich9-intel-hda` | Звук | virtio дефолтом с авто-проверкой, HDA — fallback; см. раздел "Настройки звука" |
+| `virtio-keyboard-pci` | Клавиатура | Всегда (или `usb-kbd` fallback) |
+| `virtio-tablet-pci` / `virtio-mouse-pci` | Указатель | tablet (абсолютные координаты) дефолтом; mouse — опция для relative-режима, см. раздел "Настройки ввода" |
+| `virtio-multitouch-pci` | Мультитouch | Если включён |
+| `memory-backend-memfd` | Shared/private память | Всегда; `share=on` если KSM или Venus/VirGL включены (см. раздел CPU и память) |
+| `blockdev` + `discard=unmap` | SSD TRIM | Для qcow2 на SSD |
+| `vdagent` | Clipboard + mouse sync | Для SDL/Spice (для GTK — опционально, см. раздел Дисплей) |
+| `virtio-rng-pci` | Энтропия | Всегда |
+| `iothread` | IO threading | См. ниже — зависит от диска, не безусловно |
+| `virtio-net-pci` | Сеть | Всегда (fallback `e1000`) |
+| `virtiofsd` | Shared folders | Если `--share`; требует точного совпадения размера memory-backend и `-m` |
+
+### `aio`/`iothread` — не один универсальный дефолт, а условная логика
+
+Предыдущая версия плана указывала `io_uring` как безусловный дефолт со fallback на `native`. По актуальной документации и практике QEMU/Proxmox это нужно уточнить:
+
+- **`aio=native` (Linux AIO) и `aio=io_uring` оба не блокируют при `cache=none`/`O_DIRECT`** — `io_uring` не гарантирует прирост производительности над `native` на практике, разница часто в пределах погрешности, и сама поддержка `io_uring` в QEMU продолжает активно развиваться (доклады 2025 года говорят "making io_uring pervasive" — то есть это ещё не до конца завершённая область).
+- **Для thin-provisioned qcow2 без preallocation (а это дефолт ANDLER, см. раздел Disk management) предпочтительнее `aio=threads`**, а не `native`/`io_uring` — запись в ещё не аллоцированные секторы qcow2 может временно блокировать vCPU при `native`/`io_uring`, что особенно заметно сразу после создания диска.
+- Рекомендуемый дефолт для ANDLER: **`aio=threads` для свежесозданных qcow2-дисков без явного preallocation**, с возможностью переключения на `aio=native`+`cache=none` для дисков с `preallocation=full` (продвинутая опция, не дефолт).
+- **`iothread`** даёт измеримый прирост в первую очередь при нескольких vCPU и I/O-интенсивной нагрузке; для однодискового, не нагруженного сценария выигрыш скромный, а ресурс (отдельный поток) не бесплатный. Дефолт: **1 iothread на инстанс**, без авто-масштабирования количества iothread'ов на раннем этапе — это можно добавить позже как продвинутую настройку (`iothread-vq-mapping`, доступно с QEMU 9.0+) для тяжёлых нагрузок.
+
+### Fallback
+
+- `aio=threads` (дефолт для thin qcow2) → `aio=native` (продвинутая опция при `preallocation=full`)
+- `PipeWire` → `PulseAudio` → `None` (если PipeWire/PulseAudio нет)
+- `e1000` вместо `virtio-net-pci` (для совместимости со старыми ОС)
+- Display: см. раздел "Настройки дисплея" — `GTK`/`SDL` дефолт зависит от GPU-вендора, не статичный fallback друг в друга
+
+### Что изменилось и почему
+
+`io_uring` как безусловный дефолт заменён на условную логику `aio=threads`/`aio=native` в зависимости от того, преаллоцирован ли диск — `io_uring` не даёт гарантированного преимущества над `native`, а для thin-provisioned qcow2 (дефолт проекта) `threads` исторически безопаснее на запись в новые сектора. `virtio-vga-gl` в таблице заменён на `virtio-gpu-gl` (см. раздел GPU). Уточнено, что `vdagent` не универсален, а зависит от дисплея. Добавлено предупреждение про обязательное совпадение размеров для `virtiofsd`.
+
+---
+
+## Приоритеты реализации
+
+| # | Область | Приоритет | Описание | Статус кода |
+|---|---------|-----------|----------|-------------|
+| 1 | Единая точка резолва путей (`ANDLER_HOME` → все подкаталоги) | Высокий | Сейчас резолвится по кускам в разных местах — см. раздел "Структура хранения" | 🔶 Частично |
+| 2 | Disk management | Высокий | Создание, info, resize, авто-формат, разное поведение qcow2/raw | 🔶 Конфиг есть, CLI-команды `disk *` — частично |
+| 3 | Монтирование ISO/CD-ROM | Высокий | Условный дефолт virtio-scsi/ide по типу гостя — см. отдельный раздел | ❌ Нет |
+| 4 | UEFI / BIOS | Высокий | Авто-детект OVMF, VARS, Legacy fallback, дистрибутив-специфичные инструкции | 🔶 `FirmwareConfig` есть, авто-детект — нет |
+| 5 | Wizard | Высокий | Интерактивный опрос (стрелки/Enter/Space через `inquire`), Basic/Advanced, новая зависимость в `cli/Cargo.toml` — см. отдельный раздел | ❌ Нет, нужна новая зависимость |
+| 6 | GPU render | Высокий | Venus (`virtio-gpu-gl`), VirGL, CPU; auto-detect минимальных версий хоста | ✅ Конфиг есть (`RenderBackend`), auto-detect версий — нет |
+| 7 | Display | Средний | SDL/GTK с дефолтом по GPU-вендору, Spice, None | ✅ Конфиг есть (`DisplayEngine`); GTK-детект вендора — нет |
+| 8 | Audio | Средний | virtio-sound/ich9-hda устройство + PipeWire/PulseAudio backend, авто-проверка работы virtio-sound | ✅ Конфиг backend'а есть; выбор PCI-устройства и проверка — нет |
+| 9 | Input | Средний | virtio-tablet (абсолютные координаты) дефолтом, mouse/USB опционально, vdagent с учётом дисплея | ✅ Конфиг есть (`InputConfig`) |
+| 10 | Network | Средний | NAT (passt/SLIRP fallback), Bridge, Isolated, port forwarding — см. отдельный раздел | ✅ `NetworkConfig` есть; passt-детект, port forwarding, bridge-проверка — нет |
+| 11 | CPU/Memory | Средний | Дефолты, balloon, zram, связка `share=on` с Venus/KSM | ✅ Конфиг есть; связка Venus↔share — нет |
+| 12 | Snapshots | Средний | Internal snapshots, CRUD, явная проверка `Running`/`Paused`, лимит количества (настраиваемый, сейчас не реализован вообще) | 🔶 Backend-логика CRUD есть; лимит, UX-сообщение о требовании состояния — нет |
+| 13 | Partial instance ID | Средний | Prefix UUID как Docker, неоднозначность — явная ошибка, не угадывание — см. отдельный раздел | ❌ Нет |
+| 14 | Logging | Средний | Info-дефолт, debug/trace через флаги, лог QEMU отдельно от daemon — см. отдельный раздел | ❌ Нет |
+| 15 | NVIDIA metrics | Средний | NVML предпочтительнее парсинга nvidia-smi text; CSV fallback; толерантность к отсутствующим полям — см. отдельный раздел | ❌ Нет |
+| 16 | Boot priority | Средний | bootindex по ISO/диску, ручное переопределение, связь с CD-ROM bus — см. отдельный раздел | ❌ Нет |
+| 17 | Android ARM-трансляторы | Средний | libndk/libhoudini — выбор одного активного по CPU-вендору, ручное переключение | ❌ Нет |
+| 18 | Clone/Export | Низкий | Linked, Full, Shared Base; нужна явная ошибка при клонировании запущенной VM, решение по уникальности имён | ✅ Backend-логика в daemon (`clone_ops.rs`); UX-сообщения и уникальность имён — нет |
+| 19 | Cloud Hypervisor | Низкий | Второй backend | ❌ Нет |
+| 20 | GUI | Низкий | Визуальный интерфейс | ❌ Нет |
+
+**Колонка "Статус кода"** добавлена, чтобы исполнитель плана не тратил время на повторную реализацию того, что уже есть в `andler-core::config::*`/`andler-store`/`andler-daemon` — основной недостающий слой это: единая точка резолва путей, wizard как отдельная ветка CLI, и auto-detect хостовых возможностей (OVMF-версии, Venus-требования, GPU-вендор, CPU-вендор для Android-трансляторов).
+
+---
+
+## Принцип для GUI/CLI: явный выбор + объяснение разницы, не скрытая магия
+
+Большинство решений в этом плане — это не "одно правильное значение", а **условный дефолт** (зависит от ОС гостя, GPU-вендора хоста, формата диска, известности ISO) с возможностью пользователя переключить вручную. Это сознательное архитектурное требование к структуре конфига, не просто текстовая ремарка:
+
+- Каждый enum-вариант в `andler-core::config::*` (RenderBackend, DisplayEngine, AudioDevice, InputPointerMode, CdromBus и т.п.) должен нести **doc-комментарий, объясняющий разницу и условие выбора** — это единственный способ, чтобы CLI `--help`/wizard-подсказки (`with_help_message` у `inquire::Select`/`MultiSelect`, см. раздел Wizard) и будущие GUI-тултипы не расходились с кодом с течением времени. Документация в отдельном файле гарантированно устареет; doc-комментарий на самом enum-варианте — нет.
+- В будущем GUI эти описания становятся тултипами у списков/переключателей напрямую из тех же doc-комментариев (через генерацию справки на основе кода, не дублирование текста вручную).
+- В CLI — `andler create --help` и interactive wizard используют тот же текст: "почему именно этот дефолт" и "когда нужно переключить".
+- Принцип one-way door: пользователь всегда может посмотреть, какой дефолт выбран и почему (`andler config <id> --explain` или аналог), и переключить на альтернативу одной командой/одним кликом — без необходимости понимать внутренние детали QEMU.
