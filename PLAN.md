@@ -14,27 +14,28 @@
 1. [Видение](#видение)
 2. [Структура хранения](#структура-хранения)
 3. [Disk management](#disk-management)
-4. [Монтирование ISO / CD-ROM](#монтирование-iso--cd-rom)
-5. [Wizard (interactive create)](#wizard-interactive-create)
-6. [UEFI / BIOS](#uefi--bios)
-7. [Настройки рендера (GPU)](#настройки-рендера-gpu)
-8. [Настройки дисплея](#настройки-дисплея)
-9. [Настройки звука](#настройки-звука)
-10. [Настройки ввода](#настройки-ввода)
-11. [Настройки сети](#настройки-сети)
-12. [CPU и память](#cpu-и-память)
-13. [Снапшоты](#снапшоты)
-14. [Клонирование VM](#клонирование-vm)
-15. [Удаление VM](#удаление-vm)
-16. [Partial instance ID](#partial-instance-id)
-17. [Logging](#logging)
-18. [NVIDIA metrics](#nvidia-metrics)
-19. [Boot priority](#boot-priority)
-20. [Backend'ы (гипервизоры)](#backend-ы)
-21. [CLI vs GUI](#cli-vs-gui)
-22. [Modern QEMU arguments (2026)](#modern-qemu-arguments-2026)
-23. [Приоритеты реализации](#приоритеты-реализации)
-24. [Принцип для GUI/CLI: явный выбор + объяснение разницы](#принцип-для-guicli-явный-выбор--объяснение-разницы-не-скрытая-магия)
+4. [Auto-compaction (compact_on_shutdown)](#auto-compaction-compact_on_shutdown)
+5. [Монтирование ISO / CD-ROM](#монтирование-iso--cd-rom)
+6. [Wizard (interactive create)](#wizard-interactive-create)
+7. [UEFI / BIOS](#uefi--bios)
+8. [Настройки рендера (GPU)](#настройки-рендера-gpu)
+9. [Настройки дисплея](#настройки-дисплея)
+10. [Настройки звука](#настройки-звука)
+11. [Настройки ввода](#настройки-ввода)
+12. [Настройки сети](#настройки-сети)
+13. [CPU и память](#cpu-и-память)
+14. [Снапшоты](#снапшоты)
+15. [Клонирование VM](#клонирование-vm)
+16. [Удаление VM](#удаление-vm)
+17. [Partial instance ID](#partial-instance-id)
+18. [Logging](#logging)
+19. [NVIDIA metrics](#nvidia-metrics)
+20. [Boot priority](#boot-priority)
+21. [Backend'ы (гипервизоры)](#backend-ы)
+22. [CLI vs GUI](#cli-vs-gui)
+23. [Modern QEMU arguments (2026)](#modern-qemu-arguments-2026)
+24. [Приоритеты реализации](#приоритеты-реализации)
+25. [Принцип для GUI/CLI: явный выбор + объяснение разницы](#принцип-для-guicli-явный-выбор--объяснение-разницы-не-скрытая-магия)
 
 ---
 
@@ -159,6 +160,49 @@ ANDLER — **лаунчер и менеджер виртуальных маши�
 ### Что не описано и нужно добавить
 
 - **Поведение `disk resize` уменьшения размера**: `qemu-img resize` не уменьшает qcow2 без `--shrink`, и уменьшение требует, чтобы файловая система внутри гостя была заранее уменьшена — иначе риск потери данных. План должен прямо предупреждать об этом в CLI-сообщении при попытке уменьшения, а не просить передать флаг.
+
+---
+
+## Auto-compaction (compact_on_shutdown)
+
+### Что это
+
+Автоматическое сжатие qcow2-диска после выключения VM. Удаляет свободные блоки (освобождённые внутри гостя данные), уменьшая физический размер файла диска на хосте. Реализовано через `qemu-img convert -O qcow2` во временный файл с последующим атомарным переименованием.
+
+### Когда работает
+
+После успешного `stop_instance` (переход в состояние `Stopped`) — если в конфиге инстанса `compact_on_shutdown = true` и формат диска `qcow2`. Для raw-дисков операция не выполняется (нет метаданных для компактификации).
+
+### Выключено по умолчанию
+
+`compact_on_shutdown: false` — compact это потенциально долгая операция (перезапись всего файла диска), которая может занимать минуты для больших дисков. Пользователь должен явно включить её, если хочет автоматической очистки.
+
+### Как включить
+
+- **CLI**: `andler create --kind linux ... --compact-on-shutdown`
+- **TOML**: `compact_on_shutdown = true` в секции диска
+- **Просмотр**: `andler config <id>` показывает текущее значение
+
+### Реализация
+
+- **Поле в домене**: `DiskConfig::compact_on_shutdown: bool` (`core/andler-core/src/config/disk.rs`)
+- **Протокол**: поле `bool compact_on_shutdown = 8` в `DiskConfig` (`services/andler-rpc/proto/andler.proto`)
+- **Поведение в daemon**: после `stop_instance` вызывается `spawn_compact_on_shutdown()` — фоновая задача (`tokio::spawn`), которая логирует начало/успех/ошибку через `tracing`, не блокируя возврат из stop
+- **CLI-флаг**: `--compact-on-shutdown` в `andler create`, TOML-поле `compact_on_shutdown = true`
+
+### Связь с `disk compact`
+
+Ручная команда `andler disk compact <path>` делает то же самое (тот же `qemu-img convert`), но по запросу пользователя. Auto-compaction — автоматический вызов той же операции при выключении VM, если флаг включён.
+
+### Что не описано и нужно добавить
+
+- **Для Android-инстансов**: флаг `compact_on_shutdown` пока не пробрасывается через `CreateAndroidInstanceRequest` — overlay-диск создаётся целиком на стороне daemon. Это отдельная доработка по аналогии с Linux-инстансами.
+
+- **Ограничение этого раунда**: для Android-инстансов (`andler create --kind android`) диск (`overlay`) создаётся полностью на стороне daemon без передачи произвольного DiskConfig через RPC — чтобы и туда прокинуть флаг, нужно отдельно расширять `CreateAndroidInstanceRequest` и `create_android_instance`. Сейчас это не сделано (оставил `compact_on_shutdown`: `false` у Android-overlay) — если нужно, это отдельная небольшая доработка по аналогии с уже сделанным для Linux.
+
+### Что изменилось и почему
+
+Новый раздел — описывает фичу, которая есть в коде, но не была описана в плане. Добавлено в план для полноты: приоритет 3 в списке приоритетов соответствует этому разделу.
 
 ---
 
@@ -780,7 +824,7 @@ CLI/wizard должны явно сообщать об этом: попытка 
 
 Сейчас (судя по коду) инстансы идентифицируются полным UUID. Это неудобно набирать вручную в CLI. Предлагаемое поведение, аналогичное `docker`/`docker-compose`:
 
-- Команды, принимающие `<id>` (`start`, `stop`, `status`, `remove`, `snapshot`, `clone` и т.д.), принимают **префикс** UUID длиной от 4 символов вместо полного значения.
+- Команды, принимающие `<id>` (`start`, `stop`, `status`, `remove`, `snapshot`, `clone` и т.д.), принимают **префикс** UUID длиной от 1 и более символов вместо полного значения.
 - Если префикс однозначно резолвится в один инстанс — команда выполняется как обычно.
 - Если префикс соответствует **нескольким** инстансам — команда завершается ошибкой со списком совпавших полных ID, не выбирает случайный/первый. Это критично: неоднозначность при операциях с потенциально разрушительными последствиями (`remove --purge`) должна всегда требовать явного уточнения, не угадывания.
 - `andler list` показывает сокращённый ID (первые 8 символов, как `docker ps`) по умолчанию, с флагом `--full-id`/`-q` для полного значения, нужного для скриптов.
@@ -976,34 +1020,27 @@ Boot priority и выбор bus для CD-ROM (`virtio-scsi`/`ide`, см. соо
 
 ## Приоритеты реализации
 
-| # | Область | Приоритет | Описание | Статус кода |
-|---|---------|-----------|----------|-------------|
-| 1 | Единая точка резолва путей (`ANDLER_HOME` → все подкаталоги) | Высокий | Сейчас резолвится по кускам в разных местах — см. раздел "Структура хранения" | 🔶 Частично |
-| 2 | Disk management | Высокий | Создание, info, resize, авто-формат, разное поведение qcow2/raw | 🔶 Конфиг есть, CLI-команды `disk *` — частично |
-| 3 | Монтирование ISO/CD-ROM | Высокий | Условный дефолт virtio-scsi/ide по типу гостя — см. отдельный раздел | ❌ Нет |
-| 4 | UEFI / BIOS | Высокий | Авто-детект OVMF, VARS, Legacy fallback, дистрибутив-специфичные инструкции | 🔶 `FirmwareConfig` есть, авто-детект — нет |
-| 5 | Wizard | Высокий | Интерактивный опрос (стрелки/Enter/Space через `inquire`), Basic/Advanced, новая зависимость в `cli/Cargo.toml` — см. отдельный раздел | ❌ Нет, нужна новая зависимость |
-| 6 | GPU render | Высокий | Venus (`virtio-gpu-gl`), VirGL, CPU; auto-detect минимальных версий хоста | ✅ Конфиг есть (`RenderBackend`), auto-detect версий — нет |
-| 7 | Display | Средний | SDL/GTK с дефолтом по GPU-вендору, Spice, None | ✅ Конфиг есть (`DisplayEngine`); GTK-детект вендора — нет |
-| 8 | Audio | Средний | virtio-sound/ich9-hda устройство + PipeWire/PulseAudio backend, авто-проверка работы virtio-sound | ✅ Конфиг backend'а есть; выбор PCI-устройства и проверка — нет |
-| 9 | Input | Средний | virtio-tablet (абсолютные координаты) дефолтом, mouse/USB опционально, vdagent с учётом дисплея | ✅ Конфиг есть (`InputConfig`) |
-| 10 | Network | Средний | NAT (passt/SLIRP fallback), Bridge, Isolated, port forwarding — см. отдельный раздел | ✅ `NetworkConfig` есть; passt-детект, port forwarding, bridge-проверка — нет |
-| 11 | CPU/Memory | Средний | Дефолты, balloon, zram, связка `share=on` с Venus/KSM | ✅ Конфиг есть; связка Venus↔share — нет |
-| 12 | Snapshots | Средний | Internal snapshots, CRUD, явная проверка `Running`/`Paused`, лимит количества (настраиваемый, сейчас не реализован вообще) | 🔶 Backend-логика CRUD есть; лимит, UX-сообщение о требовании состояния — нет |
-| 13 | Partial instance ID | Средний | Prefix UUID как Docker, неоднозначность — явная ошибка, не угадывание — см. отдельный раздел | ❌ Нет |
-| 14 | Logging | Средний | Info-дефолт, debug/trace через флаги, лог QEMU отдельно от daemon — см. отдельный раздел | ❌ Нет |
-| 15 | NVIDIA metrics | Средний | NVML предпочтительнее парсинга nvidia-smi text; CSV fallback; толерантность к отсутствующим полям — см. отдельный раздел | ❌ Нет |
-| 16 | Boot priority | Средний | bootindex по ISO/диску, ручное переопределение, связь с CD-ROM bus — см. отдельный раздел | ❌ Нет |
-| 17 | Android ARM-трансляторы | Средний | libndk/libhoudini — выбор одного активного по CPU-вендору, ручное переключение | ❌ Нет |
-| 18 | Clone/Export | Низкий | Linked, Full, Shared Base; нужна явная ошибка при клонировании запущенной VM, решение по уникальности имён | ✅ Backend-логика в daemon (`clone_ops.rs`); UX-сообщения и уникальность имён — нет |
-| 19 | Cloud Hypervisor | Низкий | Второй backend | ❌ Нет |
-| 20 | GUI | Низкий | Визуальный интерфейс | ❌ Нет |
-
-**Колонка "Статус кода"** добавлена, чтобы исполнитель плана не тратил время на повторную реализацию того, что уже есть в `andler-core::config::*`/`andler-store`/`andler-daemon` — основной недостающий слой это: единая точка резолва путей, wizard как отдельная ветка CLI, и auto-detect хостовых возможностей (OVMF-версии, Venus-требования, GPU-вендор, CPU-вендор для Android-трансляторов).
-
----
-
-## Принцип для GUI/CLI: явный выбор + объяснение разницы, не скрытая магия
+- [x] **1. Единая точка резолва путей (`ANDLER_HOME`)** (Высокий) — Модуль `andler-core::paths` с `andler_home()`, `instances_root()`, `db_path()` и т.д. — единый источник истины для всех путей. Готово — `core/andler-core/src/paths.rs`, `cli/src/main.rs`, `cli/src/instance_file.rs`, `daemon/src/main.rs` обновлены.
+- [x] **2. Disk management** (Высокий) — CLI-команды `disk create/info/resize/compact`, авто-добавление `.qcow2`, дефолт 256 GiB, раздельное поведение qcow2/raw. Готово — `services/andler-disk/src/qcow2.rs`, `cli/src/disk.rs`, `cli/src/helpers.rs`.
+- [x] **3. Auto-compaction (compact_on_shutdown)** (Высокий) — Автоматическое сжатие диска после выключения VM — поле `compact_on_shutdown` в `DiskConfig`, флаг `--compact-on-shutdown` в CLI, фоновая задача в daemon при `stop_instance`. Готово — `core/andler-core/src/config/disk.rs`, `services/andler-rpc/proto/andler.proto`, `daemon/src/daemon/instance_ops.rs`, `cli/src/main.rs`, `cli/src/create.rs`, `cli/src/status.rs`, `cli/src/instance_file.rs`.
+- [ ] **4. Монтирование ISO/CD-ROM** (Высокий) — Условный дефолт virtio-scsi/ide по типу гостя.
+- [ ] **5. UEFI / BIOS** (Высокий) — Авто-детект OVMF, VARS, Legacy fallback, дистрибутив-специфичные инструкции. `FirmwareConfig` есть, авто-детект — нет.
+- [ ] **6. Wizard** (Высокий) — Интерактивный опрос (стрелки/Enter/Space через `inquire`), Basic/Advanced, новая зависимость в `cli/Cargo.toml`.
+- [ ] **7. GPU render** (Высокий) — Venus (`virtio-gpu-gl`), VirGL, CPU; auto-detect минимальных версий хоста. Конфиг есть (`RenderBackend`), auto-detect версий — нет.
+- [ ] **8. Display** (Средний) — SDL/GTK с дефолтом по GPU-вендору, Spice, None. Конфиг есть (`DisplayEngine`); GTK-детект вендора — нет.
+- [ ] **9. Audio** (Средний) — virtio-sound/ich9-hda устройство + PipeWire/PulseAudio backend, авто-проверка работы virtio-sound. Конфиг backend'а есть; выбор PCI-устройства и проверка — нет.
+- [ ] **10. Input** (Средний) — virtio-tablet (абсолютные координаты) дефолтом, mouse/USB опционально, vdagent с учётом дисплея. Конфиг есть (`InputConfig`).
+- [ ] **11. Network** (Средний) — NAT (passt/SLIRP fallback), Bridge, Isolated, port forwarding. `NetworkConfig` есть; passt-детект, port forwarding, bridge-проверка — нет.
+- [ ] **12. CPU/Memory** (Средний) — Дефолты, balloon, zram, связка `share=on` с Venus/KSM. Конфиг есть; связка Venus↔share — нет.
+- [ ] **13. Snapshots** (Средний) — Internal snapshots, CRUD, явная проверка `Running`/`Paused`, лимит количества. Backend-логика CRUD есть; лимит, UX-сообщение — нет.
+- [ ] **14. Partial instance ID** (Средний) — Prefix UUID как Docker, неоднозначность — явная ошибка.
+- [ ] **15. Logging** (Средний) — Info-дефолт, debug/trace через флаги, лог QEMU отдельно от daemon.
+- [ ] **16. NVIDIA metrics** (Средний) — NVML предпочтительнее парсинга nvidia-smi text; CSV fallback; толерантность.
+- [ ] **17. Boot priority** (Средний) — bootindex по ISO/диску, ручное переопределение, связь с CD-ROM bus.
+- [ ] **18. Android ARM-трансляторы** (Средний) — libndk/libhoudini — выбор одного активного по CPU-вендору.
+- [ ] **19. Clone/Export** (Низкий) — Linked, Full, Shared Base; явная ошибка при клонировании запущенной VM, уникальность имён. Backend-логика есть (`clone_ops.rs`); UX-сообщения — нет.
+- [ ] **20. Cloud Hypervisor** (Низкий) — Второй backend.
+- [ ] **21. GUI** (Низкий) — Визуальный интерфейс.
 
 Большинство решений в этом плане — это не "одно правильное значение", а **условный дефолт** (зависит от ОС гостя, GPU-вендора хоста, формата диска, известности ISO) с возможностью пользователя переключить вручную. Это сознательное архитектурное требование к структуре конфига, не просто текстовая ремарка:
 
