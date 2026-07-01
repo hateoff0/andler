@@ -10,6 +10,7 @@
 //! `InstanceConfig` вместе с `InstanceId`/`InstanceKind`.
 
 mod audio;
+mod cdrom;
 mod cpu;
 mod disk;
 mod display;
@@ -21,6 +22,7 @@ mod memory;
 mod network;
 
 pub use audio::{AudioBackend, AudioConfig};
+pub use cdrom::CdromBus;
 pub use cpu::{CpuConfig, CpuPriority};
 pub use disk::{DiskConfig, DiskFormat};
 pub use display::{DisplayConfig, DisplayEngine, Resolution};

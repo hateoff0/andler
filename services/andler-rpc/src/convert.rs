@@ -7,10 +7,11 @@ use std::path::PathBuf;
 
 use crate::proto;
 use andler_core::{
-    AndroidProfile, AndroidVersion, AudioBackend, AudioConfig, BackendKind, CloneMode, CpuConfig,
-    CpuPriority, DiskConfig, DiskFormat, DisplayConfig, DisplayEngine, FirmwareConfig, GpuConfig,
-    InputConfig, InstanceConfig, InstanceId, InstanceKind, InstanceState, LogLine, LogStreamSource,
-    MemoryConfig, NetworkConfig, NetworkMode, RenderBackend, Resolution, ResourceMetrics, RootMode,
+    AndroidProfile, AndroidVersion, AudioBackend, AudioConfig, BackendKind, CdromBus, CloneMode,
+    CpuConfig, CpuPriority, DiskConfig, DiskFormat, DisplayConfig, DisplayEngine, FirmwareConfig,
+    GpuConfig, InputConfig, InstanceConfig, InstanceId, InstanceKind, InstanceState, LogLine,
+    LogStreamSource, MemoryConfig, NetworkConfig, NetworkMode, RenderBackend, Resolution,
+    ResourceMetrics, RootMode,
 };
 
 /// Ошибка конвертации proto-сообщения в доменный тип — на практике сейчас
@@ -255,6 +256,28 @@ impl From<DiskFormat> for proto::DiskFormat {
     }
 }
 
+impl From<proto::CdromBus> for CdromBus {
+    /// `CDROM_BUS_UNSPECIFIED` → `CdromBus::default()` (`Ide`), не ошибка
+    /// — в отличие от `DiskFormat`. См. doc-комментарий
+    /// `enum CdromBus` в `andler.proto`.
+    fn from(value: proto::CdromBus) -> Self {
+        match value {
+            proto::CdromBus::VirtioScsi => CdromBus::VirtioScsi,
+            proto::CdromBus::Ide => CdromBus::Ide,
+            proto::CdromBus::Unspecified => CdromBus::default(),
+        }
+    }
+}
+
+impl From<CdromBus> for proto::CdromBus {
+    fn from(value: CdromBus) -> Self {
+        match value {
+            CdromBus::VirtioScsi => proto::CdromBus::VirtioScsi,
+            CdromBus::Ide => proto::CdromBus::Ide,
+        }
+    }
+}
+
 impl TryFrom<proto::DiskConfig> for DiskConfig {
     type Error = ConvertError;
 
@@ -277,6 +300,7 @@ impl TryFrom<proto::DiskConfig> for DiskConfig {
             },
             thin_provisioning: value.thin_provisioning,
             trim_on_shutdown: value.trim_on_shutdown,
+            compact_on_shutdown: value.compact_on_shutdown,
             snapshot_timeout_secs: value.snapshot_timeout_secs,
         })
     }
@@ -293,6 +317,7 @@ impl From<DiskConfig> for proto::DiskConfig {
                 .unwrap_or_default(),
             thin_provisioning: value.thin_provisioning,
             trim_on_shutdown: value.trim_on_shutdown,
+            compact_on_shutdown: value.compact_on_shutdown,
             snapshot_timeout_secs: value.snapshot_timeout_secs,
             ..Default::default()
         };
@@ -598,6 +623,7 @@ impl TryFrom<proto::CreateInstanceRequest> for InstanceConfig {
             name: value.name,
             kind: InstanceKind::LinuxVm {
                 iso_path: PathBuf::from(value.iso_path),
+                cdrom_bus: value.cdrom_bus().into(),
             },
             backend: BackendKind::Qemu,
             cpu: value
@@ -657,9 +683,17 @@ impl From<InstanceKind> for proto::InstanceKind {
         use proto::instance_kind::Kind;
 
         let kind = match value {
-            InstanceKind::LinuxVm { iso_path } => Kind::LinuxVm(proto::instance_kind::LinuxVm {
-                iso_path: iso_path.to_string_lossy().into_owned(),
-            }),
+            InstanceKind::LinuxVm {
+                iso_path,
+                cdrom_bus,
+            } => {
+                let mut msg = proto::instance_kind::LinuxVm {
+                    iso_path: iso_path.to_string_lossy().into_owned(),
+                    ..Default::default()
+                };
+                msg.set_cdrom_bus(cdrom_bus.into());
+                Kind::LinuxVm(msg)
+            }
             InstanceKind::AndroidVm { android_profile } => {
                 Kind::AndroidVm(proto::instance_kind::AndroidVm {
                     android_profile: Some(android_profile.into()),
@@ -849,6 +883,7 @@ mod tests {
             name: "test-vm".to_string(),
             kind: InstanceKind::LinuxVm {
                 iso_path: PathBuf::from("/tmp/test.iso"),
+                cdrom_bus: CdromBus::VirtioScsi,
             },
             backend: BackendKind::Qemu,
             cpu: CpuConfig::reference_default(),
@@ -870,12 +905,15 @@ mod tests {
     /// под-типа в обе стороны, а не через один сквозной `From`/`TryFrom`
     /// на уровне всего сообщения.
     fn instance_config_to_create_request(cfg: &InstanceConfig) -> proto::CreateInstanceRequest {
-        let iso_path = match &cfg.kind {
-            InstanceKind::LinuxVm { iso_path } => iso_path.to_string_lossy().into_owned(),
+        let (iso_path, cdrom_bus) = match &cfg.kind {
+            InstanceKind::LinuxVm {
+                iso_path,
+                cdrom_bus,
+            } => (iso_path.to_string_lossy().into_owned(), *cdrom_bus),
             other => panic!("sample_instance_config produced non-LinuxVm kind: {other:?}"),
         };
 
-        proto::CreateInstanceRequest {
+        let mut request = proto::CreateInstanceRequest {
             name: cfg.name.clone(),
             iso_path,
             cpu: Some(cfg.cpu.clone().into()),
@@ -887,7 +925,10 @@ mod tests {
             firmware: Some(cfg.firmware.clone().into()),
             audio: Some(cfg.audio.into()),
             input: Some(cfg.input.into()),
-        }
+            ..Default::default()
+        };
+        request.set_cdrom_bus(cdrom_bus.into());
+        request
     }
 
     #[test]
@@ -1008,6 +1049,25 @@ mod tests {
     }
 
     #[test]
+    fn create_instance_request_unspecified_cdrom_bus_defaults_to_ide() {
+        // В отличие от disk_format, unspecified cdrom_bus — не ошибка
+        // конфигурации, а сигнал "явного выбора не было" — см.
+        // doc-комментарий `enum CdromBus` в `andler.proto`.
+        let cfg = sample_instance_config();
+        let mut request = instance_config_to_create_request(&cfg);
+        request.cdrom_bus = proto::CdromBus::Unspecified as i32;
+
+        let converted = InstanceConfig::try_from(request).unwrap();
+        match converted.kind {
+            InstanceKind::LinuxVm { cdrom_bus, .. } => {
+                assert_eq!(cdrom_bus, CdromBus::default());
+                assert_eq!(cdrom_bus, CdromBus::Ide);
+            }
+            other => panic!("expected LinuxVm, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn create_instance_request_unspecified_audio_backend_is_rejected() {
         let cfg = sample_instance_config();
         let mut request = instance_config_to_create_request(&cfg);
@@ -1055,6 +1115,7 @@ mod tests {
         match response.kind.expect("kind must be Some").kind {
             Some(Kind::LinuxVm(linux_vm)) => {
                 assert_eq!(linux_vm.iso_path, "/tmp/test.iso");
+                assert_eq!(linux_vm.cdrom_bus(), proto::CdromBus::VirtioScsi);
             }
             other => panic!("expected LinuxVm kind, got {other:?}"),
         }

@@ -28,6 +28,7 @@ use tokio_stream::wrappers::TcpListenerStream;
 use tonic::transport::Server;
 
 use crate::daemon::Daemon;
+use crate::firmware::OvmfPaths;
 use crate::service::DaemonService;
 
 /// Поднимает `DaemonService` на свежем `Daemon` на эфемерном
@@ -48,7 +49,11 @@ async fn spawn_server_and_connect() -> (
         .expect("a just-bound listener must have a local address");
 
     let daemon = Arc::new(Daemon::new());
-    let service = DaemonService::new(daemon);
+    let test_ovmf = OvmfPaths {
+        code: std::path::PathBuf::from("/usr/share/edk2/x64/OVMF_CODE.4m.fd"),
+        vars_template: std::path::PathBuf::from("/usr/share/edk2/x64/OVMF_VARS.4m.fd"),
+    };
+    let service = DaemonService::new(daemon, test_ovmf);
 
     let server = tokio::spawn(async move {
         Server::builder()
@@ -205,7 +210,7 @@ fn sample_create_instance_request() -> CreateInstanceRequest {
     };
 
     let firmware = FirmwareConfig {
-        ovmf_code_path: "/usr/share/edk2-ovmf/x64/OVMF_CODE.4m.fd".to_string(),
+        ovmf_code_path: "/usr/share/edk2/x64/OVMF_CODE.4m.fd".to_string(),
         ovmf_vars_path: "/tmp/test_VARS.fd".to_string(),
     };
 

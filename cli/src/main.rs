@@ -10,6 +10,7 @@ mod instance_file;
 mod lifecycle;
 mod snapshot;
 mod status;
+mod wizard;
 
 use andler_rpc::proto::andler_service_client::AndlerServiceClient;
 use andler_rpc::proto::{AndroidVersion as ProtoAndroidVersion, RootMode as ProtoRootMode};
@@ -19,9 +20,7 @@ use std::path::PathBuf;
 const DEFAULT_DAEMON_ADDR: &str = "http://127.0.0.1:50051";
 
 fn default_instances_root() -> String {
-    dirs::data_local_dir()
-        .unwrap_or_else(|| PathBuf::from("~/.local/share"))
-        .join("andler/instances")
+    andler_core::paths::instances_root()
         .to_string_lossy()
         .into_owned()
 }
@@ -95,9 +94,30 @@ enum Command {
         #[arg(long)]
         disk_path: Option<String>,
 
-        /// Disk size in GiB (optional, default: 40). Linux only.
+        /// Disk size in GiB (optional, default: 256). Linux only.
         #[arg(long)]
         disk_size_gib: Option<u64>,
+
+        /// Automatically compact (qemu-img convert) the disk after every
+        /// graceful shutdown. Off by default — see PLAN.md, "Disk
+        /// management": compaction rewrites the whole disk file and can
+        /// take noticeable time on large disks, so it must be an
+        /// explicit opt-in, not silently enabled for every qcow2 disk
+        /// (which is the default format). Has no effect on raw disks.
+        #[arg(long)]
+        compact_on_shutdown: bool,
+
+        /// Bus for the ISO/CD-ROM drive. Linux only. Default: auto
+        /// (decide by ISO filename — see CliCdromBus / PLAN.md).
+        #[arg(long, value_enum, default_value = "auto")]
+        cdrom_bus: CliCdromBus,
+
+        /// Run the interactive wizard in advanced mode — prompts for all
+        /// settings (GPU, display, audio, CPU, etc.) instead of just the
+        /// essentials. Has no effect when all required flags are already
+        /// provided (wizard does not start in that case).
+        #[arg(long)]
+        advanced: bool,
 
         // --- Android-specific (required when --kind android) ---
 
@@ -209,6 +229,23 @@ enum CliKind {
     Android,
 }
 
+/// Bus for the ISO/CD-ROM drive of a Linux VM. See PLAN.md, "Монтирование
+/// ISO / CD-ROM", and `andler_core::CdromBus` for the full rationale.
+#[derive(Clone, Copy, PartialEq, Eq, Default, ValueEnum)]
+enum CliCdromBus {
+    /// Decide based on the ISO filename: known Linux distros get
+    /// virtio-scsi (faster), anything unrecognized (Windows, unknown
+    /// ISO) falls back to ide (safer, no virtio drivers needed at boot).
+    #[default]
+    Auto,
+    /// Force virtio-scsi-pci + scsi-cd. Faster, but requires the
+    /// installer environment to support virtio-scsi at early boot.
+    Virtio,
+    /// Force ide-cd. Slower, but works without any virtio drivers —
+    /// safe choice for Windows or any ISO you're unsure about.
+    Ide,
+}
+
 /// Snapshot subcommands.
 #[derive(Subcommand)]
 enum SnapshotAction {
@@ -245,7 +282,9 @@ enum SnapshotAction {
 /// Disk management subcommands.
 #[derive(Subcommand)]
 enum DiskAction {
-    /// Create a new empty qcow2 disk.
+    /// Create a new empty qcow2 disk. Path without an extension gets
+    /// `.qcow2` appended automatically; an explicit extension (.img,
+    /// .raw, ...) is used as-is.
     Create {
         /// Path for the new disk file.
         path: PathBuf,
@@ -258,15 +297,23 @@ enum DiskAction {
         /// Path to the disk file.
         path: PathBuf,
     },
-    /// Resize an existing disk.
+    /// Resize an existing disk. Growing is always allowed; shrinking
+    /// requires --shrink (risk of guest data loss if the filesystem
+    /// inside the guest was not shrunk first — see PLAN.md, раздел
+    /// "Disk management").
     Resize {
         /// Path to the disk file.
         path: PathBuf,
         /// New size (e.g. "80GB", "512000MB", or plain bytes).
         #[arg(long)]
         size: String,
+        /// Confirm shrinking the disk below its current size. Required
+        /// only when the new size is smaller than the current one.
+        #[arg(long)]
+        shrink: bool,
     },
-    /// Compact a disk (reclaim unused space).
+    /// Compact a disk (reclaim unused space). Only applicable to qcow2 —
+    /// raw disks have no reclaimable metadata, see PLAN.md.
     Compact {
         /// Path to the disk file.
         path: PathBuf,
@@ -296,7 +343,7 @@ impl From<CliCloneMode> for andler_rpc::proto::CloneMode {
     }
 }
 
-#[derive(Clone, Copy, ValueEnum)]
+#[derive(Debug, Clone, Copy, ValueEnum)]
 enum CliAndroidVersion {
     #[value(name = "11")]
     Android11,
@@ -352,6 +399,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             iso_path,
             disk_path,
             disk_size_gib,
+            compact_on_shutdown,
+            cdrom_bus,
+            advanced,
             android_version,
             base_image_path,
             gapps,
@@ -364,8 +414,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         } => {
             create::handle(
                 &mut client, file, kind, name, ovmf_vars_template,
-                iso_path, disk_path, disk_size_gib, android_version,
-                base_image_path, gapps, microg, libndk, root,
+                iso_path, disk_path, disk_size_gib, compact_on_shutdown, cdrom_bus,
+                advanced,
+                android_version, base_image_path, gapps, microg, libndk, root,
                 instances_root, overlay_size_gib, magisk_dir,
             ).await?;
         }

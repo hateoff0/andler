@@ -23,14 +23,16 @@ use futures_util::StreamExt;
 use tonic::{Request, Response, Status};
 
 use crate::daemon::{Daemon, DaemonError};
+use crate::firmware::OvmfPaths;
 
 pub struct DaemonService {
     daemon: Arc<Daemon>,
+    ovmf: OvmfPaths,
 }
 
 impl DaemonService {
-    pub fn new(daemon: Arc<Daemon>) -> Self {
-        DaemonService { daemon }
+    pub fn new(daemon: Arc<Daemon>, ovmf: OvmfPaths) -> Self {
+        DaemonService { daemon, ovmf }
     }
 }
 
@@ -132,9 +134,17 @@ impl AndlerService for DaemonService {
         &self,
         request: Request<CreateInstanceRequest>,
     ) -> Result<Response<CreateInstanceResponse>, Status> {
-        let cfg = InstanceConfig::try_from(request.into_inner())?;
-        let id = self.daemon.create_instance(cfg).await?;
+        let mut cfg = InstanceConfig::try_from(request.into_inner())?;
 
+        // Если клиент не указал ovmf_code_path явно (пустая строка — proto
+        // не различает absent и empty для string) — подставляем
+        // авто-определённый путь. Клиент всегда может передать явный путь
+        // и тогда он используется без изменений.
+        if cfg.firmware.ovmf_code_path.as_os_str().is_empty() {
+            cfg.firmware.ovmf_code_path = self.ovmf.code.clone();
+        }
+
+        let id = self.daemon.create_instance(cfg).await?;
         Ok(Response::new(CreateInstanceResponse {
             instance_id: id.0.to_string(),
         }))
@@ -150,6 +160,14 @@ impl AndlerService for DaemonService {
             .ok_or_else(|| Status::invalid_argument("missing profile"))?;
         let profile = andler_core::AndroidProfile::try_from(profile_msg)?;
 
+        // Если клиент не передал ovmf_vars_template — используем
+        // авто-определённый шаблон. Аналогично ovmf_code_path выше.
+        let ovmf_vars_template = if req.ovmf_vars_template.is_empty() {
+            self.ovmf.vars_template.clone()
+        } else {
+            req.ovmf_vars_template.into()
+        };
+
         let id = self
             .daemon
             .create_android_instance(
@@ -158,7 +176,7 @@ impl AndlerService for DaemonService {
                 req.base_image_path.into(),
                 req.instances_root.into(),
                 req.overlay_size_bytes,
-                req.ovmf_vars_template.into(),
+                ovmf_vars_template,
                 if req.magisk_dir.is_empty() {
                     None
                 } else {

@@ -156,6 +156,7 @@ fn print_instance_config(config: GetInstanceConfigResponse) {
         Some(instance_kind::Kind::LinuxVm(linux_vm)) => {
             println!("kind: LinuxVm");
             println!("  iso_path: {}", linux_vm.iso_path);
+            println!("  cdrom_bus: {:?}", linux_vm.cdrom_bus());
         }
         Some(instance_kind::Kind::AndroidVm(android_vm)) => {
             println!("kind: AndroidVm");
@@ -213,6 +214,7 @@ fn print_instance_config(config: GetInstanceConfigResponse) {
         }
         println!("  thin_provisioning: {}", disk.thin_provisioning);
         println!("  trim_on_shutdown: {}", disk.trim_on_shutdown);
+        println!("  compact_on_shutdown: {}", disk.compact_on_shutdown);
     }
 
     if let Some(display) = config.display {
@@ -267,7 +269,11 @@ fn print_instance_config(config: GetInstanceConfigResponse) {
 
     if let Some(firmware) = config.firmware {
         println!("[firmware]");
-        println!("  ovmf_code_path: {}", firmware.ovmf_code_path);
+        if firmware.ovmf_code_path.is_empty() {
+            println!("  ovmf_code_path: (resolved by daemon at start)");
+        } else {
+            println!("  ovmf_code_path: {}", firmware.ovmf_code_path);
+        }
         println!("  ovmf_vars_path: {}", firmware.ovmf_vars_path);
     }
 

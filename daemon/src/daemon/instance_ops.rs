@@ -4,7 +4,7 @@ use super::Daemon;
 use super::error::DaemonError;
 use super::types::{InstanceDirGuard, InstanceRecord};
 use andler_core::{
-    BackendError, InstanceConfig, InstanceEvent, InstanceId,
+    BackendError, DiskFormat, InstanceConfig, InstanceEvent, InstanceId,
     InstanceState,
 };
 
@@ -96,12 +96,9 @@ impl Daemon {
             })?;
 
         let ovmf_vars_path = instance_dir.join("VARS.fd");
-        tokio::fs::copy(&ovmf_vars_template, &ovmf_vars_path)
+        andler_firmware::provision_vars(&ovmf_vars_template, &ovmf_vars_path)
             .await
-            .map_err(|source| DaemonError::Io {
-                path: ovmf_vars_path.clone(),
-                source,
-            })?;
+            .map_err(|e| DaemonError::Firmware(e.to_string()))?;
 
         let overlay = andler_disk::overlay::create_overlay(
             &instance_dir,
@@ -224,6 +221,13 @@ impl Daemon {
     /// Персистентность — как в `start_instance`: промежуточное `Stopping`
     /// сохраняется сразу, финальное (`Stopped`/`Error`) — после того, как
     /// write-lock `instances` отпущен.
+    ///
+    /// Если у инстанса включён `DiskConfig::compact_on_shutdown` и формат
+    /// диска — qcow2, после успешной остановки в фоне (без блокировки
+    /// возврата из этого метода — см. `spawn_compact_on_shutdown`)
+    /// запускается `andler_disk::qcow2::compact`. Выключено по умолчанию
+    /// — см. PLAN.md, раздел «Disk management», и doc-комментарий самого
+    /// поля в `andler_core::config::disk::DiskConfig`.
     pub async fn stop_instance(&self, id: InstanceId, graceful: bool) -> Result<(), DaemonError> {
         let (handle, backend, stopping_state) = {
             let mut instances = self.instances.write().await;
@@ -264,9 +268,15 @@ impl Daemon {
             }
         };
         let final_state = record.state.clone();
+        let disk = record.config.disk.clone();
         drop(instances);
 
         self.persist_state(id, &final_state).await;
+
+        if result.is_ok() {
+            spawn_compact_on_shutdown(id, disk);
+        }
+
         result
     }
 
@@ -433,4 +443,67 @@ impl Daemon {
 
         Ok(())
     }
+}
+
+/// Запускает компактификацию диска инстанса в фоне (`tokio::spawn`), если
+/// для него включён `DiskConfig::compact_on_shutdown` и формат диска —
+/// qcow2 — единственный формат с qcow2-метаданными, которые вообще можно
+/// компактифицировать (см. `andler_disk::qcow2::compact` и PLAN.md,
+/// раздел «Disk management»).
+///
+/// Намеренно **не** блокирует `stop_instance` — компактификация (полная
+/// перезапись файла диска через `qemu-img convert`) может занимать
+/// заметное время на больших дисках, и пользователь, вызвавший `andler
+/// stop`, не должен ждать её завершения, чтобы получить управление
+/// обратно. Ошибки логируются через `tracing::error!`, а не
+/// пробрасываются никуда дальше — на этом этапе нет канала, через
+/// который асинхронная пост-shutdown задача могла бы сообщить о неудаче
+/// вызывающей стороне `stop_instance` (она уже получила `Ok(())` к этому
+/// моменту). См. также `andler logs`/будущий `andler metrics` как место,
+/// где такой статус мог бы стать видимым пользователю, если на практике
+/// окажется, что молчаливый лог недостаточен.
+///
+/// Не проверяет текущее состояние инстанса (`Stopped` vs что-то ещё) —
+/// вызывается только из `stop_instance` сразу после успешного перехода в
+/// `Stopped`, так что повторная проверка состояния была бы избыточной
+/// гонкой с самим собой, а не дополнительной защитой.
+fn spawn_compact_on_shutdown(id: InstanceId, disk: andler_core::DiskConfig) {
+    if !disk.compact_on_shutdown {
+        return;
+    }
+    if disk.format != DiskFormat::Qcow2 {
+        tracing::debug!(
+            instance_id = %id.0,
+            format = ?disk.format,
+            "compact_on_shutdown is enabled but disk format is not qcow2 — skipping, \
+             see PLAN.md, раздел «Disk management»"
+        );
+        return;
+    }
+
+    let path = disk.path.clone();
+    tokio::spawn(async move {
+        tracing::info!(
+            instance_id = %id.0,
+            path = %path.display(),
+            "compact_on_shutdown: starting automatic disk compaction"
+        );
+        match andler_disk::qcow2::compact(&path).await {
+            Ok(()) => {
+                tracing::info!(
+                    instance_id = %id.0,
+                    path = %path.display(),
+                    "compact_on_shutdown: disk compaction finished"
+                );
+            }
+            Err(err) => {
+                tracing::error!(
+                    instance_id = %id.0,
+                    path = %path.display(),
+                    error = %err,
+                    "compact_on_shutdown: automatic disk compaction failed"
+                );
+            }
+        }
+    });
 }

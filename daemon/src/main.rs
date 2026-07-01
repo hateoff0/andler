@@ -10,16 +10,21 @@
 //! неавторизованный контроль над VM на любом интерфейсе без явного opt-in.
 //!
 //! Путь к sqlite-файлу персистентности — `ANDLERD_STORE_PATH`, по
-//! умолчанию `andlerd-state.db` в текущем рабочем каталоге процесса (а не
-//! абсолютный `/var/lib/andler/state.db` из архитектурного плана — выбор
-//! и проверка прав на запись в системный каталог при первом запуске
-//! остаются для packaging-шага, не для самого бинарника на этом этапе
-//! разработки). При старте `andlerd` восстанавливает все ранее
+//! умолчанию `andler_core::paths::db_path()` (`<ANDLER_HOME>/andlerd.db`,
+//! см. PLAN.md, раздел «Структура хранения» — единая точка резолва
+//! путей). Раньше дефолтом был `andlerd-state.db` в текущем рабочем
+//! каталоге процесса; это было удобно для разработки, но не совпадало с
+//! задокументированной структурой хранения ANDLER и ломалось при запуске
+//! daemon'а не из той директории, откуда его обычно запускают. Выбор и
+//! проверка прав на запись в системный каталог (`/var/lib/andler/...`)
+//! для packaging-сценария остаются отдельной задачей, не входят в этот
+//! бинарник на текущем этапе разработки. При старте `andlerd` восстанавливает все ранее
 //! сохранённые инстансы через `Daemon::restore` — см. документацию этого
 //! метода про то, почему нетерминальные состояния (`Running` и т.п.)
 //! восстанавливаются как `Error`, а не как есть.
 
 mod daemon;
+mod firmware;
 mod service;
 
 #[cfg(test)]
@@ -37,21 +42,11 @@ use tonic::transport::Server;
 const DEFAULT_LISTEN_ADDR: &str = "127.0.0.1:50051";
 
 fn default_store_path() -> String {
-    dirs::data_local_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("~/.local/share"))
-        .join("andler/state.db")
-        .to_string_lossy()
-        .into_owned()
+    andler_core::paths::db_path().to_string_lossy().into_owned()
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // `tracing_subscriber::fmt` — минимальный вывод в stderr с уровнем по
-    // умолчанию `info` (переопределяется `RUST_LOG`, стандартное поведение
-    // `EnvFilter`). Без подписчика `tracing::warn!`/`tracing::error!` в
-    // `daemon.rs` (см. `persist_state`/`persist_new_instance`/`restore`)
-    // никуда не выводились бы — это первое использование `tracing` в
-    // проекте, до сих пор было достаточно `println!`.
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
@@ -62,16 +57,57 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let store_path =
         std::env::var("ANDLERD_STORE_PATH").unwrap_or_else(|_| default_store_path());
 
+    // --- OVMF авто-детект ---
+    // `ANDLERD_OVMF_CODE` и `ANDLERD_OVMF_VARS` — опциональные переменные
+    // окружения для явного переопределения путей к OVMF без пересборки.
+    // Если не заданы — запускается `andler_firmware::detect_matched_pair()`,
+    // которая ищет OVMF в стандартных системных путях (Arch, Ubuntu,
+    // Fedora, openSUSE — см. `andler_firmware::KNOWN_OVMF_CODE_PATHS`).
+    // При неудаче daemon завершается с понятной ошибкой, а не при первом
+    // `andler create` с непонятным backtrace.
+    let ovmf_code = std::env::var("ANDLERD_OVMF_CODE")
+        .ok()
+        .map(std::path::PathBuf::from);
+    let ovmf_vars_template = std::env::var("ANDLERD_OVMF_VARS")
+        .ok()
+        .map(std::path::PathBuf::from);
+
+    let ovmf = firmware::resolve(ovmf_code, ovmf_vars_template).map_err(|e| {
+        eprintln!("andlerd: {e}");
+        eprintln!(
+            "andlerd: known CODE paths checked:\n{}",
+            andler_firmware::KNOWN_OVMF_CODE_PATHS
+                .iter()
+                .map(|p| format!("  {p}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+        eprintln!(
+            "andlerd: known VARS paths checked:\n{}",
+            andler_firmware::KNOWN_OVMF_VARS_PATHS
+                .iter()
+                .map(|p| format!("  {p}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+        e
+    })?;
+
     if let Some(parent) = std::path::Path::new(&store_path).parent() {
         std::fs::create_dir_all(parent)?;
     }
 
     let store = Store::open(&store_path).await?;
     let daemon = Daemon::restore(store).await?;
-    tracing::info!(store_path = %store_path, "restored instances from store");
+    tracing::info!(
+        store_path = %store_path,
+        ovmf_code = %ovmf.code.display(),
+        ovmf_vars_template = %ovmf.vars_template.display(),
+        "andlerd started"
+    );
 
     let daemon = Arc::new(daemon);
-    let service = DaemonService::new(daemon);
+    let service = DaemonService::new(daemon, ovmf);
 
     println!("andlerd: listening on {addr}");
 

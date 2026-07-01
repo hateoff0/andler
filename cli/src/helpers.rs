@@ -85,6 +85,20 @@ pub fn parse_size(input: &str) -> Result<u64, String> {
     Ok(bytes)
 }
 
+/// Если у пути нет расширения — добавляет `.qcow2`. Если расширение уже
+/// есть (`.img`, `.raw`, что угодно) — путь используется как есть, без
+/// изменений. См. PLAN.md, раздел «Disk management» → «Авто-добавление
+/// .qcow2»: пользователь, передавший `--disk-path ~/my-disk`, не должен
+/// думать о расширении сам, но явно указанное расширение — это явный
+/// выбор, который ANDLER не переопределяет.
+pub fn ensure_qcow2_extension(path: &std::path::Path) -> std::path::PathBuf {
+    if path.extension().is_some() {
+        path.to_path_buf()
+    } else {
+        path.with_extension("qcow2")
+    }
+}
+
 pub fn format_size(bytes: u64) -> String {
     const TIB: u64 = 1024 * 1024 * 1024 * 1024;
     const GIB: u64 = 1024 * 1024 * 1024;
@@ -111,6 +125,32 @@ pub fn format_size(bytes: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --- ensure_qcow2_extension tests ---
+
+    #[test]
+    fn ensure_qcow2_extension_adds_when_missing() {
+        assert_eq!(
+            ensure_qcow2_extension(std::path::Path::new("/home/user/my-disk")),
+            std::path::PathBuf::from("/home/user/my-disk.qcow2")
+        );
+    }
+
+    #[test]
+    fn ensure_qcow2_extension_keeps_existing_extension() {
+        assert_eq!(
+            ensure_qcow2_extension(std::path::Path::new("/home/user/my-disk.img")),
+            std::path::PathBuf::from("/home/user/my-disk.img")
+        );
+        assert_eq!(
+            ensure_qcow2_extension(std::path::Path::new("/home/user/my-disk.raw")),
+            std::path::PathBuf::from("/home/user/my-disk.raw")
+        );
+        assert_eq!(
+            ensure_qcow2_extension(std::path::Path::new("/home/user/my-disk.qcow2")),
+            std::path::PathBuf::from("/home/user/my-disk.qcow2")
+        );
+    }
 
     // --- parse_size tests ---
 

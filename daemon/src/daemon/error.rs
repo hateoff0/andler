@@ -34,9 +34,14 @@ pub enum DaemonError {
     #[error("disk error: {0}")]
     Disk(#[from] andler_disk::DiskError),
 
-    /// Ошибка файловой системы вне `andler-disk` — на данный момент это
-    /// только подготовка персональной копии `OVMF_VARS` для нового
-    /// Android-инстанса (создание каталога инстанса, копирование шаблона).
+    /// Ошибка `andler-firmware` при детекции OVMF или провизионировании
+    /// персональной копии `OVMF_VARS`. Например, OVMF/EDK2 не установлен
+    /// в системе, или не удалось скопировать шаблон VARS в каталог инстанса.
+    #[error("firmware error: {0}")]
+    Firmware(String),
+
+    /// Ошибка файловой системы вне `andler-disk` — создание каталога
+    /// инстанса и прочие FS-операции, не связанные с OVMF.
     #[error("filesystem error at {path}: {source}")]
     Io {
         path: PathBuf,

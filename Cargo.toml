@@ -5,6 +5,7 @@ members = [
     "backends/andler-qemu",
     "backends/andler-vmm",
     "services/andler-disk",
+    "services/andler-firmware",
     "services/andler-net",
     "services/andler-store",
     "services/andler-rpc",

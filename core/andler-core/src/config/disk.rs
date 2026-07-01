@@ -5,6 +5,16 @@
 //! + `-device virtio-blk-pci,...,num-queues=4`. Для Android-инстансов —
 //! `base_image`/overlay-механизм из §4.4.2
 //! docs/architecture/CORE_ARCHITECTURE_PLAN.md.
+//!
+//! Дефолтный размер диска у `reference_default` — **256 GiB**, не 40 GiB
+//! из `start.sh`. См. PLAN.md, раздел «Disk management»: единый дефолт
+//! 256 GiB (вместо более раннего варианта с раздельными 64/128 GiB по
+//! типу гостя) выбран осознанно как номинальный верхний предел —
+//! благодаря thin provisioning у qcow2 он не означает немедленно занятое
+//! место на хосте. 40 GiB из `start.sh` остаётся исторически
+//! зафиксированным как нижняя граница, которой реальный размер
+//! современной Linux/Android-инсталляции после установки обычно не
+//! превышает, но не как актуальный дефолт ANDLER.
 
 use std::path::PathBuf;
 
@@ -52,6 +62,28 @@ pub struct DiskConfig {
     /// `andler-qemu` принимает на основе этого флага плюс самого факта
     /// `discard=on` устройства (см. TODO в `andler-qemu` README).
     pub trim_on_shutdown: bool,
+    /// Автоматически компактифицировать (`qemu-img convert` во временный
+    /// файл + atomic rename — см. `andler_disk::qcow2::compact`) диск
+    /// сразу после штатной остановки инстанса.
+    ///
+    /// **Выключено по умолчанию** (`false`) — пользователь должен явно
+    /// включить эту опцию (CLI-флаг при создании, `andler config <id>
+    /// --set compact-on-shutdown=true`, или TOML-поле), не наоборот.
+    /// Причина не делать это дефолтом для всех qcow2-дисков (а они и есть
+    /// дефолт ANDLER, см. `reference_default`): compact — потенциально
+    /// длительная операция (полная перезапись файла диска через `qemu-img
+    /// convert`, время растёт с фактическим занятым местом на хосте), и
+    /// превращение каждого `andler stop` в операцию, которая может занять
+    /// заметное время и нагрузить диск хоста на запись, было бы
+    /// неожиданным побочным эффектом без явного согласия пользователя.
+    ///
+    /// Применимо только к `DiskFormat::Qcow2` — у raw нет qcow2-метаданных
+    /// для компактификации (см. `andler_disk::qcow2::compact` и раздел
+    /// «Disk management» в PLAN.md); для не-qcow2 дисков значение этого
+    /// поля просто игнорируется на уровне backend'а, не является ошибкой
+    /// конфигурации сама по себе (диск мог быть переключён в raw уже
+    /// после того, как флаг был включён).
+    pub compact_on_shutdown: bool,
     /// Таймаут ожидания завершения async job (snapshot-save/load/delete)
     /// в секундах. `None` — 30 секунд по умолчанию. Увеличьте для
     /// очень больших дисков (сотни GiB), где snapshot-операции занимают
@@ -62,17 +94,22 @@ pub struct DiskConfig {
 impl DiskConfig {
     pub const GIB: u64 = 1024 * 1024 * 1024;
 
-    /// Конфигурация обычного самостоятельного диска (`LinuxVm`),
-    /// соответствующая `start.sh`: `disk.qcow2`, 40 GiB, qcow2,
-    /// без backing image, thin-provisioned, discard включён.
+    /// Конфигурация обычного самостоятельного диска (`LinuxVm`):
+    /// `disk.qcow2`, **256 GiB** (номинальный верхний предел, не сразу
+    /// занятое место на хосте — см. doc-комментарий модуля), qcow2,
+    /// без backing image, thin-provisioned, discard включён. Размер
+    /// сознательно отличается от 40 GiB в `scripts/start.sh` — см.
+    /// PLAN.md, раздел «Disk management» и блок «Что изменилось и
+    /// почему» при нём.
     pub fn reference_default(path: PathBuf) -> Self {
         DiskConfig {
             path,
-            size_bytes: 40 * Self::GIB,
+            size_bytes: 256 * Self::GIB,
             format: DiskFormat::Qcow2,
             base_image: None,
             thin_provisioning: true,
             trim_on_shutdown: true,
+            compact_on_shutdown: false,
             snapshot_timeout_secs: None,
         }
     }
@@ -90,6 +127,7 @@ impl DiskConfig {
             base_image: Some(base_image),
             thin_provisioning: true,
             trim_on_shutdown: true,
+            compact_on_shutdown: false,
             snapshot_timeout_secs: None,
         }
     }
@@ -100,13 +138,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn reference_default_matches_start_sh() {
+    fn reference_default_is_256_gib_thin_provisioned_qcow2() {
+        // Имя теста ранее было `reference_default_matches_start_sh` —
+        // переименовано, т.к. дефолт теперь намеренно *не* совпадает со
+        // start.sh (40 GiB). См. PLAN.md, раздел «Disk management»: не
+        // "исправляйте" это обратно на 40 без сверки с планом — это
+        // было умышленное изменение, а не регрессия.
         let cfg = DiskConfig::reference_default(PathBuf::from("disk.qcow2"));
-        assert_eq!(cfg.size_bytes, 40 * DiskConfig::GIB);
+        assert_eq!(cfg.size_bytes, 256 * DiskConfig::GIB);
         assert_eq!(cfg.format, DiskFormat::Qcow2);
         assert_eq!(cfg.base_image, None);
         assert!(cfg.thin_provisioning);
         assert!(cfg.trim_on_shutdown);
+        assert!(
+            !cfg.compact_on_shutdown,
+            "compact_on_shutdown must be opt-in, not a default-on behavior — see PLAN.md"
+        );
     }
 
     #[test]
@@ -119,5 +166,6 @@ mod tests {
         );
         assert_eq!(cfg.base_image, Some(base));
         assert_eq!(cfg.format, DiskFormat::Qcow2);
+        assert!(!cfg.compact_on_shutdown);
     }
 }

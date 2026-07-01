@@ -13,8 +13,8 @@
 use std::path::{Path, PathBuf};
 
 use andler_core::{
-    AudioConfig, CpuConfig, DiskConfig, DisplayConfig, FirmwareConfig, GpuConfig, InputConfig,
-    MemoryConfig, NetworkConfig,
+    AudioConfig, CdromBus, CpuConfig, DiskConfig, DisplayConfig, FirmwareConfig, GpuConfig,
+    InputConfig, MemoryConfig, NetworkConfig,
 };
 use andler_rpc::proto::{
     CreateAndroidInstanceRequest, CreateInstanceRequest, AndroidProfile as ProtoAndroidProfile,
@@ -46,6 +46,21 @@ pub enum InstanceFileResult {
     Android(CreateAndroidInstanceRequest),
 }
 
+/// TOML-представление выбора `cdrom_bus` — отдельный тип от
+/// `andler_core::CdromBus`, потому что у него есть третье состояние
+/// (`Auto`), которого нет (и не должно быть) в домене: домен всегда несёт
+/// уже принятое решение, а "auto" — это просьба к этому модулю принять
+/// решение за пользователя на основе `recommended_for_iso_filename`, не
+/// валидный домена сам по себе.
+#[derive(Debug, Clone, Copy, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum InstanceFileCdromBus {
+    #[default]
+    Auto,
+    Virtio,
+    Ide,
+}
+
 /// TOML instance file. Shared fields for both LinuxVm and AndroidVm.
 /// Android-specific fields are `Option` — if present, the file is treated
 /// as an AndroidVm config.
@@ -60,9 +75,24 @@ pub struct InstanceFile {
     /// Path to disk file. Required for LinuxVm, ignored for AndroidVm.
     #[serde(default)]
     pub disk_path: Option<PathBuf>,
-    /// Disk size in GiB. Optional (default: 40 GiB).
+    /// Disk size in GiB. Optional (default: 256 GiB — see
+    /// `DiskConfig::reference_default`; thin-provisioned qcow2, so this
+    /// is a nominal upper bound, not space used immediately on the host).
     #[serde(default)]
     pub disk_size_gib: Option<u64>,
+    /// Automatically compact the disk after every graceful shutdown.
+    /// Optional (default: `false` — see
+    /// `DiskConfig::compact_on_shutdown`; off unless explicitly enabled,
+    /// has no effect on non-qcow2 disks).
+    #[serde(default)]
+    pub compact_on_shutdown: bool,
+    /// Bus for the ISO/CD-ROM drive. Optional — absent or `"auto"` means
+    /// decide based on the ISO filename (see
+    /// `CdromBus::recommended_for_iso_filename`); `"virtio"` or `"ide"`
+    /// force an explicit choice. See PLAN.md, "Монтирование ISO /
+    /// CD-ROM".
+    #[serde(default)]
+    pub cdrom_bus: InstanceFileCdromBus,
 
     // --- Common ---
     /// Path to OVMF_VARS template. Required for both types.
@@ -148,14 +178,18 @@ impl InstanceFile {
                 .expect("disk size overflow");
         }
         disk.snapshot_timeout_secs = self.snapshot_timeout_secs;
+        disk.compact_on_shutdown = self.compact_on_shutdown;
 
-        CreateInstanceRequest {
+        let iso_path = self.iso_path.expect("iso_path required for LinuxVm");
+        let resolved_cdrom_bus = match self.cdrom_bus {
+            InstanceFileCdromBus::Auto => CdromBus::recommended_for_iso_filename(&iso_path),
+            InstanceFileCdromBus::Virtio => CdromBus::VirtioScsi,
+            InstanceFileCdromBus::Ide => CdromBus::Ide,
+        };
+
+        let mut req = CreateInstanceRequest {
             name: self.name,
-            iso_path: path_to_string(
-                &self
-                    .iso_path
-                    .expect("iso_path required for LinuxVm"),
-            ),
+            iso_path: path_to_string(&iso_path),
             cpu: Some(
                 self.cpu
                     .unwrap_or_else(CpuConfig::reference_default)
@@ -179,7 +213,18 @@ impl InstanceFile {
                     .into(),
             ),
             firmware: Some(
-                FirmwareConfig::reference_default(self.ovmf_vars_path.clone()).into(),
+                // `ovmf_code_path` намеренно пустой — daemon (service.rs)
+                // подставит авто-определённый или явный путь из своей
+                // конфигурации. CLI знает только путь к VARS (персональный
+                // per-instance файл), но не путь к CODE (системный,
+                // зависящий от дистрибутива). Пустая строка = "используй
+                // авто-детект daemon'а" — это соглашение между CLI и
+                // service.rs, задокументированное в обоих местах.
+                andler_core::FirmwareConfig {
+                    ovmf_code_path: std::path::PathBuf::new(),
+                    ovmf_vars_path: self.ovmf_vars_path.clone(),
+                }
+                .into(),
             ),
             audio: Some(
                 self.audio
@@ -191,7 +236,10 @@ impl InstanceFile {
                     .unwrap_or_else(InputConfig::reference_default)
                     .into(),
             ),
-        }
+            ..Default::default()
+        };
+        req.set_cdrom_bus(resolved_cdrom_bus.into());
+        req
     }
 
     /// Builds a `CreateAndroidInstanceRequest` for AndroidVm.
@@ -251,10 +299,7 @@ fn path_to_string(path: &Path) -> String {
 }
 
 fn default_instances_root() -> String {
-    dirs::data_local_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("andler")
-        .join("instances")
+    andler_core::paths::instances_root()
         .to_string_lossy()
         .into_owned()
 }
@@ -310,6 +355,77 @@ mod tests {
             InstanceFileResult::Linux(req) => {
                 let disk = req.disk.expect("disk must be Some");
                 assert_eq!(disk.size_bytes, 100 * 1024 * 1024 * 1024);
+            }
+            other => panic!("expected Linux, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn linux_compact_on_shutdown_defaults_to_false() {
+        let file: InstanceFile =
+            toml::from_str(MINIMAL_LINUX_TOML).expect("minimal Linux TOML must parse");
+        match file.into_result() {
+            InstanceFileResult::Linux(req) => {
+                let disk = req.disk.expect("disk must be Some");
+                assert!(
+                    !disk.compact_on_shutdown,
+                    "compact_on_shutdown must default to false when absent from TOML"
+                );
+            }
+            other => panic!("expected Linux, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn linux_compact_on_shutdown_can_be_enabled() {
+        let toml = format!("{MINIMAL_LINUX_TOML}\ncompact_on_shutdown = true\n");
+        let file: InstanceFile = toml::from_str(&toml).expect("TOML must parse");
+        match file.into_result() {
+            InstanceFileResult::Linux(req) => {
+                let disk = req.disk.expect("disk must be Some");
+                assert!(disk.compact_on_shutdown);
+            }
+            other => panic!("expected Linux, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn linux_cdrom_bus_defaults_to_auto_detect_by_iso_filename() {
+        // MINIMAL_LINUX_TOML's iso_path is "/tmp/test.iso" — not a known
+        // distro name, so auto-detect should fall back to Ide.
+        let file: InstanceFile =
+            toml::from_str(MINIMAL_LINUX_TOML).expect("minimal Linux TOML must parse");
+        match file.into_result() {
+            InstanceFileResult::Linux(req) => {
+                assert_eq!(req.cdrom_bus(), andler_rpc::proto::CdromBus::Ide);
+            }
+            other => panic!("expected Linux, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn linux_cdrom_bus_auto_detects_virtio_for_known_distro_filename() {
+        let toml = MINIMAL_LINUX_TOML.replace("/tmp/test.iso", "/tmp/ubuntu-24.04.iso");
+        let file: InstanceFile = toml::from_str(&toml).expect("TOML must parse");
+        match file.into_result() {
+            InstanceFileResult::Linux(req) => {
+                assert_eq!(req.cdrom_bus(), andler_rpc::proto::CdromBus::VirtioScsi);
+            }
+            other => panic!("expected Linux, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn linux_cdrom_bus_explicit_choice_overrides_auto_detect() {
+        // Explicit "ide" must win even though the filename would
+        // auto-detect to virtio.
+        let toml = MINIMAL_LINUX_TOML
+            .replace("/tmp/test.iso", "/tmp/ubuntu-24.04.iso")
+            + "\ncdrom_bus = \"ide\"\n";
+        let file: InstanceFile = toml::from_str(&toml).expect("TOML must parse");
+        match file.into_result() {
+            InstanceFileResult::Linux(req) => {
+                assert_eq!(req.cdrom_bus(), andler_rpc::proto::CdromBus::Ide);
             }
             other => panic!("expected Linux, got {other:?}"),
         }

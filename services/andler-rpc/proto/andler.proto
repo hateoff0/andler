@@ -153,6 +153,24 @@ enum DiskFormat {
     VDI = 3;
 }
 
+// Зеркало `andler_core::CdromBus` — bus для ISO/CD-ROM привода, отдельная
+// от `DiskFormat`/основного диска ось конфигурации. См. PLAN.md, раздел
+// «Монтирование ISO / CD-ROM» и doc-комментарии `andler_core::CdromBus`.
+enum CdromBus {
+    // Не "лучший дефолт", а маркер отсутствия явного значения — конвертер
+    // (`andler-rpc::convert`) трактует его как `CdromBus::default()`
+    // (`Ide`, безопасный fallback), а не падает с ошибкой, в отличие от
+    // `DiskFormat`/`*_UNSPECIFIED` в других местах, где unspecified —
+    // ошибка конфигурации. Это сознательная асимметрия: на момент ввода
+    // этого поля уже существующие сериализованные `InstanceConfig` в
+    // `andler-store` физически не могут содержать осознанный выбор этого
+    // поля (его не существовало), и интерпретировать его отсутствие как
+    // ошибку значило бы ломать чтение уже сохранённых конфигов.
+    CDROM_BUS_UNSPECIFIED = 0;
+    VIRTIO_SCSI = 1;
+    IDE = 2;
+}
+
 message DiskConfig {
     string path = 1;
     uint64 size_bytes = 2;
@@ -170,6 +188,13 @@ message DiskConfig {
     // Таймаут async job (snapshot-save/load/delete) в секундах.
     // 0 или отсутствие = 30 секунд по умолчанию.
     optional uint64 snapshot_timeout_secs = 7;
+    // Автоматический `qemu-img convert` (compact) диска сразу после
+    // штатной остановки инстанса. Выключено по умолчанию (`false`) —
+    // см. `andler_core::config::DiskConfig.compact_on_shutdown` за
+    // обоснованием (потенциально долгая операция на каждое выключение,
+    // не должна быть сюрпризом без явного opt-in). Применимо только к
+    // qcow2 — для других форматов диска флаг просто не имеет эффекта.
+    bool compact_on_shutdown = 8;
 }
 
 message Resolution {
@@ -287,6 +312,10 @@ message CreateInstanceRequest {
     FirmwareConfig firmware = 9;
     AudioConfig audio = 10;
     InputConfig input = 11;
+    // См. `InstanceKind.LinuxVm.cdrom_bus`/`andler_core::CdromBus`.
+    // `CDROM_BUS_UNSPECIFIED` трактуется как `CdromBus::default()` (Ide),
+    // не как ошибка — см. doc-комментарий enum `CdromBus` выше.
+    CdromBus cdrom_bus = 12;
 }
 
 enum AndroidVersion {
@@ -411,6 +440,7 @@ enum BackendKind {
 message InstanceKind {
     message LinuxVm {
         string iso_path = 1;
+        CdromBus cdrom_bus = 2;
     }
     message AndroidVm {
         AndroidProfile android_profile = 1;

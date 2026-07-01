@@ -9,8 +9,8 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use super::{
-    AudioConfig, CpuConfig, DiskConfig, DisplayConfig, FirmwareConfig, GpuConfig, InputConfig,
-    MemoryConfig, NetworkConfig,
+    AudioConfig, CdromBus, CpuConfig, DiskConfig, DisplayConfig, FirmwareConfig, GpuConfig,
+    InputConfig, MemoryConfig, NetworkConfig,
 };
 use crate::android_profile::AndroidProfile;
 
@@ -61,7 +61,20 @@ pub enum InstanceKind {
     /// либо с уже установленного диска (`iso_path` тогда не используется
     /// при сборке cmdline, но сохраняется для возможности переустановки —
     /// конкретное поведение решает `andler-qemu`).
-    LinuxVm { iso_path: PathBuf },
+    LinuxVm {
+        iso_path: PathBuf,
+        /// Bus, через который ISO/CD-ROM привод подключается к гостю.
+        /// См. `CdromBus` и PLAN.md, раздел «Монтирование ISO /
+        /// CD-ROM» — это не то же самое устройство, что у основного
+        /// диска (`DiskConfig`), и неподходящий выбор здесь блокирует
+        /// загрузку раньше, чем у пользователя появляется возможность
+        /// его исправить. Решение о дефолте (известный дистрибутив vs
+        /// неизвестный ISO) принимает вызывающая сторона
+        /// (`CdromBus::recommended_for_iso_filename` + явный выбор
+        /// пользователя в CLI/wizard) до того, как `InstanceConfig`
+        /// собран — здесь хранится уже принятое решение, не "auto".
+        cdrom_bus: CdromBus,
+    },
     /// Android-инстанс на базе Waydroid. `android_profile` резолвится в
     /// конкретный `DiskConfig` через `AndroidProfile::resolve`
     /// (см. `android_profile.rs`) до того, как `InstanceConfig` будет
@@ -115,6 +128,7 @@ mod tests {
             name: "test-vm".to_string(),
             kind: InstanceKind::LinuxVm {
                 iso_path: PathBuf::from("/tmp/cachyos.iso"),
+                cdrom_bus: CdromBus::VirtioScsi,
             },
             backend: BackendKind::Qemu,
             cpu: CpuConfig::reference_default(),

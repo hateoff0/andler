@@ -1023,8 +1023,8 @@ Boot priority и выбор bus для CD-ROM (`virtio-scsi`/`ide`, см. соо
 - [x] **1. Единая точка резолва путей (`ANDLER_HOME`)** (Высокий) — Модуль `andler-core::paths` с `andler_home()`, `instances_root()`, `db_path()` и т.д. — единый источник истины для всех путей. Готово — `core/andler-core/src/paths.rs`, `cli/src/main.rs`, `cli/src/instance_file.rs`, `daemon/src/main.rs` обновлены.
 - [x] **2. Disk management** (Высокий) — CLI-команды `disk create/info/resize/compact`, авто-добавление `.qcow2`, дефолт 256 GiB, раздельное поведение qcow2/raw. Готово — `services/andler-disk/src/qcow2.rs`, `cli/src/disk.rs`, `cli/src/helpers.rs`.
 - [x] **3. Auto-compaction (compact_on_shutdown)** (Высокий) — Автоматическое сжатие диска после выключения VM — поле `compact_on_shutdown` в `DiskConfig`, флаг `--compact-on-shutdown` в CLI, фоновая задача в daemon при `stop_instance`. Готово — `core/andler-core/src/config/disk.rs`, `services/andler-rpc/proto/andler.proto`, `daemon/src/daemon/instance_ops.rs`, `cli/src/main.rs`, `cli/src/create.rs`, `cli/src/status.rs`, `cli/src/instance_file.rs`.
-- [ ] **4. Монтирование ISO/CD-ROM** (Высокий) — Условный дефолт virtio-scsi/ide по типу гостя.
-- [ ] **5. UEFI / BIOS** (Высокий) — Авто-детект OVMF, VARS, Legacy fallback, дистрибутив-специфичные инструкции. `FirmwareConfig` есть, авто-детект — нет.
+- [x] **4. Монтирование ISO/CD-ROM** (Высокий) — Условный дефолт virtio-scsi/ide по типу гостя.
+- [x] **5. UEFI / BIOS** (Высокий) — Авто-детект OVMF, VARS, Legacy fallback, дистрибутив-специфичные инструкции. `FirmwareConfig` есть, авто-детект — нет.
 - [ ] **6. Wizard** (Высокий) — Интерактивный опрос (стрелки/Enter/Space через `inquire`), Basic/Advanced, новая зависимость в `cli/Cargo.toml`.
 - [ ] **7. GPU render** (Высокий) — Venus (`virtio-gpu-gl`), VirGL, CPU; auto-detect минимальных версий хоста. Конфиг есть (`RenderBackend`), auto-detect версий — нет.
 - [ ] **8. Display** (Средний) — SDL/GTK с дефолтом по GPU-вендору, Spice, None. Конфиг есть (`DisplayEngine`); GTK-детект вендора — нет.

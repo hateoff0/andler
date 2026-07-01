@@ -1,0 +1,13 @@
+[package]
+name = "andler-firmware"
+description = "UEFI/OVMF firmware detection and provisioning for ANDLER"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+andler-core = { path = "../../core/andler-core" }
+thiserror = { workspace = true }
+serde = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }

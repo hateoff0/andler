@@ -1,7 +1,7 @@
 use super::*;
 use andler_core::{
-    AndroidProfile, AudioConfig, CpuConfig, DiskConfig, DisplayConfig, FirmwareConfig, GpuConfig,
-    InputConfig, InstanceKind, MemoryConfig, NetworkConfig,
+    AndroidProfile, AudioConfig, CdromBus, CpuConfig, DiskConfig, DisplayConfig, FirmwareConfig,
+    GpuConfig, InputConfig, InstanceKind, MemoryConfig, NetworkConfig,
 };
 pub(crate) use andler_core::{AndroidVersion, RootMode};
 use std::path::PathBuf;
@@ -36,6 +36,7 @@ pub(crate) fn sample_config() -> InstanceConfig {
         name: "test-vm".to_string(),
         kind: InstanceKind::LinuxVm {
             iso_path: PathBuf::from("/tmp/test.iso"),
+            cdrom_bus: CdromBus::Ide,
         },
         backend: BackendKind::Qemu,
         cpu: CpuConfig::reference_default(),

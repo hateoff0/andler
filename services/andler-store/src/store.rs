@@ -456,6 +456,7 @@ mod tests {
             name: "test-vm".to_string(),
             kind: InstanceKind::LinuxVm {
                 iso_path: PathBuf::from("/tmp/test.iso"),
+                cdrom_bus: andler_core::CdromBus::Ide,
             },
             backend: BackendKind::Qemu,
             cpu: CpuConfig::reference_default(),

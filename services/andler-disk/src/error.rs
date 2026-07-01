@@ -57,4 +57,31 @@ pub enum DiskError {
     /// раздел.
     #[error("nbd setup failed: {0}")]
     NbdSetupFailed(String),
+
+    /// `resize` запрошен с размером меньше текущего виртуального размера
+    /// диска, но вызывающая сторона не подтвердила это явно
+    /// (`allow_shrink = false`). См. PLAN.md, раздел «Disk management»:
+    /// `qemu-img resize` не уменьшает qcow2 без `--shrink`, и уменьшение
+    /// безопасно только если файловая система внутри гостя была заранее
+    /// уменьшена — иначе риск потери данных. Это не просьба передать
+    /// флаг библиотеке qemu-img, а явный отказ на уровне ANDLER, пока
+    /// пользователь не подтвердит операцию осознанно.
+    #[error(
+        "shrinking {path} from {current_size_bytes} to {requested_size_bytes} bytes requires \
+         explicit confirmation (risk of data loss if the guest filesystem was not shrunk first)"
+    )]
+    ShrinkRequiresConfirmation {
+        path: PathBuf,
+        current_size_bytes: u64,
+        requested_size_bytes: u64,
+    },
+
+    /// `compact` запрошен для диска не в формате qcow2 (например, raw).
+    /// Для raw-дисков нет qcow2-метаданных, по которым можно было бы
+    /// компактифицировать файл — операция в qcow2-понятии неприменима.
+    /// См. PLAN.md, раздел «Disk management»: `disk compact` должен
+    /// явно сообщать об этом, не пытаться слепо выполнить `qemu-img
+    /// convert` и не падать с непонятной ошибкой `qemu-img`.
+    #[error("compact is not applicable to `{format}` disks (only qcow2 has reclaimable metadata): {path}")]
+    CompactNotApplicable { path: PathBuf, format: String },
 }

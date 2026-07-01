@@ -112,6 +112,13 @@ ovmf_vars_path = "/home/user/.local/share/andler/my-linux-vm/VARS.fd"
 
 disk_size_gib = 100
 snapshot_timeout_secs = 60
+# Off by default. Rewrites the whole disk file via qemu-img convert after
+# every graceful shutdown to reclaim freed-up space — see PLAN.md, "Disk
+# management". Only takes effect for qcow2 disks.
+compact_on_shutdown = false
+# "auto" (default) picks virtio-scsi for known Linux distros (by ISO
+# filename) and ide otherwise; can be forced to "virtio" or "ide".
+cdrom_bus = "auto"
 
 [cpu]
 cores = 8

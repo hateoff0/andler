@@ -114,22 +114,50 @@ pub async fn clone_full(source: &Path, dest: &Path) -> Result<(), DiskError> {
 /// (`new_size_bytes`), чтобы вызывающая сторона не передавала строки с
 /// произвольным синтаксисом `qemu-img` напрямую в этот API.
 ///
-/// Уменьшение размера (`new_size_bytes` меньше текущего) поддерживается
-/// `qemu-img`, но рискованно для файловых систем гостя, которые этого не
-/// ожидают — ответственность за то, что уменьшение безопасно, лежит на
-/// вызывающей стороне (`andler-daemon`), не на этой функции.
-pub async fn resize(path: &Path, new_size_bytes: u64) -> Result<(), DiskError> {
-    run_qemu_img(&[
-        "resize",
-        &path.to_string_lossy(),
-        &new_size_bytes.to_string(),
-    ])
-    .await
+/// Уменьшение размера (`new_size_bytes` меньше текущего виртуального
+/// размера) **не выполняется без явного `allow_shrink = true`** —
+/// возвращается `DiskError::ShrinkRequiresConfirmation`. Это не просто
+/// проброс `--shrink` флага `qemu-img`: уменьшение рискованно для
+/// файловых систем гостя, которые этого не ожидают (см. PLAN.md, раздел
+/// «Disk management»), и должно требовать осознанного подтверждения
+/// вызывающей стороны (CLI/wizard), а не приниматься как любое другое
+/// изменение размера. При `allow_shrink = true` к команде добавляется
+/// `--shrink`, которого иначе `qemu-img` потребовал бы сам с менее
+/// понятным сообщением об ошибке.
+pub async fn resize(path: &Path, new_size_bytes: u64, allow_shrink: bool) -> Result<(), DiskError> {
+    let current_size_bytes = virtual_size_bytes(path).await?;
+
+    if new_size_bytes < current_size_bytes && !allow_shrink {
+        return Err(DiskError::ShrinkRequiresConfirmation {
+            path: path.to_path_buf(),
+            current_size_bytes,
+            requested_size_bytes: new_size_bytes,
+        });
+    }
+
+    let size_arg = new_size_bytes.to_string();
+    let path_arg = path.to_string_lossy();
+    let mut args: Vec<&str> = vec!["resize"];
+    if new_size_bytes < current_size_bytes {
+        args.push("--shrink");
+    }
+    args.push(&path_arg);
+    args.push(&size_arg);
+
+    run_qemu_img(&args).await
 }
 
 /// Сжимает диск, удаляя свободные блоки (актуально после удаления данных
 /// внутри гостя — без compact файл не уменьшится физически, даже если
 /// внутри гостя места было освобождено).
+///
+/// Применимо только к **qcow2**: raw не имеет qcow2-метаданных, которые
+/// можно было бы компактифицировать (см. PLAN.md, раздел «Disk
+/// management»). Для любого другого формата возвращает
+/// `DiskError::CompactNotApplicable` — не пытается слепо выполнить
+/// `qemu-img convert` и не оставляет вызывающей стороне разбираться с
+/// менее понятной ошибкой `qemu-img` (или, хуже, молча создавать
+/// бессмысленный для raw файл).
 ///
 /// Реализовано как `qemu-img convert` во временный файл с последующей
 /// заменой оригинала, а не `qemu-img convert -O qcow2` напрямую в тот же
@@ -138,6 +166,14 @@ pub async fn resize(path: &Path, new_size_bytes: u64) -> Result<(), DiskError> {
 /// финальное переименование было атомарной операцией в пределах одной
 /// файловой системы, а не межфайловым копированием.
 pub async fn compact(path: &Path) -> Result<(), DiskError> {
+    let disk_info = info(path).await?;
+    if disk_info.format != "qcow2" {
+        return Err(DiskError::CompactNotApplicable {
+            path: path.to_path_buf(),
+            format: disk_info.format,
+        });
+    }
+
     let tmp_path = path.with_extension("qcow2.compact-tmp");
 
     run_qemu_img(&[
@@ -489,6 +525,98 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, DiskError::BackingFileNotFound(_)));
+
+        tokio::fs::remove_dir_all(&dir).await.ok();
+    }
+
+    #[tokio::test]
+    #[ignore = "requires qemu-img binary, see docker/README.md integration-test target"]
+    async fn resize_grow_succeeds_without_confirmation() {
+        let dir = std::env::temp_dir().join("andler-disk-test-resize-grow");
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let path = dir.join("test.qcow2");
+
+        create(&path, 10 * 1024 * 1024 * 1024).await.unwrap();
+        resize(&path, 20 * 1024 * 1024 * 1024, false).await.unwrap();
+        let size = virtual_size_bytes(&path).await.unwrap();
+        assert_eq!(size, 20 * 1024 * 1024 * 1024);
+
+        tokio::fs::remove_dir_all(&dir).await.ok();
+    }
+
+    #[tokio::test]
+    #[ignore = "requires qemu-img binary, see docker/README.md integration-test target"]
+    async fn resize_shrink_without_confirmation_is_rejected() {
+        let dir = std::env::temp_dir().join("andler-disk-test-resize-shrink-reject");
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let path = dir.join("test.qcow2");
+
+        create(&path, 20 * 1024 * 1024 * 1024).await.unwrap();
+        let err = resize(&path, 10 * 1024 * 1024 * 1024, false)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, DiskError::ShrinkRequiresConfirmation { .. }));
+        // Размер не должен был измениться — отказ происходит до вызова
+        // `qemu-img resize`.
+        let size = virtual_size_bytes(&path).await.unwrap();
+        assert_eq!(size, 20 * 1024 * 1024 * 1024);
+
+        tokio::fs::remove_dir_all(&dir).await.ok();
+    }
+
+    #[tokio::test]
+    #[ignore = "requires qemu-img binary, see docker/README.md integration-test target"]
+    async fn resize_shrink_with_confirmation_succeeds() {
+        let dir = std::env::temp_dir().join("andler-disk-test-resize-shrink-confirmed");
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let path = dir.join("test.qcow2");
+
+        create(&path, 20 * 1024 * 1024 * 1024).await.unwrap();
+        resize(&path, 10 * 1024 * 1024 * 1024, true).await.unwrap();
+        let size = virtual_size_bytes(&path).await.unwrap();
+        assert_eq!(size, 10 * 1024 * 1024 * 1024);
+
+        tokio::fs::remove_dir_all(&dir).await.ok();
+    }
+
+    #[tokio::test]
+    #[ignore = "requires qemu-img binary, see docker/README.md integration-test target"]
+    async fn compact_qcow2_succeeds() {
+        let dir = std::env::temp_dir().join("andler-disk-test-compact-qcow2");
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let path = dir.join("test.qcow2");
+
+        create(&path, 1024 * 1024 * 1024).await.unwrap();
+        compact(&path).await.unwrap();
+        // Файл остаётся валидным qcow2 того же логического размера.
+        let size = virtual_size_bytes(&path).await.unwrap();
+        assert_eq!(size, 1024 * 1024 * 1024);
+
+        tokio::fs::remove_dir_all(&dir).await.ok();
+    }
+
+    #[tokio::test]
+    #[ignore = "requires qemu-img binary, see docker/README.md integration-test target"]
+    async fn compact_raw_is_rejected_as_not_applicable() {
+        let dir = std::env::temp_dir().join("andler-disk-test-compact-raw");
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let path = dir.join("test.raw");
+
+        run_qemu_img(&[
+            "create",
+            "-f",
+            "raw",
+            &path.to_string_lossy(),
+            &(1024 * 1024 * 1024).to_string(),
+        ])
+        .await
+        .unwrap();
+
+        let err = compact(&path).await.unwrap_err();
+        assert!(matches!(
+            err,
+            DiskError::CompactNotApplicable { format, .. } if format == "raw"
+        ));
 
         tokio::fs::remove_dir_all(&dir).await.ok();
     }
