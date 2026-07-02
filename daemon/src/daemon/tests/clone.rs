@@ -1,7 +1,7 @@
 use super::common::*;
 use super::*;
 use std::path::PathBuf;
-use andler_core::{AndroidProfile, CloneMode};
+use andler_core::{AndroidProfile, ArmTranslator, CloneMode};
 
 // --- clone_instance / find_live_clones (non-ignore) ---------------------
 
@@ -403,7 +403,7 @@ async fn clone_instance_with_linked_mode_creates_overlay_pointing_at_source_disk
         android_version: AndroidVersion::Android13,
         gapps: false,
         microg: false,
-        libndk: false,
+        arm_translator: ArmTranslator::None,
         root: RootMode::None,
     };
     let source_id = daemon
@@ -472,7 +472,7 @@ async fn clone_instance_with_full_standalone_mode_has_no_base_image() {
         android_version: AndroidVersion::Android13,
         gapps: false,
         microg: false,
-        libndk: false,
+        arm_translator: ArmTranslator::None,
         root: RootMode::None,
     };
     let source_id = daemon
@@ -527,7 +527,7 @@ async fn clone_instance_with_shared_base_mode_survives_source_purge() {
         android_version: AndroidVersion::Android13,
         gapps: false,
         microg: false,
-        libndk: false,
+        arm_translator: ArmTranslator::None,
         root: RootMode::None,
     };
     let source_id = daemon
@@ -583,7 +583,7 @@ async fn clone_instance_of_a_clone_is_allowed() {
         android_version: AndroidVersion::Android13,
         gapps: false,
         microg: false,
-        libndk: false,
+        arm_translator: ArmTranslator::None,
         root: RootMode::None,
     };
     let source_id = daemon
@@ -650,7 +650,7 @@ async fn export_instance_disk_creates_standalone_file_without_registering_instan
         android_version: AndroidVersion::Android13,
         gapps: false,
         microg: false,
-        libndk: false,
+        arm_translator: ArmTranslator::None,
         root: RootMode::None,
     };
     let source_id = daemon

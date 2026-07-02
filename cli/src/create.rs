@@ -7,7 +7,7 @@ use tonic::transport::Channel;
 
 use crate::instance_file::{InstanceFile, InstanceFileResult};
 use crate::wizard::{PartialArgs, WizardError, WizardKind, WizardResult};
-use crate::{err_exit, CliAndroidVersion, CliCdromBus, CliKind, CliRootMode};
+use crate::{err_exit, CliAndroidVersion, CliArmTranslator, CliCdromBus, CliKind, CliRootMode};
 
 #[allow(clippy::too_many_arguments)]
 pub async fn handle(
@@ -26,7 +26,7 @@ pub async fn handle(
     base_image_path: Option<String>,
     gapps: bool,
     microg: bool,
-    libndk: bool,
+    arm_translator: Option<CliArmTranslator>,
     root: CliRootMode,
     instances_root: String,
     overlay_size_gib: u64,
@@ -139,8 +139,14 @@ pub async fn handle(
                 err_exit("error: --magisk-dir is required when --root magisk");
             }
 
+            // В чистом CLI-режиме (без wizard) авто-детект по CPU не
+            // запускается — не заданный флаг значит "без транслятора",
+            // явно и предсказуемо. Авто-детект — привилегия wizard'а
+            // (см. `andler-firmware::detect::arm`).
+            let arm_translator = arm_translator.unwrap_or(CliArmTranslator::None);
+
             let req = build_android_request(
-                name, av, bip, ovmf, gapps, microg, libndk, root,
+                name, av, bip, ovmf, gapps, microg, arm_translator, root,
                 instances_root, overlay_size_gib, magisk_dir,
             );
             let response = client.create_android_instance(req).await?;
@@ -211,7 +217,7 @@ fn build_android_request(
     ovmf_vars_template: String,
     gapps: bool,
     microg: bool,
-    libndk: bool,
+    arm_translator: CliArmTranslator,
     root: CliRootMode,
     instances_root: String,
     overlay_size_gib: u64,
@@ -220,11 +226,11 @@ fn build_android_request(
     let mut profile = ProtoAndroidProfile {
         gapps,
         microg,
-        libndk,
         ..Default::default()
     };
     profile.set_android_version(android_version.into());
     profile.set_root(root.into());
+    profile.set_arm_translator(arm_translator.into());
 
     CreateAndroidInstanceRequest {
         name,

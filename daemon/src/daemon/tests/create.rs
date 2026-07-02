@@ -1,6 +1,6 @@
 use super::common::*;
 use super::*;
-use andler_core::{AndroidProfile, InstanceKind};
+use andler_core::{AndroidProfile, ArmTranslator, InstanceKind};
 
 #[tokio::test]
 async fn create_instance_registers_with_created_state() {
@@ -53,7 +53,7 @@ async fn create_android_instance_resolves_profile_and_creates_overlay() {
         android_version: AndroidVersion::Android13,
         gapps: true,
         microg: false,
-        libndk: true,
+        arm_translator: ArmTranslator::Libndk,
         root: RootMode::None,
     };
 
@@ -109,7 +109,7 @@ async fn create_android_instance_fails_when_base_image_missing() {
         android_version: AndroidVersion::Android13,
         gapps: false,
         microg: true,
-        libndk: false,
+        arm_translator: ArmTranslator::None,
         root: RootMode::None,
     };
 
@@ -154,7 +154,7 @@ async fn create_android_instance_cleans_up_instance_dir_on_missing_ovmf_template
         android_version: AndroidVersion::Android13,
         gapps: false,
         microg: true,
-        libndk: false,
+        arm_translator: ArmTranslator::None,
         root: RootMode::None,
     };
 

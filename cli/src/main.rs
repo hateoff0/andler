@@ -13,7 +13,10 @@ mod status;
 mod wizard;
 
 use andler_rpc::proto::andler_service_client::AndlerServiceClient;
-use andler_rpc::proto::{AndroidVersion as ProtoAndroidVersion, RootMode as ProtoRootMode};
+use andler_rpc::proto::{
+    AndroidVersion as ProtoAndroidVersion, ArmTranslator as ProtoArmTranslator,
+    RootMode as ProtoRootMode,
+};
 use clap::{Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 
@@ -137,9 +140,11 @@ enum Command {
         #[arg(long)]
         microg: bool,
 
-        /// Include ARM->x86 translation (libhoudini/libndk).
-        #[arg(long)]
-        libndk: bool,
+        /// ARM->x86 translation. Omit to auto-detect from host CPU vendor
+        /// (AMD -> libndk, Intel -> libhoudini) when the wizard runs;
+        /// in pure CLI mode (no wizard), omitting this defaults to `none`.
+        #[arg(long, value_enum)]
+        arm_translator: Option<CliArmTranslator>,
 
         /// Root mode: none or magisk.
         #[arg(long, value_enum, default_value_t = CliRootMode::None)]
@@ -375,6 +380,23 @@ impl From<CliRootMode> for ProtoRootMode {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum CliArmTranslator {
+    None,
+    Libndk,
+    Libhoudini,
+}
+
+impl From<CliArmTranslator> for ProtoArmTranslator {
+    fn from(value: CliArmTranslator) -> Self {
+        match value {
+            CliArmTranslator::None => ProtoArmTranslator::ArmTranslatorNone,
+            CliArmTranslator::Libndk => ProtoArmTranslator::Libndk,
+            CliArmTranslator::Libhoudini => ProtoArmTranslator::Libhoudini,
+        }
+    }
+}
+
 fn err_exit(msg: &str) -> ! {
     eprintln!("{msg}");
     std::process::exit(2);
@@ -406,7 +428,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             base_image_path,
             gapps,
             microg,
-            libndk,
+            arm_translator,
             root,
             instances_root,
             overlay_size_gib,
@@ -416,7 +438,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 &mut client, file, kind, name, ovmf_vars_template,
                 iso_path, disk_path, disk_size_gib, compact_on_shutdown, cdrom_bus,
                 advanced,
-                android_version, base_image_path, gapps, microg, libndk, root,
+                android_version, base_image_path, gapps, microg, arm_translator, root,
                 instances_root, overlay_size_gib, magisk_dir,
             ).await?;
         }

@@ -10,16 +10,32 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Тип координат устройства-указателя, которое видит гость.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PointerMode {
+    /// `-device virtio-tablet-pci` — абсолютные координаты (совпадают с
+    /// позицией курсора хоста 1:1). Дефолт: курсор хоста и курсор гостя
+    /// совпадают в любой момент, без эффекта "мышь застряла на границе
+    /// окна", который возникает при relative-режиме без явного grab.
+    /// Обязателен для Android-инстансов (Waydroid ожидает touch-события).
+    Tablet,
+    /// `-device virtio-mouse-pci` — относительные координаты (как у
+    /// физической мыши). Нужен для приложений, которые сами захватывают
+    /// мышь через relative-движение (например, FPS-игры) — с `Tablet`
+    /// такие приложения получают "прыгающий" курсор.
+    Mouse,
+}
+
 /// Конфигурация ввода и интеграции с хостом.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InputConfig {
-    /// `virtio-tablet-pci` — абсолютное позиционирование (тач/планшет)
-    /// вместо относительного движения мыши. `true` соответствует поведению
-    /// `start.sh` и обязательно для Android-инстансов (Waydroid ожидает
-    /// touch-события, не относительный курсор).
-    pub tablet_mode: bool,
+    /// См. [`PointerMode`]. `#[serde(default)]` — старые сериализованные
+    /// конфиги без этого поля читаются как `Tablet` (поведение `start.sh`
+    /// до появления выбора pointer mode), не падают на десериализации.
+    #[serde(default = "default_pointer_mode")]
+    pub pointer_mode: PointerMode,
     /// Скрывать курсор хоста в окне отображения (`show-cursor=off`).
-    /// Имеет смысл вместе с `tablet_mode = true` — иначе на экране
+    /// Имеет смысл вместе с `pointer_mode = Tablet` — иначе на экране
     /// одновременно курсор хоста и точка тача гостя.
     pub hide_host_cursor: bool,
     /// Включить буфер обмена между хостом и гостем через
@@ -28,12 +44,16 @@ pub struct InputConfig {
     pub clipboard_enabled: bool,
 }
 
+fn default_pointer_mode() -> PointerMode {
+    PointerMode::Tablet
+}
+
 impl InputConfig {
     /// Конфигурация, соответствующая `start.sh`: tablet-режим, курсор хоста
     /// скрыт, буфер обмена включён.
     pub fn reference_default() -> Self {
         InputConfig {
-            tablet_mode: true,
+            pointer_mode: PointerMode::Tablet,
             hide_host_cursor: true,
             clipboard_enabled: true,
         }
@@ -47,8 +67,15 @@ mod tests {
     #[test]
     fn reference_default_matches_start_sh() {
         let cfg = InputConfig::reference_default();
-        assert!(cfg.tablet_mode);
+        assert_eq!(cfg.pointer_mode, PointerMode::Tablet);
         assert!(cfg.hide_host_cursor);
         assert!(cfg.clipboard_enabled);
+    }
+
+    #[test]
+    fn pointer_mode_deserializes_with_default_when_missing() {
+        let json = r#"{"hide_host_cursor":true,"clipboard_enabled":true}"#;
+        let cfg: InputConfig = serde_json::from_str(json).expect("must deserialize");
+        assert_eq!(cfg.pointer_mode, PointerMode::Tablet);
     }
 }

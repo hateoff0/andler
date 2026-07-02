@@ -13,16 +13,17 @@ pub mod error;
 pub mod fsm;
 pub mod paths;
 
-pub use android_profile::{AndroidProfile, AndroidVersion, RootMode};
+pub use android_profile::{AndroidProfile, AndroidVersion, ArmTranslator, RootMode};
 pub use backend::{
     BackendHandle, BackendStatus, HypervisorBackend, LogLine, LogStreamSource, ResourceMetrics,
     SnapshotInfo,
 };
 pub use clone::CloneMode;
 pub use config::{
-    AudioBackend, AudioConfig, BackendKind, CdromBus, CpuConfig, CpuPriority, DiskConfig,
-    DiskFormat, DisplayConfig, DisplayEngine, FirmwareConfig, GpuConfig, InputConfig,
-    InstanceConfig, InstanceId, InstanceKind, MemoryConfig, NetworkConfig, NetworkMode,
+    AudioBackend, AudioConfig, AudioDevice, BackendKind, CdromBus, CpuConfig, CpuPriority,
+    DiskConfig, DiskFormat, DisplayConfig, DisplayEngine, FirmwareConfig, GpuConfig, InputConfig,
+    InstanceConfig, InstanceId, InstanceKind, MemoryConfig, NatBackend, NetworkConfig, NetworkMode,
+    PointerMode,
     RenderBackend, Resolution,
 };
 pub use error::{BackendError, FsmError};

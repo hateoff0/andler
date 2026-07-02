@@ -212,6 +212,9 @@ enum DisplayEngine {
     // `AUDIO_NONE` в `AudioBackend` ниже); голый `NONE` столкнулся бы с
     // другими enum'ами в этом файле.
     DISPLAY_NONE = 4;
+    // Дефолт для desktop-хостов, кроме NVIDIA — см.
+    // `andler_core::config::display::DisplayEngine::Gtk`.
+    GTK = 5;
 }
 
 message DisplayConfig {
@@ -266,9 +269,22 @@ message NetworkMode {
     }
 }
 
+// Реализация NAT — только применимо при `NetworkMode.nat`, игнорируется
+// для `bridge`/`isolated`. См. `andler_core::config::network::NatBackend`.
+enum NatBackend {
+    NAT_BACKEND_UNSPECIFIED = 0;
+    SLIRP = 1;
+    PASST = 2;
+}
+
 message NetworkConfig {
     NetworkMode mode = 1;
     string device_model = 2;
+    // `UNSPECIFIED` трактуется как `SLIRP` (дефолт `start.sh`) при
+    // конвертации proto -> core, аналогично `CdromBus`/`compact_on_shutdown`
+    // — старые клиенты, не знающие об этом поле, получают прежнее
+    // поведение без явной ошибки.
+    NatBackend nat_backend = 3;
 }
 
 message FirmwareConfig {
@@ -283,14 +299,40 @@ enum AudioBackend {
     AUDIO_NONE = 3;
 }
 
+// PCI-устройство, которое видит гость — независимая ось от `AudioBackend`
+// (backend хоста). См. `andler_core::config::audio::AudioDevice`.
+enum AudioDevice {
+    AUDIO_DEVICE_UNSPECIFIED = 0;
+    VIRTIO_SOUND = 1;
+    ICH9_HDA = 2;
+}
+
 message AudioConfig {
     AudioBackend backend = 1;
+    // `UNSPECIFIED` трактуется как `VIRTIO_SOUND` (новый дефолт ANDLER,
+    // умышленно отличается от буквального `start.sh`) при конвертации
+    // proto -> core.
+    AudioDevice device = 2;
+}
+
+// См. `andler_core::config::input::PointerMode`.
+enum PointerMode {
+    POINTER_MODE_UNSPECIFIED = 0;
+    TABLET = 1;
+    MOUSE = 2;
 }
 
 message InputConfig {
+    // Заменено на `pointer_mode` (поле 4) — сохранено зарезервированным,
+    // не переиспользуется, чтобы не столкнуться со старыми клиентами,
+    // которые всё ещё шлют это поле по номеру 1. Конвертация proto -> core:
+    // если `pointer_mode` == UNSPECIFIED, используется значение этого поля
+    // (`true` -> Tablet, `false` -> Mouse) как fallback для обратной
+    // совместимости; если `pointer_mode` задан явно — он побеждает.
     bool tablet_mode = 1;
     bool hide_host_cursor = 2;
     bool clipboard_enabled = 3;
+    PointerMode pointer_mode = 4;
 }
 
 // Поля соответствуют `andler_core::InstanceConfig` для
@@ -331,12 +373,28 @@ enum RootMode {
     reserved 3; // was ROOT_MODE_KERNEL_SU, removed
 }
 
+// См. `andler_core::android_profile::ArmTranslator`.
+enum ArmTranslator {
+    ARM_TRANSLATOR_UNSPECIFIED = 0;
+    ARM_TRANSLATOR_NONE = 1;
+    LIBNDK = 2;
+    LIBHOUDINI = 3;
+}
+
 message AndroidProfile {
     AndroidVersion android_version = 1;
     bool gapps = 2;
     bool microg = 3;
-    bool libndk = 4;
+    // Заменено на `arm_translator` (поле 6) — зарезервировано, не
+    // переиспользуется, чтобы не столкнуться со старыми клиентами,
+    // которые всё ещё шлют bool по номеру 4.
+    reserved 4;
+    reserved "libndk";
     RootMode root = 5;
+    // `UNSPECIFIED`/отсутствие поля трактуется как `ARM_TRANSLATOR_NONE`
+    // при конвертации proto -> core (безопасный дефолт — старые клиенты
+    // не знали об этом поле и не имели транслятора вовсе).
+    ArmTranslator arm_translator = 6;
 }
 
 // Поля соответствуют параметрам Daemon::create_android_instance

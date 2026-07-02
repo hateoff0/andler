@@ -15,7 +15,8 @@
 use std::path::Path;
 
 use andler_core::{
-    AudioBackend, DiskFormat, DisplayEngine, InstanceConfig, InstanceKind, RenderBackend,
+    AudioBackend, AudioDevice, DiskFormat, DisplayEngine, InstanceConfig, InstanceKind,
+    NatBackend, PointerMode, RenderBackend,
 };
 
 /// Собирает полный список аргументов для `qemu-system-x86_64`, эквивалентный
@@ -192,6 +193,16 @@ fn gpu_display_args(cfg: &InstanceConfig) -> Vec<String> {
             if gpu.gl { "on" } else { "off" },
             show_cursor
         ),
+        // GTK имеет собственный `clipboard=on` — не требует vdagent для
+        // буфера обмена (в отличие от SDL, см. PLAN.md "Настройки
+        // дисплея"). `input_args()` всё равно добавляет vdagent
+        // безусловно на данном этапе (см. docstring там) — избыточно,
+        // но не ломает функциональность.
+        DisplayEngine::Gtk => format!(
+            "gtk,gl={},show-cursor={},clipboard=on",
+            if gpu.gl { "on" } else { "off" },
+            show_cursor
+        ),
         // Spice/Dbus — нужны для стриминга в GUI-клиент (frontend/), не
         // используются текущим CLI-путём. Конкретные флаги (порт, TLS,
         // и т.п.) — открытый вопрос на момент реализации GUI, не этого шага.
@@ -252,16 +263,23 @@ fn disk_args(cfg: &InstanceConfig) -> Vec<String> {
     args
 }
 
-/// `-device virtio-tablet-pci,id=tablet0` (если `tablet_mode`) +
+/// `-device virtio-tablet-pci,id=tablet0` (`PointerMode::Tablet`) или
+/// `-device virtio-mouse-pci,id=mouse0` (`PointerMode::Mouse`) +
 /// `-device virtio-serial-pci` + `-device virtserialport,...` +
 /// `-chardev qemu-vdagent,...,clipboard=on,mouse=on` (если `clipboard_enabled`).
 fn input_args(cfg: &InstanceConfig) -> Vec<String> {
     let input = &cfg.input;
     let mut args = Vec::new();
 
-    if input.tablet_mode {
-        args.push("-device".to_string());
-        args.push("virtio-tablet-pci,id=tablet0".to_string());
+    match input.pointer_mode {
+        PointerMode::Tablet => {
+            args.push("-device".to_string());
+            args.push("virtio-tablet-pci,id=tablet0".to_string());
+        }
+        PointerMode::Mouse => {
+            args.push("-device".to_string());
+            args.push("virtio-mouse-pci,id=mouse0".to_string());
+        }
     }
 
     if input.clipboard_enabled {
@@ -276,7 +294,9 @@ fn input_args(cfg: &InstanceConfig) -> Vec<String> {
     args
 }
 
-/// `-nic user,model=virtio-net-pci` (NAT) или эквивалент для других режимов.
+/// `-nic user,model=virtio-net-pci` (NAT/SLIRP, дефолт) или
+/// `-netdev passt,id=net0 -device virtio-net-pci,netdev=net0` (NAT/passt) —
+/// см. `NatBackend`. Для других режимов сети — см. ниже.
 ///
 /// `Bridge`/`Isolated` пока не реализованы в `andler-net` (см. его README)
 /// — здесь оставлен `panic!` для непокрытых вариантов по той же причине,
@@ -287,10 +307,18 @@ fn network_args(cfg: &InstanceConfig) -> Vec<String> {
     use andler_core::NetworkMode;
 
     match &cfg.network.mode {
-        NetworkMode::Nat => vec![
-            "-nic".to_string(),
-            format!("user,model={}", cfg.network.device_model),
-        ],
+        NetworkMode::Nat => match cfg.network.nat_backend {
+            NatBackend::Slirp => vec![
+                "-nic".to_string(),
+                format!("user,model={}", cfg.network.device_model),
+            ],
+            NatBackend::Passt => vec![
+                "-netdev".to_string(),
+                "passt,id=net0".to_string(),
+                "-device".to_string(),
+                format!("{},netdev=net0", cfg.network.device_model),
+            ],
+        },
         NetworkMode::Bridge { .. } | NetworkMode::Isolated => {
             panic!(
                 "NetworkMode::{:?} is not yet implemented in andler-qemu::cmdline \
@@ -301,7 +329,10 @@ fn network_args(cfg: &InstanceConfig) -> Vec<String> {
     }
 }
 
-/// `-audiodev pipewire,id=snd0 -device ich9-intel-hda -device hda-output,audiodev=snd0`
+/// `-audiodev pipewire,id=snd0` + one of:
+/// - `-device virtio-sound-pci,audiodev=snd0` (`AudioDevice::VirtioSound`, дефолт)
+/// - `-device ich9-intel-hda -device hda-output,audiodev=snd0` (`AudioDevice::Ich9Hda`)
+///
 /// (или `pulseaudio` вместо `pipewire`; никаких audio-флагов для `None`).
 fn audio_args(cfg: &InstanceConfig) -> Vec<String> {
     match cfg.audio.backend {
@@ -312,14 +343,23 @@ fn audio_args(cfg: &InstanceConfig) -> Vec<String> {
                 AudioBackend::Pulseaudio => "pulseaudio",
                 AudioBackend::None => unreachable!(),
             };
-            vec![
+            let mut args = vec![
                 "-audiodev".to_string(),
                 format!("{backend_str},id=snd0"),
-                "-device".to_string(),
-                "ich9-intel-hda".to_string(),
-                "-device".to_string(),
-                "hda-output,audiodev=snd0".to_string(),
-            ]
+            ];
+            match cfg.audio.device {
+                AudioDevice::VirtioSound => {
+                    args.push("-device".to_string());
+                    args.push("virtio-sound-pci,audiodev=snd0".to_string());
+                }
+                AudioDevice::Ich9Hda => {
+                    args.push("-device".to_string());
+                    args.push("ich9-intel-hda".to_string());
+                    args.push("-device".to_string());
+                    args.push("hda-output,audiodev=snd0".to_string());
+                }
+            }
+            args
         }
     }
 }
@@ -492,6 +532,18 @@ mod tests {
     }
 
     #[test]
+    fn gpu_display_args_for_gtk_includes_native_clipboard() {
+        let mut cfg = start_sh_equivalent_config();
+        cfg.display.display_engine = DisplayEngine::Gtk;
+        let args = gpu_display_args(&cfg);
+        let display_idx = args
+            .iter()
+            .position(|a| a == "-display")
+            .expect("-display must be present");
+        assert_eq!(args[display_idx + 1], "gtk,gl=on,show-cursor=off,clipboard=on");
+    }
+
+    #[test]
     #[should_panic(expected = "Passthrough")]
     fn gpu_display_args_panics_on_passthrough() {
         let mut cfg = start_sh_equivalent_config();
@@ -521,7 +573,7 @@ mod tests {
 
     #[test]
     fn disk_args_have_no_cdrom_for_android_vm() {
-        use andler_core::{AndroidProfile, AndroidVersion, RootMode};
+        use andler_core::{AndroidProfile, AndroidVersion, ArmTranslator, RootMode};
 
         let mut cfg = start_sh_equivalent_config();
         cfg.kind = InstanceKind::AndroidVm {
@@ -529,7 +581,7 @@ mod tests {
                 android_version: AndroidVersion::Android13,
                 gapps: true,
                 microg: false,
-                libndk: true,
+                arm_translator: ArmTranslator::Libndk,
                 root: RootMode::None,
             },
         };
@@ -565,14 +617,60 @@ mod tests {
     }
 
     #[test]
+    fn input_args_use_virtio_mouse_when_pointer_mode_is_mouse() {
+        let mut cfg = start_sh_equivalent_config();
+        cfg.input.pointer_mode = PointerMode::Mouse;
+        let args = input_args(&cfg);
+        assert!(args.contains(&"virtio-mouse-pci,id=mouse0".to_string()));
+        assert!(!args.iter().any(|a| a.contains("virtio-tablet-pci")));
+    }
+
+    #[test]
     fn network_args_match_start_sh() {
         let cfg = start_sh_equivalent_config();
         assert_eq!(network_args(&cfg), vec!["-nic", "user,model=virtio-net-pci"]);
     }
 
     #[test]
-    fn audio_args_match_start_sh() {
+    fn network_args_use_passt_netdev_when_selected() {
+        let mut cfg = start_sh_equivalent_config();
+        cfg.network.nat_backend = NatBackend::Passt;
+        assert_eq!(
+            network_args(&cfg),
+            vec![
+                "-netdev",
+                "passt,id=net0",
+                "-device",
+                "virtio-net-pci,netdev=net0",
+            ]
+        );
+    }
+
+    #[test]
+    fn audio_args_match_reference_default_virtio_sound() {
+        // ПРИМЕЧАНИЕ: reference_default() теперь умышленно отклоняется от
+        // буквального start.sh для audio-устройства (virtio-sound-pci,
+        // не ich9-intel-hda) — см. `AudioConfig::reference_default()`.
+        // Backend хоста (pipewire) по-прежнему как в start.sh.
         let cfg = start_sh_equivalent_config();
+        assert_eq!(
+            audio_args(&cfg),
+            vec![
+                "-audiodev",
+                "pipewire,id=snd0",
+                "-device",
+                "virtio-sound-pci,audiodev=snd0",
+            ]
+        );
+    }
+
+    #[test]
+    fn audio_args_ich9_hda_matches_start_sh_literal() {
+        // Буквальный start.sh: `-device ich9-intel-hda -device
+        // hda-output,audiodev=snd0` — всё ещё доступно как явный выбор
+        // `AudioDevice::Ich9Hda` (fallback-вариант).
+        let mut cfg = start_sh_equivalent_config();
+        cfg.audio.device = AudioDevice::Ich9Hda;
         assert_eq!(
             audio_args(&cfg),
             vec![

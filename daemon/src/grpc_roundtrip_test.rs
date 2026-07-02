@@ -207,6 +207,7 @@ fn sample_create_instance_request() -> CreateInstanceRequest {
             kind: Some(network_mode::Kind::Nat(network_mode::Nat {})),
         }),
         device_model: "virtio-net-pci".to_string(),
+        nat_backend: andler_rpc::proto::NatBackend::Slirp as i32,
     };
 
     let firmware = FirmwareConfig {
@@ -216,12 +217,15 @@ fn sample_create_instance_request() -> CreateInstanceRequest {
 
     let mut audio = AudioConfig::default();
     audio.set_backend(andler_rpc::proto::AudioBackend::Pipewire);
+    audio.set_device(andler_rpc::proto::AudioDevice::VirtioSound);
 
-    let input = InputConfig {
+    let mut input = InputConfig {
         tablet_mode: true,
         hide_host_cursor: true,
         clipboard_enabled: true,
+        ..Default::default()
     };
+    input.set_pointer_mode(andler_rpc::proto::PointerMode::Tablet);
 
     CreateInstanceRequest {
         name: "test-linux-vm".to_string(),
@@ -308,6 +312,7 @@ async fn create_instance_with_bridge_network_round_trips_over_real_grpc() {
             })),
         }),
         device_model: "virtio-net-pci".to_string(),
+        nat_backend: andler_rpc::proto::NatBackend::Slirp as i32,
     });
 
     let response = client

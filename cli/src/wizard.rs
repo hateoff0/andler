@@ -32,7 +32,7 @@ use andler_rpc::proto::{CreateAndroidInstanceRequest, CreateInstanceRequest};
 use inquire::{Confirm, CustomType, InquireError, Select, Text};
 
 use crate::helpers::ensure_qcow2_extension;
-use crate::{CliAndroidVersion, CliRootMode};
+use crate::{CliAndroidVersion, CliArmTranslator, CliRootMode};
 
 /// Результат wizard — то, что нужно передать в gRPC.
 pub enum WizardResult {
@@ -206,10 +206,13 @@ fn run_android(
     } else {
         false
     };
-    let libndk = if advanced {
-        confirm("Включить libndk (ARM-транслятор для ARMv8 приложений)?", false)?
+    let arm_translator = if advanced {
+        ask_arm_translator()?
     } else {
-        true // безопасный дефолт — libndk почти всегда нужен
+        // Авто-детект по CPU вендору ещё не подключён к wizard'у (это
+        // отдельный шаг — andler-firmware::detect::arm, WIZARD.md Part 5).
+        // До этого — безопасный дефолт "без транслятора", не угадываем.
+        CliArmTranslator::None
     };
 
     let (root_mode, magisk_dir) = if advanced {
@@ -235,7 +238,7 @@ fn run_android(
     println!("│  Overlay:           {overlay_gib} GiB");
     println!("│  GApps:             {gapps}");
     println!("│  MicroG:            {microg}");
-    println!("│  libndk:            {libndk}");
+    println!("│  ARM translator:    {arm_translator:?}");
     println!(
         "│  Root:              {}",
         if root_mode == CliRootMode::Magisk {
@@ -257,11 +260,11 @@ fn run_android(
     let mut profile = AndroidProfile {
         gapps,
         microg,
-        libndk,
         ..Default::default()
     };
     profile.set_android_version(version.into());
     profile.set_root(root_mode.into());
+    profile.set_arm_translator(arm_translator.into());
 
     Ok(CreateAndroidInstanceRequest {
         name,
@@ -367,6 +370,26 @@ fn ask_android_version() -> Result<CliAndroidVersion, WizardError> {
         CliAndroidVersion::V13
     } else {
         CliAndroidVersion::V11
+    })
+}
+
+fn ask_arm_translator() -> Result<CliArmTranslator, WizardError> {
+    let choice = Select::new(
+        "ARM-транслятор (для ARM-only приложений):",
+        vec!["none", "libndk (AMD)", "libhoudini (Intel)"],
+    )
+    .with_help_message(
+        "Позволяет запускать приложения, скомпилированные только под ARM. \
+         Авто-детект по CPU вендору появится позже (andler-firmware) — \
+         пока выбирайте вручную.",
+    )
+    .prompt()
+    .map_err(map_inquire_err)?;
+
+    Ok(match choice {
+        "libndk (AMD)" => CliArmTranslator::Libndk,
+        "libhoudini (Intel)" => CliArmTranslator::Libhoudini,
+        _ => CliArmTranslator::None,
     })
 }
 

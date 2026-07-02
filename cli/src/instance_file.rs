@@ -120,9 +120,17 @@ pub struct InstanceFile {
     /// Include microG.
     #[serde(default)]
     pub microg: bool,
-    /// Include ARM→x86 translation (libhoudini/libndk).
+    /// Include ARM→x86 translation (libhoudini/libndk). **Deprecated** —
+    /// use `arm_translator = "libndk"` instead. Kept only for backward
+    /// compatibility with TOML files written before `arm_translator`
+    /// existed: `libndk = true` -> `ArmTranslator::Libndk` when
+    /// `arm_translator` is absent. If both are present, `arm_translator`
+    /// wins.
     #[serde(default)]
     pub libndk: bool,
+    /// ARM→x86 translator: `"none"` (default), `"libndk"`, `"libhoudini"`.
+    #[serde(default)]
+    pub arm_translator: Option<String>,
     /// Instance directory root for Android instances.
     #[serde(default)]
     pub instances_root: Option<String>,
@@ -268,13 +276,24 @@ impl InstanceFile {
         let mut profile = ProtoAndroidProfile {
             gapps: self.gapps,
             microg: self.microg,
-            libndk: self.libndk,
             ..Default::default()
         };
         profile.set_android_version(match android_version {
             11 => andler_rpc::proto::AndroidVersion::Android11,
             _ => andler_rpc::proto::AndroidVersion::Android13,
         });
+
+        // `arm_translator` побеждает, если задан явно; иначе — обратная
+        // совместимость со старым `libndk = true/false` (см. doc-
+        // комментарий на поле `libndk`).
+        let arm_translator = match self.arm_translator.as_deref() {
+            Some("libndk") => andler_rpc::proto::ArmTranslator::Libndk,
+            Some("libhoudini") => andler_rpc::proto::ArmTranslator::Libhoudini,
+            Some(_) => andler_rpc::proto::ArmTranslator::ArmTranslatorNone,
+            None if self.libndk => andler_rpc::proto::ArmTranslator::Libndk,
+            None => andler_rpc::proto::ArmTranslator::ArmTranslatorNone,
+        };
+        profile.set_arm_translator(arm_translator);
 
         let root_mode = match self.root.as_deref() {
             Some("magisk") => andler_rpc::proto::RootMode::Magisk,
@@ -472,10 +491,67 @@ mod tests {
                 let profile = req.profile.unwrap();
                 assert!(profile.gapps);
                 assert!(profile.microg);
-                assert!(profile.libndk);
+                // Backward compat: старый `libndk = true` (без
+                // `arm_translator`) резолвится в Libndk.
+                assert_eq!(
+                    profile.arm_translator(),
+                    andler_rpc::proto::ArmTranslator::Libndk
+                );
                 assert_eq!(
                     profile.root(),
                     andler_rpc::proto::RootMode::Magisk
+                );
+            }
+            other => panic!("expected Android, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn android_arm_translator_field_selects_libhoudini() {
+        let toml = format!("{MINIMAL_ANDROID_TOML}\narm_translator = \"libhoudini\"\n");
+        let file: InstanceFile = toml::from_str(&toml).expect("TOML must parse");
+        match file.into_result() {
+            InstanceFileResult::Android(req) => {
+                let profile = req.profile.unwrap();
+                assert_eq!(
+                    profile.arm_translator(),
+                    andler_rpc::proto::ArmTranslator::Libhoudini
+                );
+            }
+            other => panic!("expected Android, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn android_arm_translator_field_wins_over_legacy_libndk() {
+        // Явный arm_translator побеждает над устаревшим libndk, даже
+        // если они противоречат друг другу (рассинхронизированный файл).
+        let toml = format!(
+            "{MINIMAL_ANDROID_TOML}\nlibndk = true\narm_translator = \"none\"\n"
+        );
+        let file: InstanceFile = toml::from_str(&toml).expect("TOML must parse");
+        match file.into_result() {
+            InstanceFileResult::Android(req) => {
+                let profile = req.profile.unwrap();
+                assert_eq!(
+                    profile.arm_translator(),
+                    andler_rpc::proto::ArmTranslator::ArmTranslatorNone
+                );
+            }
+            other => panic!("expected Android, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn android_no_translator_fields_defaults_to_none() {
+        let file: InstanceFile =
+            toml::from_str(MINIMAL_ANDROID_TOML).expect("minimal Android TOML must parse");
+        match file.into_result() {
+            InstanceFileResult::Android(req) => {
+                let profile = req.profile.unwrap();
+                assert_eq!(
+                    profile.arm_translator(),
+                    andler_rpc::proto::ArmTranslator::ArmTranslatorNone
                 );
             }
             other => panic!("expected Android, got {other:?}"),

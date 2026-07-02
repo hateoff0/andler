@@ -7,11 +7,11 @@ use std::path::PathBuf;
 
 use crate::proto;
 use andler_core::{
-    AndroidProfile, AndroidVersion, AudioBackend, AudioConfig, BackendKind, CdromBus, CloneMode,
-    CpuConfig, CpuPriority, DiskConfig, DiskFormat, DisplayConfig, DisplayEngine, FirmwareConfig,
-    GpuConfig, InputConfig, InstanceConfig, InstanceId, InstanceKind, InstanceState, LogLine,
-    LogStreamSource, MemoryConfig, NetworkConfig, NetworkMode, RenderBackend, Resolution,
-    ResourceMetrics, RootMode,
+    AndroidProfile, AndroidVersion, ArmTranslator, AudioBackend, AudioConfig, AudioDevice,
+    BackendKind, CdromBus, CloneMode, CpuConfig, CpuPriority, DiskConfig, DiskFormat,
+    DisplayConfig, DisplayEngine, FirmwareConfig, GpuConfig, InputConfig, InstanceConfig,
+    InstanceId, InstanceKind, InstanceState, LogLine, LogStreamSource, MemoryConfig, NatBackend,
+    NetworkConfig, NetworkMode, PointerMode, RenderBackend, Resolution, ResourceMetrics, RootMode,
 };
 
 /// Ошибка конвертации proto-сообщения в доменный тип — на практике сейчас
@@ -101,6 +101,31 @@ impl From<RootMode> for proto::RootMode {
     }
 }
 
+/// `UNSPECIFIED` -> `ArmTranslator::None` — не ошибка: старые клиенты,
+/// которые не знали об этом поле, физически не имели транслятора, так
+/// что это точное, а не приблизительное значение по умолчанию.
+impl From<proto::ArmTranslator> for ArmTranslator {
+    fn from(value: proto::ArmTranslator) -> Self {
+        match value {
+            proto::ArmTranslator::Libndk => ArmTranslator::Libndk,
+            proto::ArmTranslator::Libhoudini => ArmTranslator::Libhoudini,
+            proto::ArmTranslator::ArmTranslatorNone | proto::ArmTranslator::Unspecified => {
+                ArmTranslator::None
+            }
+        }
+    }
+}
+
+impl From<ArmTranslator> for proto::ArmTranslator {
+    fn from(value: ArmTranslator) -> Self {
+        match value {
+            ArmTranslator::None => proto::ArmTranslator::ArmTranslatorNone,
+            ArmTranslator::Libndk => proto::ArmTranslator::Libndk,
+            ArmTranslator::Libhoudini => proto::ArmTranslator::Libhoudini,
+        }
+    }
+}
+
 impl TryFrom<proto::AndroidProfile> for AndroidProfile {
     type Error = ConvertError;
 
@@ -109,7 +134,7 @@ impl TryFrom<proto::AndroidProfile> for AndroidProfile {
             android_version: value.android_version().try_into()?,
             gapps: value.gapps,
             microg: value.microg,
-            libndk: value.libndk,
+            arm_translator: value.arm_translator().into(),
             root: value.root().try_into()?,
         })
     }
@@ -120,11 +145,11 @@ impl From<AndroidProfile> for proto::AndroidProfile {
         let mut msg = proto::AndroidProfile {
             gapps: value.gapps,
             microg: value.microg,
-            libndk: value.libndk,
             ..Default::default()
         };
         msg.set_android_version(value.android_version.into());
         msg.set_root(value.root.into());
+        msg.set_arm_translator(value.arm_translator.into());
         msg
     }
 }
@@ -354,6 +379,7 @@ impl TryFrom<proto::DisplayEngine> for DisplayEngine {
             // `prost` поэтому не обрезает префикс (тот же эффект, что у
             // `AudioBackend::AudioNone` для `AUDIO_NONE` ниже).
             proto::DisplayEngine::DisplayNone => Ok(DisplayEngine::None),
+            proto::DisplayEngine::Gtk => Ok(DisplayEngine::Gtk),
             proto::DisplayEngine::Unspecified => Err(ConvertError::MissingDisplayEngine),
         }
     }
@@ -366,6 +392,7 @@ impl From<DisplayEngine> for proto::DisplayEngine {
             DisplayEngine::Spice => proto::DisplayEngine::Spice,
             DisplayEngine::Dbus => proto::DisplayEngine::Dbus,
             DisplayEngine::None => proto::DisplayEngine::DisplayNone,
+            DisplayEngine::Gtk => proto::DisplayEngine::Gtk,
         }
     }
 }
@@ -504,6 +531,27 @@ impl From<NetworkMode> for proto::NetworkMode {
     }
 }
 
+/// `UNSPECIFIED` -> `Slirp` — не ошибка, а фоллбэк на поведение `start.sh`,
+/// т.к. старые сохранённые конфиги (до появления `nat_backend`) физически
+/// не могли заполнить это поле (тот же приём, что для `CdromBus`).
+impl From<proto::NatBackend> for NatBackend {
+    fn from(value: proto::NatBackend) -> Self {
+        match value {
+            proto::NatBackend::Passt => NatBackend::Passt,
+            proto::NatBackend::Slirp | proto::NatBackend::Unspecified => NatBackend::Slirp,
+        }
+    }
+}
+
+impl From<NatBackend> for proto::NatBackend {
+    fn from(value: NatBackend) -> Self {
+        match value {
+            NatBackend::Slirp => proto::NatBackend::Slirp,
+            NatBackend::Passt => proto::NatBackend::Passt,
+        }
+    }
+}
+
 impl TryFrom<proto::NetworkConfig> for NetworkConfig {
     type Error = ConvertError;
 
@@ -512,20 +560,25 @@ impl TryFrom<proto::NetworkConfig> for NetworkConfig {
             .mode
             .ok_or(ConvertError::MissingField("network.mode"))?
             .try_into()?;
+        let nat_backend = value.nat_backend().into();
 
         Ok(NetworkConfig {
             mode,
             device_model: value.device_model,
+            nat_backend,
         })
     }
 }
 
 impl From<NetworkConfig> for proto::NetworkConfig {
     fn from(value: NetworkConfig) -> Self {
-        proto::NetworkConfig {
+        let mut msg = proto::NetworkConfig {
             mode: Some(value.mode.into()),
             device_model: value.device_model,
-        }
+            ..Default::default()
+        };
+        msg.set_nat_backend(value.nat_backend.into());
+        msg
     }
 }
 
@@ -570,12 +623,36 @@ impl From<AudioBackend> for proto::AudioBackend {
     }
 }
 
+/// `UNSPECIFIED` -> `VirtioSound` — не ошибка, тот же фоллбэк-приём, что
+/// для `NatBackend`/`CdromBus`: старые сохранённые конфиги физически не
+/// могли заполнить это поле.
+impl From<proto::AudioDevice> for AudioDevice {
+    fn from(value: proto::AudioDevice) -> Self {
+        match value {
+            proto::AudioDevice::Ich9Hda => AudioDevice::Ich9Hda,
+            proto::AudioDevice::VirtioSound | proto::AudioDevice::Unspecified => {
+                AudioDevice::VirtioSound
+            }
+        }
+    }
+}
+
+impl From<AudioDevice> for proto::AudioDevice {
+    fn from(value: AudioDevice) -> Self {
+        match value {
+            AudioDevice::VirtioSound => proto::AudioDevice::VirtioSound,
+            AudioDevice::Ich9Hda => proto::AudioDevice::Ich9Hda,
+        }
+    }
+}
+
 impl TryFrom<proto::AudioConfig> for AudioConfig {
     type Error = ConvertError;
 
     fn try_from(value: proto::AudioConfig) -> Result<Self, Self::Error> {
         Ok(AudioConfig {
             backend: value.backend().try_into()?,
+            device: value.device().into(),
         })
     }
 }
@@ -584,14 +661,31 @@ impl From<AudioConfig> for proto::AudioConfig {
     fn from(value: AudioConfig) -> Self {
         let mut msg = proto::AudioConfig::default();
         msg.set_backend(value.backend.into());
+        msg.set_device(value.device.into());
         msg
     }
 }
 
+/// `UNSPECIFIED` -> фоллбэк на устаревшее поле `tablet_mode` (обратная
+/// совместимость со старыми клиентами) -> `Tablet` по умолчанию, если и
+/// оно отсутствует (proto3 `bool` по умолчанию `false`, что дало бы
+/// `Mouse` — поэтому явный `Unspecified` fallback на `tablet_mode`, а не
+/// слепое чтение bool).
 impl From<proto::InputConfig> for InputConfig {
     fn from(value: proto::InputConfig) -> Self {
+        let pointer_mode = match value.pointer_mode() {
+            proto::PointerMode::Tablet => PointerMode::Tablet,
+            proto::PointerMode::Mouse => PointerMode::Mouse,
+            proto::PointerMode::Unspecified => {
+                if value.tablet_mode {
+                    PointerMode::Tablet
+                } else {
+                    PointerMode::Mouse
+                }
+            }
+        };
         InputConfig {
-            tablet_mode: value.tablet_mode,
+            pointer_mode,
             hide_host_cursor: value.hide_host_cursor,
             clipboard_enabled: value.clipboard_enabled,
         }
@@ -600,10 +694,24 @@ impl From<proto::InputConfig> for InputConfig {
 
 impl From<InputConfig> for proto::InputConfig {
     fn from(value: InputConfig) -> Self {
-        proto::InputConfig {
-            tablet_mode: value.tablet_mode,
+        let mut msg = proto::InputConfig {
+            // Заполняем и устаревшее поле — старые клиенты, которые ещё
+            // не знают про `pointer_mode`, продолжают работать.
+            tablet_mode: value.pointer_mode == PointerMode::Tablet,
             hide_host_cursor: value.hide_host_cursor,
             clipboard_enabled: value.clipboard_enabled,
+            ..Default::default()
+        };
+        msg.set_pointer_mode(value.pointer_mode.into());
+        msg
+    }
+}
+
+impl From<PointerMode> for proto::PointerMode {
+    fn from(value: PointerMode) -> Self {
+        match value {
+            PointerMode::Tablet => proto::PointerMode::Tablet,
+            PointerMode::Mouse => proto::PointerMode::Mouse,
         }
     }
 }
@@ -824,7 +932,7 @@ mod tests {
             android_version: AndroidVersion::Android13,
             gapps: true,
             microg: false,
-            libndk: true,
+            arm_translator: ArmTranslator::Libndk,
             root: RootMode::Magisk,
         };
 
@@ -834,13 +942,30 @@ mod tests {
     }
 
     #[test]
+    fn android_profile_unspecified_arm_translator_falls_back_to_none() {
+        // Старые сохранённые профили не могли заполнить это поле —
+        // должны читаться как ArmTranslator::None, не как ошибка.
+        let mut msg = proto::AndroidProfile {
+            gapps: false,
+            microg: false,
+            root: proto::RootMode::None as i32,
+            ..Default::default()
+        };
+        msg.set_android_version(proto::AndroidVersion::Android13);
+        msg.set_arm_translator(proto::ArmTranslator::Unspecified);
+
+        let profile = AndroidProfile::try_from(msg).unwrap();
+        assert_eq!(profile.arm_translator, ArmTranslator::None);
+    }
+
+    #[test]
     fn unspecified_android_version_is_rejected() {
         let msg = proto::AndroidProfile {
             android_version: proto::AndroidVersion::Unspecified as i32,
             gapps: false,
             microg: false,
-            libndk: false,
             root: proto::RootMode::None as i32,
+            ..Default::default()
         };
         let err = AndroidProfile::try_from(msg).unwrap_err();
         assert!(matches!(err, ConvertError::MissingAndroidVersion));
@@ -1129,7 +1254,7 @@ mod tests {
                 android_version: AndroidVersion::Android13,
                 gapps: true,
                 microg: false,
-                libndk: false,
+                arm_translator: ArmTranslator::None,
                 root: RootMode::Magisk,
             },
         };
@@ -1181,6 +1306,88 @@ mod tests {
 
         let back: proto::DisplayEngine = domain.into();
         assert_eq!(back, proto::DisplayEngine::DisplayNone);
+    }
+
+    #[test]
+    fn display_engine_gtk_round_trips_through_proto() {
+        let msg = proto::DisplayEngine::Gtk;
+        let domain = DisplayEngine::try_from(msg).unwrap();
+        assert_eq!(domain, DisplayEngine::Gtk);
+
+        let back: proto::DisplayEngine = domain.into();
+        assert_eq!(back, proto::DisplayEngine::Gtk);
+    }
+
+    #[test]
+    fn nat_backend_unspecified_falls_back_to_slirp() {
+        // Старые сохранённые конфиги не могли заполнить это поле —
+        // должны читаться как Slirp (поведение start.sh), не как ошибка.
+        let domain: NatBackend = proto::NatBackend::Unspecified.into();
+        assert_eq!(domain, NatBackend::Slirp);
+    }
+
+    #[test]
+    fn nat_backend_passt_round_trips_through_proto() {
+        let domain: NatBackend = proto::NatBackend::Passt.into();
+        assert_eq!(domain, NatBackend::Passt);
+        let back: proto::NatBackend = domain.into();
+        assert_eq!(back, proto::NatBackend::Passt);
+    }
+
+    #[test]
+    fn audio_device_unspecified_falls_back_to_virtio_sound() {
+        let domain: AudioDevice = proto::AudioDevice::Unspecified.into();
+        assert_eq!(domain, AudioDevice::VirtioSound);
+    }
+
+    #[test]
+    fn audio_device_ich9_hda_round_trips_through_proto() {
+        let domain: AudioDevice = proto::AudioDevice::Ich9Hda.into();
+        assert_eq!(domain, AudioDevice::Ich9Hda);
+        let back: proto::AudioDevice = domain.into();
+        assert_eq!(back, proto::AudioDevice::Ich9Hda);
+    }
+
+    #[test]
+    fn input_config_pointer_mode_unspecified_falls_back_to_legacy_tablet_mode() {
+        // Старый клиент прислал только `tablet_mode = true`, ничего не
+        // зная про `pointer_mode` — должны получить Tablet, не Mouse.
+        let msg = proto::InputConfig {
+            tablet_mode: true,
+            hide_host_cursor: true,
+            clipboard_enabled: true,
+            pointer_mode: proto::PointerMode::Unspecified as i32,
+        };
+        let domain: InputConfig = msg.into();
+        assert_eq!(domain.pointer_mode, PointerMode::Tablet);
+    }
+
+    #[test]
+    fn input_config_pointer_mode_explicit_wins_over_legacy_tablet_mode() {
+        // pointer_mode=Mouse побеждает, даже если устаревшее поле
+        // tablet_mode=true (рассинхронизированный/старый клиент).
+        let msg = proto::InputConfig {
+            tablet_mode: true,
+            hide_host_cursor: true,
+            clipboard_enabled: true,
+            pointer_mode: proto::PointerMode::Mouse as i32,
+        };
+        let domain: InputConfig = msg.into();
+        assert_eq!(domain.pointer_mode, PointerMode::Mouse);
+    }
+
+    #[test]
+    fn input_config_to_proto_fills_legacy_tablet_mode_field() {
+        // Новый код тоже заполняет устаревшее bool-поле — старые клиенты,
+        // которые ещё не знают pointer_mode, продолжают работать.
+        let domain = InputConfig {
+            pointer_mode: PointerMode::Tablet,
+            hide_host_cursor: true,
+            clipboard_enabled: true,
+        };
+        let msg: proto::InputConfig = domain.into();
+        assert!(msg.tablet_mode);
+        assert_eq!(msg.pointer_mode(), proto::PointerMode::Tablet);
     }
 
     #[test]

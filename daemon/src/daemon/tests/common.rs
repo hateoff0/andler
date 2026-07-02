@@ -1,6 +1,6 @@
 use super::*;
 use andler_core::{
-    AndroidProfile, AudioConfig, CdromBus, CpuConfig, DiskConfig, DisplayConfig, FirmwareConfig,
+    AndroidProfile, ArmTranslator, AudioConfig, CdromBus, CpuConfig, DiskConfig, DisplayConfig, FirmwareConfig,
     GpuConfig, InputConfig, InstanceKind, MemoryConfig, NetworkConfig,
 };
 pub(crate) use andler_core::{AndroidVersion, RootMode};
@@ -59,7 +59,7 @@ pub(crate) fn sample_android_config(disk_path: PathBuf, base_image: PathBuf) -> 
             android_version: AndroidVersion::Android13,
             gapps: false,
             microg: false,
-            libndk: false,
+            arm_translator: ArmTranslator::None,
             root: RootMode::None,
         },
     };

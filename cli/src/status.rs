@@ -164,7 +164,7 @@ fn print_instance_config(config: GetInstanceConfigResponse) {
                 println!("  android_version: {:?}", profile.android_version());
                 println!("  gapps: {}", profile.gapps);
                 println!("  microg: {}", profile.microg);
-                println!("  libndk: {}", profile.libndk);
+                println!("  arm_translator: {:?}", profile.arm_translator());
                 println!("  root: {:?}", profile.root());
             }
         }
@@ -232,6 +232,7 @@ fn print_instance_config(config: GetInstanceConfigResponse) {
                 DisplayEngine::Spice => "Spice",
                 DisplayEngine::Dbus => "Dbus",
                 DisplayEngine::DisplayNone => "None",
+                DisplayEngine::Gtk => "Gtk",
             }
         );
         println!("  fullscreen: {}", display.fullscreen);
@@ -257,8 +258,14 @@ fn print_instance_config(config: GetInstanceConfigResponse) {
     if let Some(network) = config.network {
         println!("[network]");
         println!("  device_model: {}", network.device_model);
-        match network.mode.and_then(|m| m.kind) {
-            Some(network_mode::Kind::Nat(_)) => println!("  mode: Nat"),
+        match network.mode.clone().and_then(|m| m.kind) {
+            Some(network_mode::Kind::Nat(_)) => {
+                let nat_backend = match network.nat_backend() {
+                    andler_rpc::proto::NatBackend::Passt => "passt",
+                    _ => "slirp",
+                };
+                println!("  mode: Nat ({nat_backend})")
+            }
             Some(network_mode::Kind::Bridge(b)) => {
                 println!("  mode: Bridge({})", b.interface)
             }
@@ -288,11 +295,28 @@ fn print_instance_config(config: GetInstanceConfigResponse) {
                 AudioBackend::AudioNone => "None",
             }
         );
+        println!(
+            "  device: {}",
+            match audio.device() {
+                andler_rpc::proto::AudioDevice::Unspecified => "UNSPECIFIED (defaults to virtio-sound)",
+                andler_rpc::proto::AudioDevice::VirtioSound => "virtio-sound",
+                andler_rpc::proto::AudioDevice::Ich9Hda => "ich9-hda",
+            }
+        );
     }
 
     if let Some(input) = config.input {
         println!("[input]");
-        println!("  tablet_mode: {}", input.tablet_mode);
+        println!(
+            "  pointer_mode: {}",
+            match input.pointer_mode() {
+                andler_rpc::proto::PointerMode::Mouse => "mouse",
+                // UNSPECIFIED falls back to the legacy tablet_mode bool —
+                // see convert.rs — old daemons may still only send that.
+                andler_rpc::proto::PointerMode::Unspecified if !input.tablet_mode => "mouse",
+                _ => "tablet",
+            }
+        );
         println!("  hide_host_cursor: {}", input.hide_host_cursor);
         println!("  clipboard_enabled: {}", input.clipboard_enabled);
     }

@@ -33,6 +33,20 @@ pub enum AndroidVersion {
     Android13,
 }
 
+/// Транслятор архитектур ARM -> x86, нужен для приложений, скомпилированных
+/// только под ARM. Только один активен одновременно — это не набор флагов,
+/// а выбор одного из трёх взаимоисключающих вариантов.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum ArmTranslator {
+    /// Без транслятора — ARM-only приложения не запустятся.
+    #[default]
+    None,
+    /// Рекомендуется для AMD CPU (см. `andler-firmware::detect::arm`).
+    Libndk,
+    /// Рекомендуется для Intel CPU (см. `andler-firmware::detect::arm`).
+    Libhoudini,
+}
+
 /// Режим root-доступа внутри гостя.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum RootMode {
@@ -52,8 +66,9 @@ pub struct AndroidProfile {
     pub gapps: bool,
     pub microg: bool,
     /// Транслятор архитектур ARM -> x86 (libhoudini/libndk) — нужен,
-    /// если приложение скомпилировано только под ARM.
-    pub libndk: bool,
+    /// если приложение скомпилировано только под ARM. См.
+    /// [`ArmTranslator`].
+    pub arm_translator: ArmTranslator,
     pub root: RootMode,
 }
 
@@ -66,8 +81,8 @@ impl AndroidProfile {
     /// остальным набором полей делят один и тот же базовый образ.
     pub fn cache_key(&self) -> String {
         format!(
-            "{:?}-gapps_{}-microg_{}-libndk_{}",
-            self.android_version, self.gapps, self.microg, self.libndk
+            "{:?}-gapps_{}-microg_{}-arm_{:?}",
+            self.android_version, self.gapps, self.microg, self.arm_translator
         )
     }
 
@@ -125,9 +140,18 @@ mod tests {
             android_version: AndroidVersion::Android13,
             gapps: true,
             microg: false,
-            libndk: true,
+            arm_translator: ArmTranslator::Libndk,
             root: RootMode::None,
         }
+    }
+
+    #[test]
+    fn cache_key_differs_on_arm_translator() {
+        let mut a = sample_profile();
+        let mut b = sample_profile();
+        a.arm_translator = ArmTranslator::Libndk;
+        b.arm_translator = ArmTranslator::Libhoudini;
+        assert_ne!(a.cache_key(), b.cache_key());
     }
 
     #[test]
