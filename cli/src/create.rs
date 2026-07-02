@@ -21,7 +21,7 @@ pub async fn handle(
     disk_size_gib: Option<u64>,
     compact_on_shutdown: bool,
     cdrom_bus: CliCdromBus,
-    advanced: bool,
+    quick: bool,
     android_version: Option<CliAndroidVersion>,
     base_image_path: Option<String>,
     gapps: bool,
@@ -39,7 +39,15 @@ pub async fn handle(
         err_exit("error: --file and --kind are mutually exclusive");
     }
 
-    // --- TOML-режим ---
+    if has_file && quick {
+        err_exit("error: --quick and --file are mutually exclusive — --file already provides all configuration");
+    }
+
+    if quick && !has_kind {
+        err_exit("error: --quick requires --kind to specify VM type");
+    }
+
+    // --- TOML mode ---
     if has_file {
         let file = file.unwrap();
         let instance_file = InstanceFile::load(&file)?;
@@ -56,11 +64,13 @@ pub async fn handle(
         return Ok(());
     }
 
-    // --- Wizard-режим: запускается, если не переданы обязательные параметры ---
-    let linux_required = kind == Some(CliKind::Linux) && (name.is_none() || iso_path.is_none() || disk_path.is_none());
-    let android_required = kind == Some(CliKind::Android) && (name.is_none() || base_image_path.is_none());
+    // --- Wizard mode: when required CLI parameters are missing, or --quick ---
+    let linux_required = kind == Some(CliKind::Linux)
+        && (name.is_none() || iso_path.is_none() || disk_path.is_none());
+    let android_required = kind == Some(CliKind::Android)
+        && (name.is_none() || base_image_path.is_none());
     let no_kind = kind.is_none();
-    let needs_wizard = no_kind || linux_required || android_required;
+    let needs_wizard = quick || no_kind || linux_required || android_required;
 
     if needs_wizard {
         let partial = PartialArgs {
@@ -72,27 +82,28 @@ pub async fn handle(
             iso_path: iso_path.clone(),
             base_image_path: base_image_path.clone(),
             instances_root: Some(instances_root.clone()),
+            quick,
         };
 
-        let result = crate::wizard::run(partial, advanced).await;
+        let result = crate::wizard::run(partial).await;
 
         return match result {
-            Ok(WizardResult::Linux(req, root)) => {
+            Ok(WizardResult::Linux(req, _root)) => {
                 let response = client.create_instance(req).await?;
                 let id = response.into_inner().instance_id;
-                println!("✓ VM создана: {id}");
+                println!("✓ VM created: {id}");
                 println!("  andler start {id}");
                 Ok(())
             }
             Ok(WizardResult::Android(req)) => {
                 let response = client.create_android_instance(req).await?;
                 let id = response.into_inner().instance_id;
-                println!("✓ VM создана: {id}");
+                println!("✓ VM created: {id}");
                 println!("  andler start {id}");
                 Ok(())
             }
             Err(WizardError::Cancelled) => {
-                println!("Отменено.");
+                println!("Cancelled.");
                 Ok(())
             }
             Err(WizardError::NotTty) => {
@@ -103,10 +114,10 @@ pub async fn handle(
         };
     }
 
-    // --- CLI-режим (все обязательные параметры переданы) ---
+    // --- CLI mode (all required parameters provided) ---
     let kind = kind.unwrap();
     let name = name.unwrap();
-    let ovmf = ovmf_vars_template.unwrap_or_default(); // daemon auto-detects if empty
+    let ovmf = ovmf_vars_template.unwrap_or_default();
 
     match kind {
         CliKind::Linux => {
@@ -139,15 +150,20 @@ pub async fn handle(
                 err_exit("error: --magisk-dir is required when --root magisk");
             }
 
-            // В чистом CLI-режиме (без wizard) авто-детект по CPU не
-            // запускается — не заданный флаг значит "без транслятора",
-            // явно и предсказуемо. Авто-детект — привилегия wizard'а
-            // (см. `andler-firmware::detect::arm`).
             let arm_translator = arm_translator.unwrap_or(CliArmTranslator::None);
 
             let req = build_android_request(
-                name, av, bip, ovmf, gapps, microg, arm_translator, root,
-                instances_root, overlay_size_gib, magisk_dir,
+                name,
+                av,
+                bip,
+                ovmf,
+                gapps,
+                microg,
+                arm_translator,
+                root,
+                instances_root,
+                overlay_size_gib,
+                magisk_dir,
             );
             let response = client.create_android_instance(req).await?;
             println!("{}", response.into_inner().instance_id);
@@ -168,16 +184,12 @@ fn build_linux_request(
 ) -> CreateInstanceRequest {
     let mut disk = andler_core::DiskConfig::reference_default(std::path::PathBuf::from(&disk_path));
     if let Some(gib) = disk_size_gib {
-        disk.size_bytes = gib.checked_mul(andler_core::DiskConfig::GIB)
+        disk.size_bytes = gib
+            .checked_mul(andler_core::DiskConfig::GIB)
             .expect("disk size overflow");
     }
     disk.compact_on_shutdown = compact_on_shutdown;
 
-    // `auto` — не значение `CdromBus` само по себе, а просьба применить
-    // эвристику по имени ISO-файла (см. PLAN.md, раздел «Монтирование
-    // ISO / CD-ROM» → «Правило выбора дефолта»); явный выбор
-    // пользователя (`--cdrom-bus virtio|ide`) этой эвристикой не
-    // переопределяется.
     let resolved_cdrom_bus = match cdrom_bus {
         CliCdromBus::Auto => andler_core::CdromBus::recommended_for_iso_filename(
             std::path::Path::new(&iso_path),
@@ -197,7 +209,7 @@ fn build_linux_request(
         network: Some(andler_core::NetworkConfig::reference_default().into()),
         firmware: Some(
             andler_core::FirmwareConfig {
-                ovmf_code_path: std::path::PathBuf::new(), // daemon подставит авто-определённый
+                ovmf_code_path: std::path::PathBuf::new(),
                 ovmf_vars_path: std::path::PathBuf::from(&ovmf_vars_template),
             }
             .into(),
@@ -237,7 +249,8 @@ fn build_android_request(
         profile: Some(profile),
         base_image_path,
         instances_root,
-        overlay_size_bytes: overlay_size_gib.checked_mul(1024 * 1024 * 1024)
+        overlay_size_bytes: overlay_size_gib
+            .checked_mul(1024 * 1024 * 1024)
             .expect("overlay size overflow"),
         ovmf_vars_template,
         magisk_dir: magisk_dir

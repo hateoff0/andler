@@ -52,7 +52,7 @@ All prompts in Russian
 andler create → wizard starts
   1.  Configuration mode: [Use recommended settings] / Customize all settings
       Basic  → questions 2-6 only
-      Advanced → questions 2-17
+      Advanced → questions 2-21
   2.  VM type: [Linux] / Android
   3.  VM name
   4.  [Linux] Path to ISO image (Enter — skip, boot from disk)
@@ -62,16 +62,20 @@ andler create → wizard starts
   ── end of Basic ──
   7.  [Advanced] CD-ROM bus: [virtio-scsi (auto)] / ide
   8.  [Advanced] Compact disk after shutdown? [no]
-  9.  [Advanced] GPU render: [Venus] / VirGL / VirtioGPU / CPU
-  10. [Advanced] Display engine: [auto by GPU vendor] / Spice / None
-  11. [Advanced] Audio device: [virtio-sound] / ich9-hda
-  12. [Advanced] Input pointer: [tablet] / mouse
-  13. [Advanced] Network mode: [NAT (passt)] / Bridge / Isolated
-  14. [Advanced] CPU cores: [4]
-  15. [Advanced] Memory (GiB): [4]
-  16. [Advanced, Android] ARM translator: [auto-detected] / libndk / libhoudini / none
-  17. [Advanced, Android] GApps? [no] / MicroG? [no] / Root: [none]
-  18. Summary + Confirm
+  9.  [Advanced] GPU renderer: [Venus] / VirGL / VirtioGPU / CPU
+  10. [Advanced] GPU memory (MiB): [4096]
+  11. [Advanced] Display resolution: [1920x1080]
+  12. [Advanced] Start in fullscreen? [no]
+  13. [Advanced] Display refresh rate limit (0 = unlimited): [0]
+  14. [Advanced] Audio backend: [PipeWire (auto)] / PulseAudio / None
+  15. [Advanced] Enable clipboard sharing? [yes]
+  16. [Advanced] Input pointer: [tablet] / mouse
+  17. [Advanced] Network mode: [NAT (passt)] / Bridge / Isolated
+  18. [Advanced] CPU cores: [4]
+  19. [Advanced] Memory (GiB): [8]
+  20. [Advanced, Android] ARM translator: [auto-detected] / libndk / libhoudini / none
+  21. [Advanced, Android] GApps? [no] / MicroG? [no] / Root: [none]
+  22. Summary + Confirm
 ```
 
 All prompts in **English**. Defaults shown in brackets or `with_default()`.
@@ -161,6 +165,12 @@ Detection happens once at wizard start. Result shown in prompt as `[libndk (auto
 | 29 | `"Автоматически компактировать диск после каждого выключения?"` | `"Automatically compact disk after each shutdown?"` |
 | 30 | `"Экономит место..."` | `"Saves space but rewrites entire disk file — may take time on large disks"` |
 | 31 | `"Создать VM?"` | `"Create VM?"` |
+| 32 | `"Память GPU (MiB):"` | `"GPU memory (MiB):"` |
+| 33 | `"Разрешение экрана:"` | `"Display resolution (e.g. 1920x1080):"` |
+| 34 | `"Запускать в полном экране?"` | `"Start in fullscreen mode?"` |
+| 35 | `"Лимит частоты кадров (0 = безлимит):"` | `"Display refresh rate limit (0 = unlimited):"` |
+| 36 | `"Аудио система:"` | `"Audio backend:"` |
+| 37 | `"Включить обмен буфером обмена?"` | `"Enable clipboard sharing between host and VM?"` |
 
 ### Summary boxes
 
@@ -198,12 +208,16 @@ Detection happens once at wizard start. Result shown in prompt as `[libndk (auto
 | CD-ROM bus | `"virtio-scsi — faster, modern distro initrds support it; ide — compatible with Windows and any unknown ISO"` |
 | Compact on shutdown | `"Saves space but rewrites entire disk file — may take time on large disks"` |
 | GPU render | `"Venus — Vulkan 3D (fastest); VirGL — OpenGL 3D (broader); VirtioGPU — 2D; CPU — software"` |
-| Display engine | `"SDL — lightweight; GTK — built-in UI; Spice — remote; None — headless"` |
-| Audio device | `"virtio-sound — modern paravirtual; ich9-hda — legacy, broader guest support"` |
+| GPU memory | `"Host memory allocated for GPU device. 4096 MiB is sufficient for most workloads."` |
+| Display resolution | `"Initial screen resolution. Format: WIDTHxHEIGHT (e.g. 1920x1080, 2560x1440)."` |
+| Fullscreen | `"Start the VM window in fullscreen mode."` |
+| FPS limit | `"Cap display refresh rate. 0 = unlimited. Set to 60 for battery saving or to reduce host GPU load."` |
+| Audio backend | `"PipeWire — modern, recommended; PulseAudio — legacy; None — no audio"` |
+| Clipboard | `"Enable copy-paste between host and VM via qemu-vdagent."` |
 | Input pointer | `"tablet — absolute coordinates (recommended); mouse — relative coordinates"` |
 | Network mode | `"NAT — VM gets internet via host (default); Bridge — VM on host network; Isolated — no external access"` |
 | CPU cores | `"Number of virtual CPUs. Default 4 is sufficient for most use cases."` |
-| Memory | `"RAM in GiB. Default 4 is sufficient for most use cases."` |
+| Memory | `"RAM in GiB. Default 8 is sufficient for most use cases."` |
 | ARM translator | `"libndk — for AMD CPUs (recommended for AMD); libhoudini — for Intel CPUs (recommended for Intel); none — no ARM app support"` |
 | GApps | `"Google Play Store and Google services. Requires internet to set up on first boot."` |
 | MicroG | `"Open-source Google Play replacement. No Google account needed."` |
@@ -226,7 +240,7 @@ New enum and prompt at the very start of wizard:
 ```
 enum WizardMode {
     Basic,    // questions 2-6 only
-    Advanced, // questions 2-17
+    Advanced, // questions 2-21
 }
 ```
 
@@ -237,7 +251,7 @@ Configuration mode:
   Customize all settings (Advanced)
 
 Basic — only essential questions (type, name, ISO, disk size).
-Advanced — full control over GPU, display, audio, network, CPU, memory, and more.
+Advanced — full control over GPU, GPU memory, resolution, fullscreen, FPS limit, audio, clipboard, input, network, CPU, memory, and more.
 ```
 
 ### Where each question appears
@@ -252,16 +266,20 @@ Advanced — full control over GPU, display, audio, network, CPU, memory, and mo
 | 6 | Disk size | Yes | Yes |
 | 7 | CD-ROM bus | No | Yes (only if ISO provided) |
 | 8 | Compact on shutdown | No | Yes |
-| 9 | GPU render | No | Yes |
-| 10 | Display engine | No | Yes |
-| 11 | Audio | No | Yes |
-| 12 | Input | No | Yes |
-| 13 | Network | No | Yes |
-| 14 | CPU | No | Yes |
-| 15 | Memory | No | Yes |
-| 16 | ARM translator (Android only) | No | Yes |
-| 17 | GApps/MicroG/Root (Android only) | No | Yes |
-| 18 | Summary + Confirm | Yes | Yes |
+| 9 | GPU renderer | No | Yes |
+| 10 | GPU memory | No | Yes |
+| 11 | Display resolution | No | Yes |
+| 12 | Fullscreen | No | Yes |
+| 13 | FPS limit | No | Yes |
+| 14 | Audio backend | No | Yes |
+| 15 | Clipboard sharing | No | Yes |
+| 16 | Input pointer | No | Yes |
+| 17 | Network mode | No | Yes |
+| 18 | CPU cores | No | Yes |
+| 19 | Memory | No | Yes |
+| 20 | ARM translator (Android only) | No | Yes |
+| 21 | GApps/MicroG/Root (Android only) | No | Yes |
+| 22 | Summary + Confirm | Yes | Yes |
 
 ---
 
@@ -273,7 +291,7 @@ Single file: `cli/src/wizard.rs` — 546 lines.
 
 ### Target structure
 
-Split by **complexity level** (Basic/Advanced), not by OS type. The Advanced questions (9-15: GPU, display, audio, input, network, CPU, memory) are **identical** for Linux and Android — only a few questions at the end (16-17) are Android-specific.
+Split by **complexity level** (Basic/Advanced), not by OS type. The Advanced questions 9-19 (GPU, GPU memory, resolution, fullscreen, FPS limit, audio, clipboard, input, network, CPU, memory) are **identical** for Linux and Android — only a few questions at the end (20-21) are Android-specific.
 
 ```
 cli/src/wizard/
@@ -284,10 +302,10 @@ cli/src/wizard/
 │   Core config questions (2-6)
 │
 ├── advanced.rs   (~200 lines)
-│   Hardware & deep config (7-17)
+│   Hardware & deep config (7-21)
 │
 └── summary.rs    (~120 lines)
-    Review screen + confirmation (18)
+    Review screen + confirmation (22)
 ```
 
 ### mod.rs — Entry & Orchestration
@@ -402,12 +420,16 @@ Responsibilities:
 - `fn ask_cdrom_bus(iso_name: &str, recommended: CdromBus, prefilled: Option<CdromBus>) -> Result<CdromBus, WizardError>`
 - `fn ask_compact_on_shutdown(prefilled: Option<bool>) -> Result<bool, WizardError>`
 - `fn ask_gpu_render(detected: &HardwareDefaults, prefilled: Option<RenderBackend>) -> Result<RenderBackend, WizardError>` — uses `detected.gpu_render` as default, `detected.venus_supported` to check Venus availability
-- `fn ask_display_engine(detected: &HardwareDefaults, prefilled: Option<DisplayEngine>) -> Result<DisplayEngine, WizardError>` — uses `detected.display_engine` as default
-- `fn ask_audio_device(prefilled: Option<AudioDevice>) -> Result<AudioDevice, WizardError>`
+- `fn ask_gpu_memory(prefilled: Option<u64>) -> Result<u64, WizardError>` — validates: must be 256-16384 MiB (256 MiB minimum for virtio-gpu, 16 GiB max reasonable)
+- `fn ask_display_resolution(prefilled: Option<Resolution>) -> Result<Resolution, WizardError>` — validates: format must be `WIDTHxHEIGHT` (e.g. `1920x1080`), width/height 64-7680
+- `fn ask_fullscreen(prefilled: Option<bool>) -> Result<bool, WizardError>`
+- `fn ask_fps_limit(prefilled: Option<u32>) -> Result<u32, WizardError>` — validates: 0 (unlimited) or 1-240
+- `fn ask_audio_backend(detected: &HardwareDefaults, prefilled: Option<AudioBackend>) -> Result<AudioBackend, WizardError>` — uses `detected.audio_server` as default
+- `fn ask_clipboard_enabled(prefilled: Option<bool>) -> Result<bool, WizardError>`
 - `fn ask_input_pointer(prefilled: Option<InputPointerMode>) -> Result<InputPointerMode, WizardError>`
 - `fn ask_network_mode(prefilled: Option<NetworkMode>) -> Result<NetworkMode, WizardError>`
 - `fn ask_cpu_cores(prefilled: Option<u32>) -> Result<u32, WizardError>` — validates: must be 1-128. Warns if exceeds host cores but allows it (QEMU handles overcommit)
-- `fn ask_memory_gib(prefilled: Option<u64>) -> Result<u64, WizardError>` — validates: must be 1-1024. Warns if exceeds host RAM but allows it (ballooning/zswap can help)
+- `fn ask_memory_gib(prefilled: Option<u64>) -> Result<u64, WizardError>` — validates: must be 1-1024. Warns if exceeds host RAM but allows it (host may have swap/zswap)
 - `fn ask_arm_translator(detected: &HardwareDefaults, prefilled: Option<ArmTranslator>) -> Result<ArmTranslator, WizardError>` (Android only) — uses `detected.arm_translator` as default, shown in prompt as `[libndk (auto)]` or `[libhoudini (auto)]`
 - `fn ask_gapps(prefilled: Option<bool>) -> Result<bool, WizardError>` (Android only) — Confirm prompt. If user selects yes, MicroG is automatically set to false (they're mutually exclusive)
 - `fn ask_microg(prefilled: Option<bool>) -> Result<bool, WizardError>` (Android only) — Confirm prompt. If user selects yes, GApps is automatically set to false (they're mutually exclusive)
@@ -421,8 +443,12 @@ pub struct AdvancedConfig {
     pub cdrom_bus: Option<CdromBus>,          // None if no ISO
     pub compact_on_shutdown: bool,
     pub gpu_render: RenderBackend,
-    pub display_engine: DisplayEngine,
-    pub audio_device: AudioDevice,
+    pub gpu_memory_mib: u64,                  // GPU memory in MiB
+    pub display_resolution: Resolution,       // screen resolution
+    pub fullscreen: bool,                     // start fullscreen
+    pub fps_limit: u32,                       // 0 = unlimited
+    pub audio_backend: AudioBackend,          // PipeWire/PulseAudio/None
+    pub clipboard_enabled: bool,              // clipboard sharing
     pub input_pointer: InputPointerMode,
     pub network_mode: NetworkMode,
     pub cpu_cores: u32,
@@ -435,8 +461,8 @@ pub struct AdvancedConfig {
 ```
 
 OS-specific flow:
-- `run_linux`: asks 7-15 (skips 16-17)
-- `run_android`: asks 7-17 (all advanced questions)
+- `run_linux`: asks 7-19 (skips 20-21)
+- `run_android`: asks 7-21 (all advanced questions)
 
 ### HardwareDefaults — auto-detected values from andler-firmware
 
@@ -497,12 +523,13 @@ Responsibilities:
 │                     my-vm-disk.qcow2 (256 GiB, qcow2)         │
 │  Compact on shutdown: no (default)                             │
 │  OVMF VARS:         auto-detected (/usr/share/edk2-ovmf/...)  │
-│  GPU:               Venus (auto-detected)                      │
-│  Display:           SDL (auto-detected — NVIDIA GPU)           │
-│  Audio:             virtio-sound + PipeWire (auto-detected)    │
+│  GPU:               Venus, 4096 MiB (auto-detected)           │
+│  Display:           1920x1080, windowed (default)              │
+│  Audio:             PipeWire (auto-detected)                   │
+│  Clipboard:         enabled (default)                          │
 │  Network:           NAT/passt (default)                        │
 │  CPU:               4 cores (default)                          │
-│  Memory:            4 GiB (default)                            │
+│  Memory:            8 GiB (default)                            │
 └───────────────────────────────────────────────────────────────┘
 ```
 
@@ -526,12 +553,13 @@ Summary shows: `│  OVMF VARS:         not found (Legacy BIOS will be used)  �
 │  GApps:             no (default)                               │
 │  MicroG:            no (default)                               │
 │  Root:              none (default)                             │
-│  GPU:               Venus (auto-detected)                      │
-│  Display:           SDL (auto-detected — NVIDIA GPU)           │
-│  Audio:             virtio-sound + PipeWire (auto-detected)    │
+│  GPU:               Venus, 4096 MiB (auto-detected)           │
+│  Display:           1920x1080, windowed (default)              │
+│  Audio:             PipeWire (auto-detected)                   │
+│  Clipboard:         enabled (default)                          │
 │  Network:           NAT (default)                              │
 │  CPU:               4 cores (default)                          │
-│  Memory:            4 GiB (default)                            │
+│  Memory:            8 GiB (default)                            │
 └───────────────────────────────────────────────────────────────┘
 ```
 
@@ -547,7 +575,7 @@ Error raised before summary is shown — Android requires UEFI.
 
 ### Why this decomposition (not linux.rs/android.rs)
 
-The Advanced questions 9-15 (GPU, display, audio, input, network, CPU, memory) are **identical** for Linux and Android. Splitting by OS type would duplicate these ~100 lines. Splitting by complexity level keeps them in one place (`advanced.rs`) and only the last 2 questions (16-17) are Android-specific, handled by a simple `if kind == Android` branch inside `advanced.rs`.
+The Advanced questions 9-19 (GPU, GPU memory, resolution, fullscreen, FPS limit, audio, clipboard, input, network, CPU, memory) are **identical** for Linux and Android. Splitting by OS type would duplicate these ~120 lines. Splitting by complexity level keeps them in one place (`advanced.rs`) and only the last 2 questions (20-21) are Android-specific, handled by a simple `if kind == Android` branch inside `advanced.rs`.
 
 ---
 
@@ -564,12 +592,16 @@ Every Select/Confirm/Text shows its default value explicitly:
 | CD-ROM bus | auto-detected | Prompt: `"CD-ROM bus (auto: {virtio-scsi/ide}):"` |
 | Compact on shutdown | no | Confirm with `with_default(false)` |
 | GPU render | Venus (if host meets requirements) | First item: `"Venus (3D via Vulkan, fastest)"` — from `detected.gpu_render` |
-| Display engine | auto by GPU vendor | Prompt: `"Display engine (auto: {sdl/gtk}):"` — from `detected.display_engine` |
-| Audio device | virtio-sound | First item: `"virtio-sound (modern, recommended)"` |
+| GPU memory | 4096 MiB | `with_default(4096)` |
+| Display resolution | 1920x1080 | `with_default("1920x1080")` |
+| Fullscreen | no | Confirm with `with_default(false)` |
+| FPS limit | 0 (unlimited) | `with_default(0)` — "0 = unlimited" |
+| Audio backend | auto-detected | First item matches `detected.audio_server`: `"PipeWire (auto-detected)"` / `"PulseAudio (auto-detected)"` / `"None"` |
+| Clipboard sharing | yes | Confirm with `with_default(true)` |
 | Input pointer | tablet | First item: `"tablet (absolute coordinates, recommended)"` |
 | Network mode | NAT | First item: `"NAT (passt, recommended)"` |
 | CPU cores | 4 | `with_default(4)` |
-| Memory | 4 GiB | `with_default(4)` |
+| Memory | 8 GiB | `with_default(8)` |
 | ARM translator | auto-detected | Prompt: `"ARM translator (auto: {libndk/libhoudini/none}):"` — from `detected.arm_translator` |
 | GApps | no | Confirm with `with_default(false)` |
 | MicroG | no | Confirm with `with_default(false)` |
@@ -580,10 +612,14 @@ Every Select/Confirm/Text shows its default value explicitly:
 For Advanced questions, defaults are implemented via `with_default()` or by placing the default item first in the Select list. All auto-detected values come from `HardwareDefaults` (populated by `andler-firmware::detect_all()`):
 
 - GPU render: `Select::new(&options).with_default(&detected.gpu_render)` — auto-detected from host GPU vendor
-- Display engine: `Select::new(&options).with_default(&detected.display_engine)` — auto-detected from GPU vendor (SDL for NVIDIA, GTK for AMD/Intel)
-- Audio: `Select::new(&options).with_default(&"virtio-sound")` — first item. Summary shows `detected.audio_server`: "virtio-sound + PipeWire" / "virtio-sound + PulseAudio" / "virtio-sound (no audio server detected)"
+- GPU memory: `Text::new(...).with_default("4096")` — 4 GiB, common default for most GPUs
+- Display resolution: `Text::new(...).with_default("1920x1080")` — standard Full HD
+- Fullscreen: `Confirm::new(...).with_default(false)` — windowed by default
+- FPS limit: `Text::new(...).with_default("0")` — unlimited by default
+- Audio: `Select::new(&options).with_default(&detected.audio_server)` — auto-detected from host PipeWire/PulseAudio sockets
+- Clipboard: `Confirm::new(...).with_default(true)` — enabled by default (most users want copy-paste between host and VM)
 - Network: `Select::new(&options).with_default(&"nat")` — first item
-- CPU/Memory: `Text::new(...).with_default(&default.to_string())` — shown in input field
+- CPU/Memory: `Text::new(...).with_default(&default.to_string())` — shown in input field (default: 4 cores, 8 GiB)
 
 ### Auto-detection of audio server
 
@@ -815,8 +851,8 @@ GPU load = `100% - (Δrc6_residency_ms / Δwall_clock_ms * 100)`
 | `cli/src/wizard.rs` | **Delete** (replaced by wizard/ directory) |
 | `cli/src/wizard/mod.rs` | **New**: run(), PartialArgs, WizardResult, WizardMode, WizardError, ask_wizard_mode(), build_create_request() + unit tests |
 | `cli/src/wizard/basic.rs` | **New**: ask_kind, ask_name, ask_iso_path, ask_base_image, ask_android_version, ask_disk_size + BasicResult enum + unit tests |
-| `cli/src/wizard/advanced.rs` | **New**: ask_cdrom_bus, ask_compact, ask_gpu, ask_display, ask_audio, ask_input, ask_network, ask_cpu, ask_memory, ask_arm_translator, ask_gapps, ask_microg, ask_root_mode + unit tests |
-| `cli/src/wizard/summary.rs` | **New**: summary screen + confirm + "Modify" flow + Android-specific summary |
+| `cli/src/wizard/advanced.rs` | **New**: ask_cdrom_bus, ask_compact, ask_gpu, ask_gpu_memory, ask_resolution, ask_fullscreen, ask_fps_limit, ask_audio, ask_clipboard, ask_input, ask_network, ask_cpu, ask_memory, ask_arm_translator, ask_gapps, ask_microg, ask_root_mode + unit tests |
+| `cli/src/wizard/summary.rs` | **New**: summary screen + confirm + "Modify" flow + Android-specific summary (updated with new fields: GPU memory, resolution, fullscreen, FPS limit, audio backend, clipboard) |
 | `cli/Cargo.toml` | `inquire` already present — no change needed |
 | `daemon/src/daemon/tests/common.rs` | Replace `libndk: false` → `arm_translator: ArmTranslator::None` |
 | `daemon/src/daemon/tests/clone.rs` | Replace 5 occurrences |
@@ -852,9 +888,21 @@ GPU load = `100% - (Δrc6_residency_ms / Δwall_clock_ms * 100)`
 | `test_merge_gpu_metrics` | `services/andler-firmware/src/metrics/mod.rs` | GPU fields fill None in base |
 | `test_parse_arm_translator_valid` | `cli/src/wizard/advanced.rs` | `parse_arm_translator("libndk")` → `Some(CliArmTranslator::Libndk)` |
 | `test_parse_arm_translator_invalid` | `cli/src/wizard/advanced.rs` | `parse_arm_translator("unknown")` → `None` |
+| `test_parse_resolution_valid` | `cli/src/wizard/advanced.rs` | `parse_resolution("1920x1080")` → `Ok(Resolution { width: 1920, height: 1080 })` |
+| `test_parse_resolution_invalid_format` | `cli/src/wizard/advanced.rs` | `parse_resolution("1920")` → `Err` |
+| `test_parse_resolution_out_of_range` | `cli/src/wizard/advanced.rs` | `parse_resolution("8192x8192")` → `Err` |
+| `test_parse_gpu_memory_valid` | `cli/src/wizard/advanced.rs` | `parse_gpu_memory("4096")` → `Ok(4096)` |
+| `test_parse_gpu_memory_too_low` | `cli/src/wizard/advanced.rs` | `parse_gpu_memory("128")` → `Err` |
+| `test_parse_fps_limit_valid` | `cli/src/wizard/advanced.rs` | `parse_fps_limit("60")` → `Ok(60)` |
+| `test_parse_fps_limit_unlimited` | `cli/src/wizard/advanced.rs` | `parse_fps_limit("0")` → `Ok(0)` |
 | `test_build_create_request_linux` | `cli/src/wizard/mod.rs` | `build_create_request(BasicResult::Linux(...), Some(advanced), &detected)` → correct request |
 | `test_build_create_request_android` | `cli/src/wizard/mod.rs` | `build_create_request(BasicResult::Android(...), Some(advanced), &detected)` → correct request |
 | `test_build_create_request_basic_mode` | `cli/src/wizard/mod.rs` | `build_create_request(basic, None, &detected)` → uses defaults |
+| `test_build_create_request_advanced_clipboard` | `cli/src/wizard/mod.rs` | `build_create_request` with clipboard_enabled=false → correct field |
+| `test_build_create_request_advanced_gpu_memory` | `cli/src/wizard/mod.rs` | `build_create_request` with gpu_memory_mib=8192 → correct field |
+| `test_build_create_request_advanced_resolution` | `cli/src/wizard/mod.rs` | `build_create_request` with resolution=2560x1440 → correct field |
+| `test_build_create_request_advanced_fullscreen` | `cli/src/wizard/mod.rs` | `build_create_request` with fullscreen=true → correct field |
+| `test_build_create_request_advanced_fps_limit` | `cli/src/wizard/mod.rs` | `build_create_request` with fps_limit=60 → correct field |
 | `test_basic_result_accessors` | `cli/src/wizard/basic.rs` | `BasicResult::Linux(...).name()` → correct name |
 | `test_toml_backward_compat_libndk_true` | `cli/src/instance_file.rs` | TOML with `libndk = true` → `arm_translator: "libndk"` |
 | `test_toml_backward_compat_libndk_false` | `cli/src/instance_file.rs` | TOML with `libndk = false` → `arm_translator: "none"` |
@@ -918,6 +966,14 @@ All test files that reference `libndk: true/false` must be updated to `arm_trans
 | User presses Ctrl+C | Cancel, no files created |
 | User clicks "Modify" in summary | Loop back to advanced questions with current values as prefilled defaults |
 | Invalid disk size (float, negative, overflow) | Error message: "Enter an integer, e.g. 256" |
+| Invalid resolution format | Error: "Invalid format. Use WIDTHxHEIGHT, e.g. 1920x1080" |
+| Resolution out of range | Error: "Width and height must be between 64 and 7680" |
+| Invalid GPU memory | Error: "Enter an integer between 256 and 16384, e.g. 4096" |
+| Invalid FPS limit | Error: "Enter 0 (unlimited) or a value between 1 and 240" |
+| Invalid CPU cores | Error: "Enter an integer between 1 and 128" |
+| CPU cores exceeds host | Warning: "Host has {N} cores. VM will use {M} cores. Proceed?" |
+| Invalid memory | Error: "Enter an integer between 1 and 1024, e.g. 8" |
+| Memory exceeds host | Warning: "Host has {N} GiB RAM. VM will use {M} GiB. Proceed?" |
 | No ISO + no existing disk (Linux) | Wizard allows this — VM will fail to boot, but wizard doesn't block it. Summary shows "(no ISO — boot from disk)". |
 | ISO provided but file doesn't exist | Warning: "File not found: {path}. Continue anyway?" (wizard doesn't validate ISO existence) |
 | Base image file doesn't exist | Error: "Base image not found: {path}. Android requires a valid base image." (wizard validates base image because it's required) |
@@ -957,9 +1013,55 @@ All test files that reference `libndk: true/false` must be updated to `arm_trans
 5. CLI main: `CliArmTranslator` enum (ValueEnum) + remove `--advanced` + add `--quick`
 6. CLI instance_file: TOML `arm_translator` field + backward compat (Part 6)
 7. CLI create: `build_android_request` takes enum + remove `advanced` param + handle `WizardResult`
-8. CLI wizard/: decompose into wizard/ directory + English + Basic/Advanced + ARM translator + defaults + summary + loop
+8. CLI wizard/: decompose into wizard/ directory + English + Basic/Advanced + ARM translator + GPU memory + resolution + fullscreen + FPS limit + audio backend + clipboard + defaults + summary + loop
 9. CLI status: display ARM translator name instead of bool
 10. Tests: all `libndk: true/false` replacements + new unit tests (Part 5)
 11. PLAN.md: update Wizard section (remove --advanced, add English, update ARM translator)
 12. instance_file tests: update TOML fixtures + backward compat tests
 13. Verify: all help messages in English, all defaults labeled, summary shows all values, `cargo test` passes
+
+---
+
+## Planned features (not in wizard, future work)
+
+The following features are defined in the domain model but **not implemented in the backend**. They should NOT be added to the wizard until the backend supports them. Add wizard questions only after the backend wires them up to real QEMU flags.
+
+### Ballooning (virtio-balloon)
+
+**What:** Allow the host to dynamically reclaim unused RAM from the guest via `virtio-balloon-pci`.
+
+**Status:** `MemoryConfig.ballooning` exists in `andler-core`, but `cmdline.rs` does not add `-device virtio-balloon-pci`. Dead field.
+
+**To implement:** Add `ballooning: bool` → if true, append `-device virtio-balloon-pci` to QEMU args. Add QMP `query-balloon` for metrics.
+
+### ZRAM (guest-internal)
+
+**What:** Compressed swap inside the guest kernel. Reduces disk I/O for memory-heavy workloads.
+
+**Status:** `MemoryConfig.zram` exists in `andler-core`, but ZRAM is a **guest-internal** mechanism — no QEMU flag. No code configures ZRAM inside the guest.
+
+**To implement:** Requires SSH/exec into guest to run `modprobe zram`, `zramctl`, `mkswap`, `swapon`. Android-specific: Waydroid or init script.
+
+### CPU priority (nice/ionice)
+
+**What:** Set host process scheduling priority for the QEMU process via `nice`/`ionice`.
+
+**Status:** `CpuConfig.priority` exists in `andler-core`, but `process.rs` does not call `nice()` or `ionice()` at spawn. Dead field.
+
+**To implement:** Add `libc::nice(priority)` or `ionice` call in `QemuProcess::spawn()`. Map `CpuPriority::Low` → `nice(10)`, `Normal` → `nice(0)`, `High` → `nice(-10)`.
+
+### FPS limit
+
+**What:** Cap the VM's display refresh rate.
+
+**Status:** `DisplayConfig.fps_limit` exists in `andler-core`, but `cmdline.rs` does not use it. QEMU does not have a native `fps=` flag for SDL.
+
+**To implement:** Options: (a) QEMU spice streaming with fps limit, (b) guest-side VSync, (c) custom callback. Non-trivial — needs research.
+
+### Network modes (Bridge, Isolated)
+
+**What:** `NetworkMode::Bridge` and `NetworkMode::Isolated` are defined in `andler-core`.
+
+**Status:** `cmdline.rs` panics on Bridge/Isolated — not implemented. Only NAT works.
+
+**To implement:** Bridge needs `tap` device + `brctl`/`ip link`. Isolated needs `none` nic + nftables rules for inter-VM communication. Significant networking work.

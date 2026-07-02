@@ -289,9 +289,9 @@ impl InstanceFile {
         let arm_translator = match self.arm_translator.as_deref() {
             Some("libndk") => andler_rpc::proto::ArmTranslator::Libndk,
             Some("libhoudini") => andler_rpc::proto::ArmTranslator::Libhoudini,
-            Some(_) => andler_rpc::proto::ArmTranslator::ArmTranslatorNone,
+            Some(_) => andler_rpc::proto::ArmTranslator::None,
             None if self.libndk => andler_rpc::proto::ArmTranslator::Libndk,
-            None => andler_rpc::proto::ArmTranslator::ArmTranslatorNone,
+            None => andler_rpc::proto::ArmTranslator::None,
         };
         profile.set_arm_translator(arm_translator);
 
@@ -535,7 +535,7 @@ mod tests {
                 let profile = req.profile.unwrap();
                 assert_eq!(
                     profile.arm_translator(),
-                    andler_rpc::proto::ArmTranslator::ArmTranslatorNone
+                    andler_rpc::proto::ArmTranslator::None
                 );
             }
             other => panic!("expected Android, got {other:?}"),
@@ -551,7 +551,7 @@ mod tests {
                 let profile = req.profile.unwrap();
                 assert_eq!(
                     profile.arm_translator(),
-                    andler_rpc::proto::ArmTranslator::ArmTranslatorNone
+                    andler_rpc::proto::ArmTranslator::None
                 );
             }
             other => panic!("expected Android, got {other:?}"),

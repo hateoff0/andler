@@ -109,9 +109,7 @@ impl From<proto::ArmTranslator> for ArmTranslator {
         match value {
             proto::ArmTranslator::Libndk => ArmTranslator::Libndk,
             proto::ArmTranslator::Libhoudini => ArmTranslator::Libhoudini,
-            proto::ArmTranslator::ArmTranslatorNone | proto::ArmTranslator::Unspecified => {
-                ArmTranslator::None
-            }
+            proto::ArmTranslator::None | proto::ArmTranslator::Unspecified => ArmTranslator::None,
         }
     }
 }
@@ -119,7 +117,7 @@ impl From<proto::ArmTranslator> for ArmTranslator {
 impl From<ArmTranslator> for proto::ArmTranslator {
     fn from(value: ArmTranslator) -> Self {
         match value {
-            ArmTranslator::None => proto::ArmTranslator::ArmTranslatorNone,
+            ArmTranslator::None => proto::ArmTranslator::None,
             ArmTranslator::Libndk => proto::ArmTranslator::Libndk,
             ArmTranslator::Libhoudini => proto::ArmTranslator::Libhoudini,
         }
@@ -556,11 +554,11 @@ impl TryFrom<proto::NetworkConfig> for NetworkConfig {
     type Error = ConvertError;
 
     fn try_from(value: proto::NetworkConfig) -> Result<Self, Self::Error> {
+        let nat_backend = value.nat_backend().into();
         let mode = value
             .mode
             .ok_or(ConvertError::MissingField("network.mode"))?
             .try_into()?;
-        let nat_backend = value.nat_backend().into();
 
         Ok(NetworkConfig {
             mode,
@@ -726,12 +724,14 @@ impl TryFrom<proto::CreateInstanceRequest> for InstanceConfig {
     type Error = ConvertError;
 
     fn try_from(value: proto::CreateInstanceRequest) -> Result<Self, Self::Error> {
+        let cdrom_bus = value.cdrom_bus().into();
+        let iso_path = PathBuf::from(value.iso_path);
         Ok(InstanceConfig {
             id: InstanceId::new(),
             name: value.name,
             kind: InstanceKind::LinuxVm {
-                iso_path: PathBuf::from(value.iso_path),
-                cdrom_bus: value.cdrom_bus().into(),
+                iso_path,
+                cdrom_bus,
             },
             backend: BackendKind::Qemu,
             cpu: value

@@ -115,12 +115,10 @@ enum Command {
         #[arg(long, value_enum, default_value = "auto")]
         cdrom_bus: CliCdromBus,
 
-        /// Run the interactive wizard in advanced mode — prompts for all
-        /// settings (GPU, display, audio, CPU, etc.) instead of just the
-        /// essentials. Has no effect when all required flags are already
-        /// provided (wizard does not start in that case).
+        /// Skip the interactive wizard and create with all defaults.
+        /// Requires `--kind`. Mutually exclusive with `--file`.
         #[arg(long)]
-        advanced: bool,
+        quick: bool,
 
         // --- Android-specific (required when --kind android) ---
 
@@ -365,7 +363,7 @@ impl From<CliAndroidVersion> for ProtoAndroidVersion {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
+#[derive(Clone, Copy, PartialEq, Eq, ValueEnum, Debug)]
 enum CliRootMode {
     None,
     Magisk,
@@ -390,7 +388,7 @@ enum CliArmTranslator {
 impl From<CliArmTranslator> for ProtoArmTranslator {
     fn from(value: CliArmTranslator) -> Self {
         match value {
-            CliArmTranslator::None => ProtoArmTranslator::ArmTranslatorNone,
+            CliArmTranslator::None => ProtoArmTranslator::None,
             CliArmTranslator::Libndk => ProtoArmTranslator::Libndk,
             CliArmTranslator::Libhoudini => ProtoArmTranslator::Libhoudini,
         }
@@ -423,7 +421,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             disk_size_gib,
             compact_on_shutdown,
             cdrom_bus,
-            advanced,
+            quick,
             android_version,
             base_image_path,
             gapps,
@@ -437,7 +435,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             create::handle(
                 &mut client, file, kind, name, ovmf_vars_template,
                 iso_path, disk_path, disk_size_gib, compact_on_shutdown, cdrom_bus,
-                advanced,
+                quick,
                 android_version, base_image_path, gapps, microg, arm_translator, root,
                 instances_root, overlay_size_gib, magisk_dir,
             ).await?;
