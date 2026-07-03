@@ -111,4 +111,31 @@ pub enum DaemonError {
     /// потому что выполняется через QMP (snapshot-save/load/delete).
     #[error("snapshot operation requires running instance {0:?}, but state is {1:?}")]
     SnapshotOperationRequiresRunningInstance(InstanceId, InstanceState),
+
+    /// Пользователь передал пустую строку как ссылку на инстанс (ни
+    /// полный UUID, ни префикс). Отдельно от `InvalidInstanceRef` ниже,
+    /// чтобы сообщение было конкретным, а не "prefix '' matches 0
+    /// instances".
+    #[error("instance reference must not be empty")]
+    EmptyInstanceRef,
+
+    /// `Daemon::resolve_instance_id` — префикс (см. "Partial instance ID"
+    /// в PLAN.md, по аналогии с Docker) не совпал ни с одним
+    /// зарегистрированным `InstanceId`. Отдельно от `InstanceNotFound`,
+    /// потому что там ошибка про заведомо корректный, но незарегистрированный
+    /// `InstanceId`, а здесь — про сам пользовательский ввод (нет ни
+    /// одного кандидата вообще, включая случай опечатки).
+    #[error("no instance found matching {0:?}")]
+    InstanceRefNotFound(String),
+
+    /// `Daemon::resolve_instance_id` — префикс совпал больше чем с одним
+    /// зарегистрированным `InstanceId`. Список кандидатов идёт в
+    /// сообщение целиком (их обычно не больше единиц/десятков), чтобы
+    /// пользователь сразу увидел, чем их различить, не гадая и не делая
+    /// повторный `andler status` за полным списком.
+    #[error("instance reference {prefix:?} is ambiguous, matches: {candidates:?}")]
+    AmbiguousInstanceId {
+        prefix: String,
+        candidates: Vec<InstanceId>,
+    },
 }

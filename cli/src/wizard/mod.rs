@@ -28,6 +28,7 @@ pub use advanced::AdvancedConfig;
 pub use summary::SummaryAction;
 
 /// Result passed back to `create.rs`.
+#[derive(Debug)]
 pub enum WizardResult {
     Linux(CreateInstanceRequest, String /* instances_root */),
     Android(CreateAndroidInstanceRequest),
@@ -568,4 +569,91 @@ mod tests {
     }
 
     use andler_rpc::proto::ArmTranslator as ProtoArmTranslator;
+
+    fn sample_detected_no_ovmf() -> HardwareDefaults {
+        HardwareDefaults {
+            ovmf: Err(FirmwareError::OvmfVarsNotFound),
+            ..sample_detected()
+        }
+    }
+
+    // --- --quick (build_quick is private, so these live inside this module
+    // rather than as separate integration tests; see WIZARD.md test plan
+    // note on inquire's prompt_with_backend being pub(crate)-only, which
+    // rules out simulating the interactive Select/Text prompts below). ---
+
+    #[test]
+    fn test_quick_linux_ovmf_not_found() {
+        // Linux + --quick + no OVMF -> Legacy BIOS warning on stderr, but
+        // the request still succeeds (Linux never requires UEFI).
+        let partial = PartialArgs {
+            kind: Some(WizardKind::Linux),
+            name: Some("quick-linux-test".into()),
+            quick: true,
+            instances_root: Some("/tmp/instances".into()),
+            ..Default::default()
+        };
+        let result = build_quick(partial, &sample_detected_no_ovmf());
+        assert!(result.is_ok());
+        match result.unwrap() {
+            WizardResult::Linux(req, _root) => assert_eq!(req.name, "quick-linux-test"),
+            WizardResult::Android(_) => panic!("expected Linux result"),
+        }
+    }
+
+    #[test]
+    fn test_quick_android_ovmf_not_found() {
+        // Android + --quick + no OVMF -> hard error (Android requires UEFI,
+        // no Legacy BIOS fallback).
+        let partial = PartialArgs {
+            kind: Some(WizardKind::Android),
+            name: Some("quick-android-test".into()),
+            base_image_path: Some("/tmp/base.qcow2".into()),
+            quick: true,
+            instances_root: Some("/tmp/instances".into()),
+            ..Default::default()
+        };
+        let result = build_quick(partial, &sample_detected_no_ovmf());
+        assert!(matches!(
+            result,
+            Err(WizardError::Firmware(FirmwareError::OvmfVarsNotFound))
+        ));
+    }
+
+    #[test]
+    fn test_quick_android_base_image_not_found() {
+        // Android + --quick + base image path that doesn't exist on disk
+        // -> error, even though OVMF is fine.
+        let partial = PartialArgs {
+            kind: Some(WizardKind::Android),
+            name: Some("quick-android-test".into()),
+            base_image_path: Some("/nonexistent/base-image.qcow2".into()),
+            quick: true,
+            instances_root: Some("/tmp/instances".into()),
+            ..Default::default()
+        };
+        let result = build_quick(partial, &sample_detected());
+        match result {
+            Err(WizardError::Inquire(msg)) => {
+                assert!(msg.contains("Base image not found"));
+            }
+            other => panic!("expected base-image-not-found error, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_wizard_not_tty() {
+        // Calls the real public `run()` entry point (not a fake/mock): the
+        // cargo test harness does not attach a TTY to stdin, so `is_tty()`
+        // is false here for real, and this exercises the actual NotTty
+        // early-return path without any --quick/--file shortcut.
+        let partial = PartialArgs {
+            kind: Some(WizardKind::Linux),
+            name: Some("interactive-test".into()),
+            quick: false,
+            ..Default::default()
+        };
+        let result = run(partial).await;
+        assert!(matches!(result, Err(WizardError::NotTty)));
+    }
 }

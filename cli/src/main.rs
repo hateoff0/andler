@@ -176,7 +176,14 @@ enum Command {
     /// Print current instance status.
     Status { instance_id: String },
     /// List all registered instances (id / name / state).
-    List,
+    List {
+        /// Print the full instance UUID instead of the shortened
+        /// 8-character prefix shown by default (same idea as `docker
+        /// ps -q`/`--no-trunc`, needed for scripts that want an
+        /// unambiguous id to feed back into other commands).
+        #[arg(long = "full-id", short = 'q')]
+        full_id: bool,
+    },
     /// Remove an instance record. Instance must be stopped first.
     /// Without --purge, only removes the record; with --purge, also
     /// deletes disk and OVMF VARS files.
@@ -458,8 +465,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Command::Status { instance_id } => {
             status::handle_status(&mut client, instance_id).await?;
         }
-        Command::List => {
-            status::handle_list(&mut client).await?;
+        Command::List { full_id } => {
+            status::handle_list(&mut client, full_id).await?;
         }
         Command::Remove { instance_id, purge } => {
             lifecycle::handle_remove(&mut client, instance_id, purge).await?;

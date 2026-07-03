@@ -8,3 +8,4 @@ mod persistence;
 mod remove;
 mod clone;
 mod list_config;
+mod resolve_instance_id;

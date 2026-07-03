@@ -910,17 +910,22 @@ GPU load = `100% - (Δrc6_residency_ms / Δwall_clock_ms * 100)`
 
 ### Integration tests
 
-| Test | What it tests |
-|------|---------------|
-| `test_wizard_basic_linux` | Full wizard flow: Basic mode → Linux → confirm → correct request |
-| `test_wizard_advanced_linux` | Full wizard flow: Advanced mode → Linux → all questions → confirm |
-| `test_wizard_android_with_arm_translator` | Full wizard flow: Advanced → Android → ARM translator selection |
-| `test_wizard_modify_loop` | Summary → Modify → change GPU → Summary → confirm |
-| `test_wizard_cancel_at_summary` | Summary → Cancel → no files created |
-| `test_wizard_not_tty` | Non-TTY → error message → exit |
-| `test_quick_linux_ovmf_not_found` | --quick + Linux + OVMF not found → Legacy BIOS warning, create request succeeds |
-| `test_quick_android_ovmf_not_found` | --quick + Android + OVMF not found → error |
-| `test_quick_android_base_image_not_found` | --quick + Android + base image not found → error |
+| Test | What it tests | Status |
+|------|---------------|--------|
+| `test_wizard_basic_linux` | Full wizard flow: Basic mode → Linux → confirm → correct request | **Blocked** — see note below |
+| `test_wizard_advanced_linux` | Full wizard flow: Advanced mode → Linux → all questions → confirm | **Blocked** — see note below |
+| `test_wizard_android_with_arm_translator` | Full wizard flow: Advanced → Android → ARM translator selection | **Blocked** — see note below |
+| `test_wizard_modify_loop` | Summary → Modify → change GPU → Summary → confirm | **Blocked** — see note below |
+| `test_wizard_cancel_at_summary` | Summary → Cancel → no files created | **Blocked** — see note below |
+| `test_wizard_not_tty` | Non-TTY → error message → exit | Done — `cli/src/wizard/mod.rs::tests::test_wizard_not_tty`, calls the real public `run()` (`cargo test`'s stdin is never a TTY, so this needs no mocking) |
+| `test_quick_linux_ovmf_not_found` | --quick + Linux + OVMF not found → Legacy BIOS warning, create request succeeds | Done — `cli/src/wizard/mod.rs::tests::test_quick_linux_ovmf_not_found` |
+| `test_quick_android_ovmf_not_found` | --quick + Android + OVMF not found → error | Done — `cli/src/wizard/mod.rs::tests::test_quick_android_ovmf_not_found` |
+| `test_quick_android_base_image_not_found` | --quick + Android + base image not found → error | Done — `cli/src/wizard/mod.rs::tests::test_quick_android_base_image_not_found` |
+
+**Why the first 5 are blocked:** they require driving `inquire::Select`/`Text` prompts programmatically (answering a scripted sequence of questions). `inquire` (0.7.5) has exactly this capability internally (`prompt_with_backend` + a `fake_backend` test helper that accepts a `Vec<Key>`), but both are `pub(crate)` inside the `inquire` crate itself — not exported, so `cli` cannot reach them. `--quick` and the not-TTY path don't hit this wall because neither one ever calls into a `Select`/`Text` prompt, which is why those 4 tests above are real, not mocked. To unblock the other 5, one of:
+1. Introduce a `trait Prompter` in `cli/src/wizard/` that the real code implements via `inquire` and tests implement via a canned-answer stub — touches every `ask_*` function's signature in `basic.rs`/`advanced.rs`/`summary.rs`.
+2. Vendor/fork `inquire` with a public `prompt_with_backend` — extra maintenance burden for a test-only need, not recommended.
+3. Leave these 5 as manual/exploratory testing only (current state) and rely on the unit tests on `build_linux_request`/`build_android_request`/`build_quick` (which already cover every field-mapping edge case the interactive flow would exercise, just not the prompt sequencing itself) for regression coverage.
 
 ### Running tests
 

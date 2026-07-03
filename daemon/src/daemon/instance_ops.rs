@@ -9,6 +9,59 @@ use andler_core::{
 };
 
 impl Daemon {
+    /// Resolves a user-supplied instance reference to a concrete
+    /// registered [`InstanceId`] — either a full UUID (fast path, exact
+    /// match, no lock needed) or a unique prefix of one, Docker-style
+    /// (`andler status a1b2c3` instead of the full UUID). See PLAN.md,
+    /// "Partial instance ID".
+    ///
+    /// The prefix is matched against the standard hyphenated lowercase
+    /// string form of each registered `InstanceId` (the same form shown
+    /// to users by `andler status`/`list_instances`), case-insensitively,
+    /// so a copy-pasted prefix from `andler status` output always works
+    /// regardless of case.
+    ///
+    /// - Zero matches -> [`DaemonError::InstanceRefNotFound`] (distinct
+    ///   from [`DaemonError::InstanceNotFound`], which is for a
+    ///   well-formed but unregistered full `InstanceId`).
+    /// - Exactly one match -> `Ok`.
+    /// - More than one match -> [`DaemonError::AmbiguousInstanceId`],
+    ///   carrying every matching `InstanceId` so the caller can show the
+    ///   user exactly what to disambiguate between, instead of forcing a
+    ///   separate `andler status` round-trip.
+    ///
+    /// A syntactically full, valid UUID is always treated as a full ID,
+    /// never as a "prefix that happens to match nothing else" — it does
+    /// not need to be registered yet for this function to accept it (the
+    /// caller decides whether an unregistered-but-well-formed ID is an
+    /// error, same as before this method existed).
+    pub async fn resolve_instance_id(&self, raw: &str) -> Result<InstanceId, DaemonError> {
+        if raw.is_empty() {
+            return Err(DaemonError::EmptyInstanceRef);
+        }
+
+        if let Ok(uuid) = uuid::Uuid::parse_str(raw) {
+            return Ok(InstanceId(uuid));
+        }
+
+        let needle = raw.to_ascii_lowercase();
+        let instances = self.instances.read().await;
+        let matches: Vec<InstanceId> = instances
+            .keys()
+            .filter(|id| id.0.to_string().starts_with(&needle))
+            .copied()
+            .collect();
+
+        match matches.len() {
+            0 => Err(DaemonError::InstanceRefNotFound(raw.to_string())),
+            1 => Ok(matches[0]),
+            _ => Err(DaemonError::AmbiguousInstanceId {
+                prefix: raw.to_string(),
+                candidates: matches,
+            }),
+        }
+    }
+
     /// Регистрирует новый инстанс с состоянием `Created`. Ничего не
     /// запускает — соответствует `andler_core::fsm::InstanceState::Created`:
     /// конфигурация принята и сохранена, процесс ещё не существует.
@@ -17,6 +70,7 @@ impl Daemon {
     /// заведомо невозможно запустить.
     pub async fn create_instance(&self, cfg: InstanceConfig) -> Result<InstanceId, DaemonError> {
         self.backend_for(cfg.backend)?;
+
 
         let id = cfg.id;
         {

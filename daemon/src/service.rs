@@ -97,6 +97,17 @@ impl From<DaemonError> for Status {
             | DaemonError::Disk(_)
             | DaemonError::Io { .. }
             | DaemonError::Restore(_) => Status::internal(err.to_string()),
+            // OVMF VARS provisioning failed for a new Android instance
+            // (see `instance_ops.rs`) — not a client-input problem, akin
+            // to the other Backend/Disk/Io/Restore internal errors above.
+            DaemonError::Firmware(_) => Status::internal(err.to_string()),
+            // Same category as `ConvertError -> Status::invalid_argument`
+            // in `andler-rpc` (see comment below): these three are all
+            // about the client's `instance_id` string itself being
+            // malformed/unresolvable/ambiguous, not about server state.
+            DaemonError::EmptyInstanceRef => Status::invalid_argument(err.to_string()),
+            DaemonError::InstanceRefNotFound(_) => Status::not_found(err.to_string()),
+            DaemonError::AmbiguousInstanceId { .. } => Status::invalid_argument(err.to_string()),
         }
     }
 }
@@ -194,7 +205,7 @@ impl AndlerService for DaemonService {
         &self,
         request: Request<InstanceIdRequest>,
     ) -> Result<Response<Empty>, Status> {
-        let id = convert::parse_instance_id(&request.into_inner().instance_id)?;
+        let id = self.daemon.resolve_instance_id(&request.into_inner().instance_id).await?;
         self.daemon.start_instance(id).await?;
         Ok(Response::new(Empty {}))
     }
@@ -204,7 +215,7 @@ impl AndlerService for DaemonService {
         request: Request<StopInstanceRequest>,
     ) -> Result<Response<Empty>, Status> {
         let req = request.into_inner();
-        let id = convert::parse_instance_id(&req.instance_id)?;
+        let id = self.daemon.resolve_instance_id(&req.instance_id).await?;
         self.daemon.stop_instance(id, req.graceful).await?;
         Ok(Response::new(Empty {}))
     }
@@ -213,7 +224,7 @@ impl AndlerService for DaemonService {
         &self,
         request: Request<InstanceIdRequest>,
     ) -> Result<Response<Empty>, Status> {
-        let id = convert::parse_instance_id(&request.into_inner().instance_id)?;
+        let id = self.daemon.resolve_instance_id(&request.into_inner().instance_id).await?;
         self.daemon.pause_instance(id).await?;
         Ok(Response::new(Empty {}))
     }
@@ -222,7 +233,7 @@ impl AndlerService for DaemonService {
         &self,
         request: Request<InstanceIdRequest>,
     ) -> Result<Response<Empty>, Status> {
-        let id = convert::parse_instance_id(&request.into_inner().instance_id)?;
+        let id = self.daemon.resolve_instance_id(&request.into_inner().instance_id).await?;
         self.daemon.resume_instance(id).await?;
         Ok(Response::new(Empty {}))
     }
@@ -231,7 +242,7 @@ impl AndlerService for DaemonService {
         &self,
         request: Request<InstanceIdRequest>,
     ) -> Result<Response<InstanceStatusResponse>, Status> {
-        let id = convert::parse_instance_id(&request.into_inner().instance_id)?;
+        let id = self.daemon.resolve_instance_id(&request.into_inner().instance_id).await?;
         let status = self.daemon.status(id).await?;
         let (state, error_message) = convert::instance_state_to_proto(&status.state);
         Ok(Response::new(InstanceStatusResponse {
@@ -272,7 +283,7 @@ impl AndlerService for DaemonService {
         request: Request<RemoveInstanceRequest>,
     ) -> Result<Response<Empty>, Status> {
         let request = request.into_inner();
-        let id = convert::parse_instance_id(&request.instance_id)?;
+        let id = self.daemon.resolve_instance_id(&request.instance_id).await?;
         self.daemon.remove_instance(id, request.purge).await?;
         Ok(Response::new(Empty {}))
     }
@@ -288,7 +299,7 @@ impl AndlerService for DaemonService {
         &self,
         request: Request<InstanceIdRequest>,
     ) -> Result<Response<GetInstanceConfigResponse>, Status> {
-        let id = convert::parse_instance_id(&request.into_inner().instance_id)?;
+        let id = self.daemon.resolve_instance_id(&request.into_inner().instance_id).await?;
         let config = self.daemon.get_instance_config(id).await?;
         Ok(Response::new(config.into()))
     }
@@ -302,7 +313,7 @@ impl AndlerService for DaemonService {
         &self,
         request: Request<InstanceIdRequest>,
     ) -> Result<Response<Self::StreamInstanceLogsStream>, Status> {
-        let id = convert::parse_instance_id(&request.into_inner().instance_id)?;
+        let id = self.daemon.resolve_instance_id(&request.into_inner().instance_id).await?;
         let inner = self.daemon.stream_instance_logs(id).await?;
         let mapped = inner.map(|line| Ok(LogLineResponse::from(line)));
         Ok(Response::new(Box::pin(mapped)))
@@ -315,7 +326,7 @@ impl AndlerService for DaemonService {
         &self,
         request: Request<InstanceIdRequest>,
     ) -> Result<Response<Self::StreamResourceMetricsStream>, Status> {
-        let id = convert::parse_instance_id(&request.into_inner().instance_id)?;
+        let id = self.daemon.resolve_instance_id(&request.into_inner().instance_id).await?;
         let inner = self.daemon.stream_resource_metrics(id).await?;
         let mapped = inner.map(|m| Ok(ResourceMetricsResponse::from(m)));
         Ok(Response::new(Box::pin(mapped)))
@@ -332,7 +343,7 @@ impl AndlerService for DaemonService {
         request: Request<CloneInstanceRequest>,
     ) -> Result<Response<CreateInstanceResponse>, Status> {
         let req = request.into_inner();
-        let source_id = convert::parse_instance_id(&req.source_instance_id)?;
+        let source_id = self.daemon.resolve_instance_id(&req.source_instance_id).await?;
         let mode = CloneMode::try_from(req.mode())?;
 
         let id = self
@@ -354,7 +365,7 @@ impl AndlerService for DaemonService {
         request: Request<ExportInstanceDiskRequest>,
     ) -> Result<Response<ExportInstanceDiskResponse>, Status> {
         let req = request.into_inner();
-        let source_id = convert::parse_instance_id(&req.source_instance_id)?;
+        let source_id = self.daemon.resolve_instance_id(&req.source_instance_id).await?;
 
         self.daemon
             .export_instance_disk(source_id, req.dest_path.clone().into())
@@ -372,7 +383,7 @@ impl AndlerService for DaemonService {
         request: Request<CreateSnapshotRequest>,
     ) -> Result<Response<CreateSnapshotResponse>, Status> {
         let req = request.into_inner();
-        let id = convert::parse_instance_id(&req.instance_id)?;
+        let id = self.daemon.resolve_instance_id(&req.instance_id).await?;
 
         let record = self
             .daemon
@@ -396,7 +407,7 @@ impl AndlerService for DaemonService {
         request: Request<RestoreSnapshotRequest>,
     ) -> Result<Response<Empty>, Status> {
         let req = request.into_inner();
-        let id = convert::parse_instance_id(&req.instance_id)?;
+        let id = self.daemon.resolve_instance_id(&req.instance_id).await?;
 
         self.daemon.restore_snapshot(id, req.tag, req.timeout_secs).await?;
 
@@ -408,7 +419,7 @@ impl AndlerService for DaemonService {
         request: Request<DeleteSnapshotRequest>,
     ) -> Result<Response<Empty>, Status> {
         let req = request.into_inner();
-        let id = convert::parse_instance_id(&req.instance_id)?;
+        let id = self.daemon.resolve_instance_id(&req.instance_id).await?;
 
         self.daemon.delete_snapshot(id, req.tag, req.timeout_secs).await?;
 
@@ -419,7 +430,7 @@ impl AndlerService for DaemonService {
         &self,
         request: Request<InstanceIdRequest>,
     ) -> Result<Response<ListSnapshotsResponse>, Status> {
-        let id = convert::parse_instance_id(&request.into_inner().instance_id)?;
+        let id = self.daemon.resolve_instance_id(&request.into_inner().instance_id).await?;
 
         let records = self.daemon.list_snapshots(id).await?;
 

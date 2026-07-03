@@ -28,21 +28,35 @@ pub async fn handle_status(
 
 pub async fn handle_list(
     client: &mut AndlerServiceClient<Channel>,
+    full_id: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let response = client.list_instances(Empty {}).await?.into_inner();
     if response.instances.is_empty() {
         println!("no instances");
     } else {
         for entry in response.instances {
-            println!(
-                "{}  {}  {}",
-                entry.instance_id,
-                state_kind_name(entry.state()),
-                entry.name
-            );
+            // Shortened, Docker-`ps`-style prefix by default; any prefix
+            // of this (down to a single hex char) is accepted by every
+            // command that takes an `<instance_id>` — see
+            // `Daemon::resolve_instance_id`. `--full-id`/`-q` prints the
+            // full UUID for scripts.
+            let id = if full_id {
+                entry.instance_id
+            } else {
+                short_id(&entry.instance_id)
+            };
+            println!("{}  {}  {}", id, state_kind_name(entry.state()), entry.name);
         }
     }
     Ok(())
+}
+
+/// First 8 characters of a full instance UUID string, matching `docker
+/// ps`'s default short-id length. Falls back to the full string if it's
+/// somehow already shorter (defensive only — `instance_id` is always a
+/// full UUID coming from the daemon).
+fn short_id(full: &str) -> &str {
+    full.get(..8).unwrap_or(full)
 }
 
 pub async fn handle_config(
@@ -319,5 +333,21 @@ fn print_instance_config(config: GetInstanceConfigResponse) {
         );
         println!("  hide_host_cursor: {}", input.hide_host_cursor);
         println!("  clipboard_enabled: {}", input.clipboard_enabled);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::short_id;
+
+    #[test]
+    fn short_id_truncates_full_uuid_to_eight_chars() {
+        let full = "a1b2c3d4-e5f6-4789-a012-3456789abcde";
+        assert_eq!(short_id(full), "a1b2c3d4");
+    }
+
+    #[test]
+    fn short_id_returns_input_unchanged_if_shorter_than_eight() {
+        assert_eq!(short_id("abc"), "abc");
     }
 }
