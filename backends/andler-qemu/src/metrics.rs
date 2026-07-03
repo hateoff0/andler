@@ -333,11 +333,12 @@ pub fn spawn_metrics_poller(
                 ..ResourceMetrics::default()
             };
 
-            // GPU-метрики из sysfs (AMD только) — читаются каждую секунду
-            // вместе с host-метриками и отправляются единым сообщением.
+            // GPU-метрики из sysfs/vendor-тулов (см. andler-firmware::metrics
+            // за AMD/NVIDIA/Intel) — читаются каждую секунду вместе с
+            // host-метриками и отправляются единым сообщением.
             let mut metrics = metrics;
-            let gpu = crate::gpu_metrics::read_gpu_metrics();
-            crate::gpu_metrics::merge_gpu_metrics(&mut metrics, &gpu);
+            let gpu = andler_firmware::metrics::read_gpu_metrics();
+            andler_firmware::metrics::merge_gpu_metrics(&mut metrics, &gpu);
 
             let _ = sender.send(metrics);
 

@@ -56,10 +56,9 @@ Implements `HypervisorBackend` for QEMU via process management, QMP communicatio
 - `process.rs`: `QemuProcess` — spawn, terminate, force-kill, log/metrics broadcast channels
 - `qmp.rs`: `QmpClient` — QMP protocol over unix socket (handshake, pause/resume/status, snapshot job API)
 - `backend.rs`: `QemuBackend` — ties everything together, manages `RunningInstance` registry
-- `metrics.rs`: Background poller reading `/proc/<pid>/stat`, `/proc/<pid>/status`, `/sys/block/*/stat`, `/proc/<net/dev`
-- `gpu_metrics.rs`: AMD sysfs reader for VRAM + GPU load
+- `metrics.rs`: Background poller reading `/proc/<pid>/stat`, `/proc/<pid>/status`, `/sys/block/*/stat`, `/proc/<net/dev` (per-VM); calls into `andler-firmware::metrics` for the GPU fields (host-level, not per-VM — moved there to sit next to GPU vendor detection)
 
-**50 tests** across 6 modules (unit + integration).
+**Tests**: unit + integration, across `cmdline`/`process`/`qmp`/`backend`/`metrics` (GPU metrics tests moved to `services/andler-firmware`).
 
 ### `backends/andler-vmm` — Cloud Hypervisor (Stub)
 

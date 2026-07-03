@@ -143,55 +143,22 @@ Collects resource metrics from `/proc` for the QEMU process. No QMP needed.
 
 **Polling interval**: 1 second (`DEFAULT_POLL_INTERVAL`).
 
-### `gpu_metrics` — GPU Metrics (AMD, NVIDIA, Intel)
+### GPU metrics — moved to `andler-firmware`
 
-Reads GPU metrics from host-side sysfs and vendor CLI tools. Supports three vendors with automatic detection:
+GPU metrics (AMD/NVIDIA/Intel sysfs + `nvidia-smi`) used to live in this
+crate as `gpu_metrics.rs`. They now live in
+`services/andler-firmware/src/metrics/` (`gpu_amd.rs`/`gpu_nvidia.rs`/
+`gpu_intel.rs`), alongside GPU vendor *detection* (`detect/gpu.rs`) —
+both read the same sysfs paths/vendor tools, so detection and monitoring
+belong in one crate. See that crate's README/doc comments for the vendor
+details (sysfs paths, `nvidia-smi` output format, the Intel
+`rc6_residency_ms` load-delta calculation, etc.) — unchanged, just moved.
 
-| Vendor | Source | Metrics |
-|--------|--------|---------|
-| AMD | sysfs `mem_info_vram_*`, `gpu_busy_percent` | VRAM used/total, GPU load % |
-| NVIDIA | `nvidia-smi` CLI | VRAM used/total, GPU load % |
-| Intel | sysfs `i915` `power/rc6_residency_ms` | GPU load % (idle-time-based), no VRAM |
-
-**Public API**:
-
-| Function | Signature | Description |
-|----------|-----------|-------------|
-| `read_gpu_metrics` | `fn() -> ResourceMetrics` | Detects vendor (AMD → NVIDIA → Intel) and reads metrics |
-| `merge_gpu_metrics` | `fn(base: &mut ResourceMetrics, gpu: &ResourceMetrics)` | Merges GPU fields into base metrics (fills `None` fields, doesn't overwrite existing) |
-
-**Vendor detection**: AMD → NVIDIA → Intel priority. First found vendor wins. `is_nvidia_available()` checks if `nvidia-smi` is in PATH.
-
-**AMD sysfs paths** (first card under `/sys/class/drm/card*/device/`):
-- `mem_info_vram_used` → `vram_used_bytes`
-- `mem_info_vram_total` → `vram_total_bytes`
-- `gpu_busy_percent` → `gpu_load_percent`
-
-**NVIDIA**: Runs `nvidia-smi --query-gpu=memory.used,memory.total,utilization.gpu --format=csv,noheader,nounits`. Values in MiB, converted to bytes. If `nvidia-smi` not found, returns None (no retry).
-
-**Intel sysfs path** (i915 driver): `device/power/rc6_residency_ms` — cumulative
-milliseconds spent in the RC6 idle power state since boot, a long-standing
-documented i915 ABI (kept as a top-level compat path pointing at `gt/gt0/`
-even after the upstream per-tile `gt/` sysfs reorganization). GPU load % is
-derived as `100 - (Δrc6_residency_ms / Δwall_clock_ms * 100)` between two
-calls, using a real elapsed-time delta (`Instant`), not an assumed fixed
-polling interval. **No VRAM metric for Intel** — integrated Intel GPUs share
-system RAM via "stolen memory" accounting that lives in `debugfs`, not a
-stable `sysfs` ABI, so `vram_used_bytes`/`vram_total_bytes` are always `None`.
-
-> An earlier version of this crate read a sysfs path that doesn't exist —
-> `device/gt/gt0/attrs/busyiffies` for load, and `mem_info_dev_local_mem_alloc`/
-> `mem_info_stolen_local_mem` for VRAM. None of those three paths are present
-> anywhere in the real i915 sysfs tree (checked against `i915_sysfs.c` and the
-> upstream `gt` sysfs reorganization commit). The bug shipped silently because
-> the unit tests only exercised the delta-calculation arithmetic with
-> hand-picked numbers, never the sysfs path string itself — on real Intel
-> hardware, `read_intel_metrics` would have always returned `None` for both
-> load and VRAM, with no error. Fixed to use the documented `rc6_residency_ms`
-> ABI for load, and to honestly return `None` for VRAM rather than read from
-> a path that was never real.
-
-**Integration**: `spawn_metrics_poller` in `metrics.rs` calls `read_gpu_metrics()` and merges into the base metrics sample every tick. Single merged `ResourceMetrics` message per tick — no separate GPU channel.
+**Integration**: `spawn_metrics_poller` in `metrics.rs` calls
+`andler_firmware::metrics::read_gpu_metrics()` and merges the result into
+the base metrics sample every tick via
+`andler_firmware::metrics::merge_gpu_metrics()`. Single merged
+`ResourceMetrics` message per tick — no separate GPU channel.
 
 ## Tests
 
@@ -202,7 +169,7 @@ stable `sysfs` ABI, so `vram_used_bytes`/`vram_total_bytes` are always `None`.
 - **`backend`** (9 tests): `Passthrough` validation, unknown handle handling, `NotImplemented` branches, `VmStatus → InstanceState` mapping, empty `metrics_stream`/`log_stream`.
 - **`process`** (3 tests): `SpawnFailed` via missing binary, `drain_to_tracing` line publishing, subscriber tolerance.
 - **`metrics`** (7 tests): CPU stat parsing, CPU% computation, I/O rates, RSS parsing, net_dev parsing.
-- **`gpu_metrics`**: AMD/NVIDIA/Intel detection, NVIDIA output parsing, a regression test asserting the Intel sysfs path is the real `rc6_residency_ms` ABI (not `busyiffies`), the `intel_gpu_load_from_delta` pure-arithmetic core tested deterministically (fully idle/fully busy/partial/clamping/non-positive-elapsed) without sleeping or mocking `Instant`, plus a real-time-based `compute_intel_gpu_load` round-trip test, merge behavior, panic safety.
+- GPU metrics tests (AMD/NVIDIA/Intel detection, NVIDIA output parsing, the Intel `rc6_residency_ms` ABI regression test, `intel_gpu_load_from_delta`/`compute_intel_gpu_load`, merge behavior) now live in `services/andler-firmware` — see that crate's tests, not this one.
 
 ### With `/dev/kvm` and `qemu-system-x86_64` (integration tests, `#[ignore]`)
 

@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 andler-core = { path = "../../core/andler-core" }
+andler-firmware = { path = "../../services/andler-firmware" }
 tokio = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }

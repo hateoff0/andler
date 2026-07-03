@@ -282,19 +282,21 @@ andler/
 │           └── input.rs            InputConfig (keyboard, mouse)
 │
 ├── backends/                      Hypervisor implementations
-│   ├── andler-qemu/               QEMU backend (50 tests)
+│   ├── andler-qemu/               QEMU backend
 │   │   ├── cmdline.rs             QEMU CLI argument builder
 │   │   ├── process.rs             Process spawn/terminate/logs
 │   │   ├── qmp.rs                 QMP protocol client
 │   │   ├── backend.rs             HypervisorBackend implementation
-│   │   ├── metrics.rs             /proc-based resource metrics
-│   │   └── gpu_metrics.rs         AMD/NVIDIA/Intel GPU metrics
+│   │   └── metrics.rs             /proc-based per-VM resource metrics
 │   └── andler-vmm/                Stub for future Cloud Hypervisor
 │
 ├── services/                      Infrastructure services
 │   ├── andler-disk/               qemu-img wrapper + Magisk provisioning
 │   ├── andler-net/                Stub for networking
 │   ├── andler-store/              SQLite state persistence
+│   ├── andler-firmware/           OVMF detect/provision + host hardware
+│   │                              auto-detect (GPU/ARM/audio/passt) +
+│   │                              host-level GPU metrics (AMD/NVIDIA/Intel)
 │   └── andler-rpc/                gRPC protocol + conversions
 │
 ├── daemon/                        Background service (80 unit + 25 integration tests)

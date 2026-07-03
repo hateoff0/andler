@@ -11,7 +11,6 @@
 
 pub mod backend;
 pub mod cmdline;
-pub mod gpu_metrics;
 pub mod metrics;
 pub mod process;
 pub mod qmp;

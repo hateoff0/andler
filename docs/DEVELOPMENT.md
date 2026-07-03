@@ -179,8 +179,7 @@ andler/
 │   │       ├── process.rs        # QemuProcess (spawn, logs, metrics)
 │   │       ├── qmp.rs            # QMP client (pause, resume, snapshots)
 │   │       ├── backend.rs        # QemuBackend (HypervisorBackend impl)
-│   │       ├── metrics.rs        # /proc-based metrics poller
-│   │       └── gpu_metrics.rs    # AMD sysfs GPU metrics
+│   │       └── metrics.rs        # /proc-based per-VM metrics poller
 │   │
 │   └── andler-vmm/               # Stub — future Cloud Hypervisor
 │
@@ -292,8 +291,8 @@ andler/
 
 ### Modifying the Metrics Pipeline
 
-1. Edit `backends/andler-qemu/src/metrics.rs` for host metrics
-2. Edit `backends/andler-qemu/src/gpu_metrics.rs` for GPU metrics
+1. Edit `backends/andler-qemu/src/metrics.rs` for per-VM host metrics (CPU/RAM/disk/network I/O)
+2. Edit `services/andler-firmware/src/metrics/` for GPU metrics (AMD/NVIDIA/Intel — host-level, not per-VM; lives next to GPU vendor detection in `detect/gpu.rs`)
 3. Update `ResourceMetrics` in `core/andler-core/src/backend.rs` if adding fields
 4. Update proto `ResourceMetricsResponse` in `proto/andler.proto`
 5. Update conversion in `services/andler-rpc/src/convert.rs`
