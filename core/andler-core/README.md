@@ -4,6 +4,19 @@ Domain model for ANDLER: instance configuration, finite state machine, and hyper
 
 ## Modules
 
+### `paths` — Unified Path Resolution
+
+Single source of truth for all filesystem paths. Reads `ANDLER_HOME` env var, falls back to `~/.local/share/andler/`.
+
+| Function | Returns |
+|----------|---------|
+| `andler_home()` | Root data directory |
+| `instances_root()` | `<home>/instances/` |
+| `base_images_dir()` | `<home>/base-images` |
+| `ovmf_cache_dir()` | `<home>/ovmf/` |
+| `venus_cache_dir()` | `<home>/venus-cache` |
+| `db_path()` | `<home>/andlerd.db` |
+
 ### `backend` — Hypervisor Backend Abstraction
 
 Defines the `HypervisorBackend` trait — the contract that all hypervisor implementations (QEMU, future Cloud Hypervisor) must fulfill.
@@ -19,9 +32,9 @@ Defines the `HypervisorBackend` trait — the contract that all hypervisor imple
 | `resume` | `async fn(&self, handle: &BackendHandle) -> Result<(), BackendError>` | Resume a paused instance |
 | `stop` | `async fn(&self, handle: &BackendHandle, graceful: bool) -> Result<(), BackendError>` | Stop an instance (graceful = SIGTERM, else kill) |
 | `status` | `async fn(&self, handle: &BackendHandle) -> Result<BackendStatus, BackendError>` | Query current status |
-| `snapshot` | `async fn(&self, handle: &BackendHandle, tag: &str) -> Result<(), BackendError>` | Create a snapshot (default: `NotImplemented`) |
-| `snapshot_restore` | `async fn(&self, handle: &BackendHandle, tag: &str) -> Result<(), BackendError>` | Restore from snapshot (default: `NotImplemented`) |
-| `snapshot_delete` | `async fn(&self, handle: &BackendHandle, tag: &str) -> Result<(), BackendError>` | Delete a snapshot (default: `NotImplemented`) |
+| `snapshot` | `async fn(&self, handle: &BackendHandle, tag: &str, timeout: Option<Duration>) -> Result<(), BackendError>` | Create a snapshot (default: `NotImplemented`) |
+| `snapshot_restore` | `async fn(&self, handle: &BackendHandle, tag: &str, timeout: Option<Duration>) -> Result<(), BackendError>` | Restore from snapshot (default: `NotImplemented`) |
+| `snapshot_delete` | `async fn(&self, handle: &BackendHandle, tag: &str, timeout: Option<Duration>) -> Result<(), BackendError>` | Delete a snapshot (default: `NotImplemented`) |
 | `snapshot_list` | `async fn(&self, handle: &BackendHandle) -> Result<Vec<SnapshotInfo>, BackendError>` | List snapshots (default: `NotImplemented`) |
 | `metrics_stream` | `fn(&self, handle: &BackendHandle) -> BoxStream<'_, ResourceMetrics>` | Real-time resource metrics (CPU%, RAM, disk, net, GPU) |
 | `log_stream` | `fn(&self, handle: &BackendHandle) -> BoxStream<'_, LogLine>` | Live-tail stdout/stderr of the hypervisor process |
@@ -42,9 +55,9 @@ Any method not implemented by a specific backend must return `BackendError::NotI
 | `disk_write_bytes_per_sec` | `Option<u64>` | `/sys/block/<dev>/stat` |
 | `net_rx_bytes_per_sec` | `Option<u64>` | `/proc/<net/dev>` delta |
 | `net_tx_bytes_per_sec` | `Option<u64>` | `/proc/<net/dev>` delta |
-| `vram_used_bytes` | `Option<u64>` | AMD sysfs `mem_info_vram_used` |
-| `vram_total_bytes` | `Option<u64>` | AMD sysfs `mem_info_vram_total` |
-| `gpu_load_percent` | `Option<f32>` | AMD sysfs `gpu_busy_percent` |
+| `vram_used_bytes` | `Option<u64>` | AMD sysfs / NVIDIA nvidia-smi / Intel sysfs |
+| `vram_total_bytes` | `Option<u64>` | AMD sysfs / NVIDIA nvidia-smi / Intel sysfs |
+| `gpu_load_percent` | `Option<f32>` | AMD sysfs / NVIDIA nvidia-smi / Intel busyiffies delta |
 
 **`SnapshotInfo`**: `tag` (user-facing identifier), `id` (backend identifier), `created_at` (format is backend-specific).
 
@@ -85,7 +98,7 @@ Nine configuration sections, each in its own file:
 
 - **`InstanceId`**: Newtype wrapper around `Uuid` (v4). Unique per instance.
 - **`BackendKind`**: `Qemu` | `Vmm` (Vmm is registered but returns `NotImplemented`).
-- **`InstanceKind`**: `LinuxVm { iso_path }` | `AndroidVm { android_profile }`.
+- **`InstanceKind`**: `LinuxVm { iso_path, cdrom_bus }` | `AndroidVm { android_profile }`.
 - **`InstanceConfig`**: The full configuration struct combining all sections:
 
 ```rust
@@ -120,8 +133,8 @@ Each sub-config has a `reference_default()` method that produces sensible defaul
 
 #### `config::disk`
 
-- `DiskConfig`: `path`, `size_bytes`, `format` (`Qcow2` | `Raw` | `Vdi`), `base_image: Option<PathBuf>` (backing file for overlays), `thin_provisioning`, `trim_on_shutdown`, `snapshot_timeout_secs: Option<u64>` (per-instance snapshot job timeout, default 30s).
-- `reference_default(path)`: 40 GiB qcow2, no backing, thin, discard.
+- `DiskConfig`: `path`, `size_bytes`, `format` (`Qcow2` | `Raw` | `Vdi`), `base_image: Option<PathBuf>` (backing file for overlays), `thin_provisioning`, `trim_on_shutdown`, `snapshot_timeout_secs: Option<u64>` (per-instance snapshot job timeout, default 30s), `compact_on_shutdown: bool` (auto-compact after stop, default false).
+- `reference_default(path)`: 256 GiB qcow2, no backing, thin, discard.
 - `overlay(path, base_image, size_bytes)`: Creates an overlay config with backing file.
 
 #### `config::gpu`
@@ -132,37 +145,46 @@ Each sub-config has a `reference_default()` method that produces sensible defaul
 
 #### `config::display`
 
-- `DisplayEngine`: `Sdl` | `Spice` | `Dbus` | `None` (headless, `-display none`).
+- `DisplayEngine`: `Sdl` | `Gtk` | `Spice` | `Dbus` | `None` (headless, `-display none`).
 - `DisplayConfig`: `resolution` (width/height), `dpi`, `fps_limit` (0 = unlimited), `display_engine`, `fullscreen`.
 - Default: 1920x1080, 96 DPI, no limit, SDL, no fullscreen.
 
 #### `config::network`
 
 - `NetworkMode`: `Nat` | `Bridge { interface }` | `Isolated`.
-- `NetworkConfig`: `mode`, `device_model` (virtio-net-pci).
-- Default: NAT, virtio-net-pci.
+- `NetworkConfig`: `mode`, `device_model` (virtio-net-pci), `nat_backend: NatBackend` (`Slirp` | `Passt`).
+- Default: NAT, virtio-net-pci, Slirp.
 
 #### `config::firmware`
 
 - `FirmwareConfig`: `ovmf_code_path` (shared read-only OVMF_CODE), `ovmf_vars_path` (per-instance copy).
-- Default: OVMF_CODE at `/usr/share/edk2-ovmf/x64/OVMF_CODE.4m.fd`.
+- Default: OVMF_CODE at `/usr/share/edk2/x64/OVMF_CODE.4m.fd`.
 
 #### `config::audio`
 
 - `AudioBackend`: `Pipewire` | `Pulseaudio` | `None`.
-- `AudioConfig`: `backend`.
-- Default: PipeWire.
+- `AudioDevice`: `VirtioSound` | `Ich9Hda`.
+- `AudioConfig`: `backend`, `device`.
+- Default: PipeWire, VirtioSound.
 
 #### `config::input`
 
-- `InputConfig`: `tablet_mode` (virtio-tablet-pci, absolute positioning), `hide_host_cursor`, `clipboard_enabled` (qemu-vdagent).
-- Default: all true.
+- `PointerMode`: `Tablet` (absolute, virtio-tablet-pci) | `Mouse` (relative, virtio-mouse-pci).
+- `InputConfig`: `pointer_mode`, `hide_host_cursor`, `clipboard_enabled` (qemu-vdagent).
+- Default: Tablet, hide cursor, clipboard on.
+
+#### `config::cdrom`
+
+- `CdromBus`: `VirtioScsi` | `Ide`.
+- `recommended_for_iso_filename(path)`: Auto-selects VirtioScsi for known Linux distros, Ide for Windows/unknown.
+- Default: Ide (safe fallback).
 
 ### `android_profile` — Android Instance Profiles
 
 - **`AndroidVersion`**: `Android11` | `Android13`.
 - **`RootMode`**: `None` (default) | `Magisk`.
-- **`AndroidProfile`**: `android_version`, `gapps`, `microg`, `libndk`, `root`.
+- **`ArmTranslator`**: `None` (default) | `Libndk` (recommended for AMD) | `Libhoudini` (recommended for Intel).
+- **`AndroidProfile`**: `android_version`, `gapps`, `microg`, `arm_translator`, `root`.
   - `cache_key()`: Version/cache key string for base image lookup.
   - `resolve(...)`: Pure function — resolves profile into a full `InstanceConfig` with overlay disk. Does not download or create files.
 
@@ -175,28 +197,30 @@ Each sub-config has a `reference_default()` method that produces sensible defaul
 
 ### `error` — Error Types
 
-- **`BackendError`**: `NotImplemented`, `HandleNotFound(String)`, `Io(String)`, `InvalidConfig { backend, reason }`.
+- **`BackendError`**: `NotImplemented { backend, operation }`, `HandleNotFound(String)`, `Io(String)`, `InvalidConfig { backend, reason }`.
 - **`FsmError`**: `InvalidTransition { from, event }`.
 
 ## Tests
 
-22 unit tests across 13 test modules. Fully testable without QEMU or `/dev/kvm` — this is the whole point of extracting the domain into a separate crate. If a test in `andler-core` requires a real QEMU process, it's in the wrong crate.
+~37 unit tests across 15 test modules. Fully testable without QEMU or `/dev/kvm` — this is the whole point of extracting the domain into a separate crate. If a test in `andler-core` requires a real QEMU process, it's in the wrong crate.
 
 | Module | Tests |
 |--------|-------|
+| `paths` | `andler_home_respects_env_override`, `andler_home_ignores_empty_env_override`, `derived_paths_are_nested_under_andler_home` |
 | `clone` | `clone_mode_variants_are_distinct` |
 | `fsm` | `happy_path_start_pause_resume_stop`, `cannot_resume_from_running`, `cannot_pause_from_created`, `fail_is_reachable_from_every_active_state`, `terminal_states_have_no_outgoing_transitions` |
-| `android_profile` | `cache_key_does_not_depend_on_root_mode`, `cache_key_differs_on_gapps`, `resolve_produces_overlay_disk_pointing_at_base_image` |
+| `android_profile` | `cache_key_differs_on_arm_translator`, `cache_key_does_not_depend_on_root_mode`, `cache_key_differs_on_gapps`, `resolve_produces_overlay_disk_pointing_at_base_image` |
 | `config::instance` | `instance_id_is_unique`, `config_round_trips_through_serde_json` |
 | `config::cpu` | `reference_default_matches_start_sh` |
 | `config::memory` | `reference_default_matches_start_sh` |
 | `config::gpu` | `passthrough_is_not_implemented`, `venus_and_friends_are_implemented`, `reference_default_matches_start_sh` |
-| `config::disk` | `reference_default_matches_start_sh`, `overlay_points_at_base_image` |
+| `config::disk` | `reference_default_is_256_gib_thin_provisioned_qcow2`, `overlay_points_at_base_image` |
 | `config::display` | `reference_default_uses_sdl`, `none_display_engine_round_trips_through_serde_json` |
-| `config::network` | `reference_default_matches_start_sh` |
-| `config::firmware` | `reference_default_matches_start_sh_code_path` |
-| `config::audio` | `reference_default_matches_start_sh` |
-| `config::input` | `reference_default_matches_start_sh` |
+| `config::network` | `reference_default_matches_start_sh`, `nat_backend_deserializes_with_default_when_missing` |
+| `config::firmware` | `reference_default_has_expected_structure`, `with_code_sets_both_paths` |
+| `config::audio` | `reference_default_backend_matches_start_sh`, `reference_default_device_is_virtio_sound_not_start_sh`, `device_field_deserializes_with_default_when_missing` |
+| `config::input` | `reference_default_matches_start_sh`, `pointer_mode_deserializes_with_default_when_missing` |
+| `config::cdrom` | `recommends_virtio_scsi_for_known_distros`, `recommends_ide_for_unknown_or_windows_iso`, `recommends_ide_when_path_has_no_filename`, `default_is_ide_not_virtio` |
 
 ## What Must NOT Live Here
 

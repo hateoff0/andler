@@ -11,11 +11,11 @@ service.rs  →  DaemonService (thin gRPC wrapper)
                ↓
 daemon/
 ├── mod.rs          →  Daemon (backend registry + instance state + optional persistence)
-├── error.rs        →  DaemonError enum (14 variants)
+├── error.rs        →  DaemonError enum (18 variants)
 ├── types.rs        →  InstanceRecord, SnapshotRecord, InstanceDirGuard, InstanceSummary
 ├── instance_ops.rs →  create, start, stop, pause, resume, remove
 ├── clone_ops.rs    →  clone_instance, export_instance_disk, find_live_clones
-├── snapshot_ops.rs →  create/restore/delete/list snapshots
+├── snapshot_ops.rs →  create/restore/delete/list snapshots (requires Running/Paused for QMP commands)
 └── query_ops.rs    →  status, list_instances, get_instance_config, stream logs/metrics
                ↓
            HypervisorBackend trait → QemuBackend / VmmBackend
@@ -26,7 +26,7 @@ daemon/
 ### `main.rs` — Entry Point
 
 - Sets up `tracing` subscriber
-- Opens `Store` at `ANDLER_STORE_PATH` (default: `~/.local/share/andler/state.db`)
+- Opens `Store` at `ANDLERD_STORE_PATH` (default: `~/.local/share/andler/state.db`)
 - Calls `Daemon::restore(store)` to recover instances from previous sessions
 - Starts tonic `Server` on `DEFAULT_LISTEN_ADDR` (`127.0.0.1:50051`)
 - Listens on loopback only — no auth/TLS (see comment in source)
@@ -71,9 +71,9 @@ Overridable via:
 
 | Method | Signature | Requirement |
 |--------|-----------|-------------|
-| `create_snapshot` | `async fn(InstanceId, String, Option<String>) -> Result<SnapshotRecord, DaemonError>` | Running/Paused |
-| `restore_snapshot` | `async fn(InstanceId, String) -> Result<(), DaemonError>` | Stopped |
-| `delete_snapshot` | `async fn(InstanceId, String) -> Result<(), DaemonError>` | Stopped |
+| `create_snapshot` | `async fn(InstanceId, String, Option<String>, Option<u64>) -> Result<SnapshotRecord, DaemonError>` | Running/Paused |
+| `restore_snapshot` | `async fn(InstanceId, String, Option<u64>) -> Result<(), DaemonError>` | Running/Paused |
+| `delete_snapshot` | `async fn(InstanceId, String, Option<u64>) -> Result<(), DaemonError>` | Running/Paused |
 | `list_snapshots` | `async fn(InstanceId) -> Result<Vec<SnapshotRecord>, DaemonError>` | Any |
 
 **Clone/Export Methods**:
@@ -99,18 +99,19 @@ Overridable via:
 
 ### `daemon/error.rs` — Error Types
 
-14 error variants mapping domain failures to gRPC status codes:
+18 error variants mapping domain failures to gRPC status codes:
 - `InstanceNotFound`, `NoBackendRegistered`, `InvalidTransition`
-- `Backend`, `Disk`, `Io`, `Restore`
+- `Backend`, `Disk`, `Firmware`, `Io`, `Restore`
 - `InstanceNotRemovable`, `InstanceNotClonable`
 - `SharedBaseNotSupportedForLinuxVm`, `InstanceHasLiveClones`
 - `SnapshotNotFound`, `SnapshotAlreadyExists`
-- `SnapshotOperationRequiresRunningInstance`, `SnapshotOperationRequiresStoppedInstance`
+- `SnapshotOperationRequiresRunningInstance`
+- `EmptyInstanceRef`, `InstanceRefNotFound`, `AmbiguousInstanceId`
 
 ### `daemon/types.rs` — Internal Types
 
 - **`InstanceRecord`**: State + backend handle + config snapshot + filesystem paths
-- **`SnapshotRecord`**: Tag, label, creation timestamp
+- **`SnapshotRecord`**: id, instance_id, tag, description, creation timestamp
 - **`InstanceDirGuard`**: RAII cleanup — deletes instance directory on drop if creation sequence didn't complete
 - **`InstanceSummary`**: Compact view for list operations
 
@@ -139,9 +140,14 @@ Handles: `status`, `stream_instance_logs`, `stream_resource_metrics`, `list_inst
 - `NoBackendRegistered` → `UNIMPLEMENTED`
 - `InvalidTransition` / `InstanceNotRemovable` / `InstanceNotClonable` → `FAILED_PRECONDITION`
 - `SnapshotAlreadyExists` → `ALREADY_EXISTS`
+- `SnapshotNotFound` → `NOT_FOUND`
 - `SharedBaseNotSupportedForLinuxVm` / `InstanceHasLiveClones` → `FAILED_PRECONDITION`
-- `SnapshotOperationRequiresRunningInstance` / `SnapshotOperationRequiresStoppedInstance` → `FAILED_PRECONDITION`
-- Other → `INTERNAL`
+- `SnapshotOperationRequiresRunningInstance` → `FAILED_PRECONDITION`
+- `Backend(NotImplemented)` → `UNIMPLEMENTED`
+- `Backend(HandleNotFound)` → `FAILED_PRECONDITION`
+- `EmptyInstanceRef` / `AmbiguousInstanceId` → `INVALID_ARGUMENT`
+- `InstanceRefNotFound` → `NOT_FOUND`
+- Other (`Backend(other)`, `Disk`, `Io`, `Restore`, `Firmware`) → `INTERNAL`
 
 ### `grpc_roundtrip_test.rs` — Integration Tests
 
@@ -161,18 +167,19 @@ Real TCP gRPC round-trip tests (no `qemu-img`/`/dev/kvm` required). Uses ephemer
 
 ### `daemon::tests` (unit tests, no network)
 
-80 tests across 8 modules:
+68 tests across 9 modules:
 
 | Module | Focus | Tests |
 |--------|-------|-------|
-| `helpers.rs` | Test infrastructure (TestTempDir, sample configs) | — |
+| `common.rs` | Test infrastructure (TestTempDir, sample configs) | — |
 | `create.rs` | Instance creation, Android overlay, TOML parsing | 5 |
 | `start_stop.rs` | Start, pause, resume, stop lifecycle | 6 |
 | `persistence.rs` | with_store, restore, without_store | 9 |
 | `remove.rs` | Remove, purge, file cleanup, clone protection | 13 |
-| `clone.rs` | Clone (3 modes), export, find_live_clones | 19 |
-| `list_config.rs` | list_instances, get_instance_config | 6 |
+| `clone.rs` | Clone (3 modes), export, find_live_clones | 20 |
+| `list_config.rs` | list_instances, get_instance_config | 7 |
 | `status.rs` | Status queries, log/metrics streaming | 3 |
+| `resolve_instance_id.rs` | Partial ID resolution, ambiguity detection | 5 |
 
 - **Instance lifecycle**: create, start (with Passthrough validation), pause/resume before start, stop before start, double create overwrite
 - **Android instance creation**: Profile resolution, overlay creation (`#[ignore]`), missing base image (verifies `InstanceDirGuard` cleanup), missing OVMF template (verifies cleanup)
@@ -185,7 +192,7 @@ Real TCP gRPC round-trip tests (no `qemu-img`/`/dev/kvm` required). Uses ephemer
 
 ### `grpc_roundtrip_test.rs` (integration, real TCP)
 
-25 tests covering the full gRPC round-trip for all major operations.
+24 tests covering the full gRPC round-trip for all major operations.
 
 ## DaemonError Variants
 
@@ -196,6 +203,7 @@ Real TCP gRPC round-trip tests (no `qemu-img`/`/dev/kvm` required). Uses ephemer
 | `InvalidTransition` | `FsmError` | FSM transition not allowed |
 | `Backend` | `BackendError` | Backend returned error |
 | `Disk` | `DiskError` | Disk creation/provisioning error |
+| `Firmware` | `String` | OVMF detection/provisioning error |
 | `Io` | `path`, `source` | Filesystem error outside disk crate |
 | `Restore` | `StoreError` | Failed to restore from store |
 | `InstanceNotRemovable` | `InstanceId`, `InstanceState` | Non-terminal state |
@@ -204,8 +212,10 @@ Real TCP gRPC round-trip tests (no `qemu-img`/`/dev/kvm` required). Uses ephemer
 | `InstanceHasLiveClones` | `InstanceId`, `Vec<InstanceId>` | Can't purge with live linked clones |
 | `SnapshotNotFound` | `instance_id`, `tag` | Snapshot doesn't exist |
 | `SnapshotAlreadyExists` | `instance_id`, `tag` | Duplicate tag |
-| `SnapshotOperationRequiresRunningInstance` | `InstanceId`, `InstanceState` | Create needs Running/Paused |
-| `SnapshotOperationRequiresStoppedInstance` | `InstanceId`, `InstanceState` | Restore/delete needs Stopped |
+| `SnapshotOperationRequiresRunningInstance` | `InstanceId`, `InstanceState` | Create/restore/delete needs Running/Paused |
+| `EmptyInstanceRef` | — | User passed empty string as instance reference |
+| `InstanceRefNotFound` | `String` | Prefix matched zero instances |
+| `AmbiguousInstanceId` | `prefix`, `candidates` | Prefix matched multiple instances |
 
 ## Requirements
 

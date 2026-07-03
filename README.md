@@ -111,10 +111,10 @@ gl = true
   --android-version 13 \
   --base-image-path /path/to/base.qcow2 \
   --ovmf-vars-template /path/to/VARS.fd \
-  --libndk
+  --arm-translator libndk
 ```
 
-`--libndk` enables ARM→x86 translation (libhoudini/libndk) for running ARM-only Android apps.
+`--arm-translator libndk` enables ARM→x86 translation (libndk for AMD CPUs, libhoudini for Intel CPUs) for running ARM-only Android apps.
 
 ### Create from TOML (auto-detected type)
 
@@ -189,8 +189,9 @@ ovmf_vars_path = "/path/to/VARS.fd"
 Optional sections with defaults:
 
 ```toml
-disk_size_gib = 40
+disk_size_gib = 256
 snapshot_timeout_secs = 30
+compact_on_shutdown = false
 
 [cpu]
 cores = 4
@@ -213,12 +214,16 @@ display_engine = "Sdl"
 
 [network]
 mode = "Nat"
+device_model = "virtio-net-pci"
+nat_backend = "Slirp"  # or "Passt" if available
 
 [audio]
 backend = "Pipewire"
+device = "VirtioSound"
 
 [input]
-tablet_mode = true
+pointer_mode = "Tablet"
+hide_host_cursor = true
 clipboard_enabled = true
 ```
 
@@ -236,7 +241,8 @@ clipboard_enabled = true
 
 | Engine | Description |
 |--------|-------------|
-| `Sdl` | Direct SDL window |
+| `Sdl` | Direct SDL window (default on NVIDIA) |
+| `Gtk` | GTK window with built-in QEMU UI (default on non-NVIDIA hosts) |
 | `Spice` | SPICE server for remote GUI |
 | `Dbus` | D-Bus compositor integration |
 | `None` | Headless (`-display none`) |
@@ -261,25 +267,27 @@ clipboard_enabled = true
 ```
 andler/
 ├── core/                          Domain types, backend trait, config, FSM
-│   └── andler-core/               22 unit tests, no external dependencies
+│   └── andler-core/               ~37 unit tests, no external dependencies
 │       ├── lib.rs                  Re-exports
 │       ├── error.rs                BackendError, FsmError
-│       ├── backend.rs              HypervisorBackend trait, BackendHandle, BackendKind
+│       ├── backend.rs              HypervisorBackend trait, BackendHandle, BackendStatus, ResourceMetrics
 │       ├── fsm.rs                  InstanceState enum (FSM transitions)
 │       ├── clone.rs                CloneMode enum (Linked, FullStandalone, SharedBase)
-│       ├── android_profile.rs      AndroidProfile, AndroidVersion
+│       ├── android_profile.rs      AndroidProfile, AndroidVersion, ArmTranslator
+│       ├── paths.rs                Unified path resolution (ANDLER_HOME)
 │       └── config/
 │           ├── mod.rs              InstanceConfig, InstanceId, InstanceKind
-│           ├── instance.rs         InstanceKind (LinuxVm, AndroidVm)
+│           ├── instance.rs         InstanceKind (LinuxVm, AndroidVm), BackendKind
 │           ├── cpu.rs              CpuConfig (cores, sockets, threads, affinity, priority)
-│           ├── memory.rs           MemoryConfig (size_bytes)
-│           ├── disk.rs             DiskConfig (path, format, base_image, snapshot_timeout_secs)
-│           ├── gpu.rs              GpuConfig (render_backend, gpu_type)
-│           ├── display.rs          DisplayConfig (headless, width, height, bpp)
-│           ├── network.rs          NetworkConfig, NetworkMode (None, Bridge, Isolated)
-│           ├── firmware.rs         FirmwareConfig (bios, ovmf_vars)
-│           ├── audio.rs            AudioConfig (backend)
-│           └── input.rs            InputConfig (keyboard, mouse)
+│           ├── memory.rs           MemoryConfig (size_bytes, ballooning, zram, ksm)
+│           ├── disk.rs             DiskConfig (path, format, base_image, compact_on_shutdown)
+│           ├── gpu.rs              GpuConfig (render_backend, hostmem_bytes, blob, gl)
+│           ├── display.rs          DisplayConfig (resolution, dpi, fps_limit, display_engine, fullscreen)
+│           ├── network.rs          NetworkConfig, NetworkMode, NatBackend (Slirp, Passt)
+│           ├── firmware.rs         FirmwareConfig (ovmf_code_path, ovmf_vars_path)
+│           ├── audio.rs            AudioConfig (backend, device)
+│           ├── input.rs            InputConfig (pointer_mode, hide_host_cursor, clipboard_enabled)
+│           └── cdrom.rs            CdromBus enum (VirtioScsi, Ide)
 │
 ├── backends/                      Hypervisor implementations
 │   ├── andler-qemu/               QEMU backend
@@ -299,31 +307,36 @@ andler/
 │   │                              host-level GPU metrics (AMD/NVIDIA/Intel)
 │   └── andler-rpc/                gRPC protocol + conversions
 │
-├── daemon/                        Background service (80 unit + 25 integration tests)
+├── daemon/                        Background service (~68 unit + 24 integration tests)
 │   └── src/
 │       ├── daemon/
 │       │   ├── mod.rs             Core orchestration logic (~250 lines)
-│       │   ├── error.rs           DaemonError enum (14 variants)
+│       │   ├── error.rs           DaemonError enum (18 variants)
 │       │   ├── types.rs           InstanceRecord, SnapshotRecord, InstanceDirGuard
-│       │   ├── instance_ops.rs    create/start/stop/pause/resume/remove
+│       │   ├── instance_ops.rs    create/start/stop/pause/resume/remove, resolve_instance_id
 │       │   ├── clone_ops.rs       clone_instance, export, find_live_clones
 │       │   ├── snapshot_ops.rs    create/restore/delete/list snapshots
 │       │   ├── query_ops.rs       status, list, get_config, stream
-│       │   └── tests/             80 unit tests across 8 modules
+│       │   └── tests/             ~68 unit tests across 10 modules
 │       ├── service.rs             gRPC service wrapper
 │       └── grpc_roundtrip_test.rs Integration tests
 │
 ├── cli/                           Command-line client
 │   └── src/
-│       ├── main.rs                CLI dispatch + enums (431 lines)
-│       ├── instance_file.rs       TOML parser (452 lines)
+│       ├── main.rs                CLI dispatch + enums
+│       ├── instance_file.rs       TOML parser
 │       ├── create.rs              Create command
-│       ├── status.rs              Status, List, Config, Logs, Metrics
+│       ├── status.rs              Status, List (--full-id/-q), Config, Logs, Metrics
 │       ├── snapshot.rs            Snapshot commands
-│       ├── disk.rs                Disk commands
+│       ├── disk.rs                Disk commands (create/info/resize/compact)
 │       ├── lifecycle.rs           Start, Stop, Pause, Resume, Remove
 │       ├── clone.rs               Clone, Export
-│       └── helpers.rs             parse_size, format_size, format_bytes
+│       ├── helpers.rs             parse_size, format_size, ensure_qcow2_extension
+│       └── wizard/                Interactive setup wizard
+│           ├── mod.rs             Entry point, orchestration, build_create_request()
+│           ├── basic.rs           Basic mode (6 questions)
+│           ├── advanced.rs        Advanced mode (15 questions)
+│           └── summary.rs         Summary with Create/Modify/Cancel
 │
 ├── docker/                        Build & test infrastructure
 ├── docs/                          Project documentation
@@ -382,15 +395,15 @@ docker compose -f docker/docker-compose.yml run --rm e2e
 
 Each crate has its own README with detailed API reference:
 
-- [`core/andler-core/README.md`](core/andler-core/README.md) — Domain types, 27 public types, 22 tests
-- [`backends/andler-qemu/README.md`](backends/andler-qemu/README.md) — QEMU backend, 50 tests
+- [`core/andler-core/README.md`](core/andler-core/README.md) — Domain types, ~30 public types, ~37 tests
+- [`backends/andler-qemu/README.md`](backends/andler-qemu/README.md) — QEMU backend, ~71 tests
 - [`backends/andler-vmm/README.md`](backends/andler-vmm/README.md) — Cloud Hypervisor stub
 - [`services/andler-disk/README.md`](services/andler-disk/README.md) — Disk ops + Magisk provisioning
 - [`services/andler-net/README.md`](services/andler-net/README.md) — Networking stub
 - [`services/andler-store/README.md`](services/andler-store/README.md) — SQLite persistence
 - [`services/andler-rpc/README.md`](services/andler-rpc/README.md) — gRPC protocol + conversions
-- [`daemon/README.md`](daemon/README.md) — Daemon orchestration, 80 unit tests + 25 integration tests
-- [`cli/README.md`](cli/README.md) — CLI commands + TOML parser
+- [`daemon/README.md`](daemon/README.md) — Daemon orchestration, ~68 unit tests + 24 integration tests
+- [`cli/README.md`](cli/README.md) — CLI commands + TOML parser + wizard
 
 ## Metrics
 

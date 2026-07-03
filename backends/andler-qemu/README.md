@@ -10,28 +10,29 @@ Pure function `build_args(&InstanceConfig, &Path) -> Vec<String>` that translate
 
 | Block | Function | What it generates |
 |-------|----------|-------------------|
-| Name | `name_args` | `-name <instance_name>` |
+| Name | `name_args` | `-name <instance_name>,process=<instance_name>` |
 | Machine & CPU | `machine_and_cpu_args` | `-machine`, `-cpu`, `-smp`, `-enable-kvm` |
 | Memory | `memory_args` | `-m`, `-mem-path`, `-mem-prealloc`, `-object memory-backend-memfd` |
 | Firmware | `firmware_args` | `-drive if=pflash` for OVMF_CODE and OVMF_VARS |
 | GPU & Display | `gpu_display_args` | `-device virtio-gpu-pci`, `-display`, `-vga` depending on `RenderBackend` and `DisplayEngine` |
 | Disk | `disk_args` | `-drive file=...,format=qcow2,id=drive-disk0`, `-device virtio-blk-pci` |
-| Input | `input_args` | `-device virtio-tablet-pci`, `-device virtio-keyboard-pci`, `-chardev qemu-vdagent` |
-| Network | `network_args` | `-netdev user`, `-device virtio-net-pci` |
+| Input | `input_args` | `-device virtio-tablet-pci` (or `virtio-mouse-pci`), `-device virtio-serial-pci`, `-chardev qemu-vdagent` (when clipboard enabled) |
+| Network | `network_args` | `-nic user,model=virtio-net-pci` (Slirp) or `-netdev passt` + `-device` (Passt) |
 | Audio | `audio_args` | `-audiodev`, `-device` for PipeWire/PulseAudio |
 | QMP | `qmp_args` | `-qmp unix:<path>,server,nowait` |
 
 Always ends with `-boot menu=on`.
 
 **RenderBackend mapping:**
-- `Venus` → `-device virtio-gpu-pci,virgl=on,gfxpassthrough=on,hostmem=...`
+- `Venus` → `-device virtio-gpu-gl,hostmem=...,blob=...,venus=true`
 - `VirtioGpu` → `-device virtio-gpu-pci` (no gl context)
-- `VirGl` → `-device virtio-gpu-pci,virgl=on`
+- `VirGl` → `-device virtio-gpu-gl,hostmem=...,blob=...`
 - `Cpu` → `-vga std` (software rendering)
 - `Passthrough` → **panics** — `QemuBackend::spawn` rejects it before reaching `cmdline`
 
 **DisplayEngine mapping:**
-- `Sdl` → `-display sdl,gl=on`
+- `Sdl` → `-display sdl,gl=on|off,show-cursor=on|off`
+- `Gtk` → `-display gtk,gl=on|off,show-cursor=on|off,clipboard=on`
 - `Spice` → `-display spice-app`
 - `Dbus` → `-display dbus`
 - `None` → `-display none`
@@ -138,8 +139,8 @@ Collects resource metrics from `/proc` for the QEMU process. No QMP needed.
 **Data sources**:
 - **CPU%**: `/proc/<pid>/stat` fields utime (index 11) + stime (index 12), delta-based: `delta(utime+stime) / delta(uptime) / num_cpus * 100`
 - **RAM**: `/proc/<pid>/status` VmRSS field
-- **Disk I/O**: `/sys/block/<dev>/stat` read/write sectors + time
-- **Net I/O**: `/proc/<net/dev>` rx/tx bytes delta
+- **Disk I/O**: `/proc/<pid>/io` read_bytes/write_bytes
+- **Net I/O**: `/proc/<pid>/net/dev` rx/tx bytes delta
 
 **Polling interval**: 1 second (`DEFAULT_POLL_INTERVAL`).
 
@@ -164,10 +165,10 @@ the base metrics sample every tick via
 
 ### Without `/dev/kvm` or QEMU binary
 
-- **`cmdline`** (22 tests): All argument blocks tested independently against `scripts/start.sh` reference. Includes edge cases: `Passthrough` panic, `None` display engine, clipboard disabled, size suffixes.
+- **`cmdline`** (26 tests): All argument blocks tested independently against `scripts/start.sh` reference. Includes edge cases: `Passthrough` panic, `None` display engine, clipboard disabled, size suffixes.
 - **`qmp`**: JSON parsing of QMP responses (`QmpReply`, `VmStatus`, `QueryStatusReturn`, `SnapshotInfo`, `QueryJobInfo`), plus `UnixStream::pair`-based fake-QMP-peer tests covering the real `snapshot-save`/`-load`/`-delete` wire schema (`devices`+`vmstate`, not the previously-buggy singular `device`), `wait_job_completion`'s `"concluded"`+`error` semantics (not the nonexistent `"completed"`/`"failed"`/`"aborted"` strings an earlier version checked), `job-dismiss`, and async-event skipping during polling.
-- **`backend`** (9 tests): `Passthrough` validation, unknown handle handling, `NotImplemented` branches, `VmStatus → InstanceState` mapping, empty `metrics_stream`/`log_stream`.
-- **`process`** (3 tests): `SpawnFailed` via missing binary, `drain_to_tracing` line publishing, subscriber tolerance.
+- **`backend`** (10 tests): `name_returns_qemu`, `Passthrough` validation, unknown handle handling, `VmStatus → InstanceState` mapping, empty `metrics_stream`/`log_stream`.
+- **`process`** (4 tests): `SpawnFailed` via missing binary, `drain_to_tracing` line publishing, subscriber tolerance, multiple subscribers fan-out.
 - **`metrics`** (7 tests): CPU stat parsing, CPU% computation, I/O rates, RSS parsing, net_dev parsing.
 - GPU metrics tests (AMD/NVIDIA/Intel detection, NVIDIA output parsing, the Intel `rc6_residency_ms` ABI regression test, `intel_gpu_load_from_delta`/`compute_intel_gpu_load`, merge behavior) now live in `services/andler-firmware` — see that crate's tests, not this one.
 
@@ -179,8 +180,6 @@ the base metrics sample every tick via
 - `connect_then_pause_then_resume_round_trip` (QMP)
 - `spawn_then_is_alive_then_terminate`
 - `force_kill_stops_unresponsive_process`
-- `create_then_virtual_size_round_trips`
-- `create_with_backing_file_fails_fast_on_missing_backing`
 
 All marked `#[ignore]` with reason — run separately in `integration-test` Docker target.
 

@@ -21,7 +21,7 @@ The `andler` binary — a thin gRPC client to `andlerd` via `andler-rpc`. No bus
 
 | Command | Description |
 |---------|-------------|
-| `andler list` | List all registered instances (id / state / name) |
+| `andler list [--full-id]` | List all registered instances (id / state / name). `--full-id`/`-q` shows full UUID instead of 8-char prefix. |
 | `andler config <instance-id>` | Print full instance configuration (all 9 sections) |
 
 ### Lifecycle Management
@@ -44,8 +44,8 @@ The `andler` binary — a thin gRPC client to `andlerd` via `andler-rpc`. No bus
 | Command | Description |
 |---------|-------------|
 | `andler snapshot <id> create --tag <name> [--description <text>] [--timeout <secs>]` | Create snapshot (requires Running/Paused). `--timeout` overrides instance default. |
-| `andler snapshot <id> restore --tag <name> [--timeout <secs>]` | Restore from snapshot (requires Stopped). `--timeout` overrides instance default. |
-| `andler snapshot <id> delete --tag <name> [--timeout <secs>]` | Delete snapshot (requires Stopped). `--timeout` overrides instance default. |
+| `andler snapshot <id> restore --tag <name> [--timeout <secs>]` | Restore from snapshot (requires Running/Paused). `--timeout` overrides instance default. |
+| `andler snapshot <id> delete --tag <name> [--timeout <secs>]` | Delete snapshot (requires Running/Paused). `--timeout` overrides instance default. |
 | `andler snapshot <id> list` | List all snapshots |
 
 ### Disk Management
@@ -98,7 +98,7 @@ root = "magisk"
 magisk_dir = "/path/to/magisk/"
 gapps = false
 microg = false
-libndk = false
+arm_translator = "libndk"
 instances_root = "/home/user/.local/share/andler/instances"
 ```
 
@@ -236,6 +236,24 @@ GPU columns (VRAM, GPU%) appear when AMD, NVIDIA, or Intel GPU data is available
 ## Snapshot Operations
 
 - **Create**: Requires Running/Paused instance. Async QEMU job with configurable timeout.
-- **Restore**: Requires Stopped instance. Reverts disk state.
-- **Delete**: Requires Stopped instance. Idempotent.
+- **Restore**: Requires Running/Paused instance. Reverts disk state.
+- **Delete**: Requires Running/Paused instance. Idempotent.
 - **List**: Any state. Shows tag, description, creation time.
+
+## Modules
+
+| Module | File | Purpose |
+|--------|------|---------|
+| `main.rs` | 509 lines | Clap CLI definition, gRPC client setup, subcommand dispatch |
+| `create.rs` | 260 lines | `Create` command — builds gRPC request from CLI flags |
+| `disk.rs` | 77 lines | `Disk` command — create, info, resize, compact |
+| `status.rs` | 353 lines | `Status`, `List`, `Config`, `Logs`, `Metrics` commands |
+| `snapshot.rs` | 77 lines | `Snapshot` command — create, restore, delete, list |
+| `lifecycle.rs` | 66 lines | `Start`, `Stop`, `Pause`, `Resume`, `Remove` commands |
+| `clone.rs` | 41 lines | `Clone`, `Export` commands |
+| `instance_file.rs` | 644 lines | TOML instance file parser |
+| `helpers.rs` | 283 lines | `parse_size`, `format_size`, `format_bytes`, `ensure_qcow2_extension` |
+| `wizard/mod.rs` | 659 lines | Interactive wizard entry point, orchestration, `build_create_request()` |
+| `wizard/basic.rs` | 256 lines | Basic mode: kind, name, ISO, disk questions |
+| `wizard/advanced.rs` | 600 lines | Advanced mode: 16 hardware questions with auto-detection defaults |
+| `wizard/summary.rs` | 249 lines | Summary display, Create/Modify/Cancel actions |

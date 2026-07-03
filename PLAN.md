@@ -30,7 +30,9 @@
 17. [Partial instance ID](#partial-instance-id)
 18. [Logging](#logging)
 19. [NVIDIA metrics](#nvidia-metrics)
-20. [Boot priority](#boot-priority)
+20. [AMD GPU metrics](#amd-gpu-metrics)
+21. [Intel GPU metrics](#intel-gpu-metrics)
+22. [Boot priority](#boot-priority)
 21. [Backend'ы (гипервизоры)](#backend-ы)
 22. [CLI vs GUI](#cli-vs-gui)
 23. [Modern QEMU arguments (2026)](#modern-qemu-arguments-2026)
@@ -94,6 +96,7 @@ ANDLER — **лаунчер и менеджер виртуальных маши�
 | Компонент | Статус | Где |
 |---|---|---|
 | SQLite-стор для `InstanceConfig`/`InstanceState` | ✅ Реализован | `services/andler-store` |
+| Сеть (stub) | 🔶 Stub — есть `NetworkConfig`/`NetworkMode` в `andler-core`, QEMU cmdline в `andler-qemu` | `services/andler-net` |
 | Дефолтный `instances_root` через `dirs::data_local_dir()` | 🔶 Частично — есть только для Android/clone-путей создания | `cli/src/main.rs`, `cli/src/instance_file.rs` |
 | Единая точка резолва `ANDLER_HOME` → все подкаталоги (`base-images/`, `ovmf/`, `venus-cache/`, путь к `andlerd.db`) | ❌ Не существует | — |
 
@@ -121,7 +124,7 @@ ANDLER — **лаунчер и менеджер виртуальных маши�
 
 ### Где менять в коде
 
-Текущий дефолт (40 GiB) зашит не на уровне CLI-флага (`disk_size_gib: Option<u64>` в `cli/src/main.rs` — лишь опциональное переопределение), а внутри `andler-core::config::DiskConfig::reference_default()` (`core/andler-core/src/config/disk.rs`), откуда его подхватывает `build_linux_request` в `cli/src/create.rs`, если CLI-флаг не передан. Существующий тест `reference_default_matches_start_sh` явно фиксирует, что дефолт равен значению из `start.sh` (40 GiB) — при смене дефолта на 256 GiB этот тест нужно обновить вместе с самим значением, иначе он начнёт ложно падать (или, что хуже, кто-то "исправит" тест обратно на 40, не заметив, что это было намеренное изменение плана).
+Текущий дефолт (256 GiB) зашит не на уровне CLI-флага (`disk_size_gib: Option<u64>` в `cli/src/main.rs` — лишь опциональное переопределение), а внутри `andler-core::config::DiskConfig::reference_default()` (`core/andler-core/src/config/disk.rs`), откуда его подхватывает `build_linux_request` в `cli/src/create.rs`, если CLI-флаг не передан. Тест `reference_default_is_256_gib_thin_provisioned_qcow2` явно фиксирует текущий дефолт.
 
 Раньше план разводил дефолты по типу гостя (64 GiB Linux / 128 GiB Android) — это усложняло и UX (два разных числа без явной причины для пользователя), и реализацию (нужно было ветвление по `InstanceKind` в коде создания диска без явной пользы). Единый дефолт **256 GiB** проще для пользователя и достаточен с запасом для обоих сценариев:
 
@@ -925,6 +928,54 @@ Stdout/stderr запущенного QEMU-процесса нужно перен
 - Если конкретное поле отсутствует в выводе (например, `power.draw` недоступен на некоторых GPU/в virtualized-режимах) — не падать с ошибкой парсинга всего ответа, отдавать `None`/`null` для этого конкретного поля.
 - Если `nvidia-smi`/NVML вообще недоступны (нет NVIDIA GPU, нет проприетарного драйвера, vGPU-passthrough не настроен) — `andler metrics <id>` явно показывает "GPU-метрики недоступны", не падает и не показывает нулевые/фиктивные значения, которые можно принять за реальные данные.
 - Метрики, полученные от `nvidia-smi` на хосте, относятся к **GPU хоста целиком**, не к конкретной VM — что важно явно показать пользователю, если у него несколько VM одновременно используют GPU-passthrough/виртуализацию: нет встроенного способа разделить нагрузку по VM на уровне самого `nvidia-smi`.
+
+---
+
+## AMD GPU metrics
+
+### Источник данных — sysfs
+
+AMD GPU метрики читаются из sysfs (`/sys/class/drm/card*/device/`) — это открытый интерфейс ядра, не зависящий от проприетарных утилит.
+
+| Метрика | Путь sysfs | Описание |
+|---------|-----------|----------|
+| VRAM used | `mem_info_vram_used` | Использованная видеопамять (байты) |
+| VRAM total | `mem_info_vram_total` | Общая видеопамять (байты) |
+| GPU busy | `gpu_busy_percent` | Загрузка GPU (процент) |
+
+### Толерантность
+
+- Если sysfs-файл недоступен (нет AMD GPU, нет драйвера `amdgpu`) — поле `None`, не ошибка.
+- Если значение не парсится — `None` для конкретного поля, остальные метрики продолжают работать.
+
+---
+
+## Intel GPU metrics
+
+### Источник данных — sysfs i915
+
+Intel GPU метрики читаются из sysfs (`/sys/class/drm/card*/device/`) через драйвер i915.
+
+| Метрика | Путь sysfs | Описание |
+|---------|-----------|----------|
+| VRAM used | `mem_info_vram_used` | Использованная видеопамять (байты) |
+| VRAM total | `mem_info_vram_total` | Общая видеопамять (байты) |
+| GPU load | `gpu_busy_percent` или `rc6_residency_ms` | Загрузка GPU |
+
+### Расчёт GPU load через rc6_residency_ms
+
+На некоторых Intel GPU (старые модели, встроенные в CPU) `gpu_busy_percent` недоступен. В этом случае загрузка рассчитывается через `rc6_residency_ms` — время, проведённое в состоянии RC6 (энергосбережение):
+
+1. Читаем `rc6_residency_ms` в момент T1
+2. Ждём 1 секунду
+3. Читаем `rc6_residency_ms` в момент T2
+4. `gpu_load = 100 - ((rc6_residency_ms[T2] - rc6_residency_ms[T1]) / 1000 * 100)`
+5. Значение ограничивается диапазоном [0, 100]
+
+### Толерантность
+
+- Если sysfs-файл недоступен (нет Intel GPU, нет драйвера i915) — поле `None`.
+- Если `rc6_residency_ms` недоступен и `gpu_busy_percent` тоже — `None` для GPU load.
 
 ---
 

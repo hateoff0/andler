@@ -29,7 +29,7 @@ gRPC protocol definition (`proto/andler.proto`) and generated server/client code
 
 ### Instance Configuration
 
-- **`CreateInstanceRequest`**: `name`, `iso_path`, `cpu`, `memory`, `disk`, `display`, `gpu`, `network`, `firmware`, `audio`, `input` — all 9 sub-configs as explicit fields. No intermediate resolution. Generates `InstanceId::new()` on the server side.
+- **`CreateInstanceRequest`**: `name`, `iso_path`, `cpu`, `memory`, `disk`, `display`, `gpu`, `network`, `firmware`, `audio`, `input`, `cdrom_bus` — all 10 sub-configs as explicit fields. No intermediate resolution. Generates `InstanceId::new()` on the server side.
 - **`CreateAndroidInstanceRequest`**: `name`, `profile` (AndroidProfile), `base_image_path`, `instances_root`, `overlay_size_bytes`, `ovmf_vars_template`, `magisk_dir` (optional, for Magisk provisioning).
 - **`GetInstanceConfigResponse`**: Full `InstanceConfig` with `instance_id`, `name`, `kind`, `backend`, and all 9 sub-configs.
 
@@ -37,13 +37,13 @@ gRPC protocol definition (`proto/andler.proto`) and generated server/client code
 
 - **`CpuConfig`**: `cores`, `sockets`, `threads`, `affinity` (repeated), `priority`.
 - **`MemoryConfig`**: `size_bytes`, `ballooning`, `zram`, `ksm`.
-- **`DiskConfig`**: `path`, `size_bytes`, `format`, `base_image`, `thin_provisioning`, `trim_on_shutdown`, `snapshot_timeout_secs` (optional).
+- **`DiskConfig`**: `path`, `size_bytes`, `format`, `base_image`, `thin_provisioning`, `trim_on_shutdown`, `snapshot_timeout_secs` (optional), `compact_on_shutdown`.
 - **`DisplayConfig`**: `resolution` (width/height), `dpi`, `fps_limit`, `display_engine`, `fullscreen`.
 - **`GpuConfig`**: `render_backend` (oneof: Venus/VirtioGpu/VirGl/Cpu/Passthrough), `hostmem_bytes`, `blob`, `gl`.
-- **`NetworkConfig`**: `mode` (oneof: Nat/Bridge{interface}/Isolated), `device_model`.
+- **`NetworkConfig`**: `mode` (oneof: Nat/Bridge{interface}/Isolated), `device_model`, `nat_backend`.
 - **`FirmwareConfig`**: `ovmf_code_path`, `ovmf_vars_path`.
-- **`AudioConfig`**: `backend`.
-- **`InputConfig`**: `tablet_mode`, `hide_host_cursor`, `clipboard_enabled`.
+- **`AudioConfig`**: `backend`, `device`.
+- **`InputConfig`**: `pointer_mode`, `hide_host_cursor`, `clipboard_enabled`.
 
 ### Instance Lifecycle
 
@@ -62,7 +62,7 @@ gRPC protocol definition (`proto/andler.proto`) and generated server/client code
 
 ### Enums
 
-`CpuPriority`, `DiskFormat`, `DisplayEngine`, `AndroidVersion`, `RootMode`, `AudioBackend`, `InstanceStateKind`, `BackendKind`, `CloneMode`, `LogStreamSource` — all with `UNSPECIFIED = 0` as default.
+`CpuPriority`, `DiskFormat`, `DisplayEngine`, `AndroidVersion`, `RootMode`, `AudioBackend`, `AudioDevice`, `CdromBus`, `NatBackend`, `PointerMode`, `ArmTranslator`, `InstanceStateKind`, `BackendKind`, `CloneMode`, `LogStreamSource` — all with `UNSPECIFIED = 0` as default.
 
 ## Conversions (`src/convert.rs`)
 
@@ -90,7 +90,7 @@ Bidirectional conversions between proto and domain types:
 
 ## Tests
 
-27 tests in `convert::tests`:
+37 tests in `convert::tests`:
 
 - AndroidProfile round-trip through proto
 - Unspecified enum rejection (AndroidVersion, RootMode, CpuPriority, DiskFormat, DisplayEngine, AudioBackend, CloneMode)
