@@ -1,0 +1,31 @@
+# Build
+/target
+
+# IDE / Editors
+.idea/
+.vscode/
+*.code-workspace
+
+# OS
+.DS_Store
+Thumbs.db
+Desktop.ini
+._*
+
+# Editors
+*.swp
+*.swo
+*~
+
+# Rust
+*.pdb
+*.profraw
+*.profdata
+
+# Environment
+.env
+.env.local
+
+# Temp
+*.tmp
+*.bak
