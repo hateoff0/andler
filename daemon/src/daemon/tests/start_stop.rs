@@ -1,6 +1,6 @@
 use super::common::*;
 use super::*;
-use andler_core::RenderBackend;
+use andler_core::{BackendError, RenderBackend};
 
 #[tokio::test]
 async fn start_instance_rejects_passthrough_via_backend_validation() {

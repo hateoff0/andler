@@ -91,6 +91,7 @@ impl Daemon {
     /// каждом создании `Daemon` (например, тест, который хочет чистый
     /// `Daemon` с реальной персистентностью, но без шума от уже
     /// существующих записей).
+    #[cfg(test)]
     pub fn with_store(store: Store) -> Self {
         Self::with_backends_and_store(default_backends(), Some(store))
     }

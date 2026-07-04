@@ -41,7 +41,7 @@ pub async fn handle_list(
             // `Daemon::resolve_instance_id`. `--full-id`/`-q` prints the
             // full UUID for scripts.
             let id = if full_id {
-                entry.instance_id
+                entry.instance_id.as_str()
             } else {
                 short_id(&entry.instance_id)
             };

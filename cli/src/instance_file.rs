@@ -13,7 +13,7 @@
 use std::path::{Path, PathBuf};
 
 use andler_core::{
-    AudioConfig, CdromBus, CpuConfig, DiskConfig, DisplayConfig, FirmwareConfig, GpuConfig,
+    AudioConfig, CdromBus, CpuConfig, DiskConfig, DisplayConfig, GpuConfig,
     InputConfig, MemoryConfig, NetworkConfig,
 };
 use andler_rpc::proto::{

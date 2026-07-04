@@ -232,6 +232,7 @@ fn print_summary(
     println!();
 }
 
+#[allow(dead_code)]
 pub(crate) fn format_audio(backend: AudioBackend) -> &'static str {
     match backend {
         AudioBackend::Pipewire => "PipeWire",

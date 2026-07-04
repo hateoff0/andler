@@ -543,6 +543,7 @@ pub fn parse_resolution(s: &str) -> Result<Resolution, String> {
     Ok(Resolution::new(width, height))
 }
 
+#[allow(dead_code)]
 pub fn parse_gpu_memory(s: &str) -> Result<u64, String> {
     let v: u64 = s.trim().parse().map_err(|_| "Invalid number".to_string())?;
     if (MIN_GPU_MEMORY_MIB..=MAX_GPU_MEMORY_MIB).contains(&v) {

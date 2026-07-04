@@ -443,7 +443,7 @@ fn default_instances_root() -> String {
 
 pub(crate) fn is_tty() -> bool {
     use std::os::unix::io::AsRawFd;
-    unsafe { libc_isatty(std::io::stdin().as_raw_fd()) }
+    libc_isatty(std::io::stdin().as_raw_fd())
 }
 
 #[cfg(unix)]

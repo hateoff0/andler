@@ -171,7 +171,7 @@ async fn create_android_instance_cleans_up_instance_dir_on_missing_ovmf_template
         .await
         .unwrap_err();
 
-    assert!(matches!(err, DaemonError::Io { .. }));
+    assert!(matches!(err, DaemonError::Firmware(_)));
 
     let mut instance_dirs = tokio::fs::read_dir(&instances_root).await.unwrap();
     assert!(

@@ -244,6 +244,7 @@ fn sample_create_instance_request() -> CreateInstanceRequest {
         firmware: Some(firmware),
         audio: Some(audio),
         input: Some(input),
+        cdrom_bus: 0, // CdromBus::Ide (default)
     }
 }
 

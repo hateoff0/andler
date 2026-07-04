@@ -34,6 +34,7 @@ pub enum BasicResult {
     Android(AndroidBasicResult),
 }
 
+#[allow(dead_code)]
 impl BasicResult {
     pub fn name(&self) -> &str {
         match self {
