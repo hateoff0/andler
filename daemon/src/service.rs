@@ -87,6 +87,9 @@ impl From<DaemonError> for Status {
             DaemonError::SnapshotOperationRequiresRunningInstance(_, _) => {
                 Status::failed_precondition(err.to_string())
             }
+            DaemonError::SnapshotLimitExceeded { .. } => {
+                Status::failed_precondition(err.to_string())
+            }
             DaemonError::Backend(andler_core::BackendError::NotImplemented { .. }) => {
                 Status::unimplemented(err.to_string())
             }
@@ -106,6 +109,7 @@ impl From<DaemonError> for Status {
             // about the client's `instance_id` string itself being
             // malformed/unresolvable/ambiguous, not about server state.
             DaemonError::EmptyInstanceRef => Status::invalid_argument(err.to_string()),
+            DaemonError::MalformedInstanceRef(_) => Status::invalid_argument(err.to_string()),
             DaemonError::InstanceRefNotFound(_) => Status::not_found(err.to_string()),
             DaemonError::AmbiguousInstanceId { .. } => Status::invalid_argument(err.to_string()),
         }

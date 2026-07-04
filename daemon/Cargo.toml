@@ -19,7 +19,7 @@ tonic = { workspace = true }
 tokio = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 futures-core = "0.3"
 futures-util = "0.3"
 async-stream = "0.3"

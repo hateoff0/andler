@@ -15,7 +15,7 @@ use std::path::PathBuf;
 
 use andler_core::{
     BackendError, BackendHandle, BackendStatus, HypervisorBackend, InstanceConfig, InstanceState,
-    LogLine, RenderBackend, ResourceMetrics,
+    LogLine, LogStreamSource, RenderBackend, ResourceMetrics,
 };
 use async_trait::async_trait;
 use futures_core::stream::BoxStream;
@@ -141,6 +141,54 @@ const DISK_DEVICE: &str = "drive-disk0";
 /// `None` для статусов, которые не однозначно соответствуют
 /// `Running`/`Paused`, а вызывающая сторона (`status()` ниже) решает, что
 /// с этим делать.
+/// Читает `qemu.log` целиком и парсит его обратно в `LogLine`, чтобы
+/// `log_stream` мог отдать историю до момента подписки клиента — сам
+/// файл пишется `QemuProcess::drain_to_tracing` построчно как
+/// `[stdout] <line>`/`[stderr] <line>` (см. её документацию), формат
+/// здесь — просто обратный разбор того же самого.
+///
+/// Отсутствие файла, ошибка чтения или строка без ожидаемого префикса
+/// (испорченный файл, отредактированный вручную) — не паника и не
+/// ошибка наружу, просто эта конкретная строка (или всё содержимое, если
+/// файла вообще нет) выпадает из истории. Клиент вызывает `log_stream`
+/// ради live-хвоста в первую очередь; отсутствие истории не должно ему
+/// в этом мешать.
+///
+/// Единственный пограничный случай, о котором стоит знать: строка, чья
+/// запись в файл завершилась непосредственно перед этим чтением, но чья
+/// публикация в broadcast-канал (см. `QemuProcess::log_sender`) —
+/// технически уже после того, как `log_stream` успел подписаться,
+/// теоретически может оказаться и здесь, в истории, и затем ещё раз в
+/// live-хвосте. Файловая запись и broadcast-отправка в
+/// `drain_to_tracing` всегда идут в этом порядке (сначала файл, потом
+/// broadcast) — поэтому на этой границе возможен только редкий дубль
+/// одной строки, никогда не потеря.
+async fn read_log_history(path: &std::path::Path) -> Vec<LogLine> {
+    let content = match tokio::fs::read_to_string(path).await {
+        Ok(content) => content,
+        Err(_) => return Vec::new(),
+    };
+
+    content
+        .lines()
+        .filter_map(|line| {
+            if let Some(rest) = line.strip_prefix("[stdout] ") {
+                Some(LogLine {
+                    source: LogStreamSource::Stdout,
+                    line: rest.to_string(),
+                })
+            } else if let Some(rest) = line.strip_prefix("[stderr] ") {
+                Some(LogLine {
+                    source: LogStreamSource::Stderr,
+                    line: rest.to_string(),
+                })
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
 fn vm_status_to_instance_state(status: VmStatus) -> Option<InstanceState> {
     match status {
         VmStatus::Running => Some(InstanceState::Running),
@@ -191,7 +239,20 @@ impl HypervisorBackend for QemuBackend {
 
         let args = cmdline::build_args(cfg, &qmp_socket_path);
 
-        let process = QemuProcess::spawn(&args, qmp_socket_path)
+        // `cfg.disk.path`'s parent is the instance's own directory
+        // (`<instances_root>/<id>/`, see PLAN.md "Структура хранения") —
+        // reused here rather than introducing a separate "instance dir"
+        // concept just for this file. `None` (no parent, e.g. a bare
+        // relative filename) means no file log for this run rather than
+        // a hard error — matches `open_log_file`'s own tolerance for a
+        // missing/unwritable path.
+        let log_file_path = cfg
+            .disk
+            .path
+            .parent()
+            .map(|dir| dir.join("qemu.log"));
+
+        let process = QemuProcess::spawn(&args, qmp_socket_path, log_file_path)
             .await
             .map_err(process_error_to_backend_error)?;
 
@@ -507,32 +568,62 @@ impl HypervisorBackend for QemuBackend {
         // следующий вызов клиента отработает штатно, потерянных данных
         // нет (broadcast не накапливает историю для ещё не подключённого
         // подписчика в любом случае).
-        let receiver = match self.instances.try_lock() {
-            Ok(mut instances) => instances.get_mut(handle).map(|i| i.process.subscribe_logs()),
+        //
+        // Подписка на `subscribe_logs()` берётся здесь же, синхронно,
+        // до какого-либо чтения `qemu.log` ниже — это важно для порядка
+        // "история, потом live", а не только для самого списка полей.
+        // См. документацию `read_log_history` за разбором единственного
+        // возможного пограничного случая (редкий дубль одной строки, не
+        // потеря).
+        let subscription = match self.instances.try_lock() {
+            Ok(mut instances) => instances
+                .get_mut(handle)
+                .map(|i| (i.process.log_file_path().map(PathBuf::from), i.process.subscribe_logs())),
             Err(_would_block) => None,
         };
 
-        match receiver {
-            Some(receiver) => Box::pin(
-                tokio_stream::wrappers::BroadcastStream::new(receiver).filter_map(|item| async {
-                    match item {
-                        Ok(line) => Some(line),
-                        // `Lagged(n)` — подписчик отстал больше, чем
-                        // вмещает `LOG_CHANNEL_CAPACITY` (см.
-                        // process::LOG_CHANNEL_CAPACITY), и пропустил `n`
-                        // строк. Пропускаем сам факт пропуска молча и
-                        // продолжаем поток со следующей доступной строки
-                        // — закрывать стрим здесь было бы хуже для
-                        // живого хвоста логов, чем потерять уведомление о
-                        // разрыве; в логах andlerd (`tracing`) эти же
-                        // строки в любом случае не потеряны — лагает
-                        // только данный gRPC-подписчик, не сам канал.
-                        Err(tokio_stream::wrappers::errors::BroadcastStreamRecvError::Lagged(
-                            _,
-                        )) => None,
+        match subscription {
+            Some((log_file_path, receiver)) => {
+                let live = tokio_stream::wrappers::BroadcastStream::new(receiver).filter_map(
+                    |item| async {
+                        match item {
+                            Ok(line) => Some(line),
+                            // `Lagged(n)` — подписчик отстал больше, чем
+                            // вмещает `LOG_CHANNEL_CAPACITY` (см.
+                            // process::LOG_CHANNEL_CAPACITY), и пропустил `n`
+                            // строк. Пропускаем сам факт пропуска молча и
+                            // продолжаем поток со следующей доступной строки
+                            // — закрывать стрим здесь было бы хуже для
+                            // живого хвоста логов, чем потерять уведомление о
+                            // разрыве; в логах andlerd (`tracing`) эти же
+                            // строки в любом случае не потеряны — лагает
+                            // только данный gRPC-подписчик, не сам канал.
+                            Err(tokio_stream::wrappers::errors::BroadcastStreamRecvError::Lagged(
+                                _,
+                            )) => None,
+                        }
+                    },
+                );
+
+                // История из `qemu.log` идёт первой, живой хвост — сразу
+                // за ней, одним непрерывным потоком для клиента (тот же
+                // `stream_instance_logs`, что и раньше — этот метод не
+                // видит разницы между "старой" и "новой" строкой).
+                // `stream::once` + `flatten` вместо `async fn`, потому что
+                // сигнатура трейта требует именно синхронный `log_stream`
+                // (см. комментарий выше) — само чтение файла остаётся
+                // асинхронным, просто отложенным до момента, когда поток
+                // начнут поллить, а не выполненным прямо здесь.
+                let history = futures_util::stream::once(async move {
+                    match log_file_path {
+                        Some(path) => read_log_history(&path).await,
+                        None => Vec::new(),
                     }
-                }),
-            ),
+                })
+                .flat_map(|history_lines| futures_util::stream::iter(history_lines));
+
+                Box::pin(history.chain(live))
+            }
             None => Box::pin(futures_util::stream::empty()),
         }
     }
@@ -542,8 +633,8 @@ impl HypervisorBackend for QemuBackend {
 mod tests {
     use super::*;
     use andler_core::{
-        AudioConfig, BackendKind, CpuConfig, DiskConfig, DisplayConfig, FirmwareConfig, GpuConfig,
-        InputConfig, InstanceId, InstanceKind, MemoryConfig, NetworkConfig,
+        AudioConfig, BackendKind, CdromBus, CpuConfig, DiskConfig, DisplayConfig, FirmwareConfig,
+        GpuConfig, InputConfig, InstanceId, InstanceKind, MemoryConfig, NetworkConfig,
     };
     use std::path::PathBuf;
 
@@ -556,6 +647,7 @@ mod tests {
             name: "test-vm".to_string(),
             kind: InstanceKind::LinuxVm {
                 iso_path: PathBuf::from("/tmp/test.iso"),
+                cdrom_bus: CdromBus::Ide,
             },
             backend: BackendKind::Qemu,
             cpu: CpuConfig::reference_default(),
@@ -653,6 +745,92 @@ mod tests {
         let handle = BackendHandle("qemu:whatever".to_string());
         let mut stream = backend.log_stream(&handle);
         assert!(stream.next().await.is_none());
+    }
+
+    struct TestTempDir(PathBuf);
+
+    impl TestTempDir {
+        fn new() -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "andler-qemu-test-{}-{}",
+                std::process::id(),
+                InstanceId::new().0
+            ));
+            std::fs::create_dir_all(&path).expect("create test temp dir");
+            TestTempDir(path)
+        }
+
+        fn path(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TestTempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[tokio::test]
+    async fn read_log_history_parses_stdout_and_stderr_lines_in_order() {
+        let dir = TestTempDir::new();
+        let log_path = dir.path().join("qemu.log");
+        tokio::fs::write(
+            &log_path,
+            "[stdout] QEMU 8.2.0 starting\n[stderr] warning: no display\n[stdout] guest booted\n",
+        )
+        .await
+        .expect("write test qemu.log");
+
+        let history = read_log_history(&log_path).await;
+
+        assert_eq!(
+            history,
+            vec![
+                LogLine {
+                    source: LogStreamSource::Stdout,
+                    line: "QEMU 8.2.0 starting".to_string(),
+                },
+                LogLine {
+                    source: LogStreamSource::Stderr,
+                    line: "warning: no display".to_string(),
+                },
+                LogLine {
+                    source: LogStreamSource::Stdout,
+                    line: "guest booted".to_string(),
+                },
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn read_log_history_returns_empty_for_missing_file() {
+        let dir = TestTempDir::new();
+        // Never written to — exercises the "file doesn't exist" branch,
+        // not just "empty file".
+        let missing_path = dir.path().join("never-created-qemu.log");
+        assert_eq!(read_log_history(&missing_path).await, Vec::new());
+    }
+
+    #[tokio::test]
+    async fn read_log_history_skips_lines_without_a_known_prefix() {
+        // Defensive case: a manually edited/corrupted file shouldn't
+        // panic `log_stream`, just silently drop what it can't parse.
+        let dir = TestTempDir::new();
+        let log_path = dir.path().join("qemu.log");
+        tokio::fs::write(&log_path, "garbage line\n[stdout] real line\n")
+            .await
+            .expect("write test qemu.log");
+
+        let history = read_log_history(&log_path).await;
+
+        assert_eq!(
+            history,
+            vec![LogLine {
+                source: LogStreamSource::Stdout,
+                line: "real line".to_string(),
+            }]
+        );
     }
 
     #[test]

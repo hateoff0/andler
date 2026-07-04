@@ -44,6 +44,13 @@ impl Daemon {
             return Ok(InstanceId(uuid));
         }
 
+        // Validate that the input looks like a hex prefix (only [0-9a-fA-F-] allowed).
+        // This distinguishes "malformed input" from "valid prefix, no match" — the former
+        // maps to InvalidArgument in gRPC, the latter to NotFound.
+        if !raw.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-') {
+            return Err(DaemonError::MalformedInstanceRef(raw.to_string()));
+        }
+
         let needle = raw.to_ascii_lowercase();
         let instances = self.instances.read().await;
         let matches: Vec<InstanceId> = instances

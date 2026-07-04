@@ -15,7 +15,7 @@
 use std::path::Path;
 
 use andler_core::{
-    AudioBackend, AudioDevice, DiskFormat, DisplayEngine, InstanceConfig, InstanceKind,
+    AudioBackend, AudioDevice, CdromBus, DiskFormat, DisplayEngine, InstanceConfig, InstanceKind,
     NatBackend, PointerMode, RenderBackend,
 };
 
@@ -225,12 +225,21 @@ fn gpu_display_args(cfg: &InstanceConfig) -> Vec<String> {
 /// `-drive file=...,format=qcow2,if=none,id=drive-disk0,discard=on,detect-zeroes=on,aio=threads`
 /// + `-device virtio-blk-pci,drive=drive-disk0,id=disk0,bootindex=1,num-queues=4`.
 ///
-/// Для `InstanceKind::LinuxVm { iso_path }` дополнительно добавляется
-/// CD-ROM: `-drive file=<iso>,media=cdrom,if=none,id=drive-cd0` +
-/// `-device ide-cd,drive=drive-cd0,id=cd0,bootindex=2` — соответствует
-/// установочному ISO в `start.sh`. Для `InstanceKind::AndroidVm` CD-ROM не
-/// добавляется: гостевой образ уже содержит готовую систему с Waydroid
-/// (см. §4.4 архитектурного плана), установочного носителя не требуется.
+/// Для `InstanceKind::LinuxVm { iso_path, cdrom_bus }` дополнительно
+/// добавляется CD-ROM: `-drive file=<iso>,media=cdrom,if=none,id=drive-cd0`
+/// + устройство, зависящее от `cdrom_bus` (см. `CdromBus`, PLAN.md, раздел
+/// «Монтирование ISO / CD-ROM»):
+/// - `CdromBus::Ide` — `-device ide-cd,drive=drive-cd0,id=cd0,bootindex=2`,
+///   соответствует установочному ISO в `start.sh`;
+/// - `CdromBus::VirtioScsi` — сначала SCSI-контроллер
+///   `-device virtio-scsi-pci,id=scsi0`, затем сам привод на нём:
+///   `-device scsi-cd,drive=drive-cd0,bus=scsi0.0,id=cd0,bootindex=2`
+///   (`scsi-cd`, не `scsi-hd` — тип устройства "CD-ROM", не "диск", тот
+///   же принцип различия, что и у `ide-cd` против `ide-hd`).
+///
+/// Для `InstanceKind::AndroidVm` CD-ROM не добавляется: гостевой образ
+/// уже содержит готовую систему с Waydroid (см. §4.4 архитектурного
+/// плана), установочного носителя не требуется.
 fn disk_args(cfg: &InstanceConfig) -> Vec<String> {
     let disk = &cfg.disk;
     let format_str = match disk.format {
@@ -250,14 +259,26 @@ fn disk_args(cfg: &InstanceConfig) -> Vec<String> {
         "virtio-blk-pci,drive=drive-disk0,id=disk0,bootindex=1,num-queues=4".to_string(),
     ];
 
-    if let InstanceKind::LinuxVm { iso_path } = &cfg.kind {
+    if let InstanceKind::LinuxVm { iso_path, cdrom_bus } = &cfg.kind {
         args.push("-drive".to_string());
         args.push(format!(
             "file={},media=cdrom,if=none,id=drive-cd0",
             iso_path.display()
         ));
-        args.push("-device".to_string());
-        args.push("ide-cd,drive=drive-cd0,id=cd0,bootindex=2".to_string());
+        match cdrom_bus {
+            CdromBus::Ide => {
+                args.push("-device".to_string());
+                args.push("ide-cd,drive=drive-cd0,id=cd0,bootindex=2".to_string());
+            }
+            CdromBus::VirtioScsi => {
+                args.push("-device".to_string());
+                args.push("virtio-scsi-pci,id=scsi0".to_string());
+                args.push("-device".to_string());
+                args.push(
+                    "scsi-cd,drive=drive-cd0,bus=scsi0.0,id=cd0,bootindex=2".to_string(),
+                );
+            }
+        }
     }
 
     args
@@ -403,6 +424,7 @@ mod tests {
             name: "linux".to_string(),
             kind: InstanceKind::LinuxVm {
                 iso_path: PathBuf::from("cachyos-desktop-linux-260426.iso"),
+                cdrom_bus: CdromBus::Ide,
             },
             backend: BackendKind::Qemu,
             cpu: CpuConfig::reference_default(),
@@ -470,7 +492,7 @@ mod tests {
             firmware_args(&cfg),
             vec![
                 "-drive",
-                "if=pflash,format=raw,readonly=on,file=/usr/share/edk2-ovmf/x64/OVMF_CODE.4m.fd",
+                "if=pflash,format=raw,readonly=on,file=/usr/share/edk2/x64/OVMF_CODE.4m.fd",
                 "-drive",
                 "if=pflash,format=raw,file=linux_VARS.fd",
             ]
@@ -567,6 +589,37 @@ mod tests {
                 "file=cachyos-desktop-linux-260426.iso,media=cdrom,if=none,id=drive-cd0",
                 "-device",
                 "ide-cd,drive=drive-cd0,id=cd0,bootindex=2",
+            ]
+        );
+    }
+
+    #[test]
+    fn disk_args_use_virtio_scsi_controller_and_scsi_cd_when_selected() {
+        // Regression test: `CdromBus::VirtioScsi` used to be completely
+        // unwired here — `disk_args` matched on `InstanceKind::LinuxVm`
+        // without even binding `cdrom_bus`, so every ISO was mounted as
+        // `ide-cd` regardless of what the wizard/CLI recorded in the
+        // config. This pins the actual virtio-scsi device sequence: the
+        // SCSI controller (`virtio-scsi-pci`) must be added before the
+        // `scsi-cd` drive that attaches to its bus (`bus=scsi0.0`).
+        let mut cfg = start_sh_equivalent_config();
+        cfg.kind = InstanceKind::LinuxVm {
+            iso_path: PathBuf::from("cachyos-desktop-linux-260426.iso"),
+            cdrom_bus: CdromBus::VirtioScsi,
+        };
+        assert_eq!(
+            disk_args(&cfg),
+            vec![
+                "-drive",
+                "file=disk.qcow2,format=qcow2,if=none,id=drive-disk0,discard=on,detect-zeroes=on,aio=threads",
+                "-device",
+                "virtio-blk-pci,drive=drive-disk0,id=disk0,bootindex=1,num-queues=4",
+                "-drive",
+                "file=cachyos-desktop-linux-260426.iso,media=cdrom,if=none,id=drive-cd0",
+                "-device",
+                "virtio-scsi-pci,id=scsi0",
+                "-device",
+                "scsi-cd,drive=drive-cd0,bus=scsi0.0,id=cd0,bootindex=2",
             ]
         );
     }

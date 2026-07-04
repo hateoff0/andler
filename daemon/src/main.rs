@@ -22,6 +22,16 @@
 //! сохранённые инстансы через `Daemon::restore` — см. документацию этого
 //! метода про то, почему нетерминальные состояния (`Running` и т.п.)
 //! восстанавливаются как `Error`, а не как есть.
+//!
+//! Логирование — `info` по умолчанию, `-v`/`--verbose` поднимает
+//! andler-крейты (не зависимости вроде `tonic`) до `debug`, `-vv`/
+//! `--trace` — до `trace`; `RUST_LOG`, если задан, имеет приоритет над
+//! обоими флагами целиком (см. `init_tracing`/`verbosity_from_args` ниже
+//! и PLAN.md, раздел "Logging"). `ANDLERD_LOG_FORMAT=json` переключает
+//! вывод на JSON-lines вместо человекочитаемого текста (тоже см.
+//! `init_tracing`). Логи самого QEMU-процесса отдельного инстанса
+//! пишутся в `<instances_root>/<id>/qemu.log`, не смешиваясь с этим
+//! потоком — см. `andler_qemu::process::QemuProcess::spawn`.
 
 mod daemon;
 mod firmware;
@@ -41,15 +51,156 @@ use tonic::transport::Server;
 
 const DEFAULT_LISTEN_ADDR: &str = "127.0.0.1:50051";
 
+/// Andler-специфичные крейты, у которых уровень меняется вместе с
+/// `-v`/`-vv` (см. `init_tracing`). Зависимости (`tonic`, `h2`, и т.д.)
+/// намеренно не включены — на `debug`/`trace` они генерируют трафик,
+/// который не помогает диагностировать сам ANDLER (см. PLAN.md, раздел
+/// "Logging": "не заваливать консоль низкоуровневым шумом"), поэтому
+/// остаются на общем дефолте `info` даже при `-vv`.
+const ANDLER_CRATE_TARGETS: &[&str] = &[
+    "daemon",
+    "andler_core",
+    "andler_qemu",
+    "andler_firmware",
+    "andler_store",
+    "andler_disk",
+    "andler_rpc",
+];
+
+/// Считает уровень verbosity из argv: 0 (дефолт) = `info`, 1
+/// (`-v`/`--verbose`) = `debug` (полная командная строка QEMU,
+/// промежуточные шаги — поиск OVMF, резолв путей), 2+ (`-vv`) = `trace`
+/// (QMP-протокол целиком, каждый вызов backend-метода). См. PLAN.md,
+/// раздел "Logging", таблицу уровней. Повторные флаги суммируются и
+/// ограничиваются сверху `trace` (`-vvv` не даёт уровня выше `trace`,
+/// такого уровня в этой схеме просто нет).
+///
+/// Единственный минимальный парсер здесь, не `clap`, — `andlerd` уже
+/// сплошь настраивается через переменные окружения (`ANDLERD_*`, см.
+/// комментарий в начале файла), а не через флаги; заводить полноценный
+/// CLI-парсер ради одного флага было бы непропорционально, а
+/// неизвестные аргументы (кроме перечисленных ниже) намеренно
+/// игнорируются, а не отклоняются как ошибка.
+fn verbosity_from_args() -> u8 {
+    verbosity_from(std::env::args().skip(1))
+}
+
+/// Чистая часть `verbosity_from_args`, принимающая произвольный итератор
+/// строк вместо `std::env::args()` — так `-v`/`-vv`-парсинг тестируется
+/// юнит-тестами без реального запуска процесса с разными argv.
+fn verbosity_from<I, S>(args: I) -> u8
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let mut level: u8 = 0;
+    for arg in args {
+        level += match arg.as_ref() {
+            "-v" | "--verbose" | "--debug" => 1,
+            "-vv" | "--trace" => 2,
+            _ => 0,
+        };
+    }
+    level.min(2)
+}
+
+#[cfg(test)]
+mod verbosity_tests {
+    use super::verbosity_from;
+
+    #[test]
+    fn no_flags_is_zero() {
+        assert_eq!(verbosity_from(Vec::<&str>::new()), 0);
+    }
+
+    #[test]
+    fn single_v_is_one() {
+        assert_eq!(verbosity_from(["-v"]), 1);
+        assert_eq!(verbosity_from(["--verbose"]), 1);
+        assert_eq!(verbosity_from(["--debug"]), 1);
+    }
+
+    #[test]
+    fn double_v_flag_is_two() {
+        assert_eq!(verbosity_from(["-vv"]), 2);
+        assert_eq!(verbosity_from(["--trace"]), 2);
+    }
+
+    #[test]
+    fn repeated_single_v_flags_add_up() {
+        assert_eq!(verbosity_from(["-v", "-v"]), 2);
+    }
+
+    #[test]
+    fn level_is_capped_at_trace() {
+        assert_eq!(verbosity_from(["-vv", "-v", "-v"]), 2);
+    }
+
+    #[test]
+    fn unrelated_args_are_ignored() {
+        assert_eq!(verbosity_from(["--name", "my-vm", "-v"]), 1);
+    }
+}
+
+/// Инициализирует `tracing_subscriber`. `RUST_LOG`, если задан, имеет
+/// приоритет над `-v`/`-vv` целиком (тот же принцип, что и у остальной
+/// конфигурации `andlerd` через `ANDLERD_*` — явно заданное окружением
+/// значение не переопределяется флагом умолчания) — так и раньше себя
+/// вела `EnvFilter::from_default_env()`, здесь это сохранено явно, а не
+/// потеряно при добавлении `-v`/`-vv`.
+///
+/// `ANDLERD_LOG_FORMAT=json` переключает вывод на JSON-lines (одна
+/// JSON-запись на строку, через `tracing_subscriber`'s `.json()`-layer;
+/// см. PLAN.md, раздел "Logging", "Структурированный формат для daemon")
+/// — удобно для агрегации логов нескольких инстансов `andlerd` или для
+/// внешних систем мониторинга. Любое другое значение (включая
+/// отсутствие переменной) — текущий человекочитаемый `fmt()`-вывод, тот
+/// же, что и раньше; это дефолт, а не `json`, потому что `andlerd` чаще
+/// всего запускается вручную во время разработки, где читаемый вывод в
+/// терминале удобнее необработанного JSON построчно.
+///
+/// `.json()` и обычный `fmt()` — разные типы `SubscriberBuilder`
+/// (разный формат полей), поэтому итоговый `if`/`else` с двумя `.init()`
+/// не сводится к одной ветке без `Box<dyn ...>` — сам фильтр (`filter`)
+/// вычисляется один раз выше, чтобы не дублировать логику выбора
+/// уровня, а не сам вызов `.init()`.
+fn init_tracing() {
+    let json = std::env::var("ANDLERD_LOG_FORMAT")
+        .map(|v| v.eq_ignore_ascii_case("json"))
+        .unwrap_or(false);
+
+    let filter = if std::env::var_os("RUST_LOG").is_some() {
+        tracing_subscriber::EnvFilter::from_default_env()
+    } else {
+        match verbosity_from_args() {
+            0 => tracing_subscriber::EnvFilter::new("info"),
+            verbosity => {
+                let level = if verbosity == 1 { "debug" } else { "trace" };
+                let directive = ANDLER_CRATE_TARGETS
+                    .iter()
+                    .map(|target| format!("{target}={level}"))
+                    .collect::<Vec<_>>()
+                    .join(",")
+                    + ",info";
+                tracing_subscriber::EnvFilter::new(directive)
+            }
+        }
+    };
+
+    if json {
+        tracing_subscriber::fmt().json().with_env_filter(filter).init();
+    } else {
+        tracing_subscriber::fmt().with_env_filter(filter).init();
+    }
+}
+
 fn default_store_path() -> String {
     andler_core::paths::db_path().to_string_lossy().into_owned()
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .init();
+    init_tracing();
 
     let addr: SocketAddr = std::env::var("ANDLERD_LISTEN_ADDR")
         .unwrap_or_else(|_| DEFAULT_LISTEN_ADDR.to_string())

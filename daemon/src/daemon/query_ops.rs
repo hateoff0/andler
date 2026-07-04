@@ -30,8 +30,13 @@ impl Daemon {
     }
 
     /// Поток строк stdout/stderr процесса гипервизора инстанса (см.
-    /// `andler_core::LogLine`) — live-tail с момента вызова, без истории
-    /// (см. документацию `HypervisorBackend::log_stream` за обоснованием).
+    /// `andler_core::LogLine`) — что именно попадает в него до момента
+    /// подключения (только live-tail или ещё и история) решает
+    /// конкретный backend (см. документацию
+    /// `HypervisorBackend::log_stream`); `stream_instance_logs` сам не
+    /// делает разницы и ничего не добавляет и не убирает из того, что
+    /// вернул backend. `andler-qemu`, например, сейчас отдаёт историю из
+    /// `qemu.log` перед живым хвостом (см. `QemuBackend::log_stream`).
     ///
     /// Для инстанса без запущенного backend'а (`record.handle == None`,
     /// тот же случай, что у `status()` выше) возвращает немедленно

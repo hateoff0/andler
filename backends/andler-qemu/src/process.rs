@@ -12,13 +12,13 @@
 //! `backend.rs`, который связывает результат `cmdline::build_args` и этот
 //! модуль с интерфейсом `HypervisorBackend`.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
 use andler_core::{LogLine, LogStreamSource, ResourceMetrics};
 use thiserror::Error;
-use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::broadcast;
 use tokio::time::timeout;
@@ -91,6 +91,15 @@ pub struct QemuProcess {
     /// даже после этого.
     pid: u32,
     qmp_socket_path: PathBuf,
+    /// Путь к файлу, в который `drain_to_tracing` дублирует stdout/stderr
+    /// (см. документацию `spawn`) — сохраняется здесь (а не только
+    /// используется на месте в `spawn`), чтобы `log_stream` в
+    /// `backend.rs` мог позже прочитать историю до момента подписки
+    /// клиента (см. `backend::QemuBackend::log_stream`,
+    /// `read_log_history`). `None`, если файл не был задан при `spawn`
+    /// или не открылся — в обоих случаях истории для этого процесса
+    /// просто нет, что для `log_stream` не отличается от пустого файла.
+    log_file_path: Option<PathBuf>,
     /// Канал, в который `drain_to_tracing` дублирует каждую прочитанную
     /// строку stdout/stderr, помимо записи в `tracing` — источник для
     /// `subscribe_logs`/`andler_core::HypervisorBackend::log_stream`.
@@ -125,7 +134,22 @@ impl QemuProcess {
     /// `drain_to_tracing` ниже) — раньше дескрипторы просто никем не
     /// читались, и причину падения процесса узнать было невозможно без
     /// внешних средств.
-    pub async fn spawn(args: &[String], qmp_socket_path: PathBuf) -> Result<Self, ProcessError> {
+    ///
+    /// `log_file_path`, если задан (обычно
+    /// `<instances_root>/<id>/qemu.log`, см. `backend.rs::spawn`),
+    /// дополнительно получает те же строки в чистом виде, по одной на
+    /// файловую строку, без структурированных полей `tracing` — отдельно
+    /// от журнала самого `andlerd` (см. PLAN.md, раздел "Logging",
+    /// "Логи самого QEMU-процесса — отдельно от логов ANDLER"). Если
+    /// файл не открылся (нет прав, не тот путь) — не фатально, просто
+    /// предупреждение в `tracing`; `andlerd` и так уже получает эти
+    /// строки через `tracing::warn!`/`subscribe_logs` независимо от
+    /// файла.
+    pub async fn spawn(
+        args: &[String],
+        qmp_socket_path: PathBuf,
+        log_file_path: Option<PathBuf>,
+    ) -> Result<Self, ProcessError> {
         let mut child = Command::new(QEMU_BINARY)
             .args(args)
             .stdout(Stdio::piped())
@@ -164,12 +188,22 @@ impl QemuProcess {
         // прочитать только один раз).
         let (log_sender, _) = broadcast::channel(LOG_CHANNEL_CAPACITY);
 
+        // Отдельный файловый хэндл на каждый поток (stdout и stderr
+        // читаются в разных задачах) — оба открыты в режиме `append`, так
+        // что чередующиеся записи из двух задач не портят друг друга:
+        // `O_APPEND` гарантирует атомарность позиционирования записи на
+        // POSIX-системах для записей размером меньше `PIPE_BUF`, чего для
+        // одной строки лога всегда достаточно.
+        let stdout_log_file = Self::open_log_file(log_file_path.as_deref()).await;
+        let stderr_log_file = Self::open_log_file(log_file_path.as_deref()).await;
+
         if let Some(stdout) = child.stdout.take() {
             tokio::spawn(Self::drain_to_tracing(
                 stdout,
                 pid,
                 LogStreamSource::Stdout,
                 log_sender.clone(),
+                stdout_log_file,
             ));
         }
         if let Some(stderr) = child.stderr.take() {
@@ -178,6 +212,7 @@ impl QemuProcess {
                 pid,
                 LogStreamSource::Stderr,
                 log_sender.clone(),
+                stderr_log_file,
             ));
         }
 
@@ -197,29 +232,64 @@ impl QemuProcess {
             child,
             pid,
             qmp_socket_path,
+            log_file_path,
             log_sender,
             metrics_sender,
             _metrics_task: metrics_task,
         })
     }
 
+    /// Открывает `path` (если задан) в режиме `create + append` для
+    /// файлового лога QEMU-процесса. Возвращает `None` и при отсутствии
+    /// пути, и при ошибке открытия — второй случай логируется через
+    /// `tracing::warn!`, но не прерывает `spawn`: файловый лог — это
+    /// дополнительное удобство (см. документацию `spawn`), а не
+    /// обязательная часть запуска процесса.
+    async fn open_log_file(path: Option<&std::path::Path>) -> Option<tokio::fs::File> {
+        let path = path?;
+        match tokio::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .await
+        {
+            Ok(file) => Some(file),
+            Err(error) => {
+                tracing::warn!(
+                    path = %path.display(),
+                    %error,
+                    "failed to open qemu.log, continuing without a file log for this instance"
+                );
+                None
+            }
+        }
+    }
+
     /// Построчно читает `reader` до EOF, логирует каждую строку через
     /// `tracing::warn!` (не `info!` — вывод QEMU в норме почти пуст;
     /// что-то в нём появляющееся обычно стоит внимания при диагностике,
-    /// даже если сам процесс в итоге работает штатно) и одновременно
-    /// публикует её в `sender` для подписчиков `subscribe_logs`. `source`
-    /// — `LogStreamSource::Stdout`/`Stderr`, чтобы не путать источники.
+    /// даже если сам процесс в итоге работает штатно), одновременно
+    /// публикует её в `sender` для подписчиков `subscribe_logs`, и, если
+    /// `log_file` открыт, дописывает `[stdout|stderr] <line>` в него.
+    /// `source` — `LogStreamSource::Stdout`/`Stderr`, чтобы не путать
+    /// источники.
     ///
     /// Ошибка `send` (нет подписчиков) намеренно проигнорирована — это
     /// штатный случай: в любой момент может не быть ни одного активного
     /// gRPC-клиента, стримящего логи, и строка просто никому не нужна
     /// прямо сейчас; `tracing` уже получил её строкой выше независимо от
-    /// этого.
+    /// этого. Ошибка записи в `log_file` тоже не прерывает чтение —
+    /// например, диск переполнился на середине жизни инстанса — просто
+    /// молча перестаёт писаться дальше (уже отправленные в `tracing`/
+    /// `sender` строки этим не затронуты), поскольку `log_file` берётся
+    /// через `take()` и не восстанавливается при первой же ошибке
+    /// записи.
     async fn drain_to_tracing<R>(
         reader: R,
         pid: u32,
         source: LogStreamSource,
         sender: broadcast::Sender<LogLine>,
+        mut log_file: Option<tokio::fs::File>,
     )
     where
         R: tokio::io::AsyncRead + Unpin,
@@ -233,6 +303,12 @@ impl QemuProcess {
             match lines.next_line().await {
                 Ok(Some(line)) => {
                     tracing::warn!(pid, stream = stream_name, "{line}");
+                    if let Some(file) = log_file.as_mut() {
+                        let entry = format!("[{stream_name}] {line}\n");
+                        if file.write_all(entry.as_bytes()).await.is_err() {
+                            log_file = None;
+                        }
+                    }
                     let _ = sender.send(LogLine { source, line });
                 }
                 Ok(None) => break,
@@ -249,9 +325,12 @@ impl QemuProcess {
     ///
     /// Новый подписчик получает только строки, отправленные *после*
     /// вызова `subscribe_logs` — `broadcast::Sender::subscribe()` не
-    /// отдаёт историю, см. документацию
-    /// `andler_core::HypervisorBackend::log_stream` за тем, что это
-    /// сознательный выбор первой версии, не упущение.
+    /// отдаёт историю, и это остаётся так и на этом уровне: история
+    /// теперь читается отдельно, из `log_file_path`, и склеивается с
+    /// этим live-хвостом на уровне выше, в
+    /// `backend::QemuBackend::log_stream` (см. её документацию и
+    /// `backend::read_log_history`), а не здесь — `subscribe_logs`
+    /// остаётся простым, не знающим о файле вообще.
     pub fn subscribe_logs(&self) -> broadcast::Receiver<LogLine> {
         self.log_sender.subscribe()
     }
@@ -272,6 +351,14 @@ impl QemuProcess {
 
     pub fn qmp_socket_path(&self) -> &PathBuf {
         &self.qmp_socket_path
+    }
+
+    /// Путь к файлу с историей stdout/stderr этого процесса, если он был
+    /// задан и успешно открылся при `spawn` — см. документацию поля
+    /// `log_file_path` и `backend::QemuBackend::log_stream`, который
+    /// использует его для отдачи истории новым подписчикам.
+    pub fn log_file_path(&self) -> Option<&Path> {
+        self.log_file_path.as_deref()
     }
 
     /// `true`, если процесс всё ещё выполняется. Не блокирует и не ждёт —
@@ -349,7 +436,7 @@ mod tests {
             "-nographic".to_string(),
         ];
 
-        let mut process = QemuProcess::spawn(&args, qmp_path).await.unwrap();
+        let mut process = QemuProcess::spawn(&args, qmp_path, None).await.unwrap();
         assert!(process.is_alive().await.unwrap());
 
         process.terminate().await.unwrap();
@@ -366,7 +453,7 @@ mod tests {
             "-nographic".to_string(),
         ];
 
-        let mut process = QemuProcess::spawn(&args, qmp_path).await.unwrap();
+        let mut process = QemuProcess::spawn(&args, qmp_path, None).await.unwrap();
         process.force_kill().await.unwrap();
         assert!(!process.is_alive().await.unwrap());
     }
@@ -396,7 +483,7 @@ mod tests {
         let (sender, mut receiver) = broadcast::channel(LOG_CHANNEL_CAPACITY);
         let reader: &[u8] = b"first line\nsecond line\n";
 
-        QemuProcess::drain_to_tracing(reader, 1234, LogStreamSource::Stdout, sender).await;
+        QemuProcess::drain_to_tracing(reader, 1234, LogStreamSource::Stdout, sender, None).await;
 
         let first = receiver.try_recv().expect("first line should be queued");
         assert_eq!(first.source, LogStreamSource::Stdout);
@@ -420,7 +507,7 @@ mod tests {
 
         // Не должно ни паниковать, ни зависнуть — если бы здесь была
         // ошибка обработки `send`, тест завис бы или упал бы.
-        QemuProcess::drain_to_tracing(reader, 1, LogStreamSource::Stderr, sender).await;
+        QemuProcess::drain_to_tracing(reader, 1, LogStreamSource::Stderr, sender, None).await;
     }
 
     /// Несколько подписчиков, оформленных через одинаковый `Sender`
@@ -433,7 +520,7 @@ mod tests {
         let mut second_receiver = sender.subscribe();
         let reader: &[u8] = b"shared line\n";
 
-        QemuProcess::drain_to_tracing(reader, 1, LogStreamSource::Stdout, sender).await;
+        QemuProcess::drain_to_tracing(reader, 1, LogStreamSource::Stdout, sender, None).await;
 
         assert_eq!(
             first_receiver.try_recv().unwrap().line,

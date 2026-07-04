@@ -112,12 +112,36 @@ pub enum DaemonError {
     #[error("snapshot operation requires running instance {0:?}, but state is {1:?}")]
     SnapshotOperationRequiresRunningInstance(InstanceId, InstanceState),
 
+    /// Инстанс уже достиг `MAX_SNAPSHOTS_PER_INSTANCE` (см.
+    /// `snapshot_ops.rs`) — новый снапшот не создаётся, пока пользователь
+    /// не удалит хотя бы один существующий. Без этого лимита internal
+    /// snapshots (каждый хранится прямо внутри qcow2-файла) могут расти
+    /// неограниченно, постепенно раздувая сам файл диска и удлиняя время
+    /// snapshot-save/-load — лимит даёт понятную, конкретную ошибку
+    /// вместо постепенной деградации, которую пользователь не связал бы
+    /// с количеством снапшотов.
+    #[error(
+        "instance {instance_id:?} already has {current} snapshots (limit {limit}); delete one before creating another"
+    )]
+    SnapshotLimitExceeded {
+        instance_id: InstanceId,
+        current: usize,
+        limit: usize,
+    },
+
     /// Пользователь передал пустую строку как ссылку на инстанс (ни
     /// полный UUID, ни префикс). Отдельно от `InvalidInstanceRef` ниже,
     /// чтобы сообщение было конкретным, а не "prefix '' matches 0
     /// instances".
     #[error("instance reference must not be empty")]
     EmptyInstanceRef,
+
+    /// `Daemon::resolve_instance_id` — строка не является ни валидным UUID,
+    /// ни валидным hex-префиксом (содержит символы вне [0-9a-fA-F-]).
+    /// Отдельно от `InstanceRefNotFound`, потому что там ошибка про
+    /// отсутствие совпадений, а здесь — про невалидный формат ввода.
+    #[error("instance reference {0:?} is not a valid UUID or hex prefix")]
+    MalformedInstanceRef(String),
 
     /// `Daemon::resolve_instance_id` — префикс (см. "Partial instance ID"
     /// в PLAN.md, по аналогии с Docker) не совпал ни с одним

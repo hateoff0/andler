@@ -3,6 +3,17 @@ use super::error::DaemonError;
 use super::types::{SnapshotRecord};
 use andler_core::{BackendError, InstanceId, InstanceState};
 
+/// Максимум internal-снапшотов на один инстанс (см. документацию
+/// `DaemonError::SnapshotLimitExceeded` за тем, почему лимит вообще
+/// нужен). 20 — произвольный, но не случайный выбор: достаточно для
+/// типичного цикла разработки/тестирования ("снапшот перед каждым
+/// рискованным шагом", несколько раз в день, несколько дней подряд), но
+/// не настолько много, чтобы qcow2-файл рос неконтролируемо между
+/// ручными чистками. Не настраивается через `InstanceConfig` — это
+/// защитный лимит самого ANDLER, а не часть декларативной конфигурации
+/// инстанса.
+const MAX_SNAPSHOTS_PER_INSTANCE: usize = 20;
+
 impl Daemon {
     /// Создаёт снапшот инстанса с указанным тегом.
     ///
@@ -10,8 +21,9 @@ impl Daemon {
     ///
     /// Алгоритм:
     /// 1. Проверить FSM: `Running`/`Paused`
-    /// 2. Вызвать `backend.snapshot(handle, tag)` (async job через QMP)
-    /// 3. Сохранить метаданные в `store`
+    /// 2. Проверить лимит: не больше `MAX_SNAPSHOTS_PER_INSTANCE` уже существующих
+    /// 3. Вызвать `backend.snapshot(handle, tag)` (async job через QMP)
+    /// 4. Сохранить метаданные в `store`
     pub async fn create_snapshot(
         &self,
         id: InstanceId,
@@ -46,6 +58,19 @@ impl Daemon {
                 handle,
             )
         };
+
+        // Считается по backend'у (реальные снапшоты внутри qcow2), не по
+        // `store` — `store` может отставать/быть недоступен (см.
+        // `list_snapshots`), а лимит должен опираться на то, что реально
+        // будет храниться в файле диска. Если сам список получить не
+        // удалось, лимит не проверяется (тот же принцип толерантности,
+        // что и в `list_snapshots::unwrap_or_default` — не блокировать
+        // создание снапшота из-за временной невозможности его
+        // пересчитать, настоящую ошибку в этом случае вернёт сам
+        // `backend.snapshot()` ниже).
+        if let Ok(existing) = backend.snapshot_list(&handle).await {
+            check_snapshot_limit(id, existing.len(), MAX_SNAPSHOTS_PER_INSTANCE)?;
+        }
 
         let timeout = timeout_secs.map(std::time::Duration::from_secs);
         backend.snapshot(&handle, &tag, timeout).await?;
@@ -233,5 +258,67 @@ impl Daemon {
                 })
                 .collect())
         }
+    }
+}
+
+/// Чистая часть проверки лимита снапшотов — вынесена из `create_snapshot`
+/// отдельно, потому что сама `create_snapshot` требует живого backend'а с
+/// уже запущенным QEMU-процессом (реальный `qmp`-хэндшейк для
+/// `snapshot_list`), которого нет в юнит-тестах этого крейта; так
+/// проверяется хотя бы сама логика "сколько есть vs сколько можно", а не
+/// путь целиком.
+fn check_snapshot_limit(
+    instance_id: InstanceId,
+    current: usize,
+    limit: usize,
+) -> Result<(), DaemonError> {
+    if current >= limit {
+        return Err(DaemonError::SnapshotLimitExceeded {
+            instance_id,
+            current,
+            limit,
+        });
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod snapshot_limit_tests {
+    use super::*;
+
+    #[test]
+    fn below_limit_is_allowed() {
+        let id = InstanceId::new();
+        assert!(check_snapshot_limit(id, 0, MAX_SNAPSHOTS_PER_INSTANCE).is_ok());
+        assert!(check_snapshot_limit(id, MAX_SNAPSHOTS_PER_INSTANCE - 1, MAX_SNAPSHOTS_PER_INSTANCE).is_ok());
+    }
+
+    #[test]
+    fn at_limit_is_rejected() {
+        let id = InstanceId::new();
+        let err = check_snapshot_limit(id, MAX_SNAPSHOTS_PER_INSTANCE, MAX_SNAPSHOTS_PER_INSTANCE)
+            .unwrap_err();
+        match err {
+            DaemonError::SnapshotLimitExceeded {
+                instance_id,
+                current,
+                limit,
+            } => {
+                assert_eq!(instance_id, id);
+                assert_eq!(current, MAX_SNAPSHOTS_PER_INSTANCE);
+                assert_eq!(limit, MAX_SNAPSHOTS_PER_INSTANCE);
+            }
+            other => panic!("expected SnapshotLimitExceeded, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn above_limit_is_rejected() {
+        // Defensive: shouldn't happen in practice (limit is checked
+        // before every create), but a stale/racy count above the limit
+        // must still be rejected, not treated as "not quite at the
+        // limit yet".
+        let id = InstanceId::new();
+        assert!(check_snapshot_limit(id, MAX_SNAPSHOTS_PER_INSTANCE + 1, MAX_SNAPSHOTS_PER_INSTANCE).is_err());
     }
 }
