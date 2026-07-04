@@ -42,7 +42,7 @@ struct Cli {
     daemon_addr: Option<String>,
 
     #[command(subcommand)]
-    command: Command,
+    command: Option<Command>,
 }
 
 #[derive(Subcommand)]
@@ -228,6 +228,9 @@ enum Command {
         #[command(subcommand)]
         action: DiskAction,
     },
+    /// Launch the interactive wizard to create a new VM.
+    /// This is the default when `andler` is invoked without a subcommand.
+    Wizard {},
 }
 
 /// VM type selector for CLI mode.
@@ -418,7 +421,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut client = AndlerServiceClient::connect(addr).await?;
 
     match cli.command {
-        Command::Create {
+        None => {
+            wizard::handle_wizard(&mut client).await?;
+        }
+        Some(Command::Wizard {}) => {
+            wizard::handle_wizard(&mut client).await?;
+        }
+        Some(Command::Create {
             file,
             kind,
             name,
@@ -438,7 +447,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             instances_root,
             overlay_size_gib,
             magisk_dir,
-        } => {
+        }) => {
             create::handle(
                 &mut client, file, kind, name, ovmf_vars_template,
                 iso_path, disk_path, disk_size_gib, compact_on_shutdown, cdrom_bus,
@@ -447,60 +456,60 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 instances_root, overlay_size_gib, magisk_dir,
             ).await?;
         }
-        Command::Start { instance_id } => {
+        Some(Command::Start { instance_id }) => {
             lifecycle::handle_start(&mut client, instance_id).await?;
         }
-        Command::Stop {
+        Some(Command::Stop {
             instance_id,
             graceful,
-        } => {
+        }) => {
             lifecycle::handle_stop(&mut client, instance_id, graceful).await?;
         }
-        Command::Pause { instance_id } => {
+        Some(Command::Pause { instance_id }) => {
             lifecycle::handle_pause(&mut client, instance_id).await?;
         }
-        Command::Resume { instance_id } => {
+        Some(Command::Resume { instance_id }) => {
             lifecycle::handle_resume(&mut client, instance_id).await?;
         }
-        Command::Status { instance_id } => {
+        Some(Command::Status { instance_id }) => {
             status::handle_status(&mut client, instance_id).await?;
         }
-        Command::List { full_id } => {
+        Some(Command::List { full_id }) => {
             status::handle_list(&mut client, full_id).await?;
         }
-        Command::Remove { instance_id, purge } => {
+        Some(Command::Remove { instance_id, purge }) => {
             lifecycle::handle_remove(&mut client, instance_id, purge).await?;
         }
-        Command::Config { instance_id } => {
+        Some(Command::Config { instance_id }) => {
             status::handle_config(&mut client, instance_id).await?;
         }
-        Command::Logs { instance_id } => {
+        Some(Command::Logs { instance_id }) => {
             status::handle_logs(&mut client, instance_id).await?;
         }
-        Command::Metrics { instance_id } => {
+        Some(Command::Metrics { instance_id }) => {
             status::handle_metrics(&mut client, instance_id).await?;
         }
-        Command::Clone {
+        Some(Command::Clone {
             source_instance_id,
             name,
             instances_root,
             mode,
-        } => {
+        }) => {
             clone::handle_clone(&mut client, source_instance_id, name, instances_root, mode).await?;
         }
-        Command::Export {
+        Some(Command::Export {
             source_instance_id,
             dest_path,
-        } => {
+        }) => {
             clone::handle_export(&mut client, source_instance_id, dest_path).await?;
         }
-        Command::Snapshot {
+        Some(Command::Snapshot {
             instance_id,
             action,
-        } => {
+        }) => {
             snapshot::handle(&mut client, instance_id, action).await?;
         }
-        Command::Disk { action } => {
+        Some(Command::Disk { action }) => {
             disk::handle(action).await?;
         }
     }

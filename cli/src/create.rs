@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use tonic::transport::Channel;
 
 use crate::instance_file::{InstanceFile, InstanceFileResult};
-use crate::wizard::{PartialArgs, WizardError, WizardKind, WizardResult};
+use crate::wizard::{PartialArgs, WizardError, WizardKind};
 use crate::{err_exit, CliAndroidVersion, CliArmTranslator, CliCdromBus, CliKind, CliRootMode};
 
 #[allow(clippy::too_many_arguments)]
@@ -88,20 +88,7 @@ pub async fn handle(
         let result = crate::wizard::run(partial).await;
 
         return match result {
-            Ok(WizardResult::Linux(req, _root)) => {
-                let response = client.create_instance(req).await?;
-                let id = response.into_inner().instance_id;
-                println!("✓ VM created: {id}");
-                println!("  andler start {id}");
-                Ok(())
-            }
-            Ok(WizardResult::Android(req)) => {
-                let response = client.create_android_instance(req).await?;
-                let id = response.into_inner().instance_id;
-                println!("✓ VM created: {id}");
-                println!("  andler start {id}");
-                Ok(())
-            }
+            Ok(result) => crate::wizard::send_result(client, result).await,
             Err(WizardError::Cancelled) => {
                 println!("Cancelled.");
                 Ok(())

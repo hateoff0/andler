@@ -29,6 +29,7 @@ pub use summary::SummaryAction;
 
 /// Result passed back to `create.rs`.
 #[derive(Debug)]
+#[allow(dead_code)]
 pub enum WizardResult {
     Linux(CreateInstanceRequest, String /* instances_root */),
     Android(CreateAndroidInstanceRequest),
@@ -439,6 +440,61 @@ fn default_instances_root() -> String {
     andler_core::paths::instances_root()
         .to_string_lossy()
         .into_owned()
+}
+
+/// Entry point for `andler wizard` and bare `andler` (no subcommand).
+/// Runs the interactive wizard with empty PartialArgs, then sends the
+/// result to andlerd via gRPC.
+pub async fn handle_wizard(
+    client: &mut andler_rpc::proto::andler_service_client::AndlerServiceClient<
+        tonic::transport::Channel,
+    >,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let partial = PartialArgs::default();
+    let result = run(partial).await;
+    match result {
+        Ok(result) => send_result(client, result).await,
+        Err(WizardError::Cancelled) => {
+            println!("Cancelled.");
+            Ok(())
+        }
+        Err(WizardError::NotTty) => {
+            eprintln!(
+                "Interactive wizard is not available (no TTY).\n\
+                 Use `andler create --kind linux --name <name> --iso-path <path> --disk-path <path>`\n\
+                 or `andler create --file vm.toml`."
+            );
+            std::process::exit(2);
+        }
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// Send wizard result to andlerd via gRPC. Shared between `create::handle()`
+/// and `handle_wizard()` to avoid duplicating the gRPC-sending logic.
+pub async fn send_result(
+    client: &mut andler_rpc::proto::andler_service_client::AndlerServiceClient<
+        tonic::transport::Channel,
+    >,
+    result: WizardResult,
+) -> Result<(), Box<dyn std::error::Error>> {
+    match result {
+        WizardResult::Linux(req, _) => {
+            let id = client.create_instance(req).await?.into_inner().instance_id;
+            println!("✓ VM created: {id}");
+            println!("  andler start {id}");
+        }
+        WizardResult::Android(req) => {
+            let id = client
+                .create_android_instance(req)
+                .await?
+                .into_inner()
+                .instance_id;
+            println!("✓ Android VM created: {id}");
+            println!("  andler start {id}");
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn is_tty() -> bool {
