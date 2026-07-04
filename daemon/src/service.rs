@@ -151,15 +151,18 @@ impl AndlerService for DaemonService {
     ) -> Result<Response<CreateInstanceResponse>, Status> {
         let mut cfg = InstanceConfig::try_from(request.into_inner())?;
 
-        // Если клиент не указал ovmf_code_path явно (пустая строка — proto
-        // не различает absent и empty для string) — подставляем
-        // авто-определённый путь. Клиент всегда может передать явный путь
-        // и тогда он используется без изменений.
         if cfg.firmware.ovmf_code_path.as_os_str().is_empty() {
             cfg.firmware.ovmf_code_path = self.ovmf.code.clone();
         }
 
-        let id = self.daemon.create_instance(cfg).await?;
+        let id = self
+            .daemon
+            .create_linux_instance(
+                cfg,
+                andler_core::paths::instances_root(),
+                self.ovmf.vars_template.clone(),
+            )
+            .await?;
         Ok(Response::new(CreateInstanceResponse {
             instance_id: id.0.to_string(),
         }))

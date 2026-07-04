@@ -206,6 +206,48 @@ impl Daemon {
         Ok(registered_id)
     }
 
+    /// Создаёт Linux-инстанс: каталог, OVMF VARS (если шаблон найден),
+    /// qcow2-диск и регистрирует инстанс. Аналог `create_android_instance`
+    /// для Linux — тот же паттерн: ресурсы создаются до регистрации, при
+    /// ошибке `InstanceDirGuard` удаляет частично созданные файлы.
+    pub async fn create_linux_instance(
+        &self,
+        mut cfg: InstanceConfig,
+        instances_root: PathBuf,
+        ovmf_vars_template: PathBuf,
+    ) -> Result<InstanceId, DaemonError> {
+        let id = InstanceId::new();
+        let instance_dir = instances_root.join(id.0.to_string());
+        let mut dir_guard = InstanceDirGuard::new(instance_dir.clone());
+
+        tokio::fs::create_dir_all(&instance_dir)
+            .await
+            .map_err(|source| DaemonError::Io {
+                path: instance_dir.clone(),
+                source,
+            })?;
+
+        if !ovmf_vars_template.as_os_str().is_empty() {
+            let ovmf_vars_path = instance_dir.join("VARS.fd");
+            andler_firmware::provision_vars(&ovmf_vars_template, &ovmf_vars_path)
+                .await
+                .map_err(|e| DaemonError::Firmware(e.to_string()))?;
+            cfg.firmware.ovmf_vars_path = ovmf_vars_path;
+        }
+
+        if cfg.disk.format == DiskFormat::Qcow2 && !cfg.disk.path.exists() {
+            andler_disk::qcow2::create(&cfg.disk.path, cfg.disk.size_bytes)
+                .await
+                .map_err(DaemonError::Disk)?;
+        }
+
+        cfg.id = id;
+        let registered_id = self.create_instance(cfg).await?;
+        dir_guard.disarm();
+
+        Ok(registered_id)
+    }
+
     /// Запускает ранее созданный инстанс: `Created -> Starting -> Running`
     /// (см. `andler_core::fsm`). При ошибке backend'а переводит запись в
     /// `Error { message }`, а не оставляет её в промежуточном `Starting`

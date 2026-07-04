@@ -647,12 +647,11 @@ async fn clone_instance_on_unknown_source_round_trips_as_not_found() {
     server.abort();
 }
 
-/// `CreateInstance` (см. `sample_create_instance_request`) всегда создаёт
-/// `LinuxVm` —clone LinuxVm с `Linked` теперь разрешён, но disk-операция
-/// требует `qemu-img` (нет в CI). Ошибка приходит от `DiskError::SpawnFailed`
-/// → `INTERNAL`, не `FAILED_PRECONDITION`.
+/// Clone LinuxVm с `Linked` требует `qemu-img`. Если `qemu-img`
+/// доступен — clone создаёт overlay-диск и succeeds; если нет —
+/// возвращает `INTERNAL` (SpawnFailed).
 #[tokio::test]
-async fn clone_instance_linux_vm_linked_requires_qemu_img() {
+async fn clone_instance_linux_vm_linked_with_qemu_img() {
     let (mut client, server) = spawn_server_and_connect().await;
 
     let create_response = client
@@ -661,7 +660,7 @@ async fn clone_instance_linux_vm_linked_requires_qemu_img() {
         .expect("create_instance must succeed")
         .into_inner();
 
-    let status = client
+    let response = client
         .clone_instance(CloneInstanceRequest {
             source_instance_id: create_response.instance_id,
             new_name: "clone".to_string(),
@@ -669,9 +668,10 @@ async fn clone_instance_linux_vm_linked_requires_qemu_img() {
             mode: CloneMode::Linked as i32,
         })
         .await
-        .expect_err("cloning a LinuxVm with Linked requires qemu-img");
-    // DiskError::SpawnFailed (нет qemu-img) → INTERNAL
-    assert_eq!(status.code(), tonic::Code::Internal);
+        .expect("cloning a LinuxVm with Linked should succeed when qemu-img is available");
+    let id = uuid::Uuid::parse_str(&response.into_inner().instance_id)
+        .expect("clone response must contain a valid UUID");
+    assert!(!id.is_nil());
 
     server.abort();
 }
@@ -742,11 +742,10 @@ async fn export_instance_disk_on_unknown_source_round_trips_as_not_found() {
     server.abort();
 }
 
-/// Export LinuxVm теперь разрешён — `full_standalone_clone` требует
-/// `qemu-img` (нет в CI), поэтому ошибка приходит от `DiskError::SpawnFailed`
-/// → `INTERNAL`, не `FAILED_PRECONDITION`.
+/// Export LinuxVm требует `qemu-img`. Если `qemu-img` доступен —
+/// export создаёт standalone-файл и succeeds.
 #[tokio::test]
-async fn export_instance_disk_linux_vm_requires_qemu_img() {
+async fn export_instance_disk_linux_vm_with_qemu_img() {
     let (mut client, server) = spawn_server_and_connect().await;
 
     let create_response = client
@@ -755,22 +754,22 @@ async fn export_instance_disk_linux_vm_requires_qemu_img() {
         .expect("create_instance must succeed")
         .into_inner();
 
-    let status = client
+    let response = client
         .export_instance_disk(ExportInstanceDiskRequest {
             source_instance_id: create_response.instance_id,
             dest_path: "/tmp/export.qcow2".to_string(),
         })
         .await
-        .expect_err("exporting a LinuxVm requires qemu-img");
-    assert_eq!(status.code(), tonic::Code::Internal);
+        .expect("exporting a LinuxVm should succeed when qemu-img is available");
+    assert!(!response.into_inner().dest_path.is_empty());
 
     server.abort();
 }
 
-/// LinuxVm + FullStandalone — требует `qemu-img` (копирование диска),
-/// поэтому ошибка приходит от `DiskError::SpawnFailed` → `INTERNAL`.
+/// LinuxVm + FullStandalone — требует `qemu-img` (копирование диска).
+/// Если `qemu-img` доступен — clone создаёт standalone-файл и succeeds.
 #[tokio::test]
-async fn clone_instance_linux_vm_full_standalone_requires_qemu_img() {
+async fn clone_instance_linux_vm_full_standalone_with_qemu_img() {
     let (mut client, server) = spawn_server_and_connect().await;
 
     let create_response = client
@@ -779,7 +778,7 @@ async fn clone_instance_linux_vm_full_standalone_requires_qemu_img() {
         .expect("create_instance must succeed")
         .into_inner();
 
-    let status = client
+    let response = client
         .clone_instance(CloneInstanceRequest {
             source_instance_id: create_response.instance_id,
             new_name: "clone".to_string(),
@@ -787,8 +786,10 @@ async fn clone_instance_linux_vm_full_standalone_requires_qemu_img() {
             mode: CloneMode::FullStandalone as i32,
         })
         .await
-        .expect_err("LinuxVm + FullStandalone requires qemu-img");
-    assert_eq!(status.code(), tonic::Code::Internal);
+        .expect("LinuxVm + FullStandalone should succeed when qemu-img is available");
+    let id = uuid::Uuid::parse_str(&response.into_inner().instance_id)
+        .expect("clone response must contain a valid UUID");
+    assert!(!id.is_nil());
 
     server.abort();
 }

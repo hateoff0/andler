@@ -235,12 +235,11 @@ pub(crate) fn build_linux_request(
     detected: &HardwareDefaults,
 ) -> Result<(CreateInstanceRequest, String), WizardError> {
     let disk_name = format!("{}-disk", basic.name);
-    let disk_path = ensure_qcow2_extension(&PathBuf::from(&disk_name))
-        .to_string_lossy()
-        .into_owned();
+    let disk_path = ensure_qcow2_extension(&PathBuf::from(&disk_name));
+    let full_disk_path = PathBuf::from(&basic.instances_root).join(&disk_path);
 
     let mut disk =
-        andler_core::DiskConfig::reference_default(PathBuf::from(&disk_path));
+        andler_core::DiskConfig::reference_default(full_disk_path);
     disk.size_bytes = basic
         .disk_size_gib
         .checked_mul(andler_core::DiskConfig::GIB)
