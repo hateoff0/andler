@@ -50,7 +50,7 @@ Venus and VirGL provide **paravirtualized 3D acceleration** — the guest sees a
 ### Monitoring
 
 - **Real-time metrics** — CPU%, RAM, disk I/O, network I/O streamed every second from `/proc`
-- **GPU metrics** — AMD (sysfs), NVIDIA (`nvidia-smi`), Intel (i915 sysfs) with automatic vendor detection
+- **GPU metrics** — AMD (sysfs), NVIDIA (NVML + `nvidia-smi` fallback), Intel (i915 sysfs) with automatic vendor detection
 - **Live logs** — tail QEMU stdout/stderr in real-time
 
 ### Android Support
@@ -156,20 +156,23 @@ gl = true
 | Command | Description |
 |---------|-------------|
 | `create` | Create instance (TOML auto-detect, or `--kind linux`/`--kind android` CLI flags) |
+| `wizard` | Launch interactive wizard (default when `andler` is invoked without a subcommand) |
+| `edit` | Edit instance config in `$VISUAL`/`$EDITOR` (does not restart running instance) |
 | `start` | Start instance |
-| `stop` | Stop instance (`--graceful` for SIGTERM) |
+| `stop` | Stop instance (default: graceful ACPI shutdown; `--graceful`: force without waiting) |
 | `pause` | Pause running instance |
 | `resume` | Resume paused instance |
 | `status` | Print instance state |
-| `list` | List all instances |
+| `list` | List all instances (`--state`, `--name` regex, `--sort`, `--json`) |
 | `config` | Print full instance configuration |
 | `remove` | Remove instance (`--purge` to delete files) |
 | `clone` | Clone instance (linked/full-standalone/shared-base) |
 | `export` | Export disk as standalone file |
-| `logs` | Live-tail QEMU stdout/stderr |
-| `metrics` | Stream resource metrics (CPU/RAM/disk/net/GPU) |
+| `logs` | Live-tail QEMU stdout/stderr (`--source`, `--grep` regex, `--tail`) |
+| `metrics` | Stream resource metrics (`--once` for single sample, `--json`) |
 | `snapshot` | Snapshot CRUD (create/restore/delete/list) |
-| `disk` | Disk management (create/info/resize/compact) |
+| `disk` | Disk management (create/info/resize `--shrink`/compact) |
+| `completions` | Generate shell completion script (bash/zsh/fish) |
 
 See [`docs/API.md`](docs/API.md) for full command reference with all flags.
 
@@ -247,6 +250,11 @@ clipboard_enabled = true
 | `Dbus` | D-Bus compositor integration |
 | `None` | Headless (`-display none`) |
 
+Note: the configured `resolution` is stored but not currently applied to
+`Sdl`/`Gtk` output — QEMU's SDL/GTK backends don't take a width/height
+parameter. Set the resolution inside the guest OS after boot for now (e.g.
+via `xrandr` or display settings).
+
 ### Network Modes
 
 | Mode | Description |
@@ -254,6 +262,25 @@ clipboard_enabled = true
 | `Nat` | QEMU user-mode networking (default) |
 | `Bridge` | Connect to host bridge interface |
 | `Isolated` | No network connectivity |
+
+### Clipboard Sharing
+
+`clipboard_enabled = true` sets up the host side correctly (a `virtio-serial`
+`qemu-vdagent` chardev), but clipboard sharing only actually works once the
+**guest** OS has `spice-vdagent` installed and running — this is not something
+ANDLER can install or detect from the host side. If clipboard doesn't work
+after boot, install it inside the guest:
+
+```
+# Arch/CachyOS
+sudo pacman -S spice-vdagent
+
+# Ubuntu/Debian
+sudo apt install spice-vdagent
+
+# Fedora
+sudo dnf install spice-vdagent
+```
 
 ### Root Modes
 
@@ -267,14 +294,14 @@ clipboard_enabled = true
 ```
 andler/
 ├── core/                          Domain types, backend trait, config, FSM
-│   └── andler-core/               ~37 unit tests, no external dependencies
+│   └── andler-core/               ~41 unit tests, no external dependencies
 │       ├── lib.rs                  Re-exports
 │       ├── error.rs                BackendError, FsmError
 │       ├── backend.rs              HypervisorBackend trait, BackendHandle, BackendStatus, ResourceMetrics
 │       ├── fsm.rs                  InstanceState enum (FSM transitions)
 │       ├── clone.rs                CloneMode enum (Linked, FullStandalone, SharedBase)
 │       ├── android_profile.rs      AndroidProfile, AndroidVersion, ArmTranslator
-│       ├── paths.rs                Unified path resolution (ANDLER_HOME)
+│       ├── paths.rs                Unified path resolution (ANDLER_HOME, runtime_dir, ensure_private_dir)
 │       └── config/
 │           ├── mod.rs              InstanceConfig, InstanceId, InstanceKind
 │           ├── instance.rs         InstanceKind (LinuxVm, AndroidVm), BackendKind
@@ -307,19 +334,21 @@ andler/
 │   │                              host-level GPU metrics (AMD/NVIDIA/Intel)
 │   └── andler-rpc/                gRPC protocol + conversions
 │
-├── daemon/                        Background service (~68 unit + 24 integration tests)
+├── daemon/                        Background service (~73 unit + 24 integration tests)
 │   └── src/
-│       ├── daemon/
-│       │   ├── mod.rs             Core orchestration logic (~250 lines)
-│       │   ├── error.rs           DaemonError enum (18 variants)
-│       │   ├── types.rs           InstanceRecord, SnapshotRecord, InstanceDirGuard
-│       │   ├── instance_ops.rs    create/start/stop/pause/resume/remove, resolve_instance_id
-│       │   ├── clone_ops.rs       clone_instance, export, find_live_clones
-│       │   ├── snapshot_ops.rs    create/restore/delete/list snapshots
-│       │   ├── query_ops.rs       status, list, get_config, stream
-│       │   └── tests/             ~68 unit tests across 10 modules
-│       ├── service.rs             gRPC service wrapper
-│       └── grpc_roundtrip_test.rs Integration tests
+│       ├── main.rs                 andlerd binary (verbosity flags, signal handling)
+│       ├── firmware.rs             OVMF auto-detection
+│       ├── service.rs              gRPC service wrapper
+│       ├── grpc_roundtrip_test.rs  Integration tests
+│       └── daemon/
+│           ├── mod.rs              Core orchestration logic (~268 lines)
+│           ├── error.rs            DaemonError enum (23 variants)
+│           ├── types.rs            InstanceRecord, SnapshotRecord, InstanceDirGuard
+│           ├── instance_ops.rs     create/start/stop/pause/resume/remove, resolve_instance_id
+│           ├── clone_ops.rs        clone_instance, export, find_live_clones
+│           ├── snapshot_ops.rs     create/restore/delete/list snapshots
+│           ├── query_ops.rs        status, list, get_config, update_instance_config, stream
+│           └── tests/              ~73 unit tests across 10 modules
 │
 ├── cli/                           Command-line client
 │   └── src/
@@ -349,7 +378,7 @@ All data under `~/.local/share/andler/` (XDG data directory):
 
 ```
 ~/.local/share/andler/
-├── state.db                    SQLite state store
+├── andlerd.db                   SQLite state store
 ├── instances/
 │   └── <uuid>/
 │       ├── instance.toml       Instance configuration
@@ -395,33 +424,32 @@ docker compose -f docker/docker-compose.yml run --rm e2e
 
 Each crate has its own README with detailed API reference:
 
-- [`core/andler-core/README.md`](core/andler-core/README.md) — Domain types, ~30 public types, ~37 tests
-- [`backends/andler-qemu/README.md`](backends/andler-qemu/README.md) — QEMU backend, ~71 tests
+- [`core/andler-core/README.md`](core/andler-core/README.md) — Domain types, ~30 public types, ~41 tests
+- [`backends/andler-qemu/README.md`](backends/andler-qemu/README.md) — QEMU backend, ~75 tests
 - [`backends/andler-vmm/README.md`](backends/andler-vmm/README.md) — Cloud Hypervisor stub
 - [`services/andler-disk/README.md`](services/andler-disk/README.md) — Disk ops + Magisk provisioning
 - [`services/andler-net/README.md`](services/andler-net/README.md) — Networking stub
 - [`services/andler-store/README.md`](services/andler-store/README.md) — SQLite persistence
 - [`services/andler-rpc/README.md`](services/andler-rpc/README.md) — gRPC protocol + conversions
-- [`daemon/README.md`](daemon/README.md) — Daemon orchestration, ~68 unit tests + 24 integration tests
-- [`cli/README.md`](cli/README.md) — CLI commands + TOML parser + wizard
+- [`daemon/README.md`](daemon/README.md) — Daemon orchestration, ~73 unit tests + 24 integration tests
+- [`cli/README.md`](cli/README.md) — CLI commands + TOML parser + wizard, 91 tests
 
 ## Metrics
 
 Real-time resource monitoring from host `/proc` (no QMP required):
 
 ```
-  CPU%   RAM        Disk R     Disk W     Net RX     Net TX     VRAM       GPU%
- 12.34   1.23 GiB   45.6 MB/s  12.3 MB/s  1.2 MB/s   0.5 MB/s   512 MiB    67.8%
+cpu=12.3%    rss=1.23 GiB   disk_r=45.6 MB/s  disk_w=12.3 MB/s  net_rx=1.2 MB/s   net_tx=0.5 MB/s   vram=512 MiB       gpu=68%
 ```
 
 | Metric | Source | Calculation |
 |--------|--------|-------------|
 | CPU% | `/proc/<pid>/stat` | Delta-based utime+stime / uptime / num_cpus |
 | RAM | `/proc/<pid>/status` | VmRSS direct read |
-| Disk I/O | `/sys/block/<dev>/stat` | Delta-based bytes/sec |
+| Disk I/O | `/proc/<pid>/io` | read_bytes/write_bytes delta |
 | Network I/O | `/proc/<net/dev>` | Delta-based bytes/sec |
-| VRAM | AMD sysfs / NVIDIA nvidia-smi / Intel sysfs | Vendor-specific |
-| GPU Load | AMD sysfs / NVIDIA nvidia-smi / Intel busyiffies delta | Vendor-specific |
+| VRAM | AMD sysfs / NVIDIA NVML (`nvml-wrapper`) / Intel sysfs | Vendor-specific |
+| GPU Load | AMD sysfs / NVIDIA NVML + nvidia-smi fallback / Intel busyiffies delta | Vendor-specific |
 
 Polling interval: 1 second. GPU metrics: AMD → NVIDIA → Intel (first found vendor wins).
 

@@ -12,7 +12,7 @@ The `andler` binary — a thin gRPC client to `andlerd` via `andler-rpc`. No bus
 | `andler create --kind linux --name <name> --iso-path <path> --disk-path <path> --ovmf-vars-template <path>` | Create LinuxVm with CLI flags |
 | `andler create --kind android --name <name> --android-version <ver> --base-image-path <path> --ovmf-vars-template <path>` | Create AndroidVm with CLI flags |
 | `andler start <instance-id>` | Start an instance |
-| `andler stop <instance-id> [--graceful]` | Stop an instance (without `--graceful`, kills immediately) |
+| `andler stop <instance-id> [--graceful]` | Stop an instance (default: graceful ACPI shutdown; `--graceful`: force without waiting) |
 | `andler pause <instance-id>` | Pause a running instance |
 | `andler resume <instance-id>` | Resume a paused instance |
 | `andler status <instance-id>` | Print current status |
@@ -21,7 +21,7 @@ The `andler` binary — a thin gRPC client to `andlerd` via `andler-rpc`. No bus
 
 | Command | Description |
 |---------|-------------|
-| `andler list [--full-id]` | List all registered instances (id / state / name). `--full-id`/`-q` shows full UUID instead of 8-char prefix. |
+| `andler list [--full-id] [--state <state>] [--name <regex>] [--sort <key>] [--json]` | List instances. `--full-id`/`-q`: full UUID. `--state`: filter by state. `--name`: regex filter. `--sort`: `name`/`state`. `--json`: machine-readable. |
 | `andler config <instance-id>` | Print full instance configuration (all 9 sections) |
 
 ### Lifecycle Management
@@ -36,8 +36,8 @@ The `andler` binary — a thin gRPC client to `andlerd` via `andler-rpc`. No bus
 
 | Command | Description |
 |---------|-------------|
-| `andler logs <instance-id>` | Live-tail QEMU stdout/stderr (no history, starts from connection) |
-| `andler metrics <instance-id>` | Stream resource metrics (CPU%, RAM, disk I/O, net I/O, GPU) every second |
+| `andler logs <instance-id> [--source stdout|stderr] [--grep <regex>] [--tail <n>]` | Live-tail QEMU stdout/stderr. `--source`: filter stream. `--grep`: regex filter. `--tail`: backlog lines. |
+| `andler metrics <instance-id> [--once] [--json]` | Stream resource metrics. `--once`: single sample and exit. `--json`: machine-readable output. |
 
 ### Snapshots
 
@@ -48,13 +48,21 @@ The `andler` binary — a thin gRPC client to `andlerd` via `andler-rpc`. No bus
 | `andler snapshot <id> delete --tag <name> [--timeout <secs>]` | Delete snapshot (requires Running/Paused). `--timeout` overrides instance default. |
 | `andler snapshot <id> list` | List all snapshots |
 
+### Configuration & Editing
+
+| Command | Description |
+|---------|-------------|
+| `andler edit <instance-id>` | Edit instance config in `$VISUAL`/`$EDITOR` as TOML (falls back to `vi`) |
+| `andler wizard` | Launch interactive wizard (default when no subcommand given) |
+| `andler completions <shell>` | Generate shell completion script (bash/zsh/fish) |
+
 ### Disk Management
 
 | Command | Description |
 |---------|-------------|
-| `andler disk create --path <path> --size <size>` | Create a new empty qcow2 disk |
+| `andler disk create <path> --size <size>` | Create a new empty qcow2 disk |
 | `andler disk info <path>` | Show disk info (virtual size, actual usage, format, backing file) |
-| `andler disk resize <path> --size <size>` | Resize an existing disk |
+| `andler disk resize <path> --size <size> [--shrink]` | Resize an existing disk. `--shrink` required to confirm shrinking. |
 | `andler disk compact <path>` | Compact a disk (reclaim unused space) |
 
 Size format: `64GB`, `128000MB`, `1T`, `512000` (bytes). Case-insensitive.
@@ -215,15 +223,13 @@ backend = "None"
 
 ## Metrics Output Format
 
-`andler metrics` streams a table:
+`andler metrics` streams key=value pairs:
 
 ```
-  CPU%   RAM        Disk R     Disk W     Net RX     Net TX     VRAM       GPU%
- 12.34   1.23 GiB   45.6 MB/s  12.3 MB/s  1.2 MB/s   0.5 MB/s   512 MiB    67.8%
- 11.20   1.24 GiB   44.1 MB/s  11.9 MB/s  1.1 MB/s   0.4 MB/s   513 MiB    68.2%
+cpu=12.34%    rss=1.23 GiB   disk_r=45.6 MB/s  disk_w=12.3 MB/s  net_rx=1.2 MB/s   net_tx=0.5 MB/s   vram=512 MiB       gpu=68%
 ```
 
-GPU columns (VRAM, GPU%) appear when AMD, NVIDIA, or Intel GPU data is available.
+GPU fields (vram, gpu) appear when AMD, NVIDIA, or Intel GPU data is available.
 
 ## Clone Modes
 
@@ -244,16 +250,17 @@ GPU columns (VRAM, GPU%) appear when AMD, NVIDIA, or Intel GPU data is available
 
 | Module | File | Purpose |
 |--------|------|---------|
-| `main.rs` | 509 lines | Clap CLI definition, gRPC client setup, subcommand dispatch |
-| `create.rs` | 260 lines | `Create` command — builds gRPC request from CLI flags |
+| `main.rs` | 769 lines | Clap CLI definition, gRPC client setup, subcommand dispatch |
+| `create.rs` | 433 lines | `Create` command — builds gRPC request from CLI flags |
+| `edit.rs` | 96 lines | `Edit` command — open config in `$EDITOR`, send changes to daemon |
 | `disk.rs` | 77 lines | `Disk` command — create, info, resize, compact |
-| `status.rs` | 353 lines | `Status`, `List`, `Config`, `Logs`, `Metrics` commands |
-| `snapshot.rs` | 77 lines | `Snapshot` command — create, restore, delete, list |
-| `lifecycle.rs` | 66 lines | `Start`, `Stop`, `Pause`, `Resume`, `Remove` commands |
+| `status.rs` | 681 lines | `Status`, `List`, `Config`, `Logs`, `Metrics` commands |
+| `snapshot.rs` | 109 lines | `Snapshot` command — create, restore, delete, list (with spinner) |
+| `lifecycle.rs` | 124 lines | `Start`, `Stop`, `Pause`, `Resume`, `Remove` commands |
 | `clone.rs` | 41 lines | `Clone`, `Export` commands |
-| `instance_file.rs` | 644 lines | TOML instance file parser |
-| `helpers.rs` | 283 lines | `parse_size`, `format_size`, `format_bytes`, `ensure_qcow2_extension` |
-| `wizard/mod.rs` | 659 lines | Interactive wizard entry point, orchestration, `build_create_request()` |
-| `wizard/basic.rs` | 256 lines | Basic mode: kind, name, ISO, disk questions |
-| `wizard/advanced.rs` | 600 lines | Advanced mode: 16 hardware questions with auto-detection defaults |
-| `wizard/summary.rs` | 249 lines | Summary display, Create/Modify/Cancel actions |
+| `instance_file.rs` | 805 lines | TOML instance file parser |
+| `helpers.rs` | 366 lines | `parse_size`, `format_size`, `format_bytes`, `ensure_qcow2_extension` |
+| `wizard/mod.rs` | 776 lines | Interactive wizard entry point, orchestration, `build_create_request()` |
+| `wizard/basic.rs` | 303 lines | Basic mode: kind, name, ISO, disk questions |
+| `wizard/advanced.rs` | 604 lines | Advanced mode: 16 hardware questions with auto-detection defaults |
+| `wizard/summary.rs` | 282 lines | Summary display, Create/Modify/Cancel actions |

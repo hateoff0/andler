@@ -16,6 +16,10 @@ Single source of truth for all filesystem paths. Reads `ANDLER_HOME` env var, fa
 | `ovmf_cache_dir()` | `<home>/ovmf/` |
 | `venus_cache_dir()` | `<home>/venus-cache` |
 | `db_path()` | `<home>/andlerd.db` |
+| `runtime_dir()` | `$XDG_RUNTIME_DIR` or `/run/user/<uid>` or `std::env::temp_dir()` |
+| `current_uid()` | Raw `getuid(2)` FFI call |
+| `ensure_private_dir(dir)` | Create dir with 0700 permissions (async) |
+| `ensure_private_dir_sync(dir)` | Create dir with 0700 permissions (sync) |
 
 ### `backend` — Hypervisor Backend Abstraction
 
@@ -30,7 +34,7 @@ Defines the `HypervisorBackend` trait — the contract that all hypervisor imple
 | `spawn` | `async fn(&self, cfg: &InstanceConfig) -> Result<BackendHandle, BackendError>` | Start a new VM instance |
 | `pause` | `async fn(&self, handle: &BackendHandle) -> Result<(), BackendError>` | Pause a running instance |
 | `resume` | `async fn(&self, handle: &BackendHandle) -> Result<(), BackendError>` | Resume a paused instance |
-| `stop` | `async fn(&self, handle: &BackendHandle, graceful: bool) -> Result<(), BackendError>` | Stop an instance (graceful = SIGTERM, else kill) |
+| `stop` | `async fn(&self, handle: &BackendHandle, graceful: bool) -> Result<(), BackendError>` | Stop an instance (graceful = ACPI shutdown via QMP; false = forceful process termination) |
 | `status` | `async fn(&self, handle: &BackendHandle) -> Result<BackendStatus, BackendError>` | Query current status |
 | `snapshot` | `async fn(&self, handle: &BackendHandle, tag: &str, timeout: Option<Duration>) -> Result<(), BackendError>` | Create a snapshot (default: `NotImplemented`) |
 | `snapshot_restore` | `async fn(&self, handle: &BackendHandle, tag: &str, timeout: Option<Duration>) -> Result<(), BackendError>` | Restore from snapshot (default: `NotImplemented`) |
@@ -51,13 +55,13 @@ Any method not implemented by a specific backend must return `BackendError::NotI
 |-------|------|--------|
 | `cpu_percent` | `Option<f32>` | `/proc/<pid>/stat` delta-based |
 | `memory_used_bytes` | `Option<u64>` | `/proc/<pid>/status` VmRSS |
-| `disk_read_bytes_per_sec` | `Option<u64>` | `/sys/block/<dev>/stat` |
-| `disk_write_bytes_per_sec` | `Option<u64>` | `/sys/block/<dev>/stat` |
+| `disk_read_bytes_per_sec` | `Option<u64>` | `/proc/<pid>/io` |
+| `disk_write_bytes_per_sec` | `Option<u64>` | `/proc/<pid>/io` |
 | `net_rx_bytes_per_sec` | `Option<u64>` | `/proc/<net/dev>` delta |
 | `net_tx_bytes_per_sec` | `Option<u64>` | `/proc/<net/dev>` delta |
-| `vram_used_bytes` | `Option<u64>` | AMD sysfs / NVIDIA nvidia-smi / Intel sysfs |
-| `vram_total_bytes` | `Option<u64>` | AMD sysfs / NVIDIA nvidia-smi / Intel sysfs |
-| `gpu_load_percent` | `Option<f32>` | AMD sysfs / NVIDIA nvidia-smi / Intel busyiffies delta |
+| `vram_used_bytes` | `Option<u64>` | AMD sysfs / NVIDIA NVML + nvidia-smi / Intel sysfs |
+| `vram_total_bytes` | `Option<u64>` | AMD sysfs / NVIDIA NVML + nvidia-smi / Intel sysfs |
+| `gpu_load_percent` | `Option<f32>` | AMD sysfs / NVIDIA NVML + nvidia-smi / Intel busyiffies delta |
 
 **`SnapshotInfo`**: `tag` (user-facing identifier), `id` (backend identifier), `created_at` (format is backend-specific).
 
@@ -202,11 +206,11 @@ Each sub-config has a `reference_default()` method that produces sensible defaul
 
 ## Tests
 
-~37 unit tests across 15 test modules. Fully testable without QEMU or `/dev/kvm` — this is the whole point of extracting the domain into a separate crate. If a test in `andler-core` requires a real QEMU process, it's in the wrong crate.
+~41 unit tests across 15 test modules. Fully testable without QEMU or `/dev/kvm` — this is the whole point of extracting the domain into a separate crate. If a test in `andler-core` requires a real QEMU process, it's in the wrong crate.
 
 | Module | Tests |
 |--------|-------|
-| `paths` | `andler_home_respects_env_override`, `andler_home_ignores_empty_env_override`, `derived_paths_are_nested_under_andler_home` |
+| `paths` | `andler_home_respects_env_override`, `andler_home_ignores_empty_env_override`, `derived_paths_are_nested_under_andler_home`, `runtime_dir_respects_xdg_runtime_dir_env`, `runtime_dir_ignores_empty_xdg_runtime_dir_env`, `ensure_private_dir_sync_creates_dir_with_0700`, `ensure_private_dir_async_creates_dir_with_0700` |
 | `clone` | `clone_mode_variants_are_distinct` |
 | `fsm` | `happy_path_start_pause_resume_stop`, `cannot_resume_from_running`, `cannot_pause_from_created`, `fail_is_reachable_from_every_active_state`, `terminal_states_have_no_outgoing_transitions` |
 | `android_profile` | `cache_key_differs_on_arm_translator`, `cache_key_does_not_depend_on_root_mode`, `cache_key_differs_on_gapps`, `resolve_produces_overlay_disk_pointing_at_base_image` |

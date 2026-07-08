@@ -53,8 +53,8 @@ docker compose -f docker/docker-compose.yml run --rm e2e
 The daemon listens on `127.0.0.1:50051` by default. Override with:
 
 ```bash
-# Via environment variable
-ANDLERD_ADDR=http://0.0.0.0:50051 ./target/release/andlerd
+# Via environment variable (daemon listen address)
+ANDLERD_LISTEN_ADDR=0.0.0.0:50051 ./target/release/andlerd
 
 # Via command-line flag (for the CLI client)
 ./target/release/andler --daemon-addr http://192.168.1.100:50051 status my-instance
@@ -62,10 +62,10 @@ ANDLERD_ADDR=http://0.0.0.0:50051 ./target/release/andlerd
 
 ### Store Path
 
-Default: `~/.local/share/andler/state.db`. Override with:
+Default: `~/.local/share/andler/andlerd.db`. Override with:
 
 ```bash
-ANDLERD_STORE_PATH=/path/to/state.db ./target/release/andlerd
+ANDLERD_STORE_PATH=/path/to/andlerd.db ./target/release/andlerd
 ```
 
 ### Default Paths
@@ -74,7 +74,7 @@ All instance data lives under `~/.local/share/andler/`:
 
 ```
 ~/.local/share/andler/
-├── state.db                    # SQLite state store
+├── andlerd.db                    # SQLite state store
 ├── instances/
 │   └── <uuid>/
 │       ├── instance.toml       # Instance configuration
@@ -123,7 +123,7 @@ docker compose -f docker/docker-compose.yml run --rm e2e
 
 ### gRPC Round-Trip Tests
 
-`daemon/src/grpc_roundtrip_test.rs` contains 25 tests that verify the full gRPC pipeline:
+`daemon/src/grpc_roundtrip_test.rs` contains 24 tests that verify the full gRPC pipeline:
 
 - Real TCP connections (ephemeral ports)
 - Real protobuf serialization/deserialization
@@ -158,6 +158,7 @@ andler/
 │           ├── clone.rs           # CloneMode
 │           ├── android_profile.rs # AndroidProfile, AndroidVersion
 │           ├── error.rs           # BackendError, FsmError
+│           ├── paths.rs           # Unified path resolution (runtime_dir, current_uid, ensure_private_dir)
 │           └── config/            # 9 config modules
 │               ├── mod.rs
 │               ├── instance.rs    # InstanceConfig, InstanceId
@@ -195,6 +196,12 @@ andler/
 │   │
 │   ├── andler-net/               # Stub — future networking
 │   │
+│   ├── andler-firmware/
+│   │   └── src/
+│   │       ├── lib.rs
+│   │       ├── detect/           # Hardware auto-detection (GPU, OVMF, ARM, audio, passt)
+│   │       └── metrics/          # GPU metrics (NVIDIA/AMD/Intel)
+│   │
 │   ├── andler-store/
 │   │   └── src/
 │   │       ├── lib.rs
@@ -213,13 +220,13 @@ andler/
 │       ├── main.rs               # Entry point, tonic server setup
 │       ├── daemon/
 │       │   ├── mod.rs            # Daemon struct, constructors, persist helpers (~250 lines)
-│       │   ├── error.rs          # DaemonError enum (14 variants)
+│       │   ├── error.rs          # DaemonError enum (23 variants)
 │       │   ├── types.rs          # InstanceRecord, SnapshotRecord, InstanceDirGuard
-│       │   ├── instance_ops.rs   # create/start/stop/pause/resume/remove
+│       │   ├── instance_ops.rs   # create/start/stop/pause/resume/remove + create_linux_instance + resolve_instance_id
 │       │   ├── clone_ops.rs      # clone_instance, export, find_live_clones
 │       │   ├── snapshot_ops.rs   # create/restore/delete/list snapshots
-│       │   ├── query_ops.rs      # status, list, get_config, stream
-│       │   └── tests/            # 80 unit tests across 8 modules
+│       │   ├── query_ops.rs      # status, list, get_config, stream, update_instance_config
+│       │   └── tests/            # 9 test modules, 73+ tests
 │       ├── service.rs            # DaemonService (gRPC wrapper)
 │       └── grpc_roundtrip_test.rs # Integration tests
 │
@@ -233,7 +240,13 @@ andler/
 │       ├── disk.rs               # Disk commands
 │       ├── lifecycle.rs          # Start, Stop, Pause, Resume, Remove
 │       ├── clone.rs              # Clone, Export
-│       └── helpers.rs            # parse_size, format_size, format_bytes
+│       ├── edit.rs               # Edit instance config
+│       ├── wizard/               # Interactive wizard
+│       │   ├── mod.rs            # Wizard entry point, handle_wizard()
+│       │   ├── basic.rs          # BasicResult, ask_kind, ask_name, ask_iso, ask_disk
+│       │   ├── advanced.rs       # AdvancedConfig, 16 ask_* functions
+│       │   └── summary.rs        # SummaryAction, print_summary
+│       └── helpers.rs            # parse_size, format_size, format_bytes, ensure_qcow2_extension
 │
 ├── docker/
 │   ├── Dockerfile.dev            # Build environment
@@ -248,7 +261,9 @@ andler/
 │   └── archive/                  # Historical/planned docs
 │
 └── scripts/
-    └── start.sh                  # Reference QEMU launch script
+    ├── start.sh                  # Reference QEMU launch script
+    ├── andlerd.service           # systemd user unit
+    └── install.sh                # systemd installation script
 ```
 
 ## Common Development Tasks

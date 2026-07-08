@@ -21,9 +21,10 @@ gRPC protocol definition (`proto/andler.proto`) and generated server/client code
 | `CloneInstance` | `CloneInstanceRequest` | `CreateInstanceResponse` | Unary | Supports LinuxVm + AndroidVm |
 | `ExportInstanceDisk` | `ExportInstanceDiskRequest` | `ExportInstanceDiskResponse` | Unary | Exports disk as standalone file |
 | `CreateSnapshot` | `CreateSnapshotRequest` | `CreateSnapshotResponse` | Unary | Requires Running/Paused instance |
-| `RestoreSnapshot` | `RestoreSnapshotRequest` | `Empty` | Unary | Requires stopped instance |
-| `DeleteSnapshot` | `DeleteSnapshotRequest` | `Empty` | Unary | Requires stopped instance |
+| `RestoreSnapshot` | `RestoreSnapshotRequest` | `Empty` | Unary | Requires Running/Paused instance |
+| `DeleteSnapshot` | `DeleteSnapshotRequest` | `Empty` | Unary | Requires Running/Paused instance |
 | `ListSnapshots` | `InstanceIdRequest` | `ListSnapshotsResponse` | Unary | |
+| `UpdateInstanceConfig` | `UpdateInstanceConfigRequest` | `Empty` | Unary | Replace instance config (andler edit) |
 
 ## Key Proto Messages
 
@@ -54,11 +55,15 @@ gRPC protocol definition (`proto/andler.proto`) and generated server/client code
 
 ### Snapshots
 
-- **`CreateSnapshotRequest`**: `instance_id`, `tag`, `description`.
+- **`CreateSnapshotRequest`**: `instance_id`, `tag`, `description`, `timeout_secs` (optional).
 - **`CreateSnapshotResponse`**: `snapshot_id`, `tag`, `created_at`.
-- **`RestoreSnapshotRequest`**: `instance_id`, `tag`.
-- **`DeleteSnapshotRequest`**: `instance_id`, `tag`.
+- **`RestoreSnapshotRequest`**: `instance_id`, `tag`, `timeout_secs` (optional).
+- **`DeleteSnapshotRequest`**: `instance_id`, `tag`, `timeout_secs` (optional).
 - **`SnapshotEntry`**: `snapshot_id`, `tag`, `description`, `created_at`.
+
+### Config Editing
+
+- **`UpdateInstanceConfigRequest`**: Mirrors `GetInstanceConfigResponse` field-for-field (`instance_ref`, `name`, `kind`, `backend`, `cpu`, `memory`, `disk`, `display`, `gpu`, `network`, `firmware`, `audio`, `input`). Protects `id`, `kind`, and `disk.path` from modification.
 
 ### Enums
 
@@ -90,7 +95,7 @@ Bidirectional conversions between proto and domain types:
 
 ## Tests
 
-37 tests in `convert::tests`:
+44 tests in `convert::tests`:
 
 - AndroidProfile round-trip through proto
 - Unspecified enum rejection (AndroidVersion, RootMode, CpuPriority, DiskFormat, DisplayEngine, AudioBackend, CloneMode)

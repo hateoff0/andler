@@ -146,13 +146,13 @@ Collects resource metrics from `/proc` for the QEMU process. No QMP needed.
 
 ### GPU metrics — moved to `andler-firmware`
 
-GPU metrics (AMD/NVIDIA/Intel sysfs + `nvidia-smi`) used to live in this
+GPU metrics (AMD/NVIDIA/Intel sysfs + NVML) used to live in this
 crate as `gpu_metrics.rs`. They now live in
 `services/andler-firmware/src/metrics/` (`gpu_amd.rs`/`gpu_nvidia.rs`/
 `gpu_intel.rs`), alongside GPU vendor *detection* (`detect/gpu.rs`) —
 both read the same sysfs paths/vendor tools, so detection and monitoring
 belong in one crate. See that crate's README/doc comments for the vendor
-details (sysfs paths, `nvidia-smi` output format, the Intel
+details (sysfs paths, NVML/nvidia-smi output format, the Intel
 `rc6_residency_ms` load-delta calculation, etc.) — unchanged, just moved.
 
 **Integration**: `spawn_metrics_poller` in `metrics.rs` calls
@@ -165,10 +165,10 @@ the base metrics sample every tick via
 
 ### Without `/dev/kvm` or QEMU binary
 
-- **`cmdline`** (26 tests): All argument blocks tested independently against `scripts/start.sh` reference. Includes edge cases: `Passthrough` panic, `None` display engine, clipboard disabled, size suffixes.
+- **`cmdline`** (27 tests): All argument blocks tested independently against `scripts/start.sh` reference. Includes edge cases: `Passthrough` panic, `None` display engine, clipboard disabled, size suffixes.
 - **`qmp`**: JSON parsing of QMP responses (`QmpReply`, `VmStatus`, `QueryStatusReturn`, `SnapshotInfo`, `QueryJobInfo`), plus `UnixStream::pair`-based fake-QMP-peer tests covering the real `snapshot-save`/`-load`/`-delete` wire schema (`devices`+`vmstate`, not the previously-buggy singular `device`), `wait_job_completion`'s `"concluded"`+`error` semantics (not the nonexistent `"completed"`/`"failed"`/`"aborted"` strings an earlier version checked), `job-dismiss`, and async-event skipping during polling.
-- **`backend`** (10 tests): `name_returns_qemu`, `Passthrough` validation, unknown handle handling, `VmStatus → InstanceState` mapping, empty `metrics_stream`/`log_stream`.
-- **`process`** (4 tests): `SpawnFailed` via missing binary, `drain_to_tracing` line publishing, subscriber tolerance, multiple subscribers fan-out.
+- **`backend`** (16 tests): `name_returns_qemu`, `Passthrough` validation, unknown handle handling, `VmStatus → InstanceState` mapping, empty `metrics_stream`/`log_stream`.
+- **`process`** (6 tests): `SpawnFailed` via missing binary, `drain_to_tracing` line publishing, subscriber tolerance, multiple subscribers fan-out.
 - **`metrics`** (7 tests): CPU stat parsing, CPU% computation, I/O rates, RSS parsing, net_dev parsing.
 - GPU metrics tests (AMD/NVIDIA/Intel detection, NVIDIA output parsing, the Intel `rc6_residency_ms` ABI regression test, `intel_gpu_load_from_delta`/`compute_intel_gpu_load`, merge behavior) now live in `services/andler-firmware` — see that crate's tests, not this one.
 

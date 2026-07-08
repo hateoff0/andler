@@ -16,14 +16,15 @@ ANDLER (**ANDLER** = *Android Linux Emulator & Runtime*) is a Rust monorepo for 
 ```
 andler-core          (no workspace dependencies — bottom layer)
     ↑
-    ├── andler-qemu  (depends on: core)
-    ├── andler-vmm   (depends on: core)
-    ├── andler-disk  (depends on: core types only via error, mostly standalone)
-    ├── andler-net   (depends on: core)
-    ├── andler-store (depends on: core)
-    └── andler-rpc   (depends on: core)
+    ├── andler-qemu     (depends on: core)
+    ├── andler-vmm      (depends on: core)
+    ├── andler-disk     (depends on: core types only via error, mostly standalone)
+    ├── andler-net      (depends on: core)
+    ├── andler-store    (depends on: core)
+    ├── andler-firmware (depends on: no workspace crates — standalone, uses sysfs/nvml)
+    └── andler-rpc      (depends on: core)
           ↑
-    andler-daemon    (depends on: core, qemu, disk, store, rpc)
+    andler-daemon    (depends on: core, qemu, firmware, disk, store, rpc)
           ↑
     andler-cli       (depends on: rpc only — thin client)
 ```
@@ -42,8 +43,9 @@ The foundation crate. Defines all public types that other crates depend on.
 - `CloneMode`: `Linked` | `FullStandalone` | `SharedBase`
 - `AndroidProfile`: Android version + root mode + app store configuration
 - `BackendError` / `FsmError`: Domain error types
+- `paths`: Unified path resolution (`runtime_dir()`, `current_uid()`, `ensure_private_dir()`)
 
-**22 unit tests**, fully testable without QEMU or `/dev/kvm`.
+**43 unit tests**, fully testable without QEMU or `/dev/kvm`.
 
 **Must not depend on any other workspace crate.**
 
@@ -74,11 +76,22 @@ Wrapper around `qemu-img` for disk creation/cloning/resizing, plus offline Magis
 - `clone.rs`: 3 clone modes (linked, full-standalone, shared-base)
 - `magisk.rs`: Offline Magisk provisioning via `qemu-nbd` with RAII guards
 
-**19 unit tests** + 8 integration tests (`#[ignore]`).
+**34 unit tests** + 8 integration tests (`#[ignore]`).
 
 ### `services/andler-net` — Networking (Stub)
 
 Contains only `NetworkConfig`/`NetworkMode` types. No real network setup logic yet — will handle bridge creation, nftables rules when implemented.
+
+### `services/andler-firmware` — Firmware & Hardware Detection
+
+Standalone crate for firmware discovery, hardware auto-detection, and GPU metrics. No workspace dependencies — communicates with hardware via sysfs and vendor CLIs.
+
+**Key components:**
+- `detect/`: Hardware auto-detection (GPU, OVMF, ARM translator, audio, network passt)
+- `metrics/`: GPU metrics collection (NVIDIA via NVML + nvidia-smi fallback, AMD via sysfs, Intel via i915 delta)
+- `HardwareDefaults` struct: `detect_all()` returns detected hardware for wizard defaults
+
+**48 tests** across `detect/` and `metrics/`.
 
 ### `services/andler-store` — SQLite Persistence
 
@@ -94,8 +107,8 @@ Two-table SQLite store with JSON columns.
 
 Protobuf definitions and generated code via `tonic`/`prost`.
 
-**19 RPCs** covering instance lifecycle, monitoring, snapshots, clone/export.
-**27 conversion tests** for bidirectional proto↔domain type mapping.
+**20 RPCs** covering instance lifecycle, monitoring, snapshots, clone/export.
+**44 conversion tests** for bidirectional proto↔domain type mapping.
 
 ### `daemon/` — Background Service
 
@@ -105,10 +118,13 @@ Orchestrates all operations. Holds backend registry, instance state, optional pe
 - `Daemon::new()` / `with_store()` / `restore()` — three construction paths
 - Instance lifecycle via FSM transitions
 - `InstanceDirGuard` RAII for cleanup on partial failure
+- `create_linux_instance()` / `create_android_instance()` — high-level resource creation + registration
+- `resolve_instance_id()` — Docker-style partial ID resolution (8-char hex prefix)
+- `update_instance_config()` — Edit config via gRPC, protects id/kind/disk.path
 - `DaemonService` — thin gRPC wrapper, one method per Daemon method
-- Error mapping: `DaemonError` → gRPC status codes
+- Error mapping: `DaemonError` (23 variants) → gRPC status codes
 
-**65+ unit tests** + **25 gRPC round-trip tests** (real TCP).
+**73+ unit tests** + **24 gRPC round-trip tests** (real TCP).
 
 ### `cli/` — Command-Line Interface
 
@@ -116,11 +132,14 @@ Thin gRPC client. Each subcommand = one gRPC request + print response.
 
 **Key features:**
 - Unified `create` command (TOML for LinuxVm, CLI flags for AndroidVm)
-- Real-time metrics streaming with GPU columns (AMD)
-- Snapshot CRUD
-- Clone/export operations
+- Interactive wizard with smart defaults and hardware auto-detection
+- Real-time metrics streaming with GPU columns (AMD/NVIDIA/Intel)
+- Snapshot CRUD with per-operation timeout
+- Disk management (create, info, resize with shrink protection, compact)
+- Shell completions (bash, zsh, fish)
+- Colored status output with `IsTerminal` gating
 
-**7 TOML parsing tests**.
+**91 tests** (TOML parsing, helpers, create, wizard, status).
 
 ## Data Flow
 
@@ -137,7 +156,7 @@ QEMU process → VM
   ↓ (/proc + sysfs)
 Metrics poller → broadcast → StreamResourceMetrics → CLI display
   ↓ (SQLite)
-andler-store (state.db)
+andler-store (andlerd.db)
 ```
 
 ## Instance Lifecycle FSM
@@ -200,15 +219,15 @@ All host-side metrics from `/proc` — no QMP communication needed for metrics:
 |--------|--------|-------------|
 | CPU% | `/proc/<pid>/stat` (utime+stime), `/proc/uptime` | `delta(utime+stime) / delta(uptime) / num_cpus * 100` |
 | RAM | `/proc/<pid>/status` (VmRSS) | Direct read |
-| Disk I/O | `/sys/block/<dev>/stat` | Delta-based bytes/sec |
+| Disk I/O | `/proc/<pid>/io` | Delta-based bytes/sec |
 | Net I/O | `/proc/<net/dev>` | Delta-based bytes/sec |
-| VRAM Used | AMD: `mem_info_vram_used`, NVIDIA: `nvidia-smi`, Intel: not available | Vendor-specific |
-| VRAM Total | AMD: `mem_info_vram_total`, NVIDIA: `nvidia-smi`, Intel: not available | Vendor-specific |
-| GPU Load | AMD: `gpu_busy_percent`, NVIDIA: `nvidia-smi`, Intel: `power/rc6_residency_ms` idle-time delta | Vendor-specific |
+| VRAM Used | AMD: `mem_info_vram_used`, NVIDIA: NVML (`nvml-wrapper`) / `nvidia-smi` fallback, Intel: not available | Vendor-specific |
+| VRAM Total | AMD: `mem_info_vram_total`, NVIDIA: NVML / `nvidia-smi` fallback, Intel: not available | Vendor-specific |
+| GPU Load | AMD: `gpu_busy_percent`, NVIDIA: NVML / `nvidia-smi` fallback, Intel: `power/rc6_residency_ms` idle-time delta | Vendor-specific |
 
 Polling interval: 1 second. Broadcast via `tokio::sync::broadcast`.
 
-GPU vendor detection priority: AMD → NVIDIA → Intel (first found wins). AMD uses direct sysfs reads. NVIDIA uses `nvidia-smi` CLI. Intel uses `i915` sysfs `power/rc6_residency_ms` (documented idle-time ABI) for GPU load, derived from a real elapsed-time delta; Intel has no VRAM metric (stolen-memory accounting is a `debugfs`, not `sysfs`, interface).
+GPU vendor detection priority: AMD → NVIDIA → Intel (first found wins). AMD uses direct sysfs reads. NVIDIA uses NVML (`nvml-wrapper` crate, primary) with `nvidia-smi` CLI fallback. Intel uses `i915` sysfs `power/rc6_residency_ms` (documented idle-time ABI) for GPU load, derived from a real elapsed-time delta; Intel has no VRAM metric (stolen-memory accounting is a `debugfs`, not `sysfs`, interface).
 
 ## Magisk Provisioning
 

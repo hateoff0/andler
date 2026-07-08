@@ -86,13 +86,16 @@ Installs Magisk root access into an Android overlay disk offline using `qemu-nbd
 | `Io` | `path`, `source` | Filesystem error at path |
 | `MagiskDirInvalid` | `String` | Magisk directory invalid or missing required files |
 | `NbdSetupFailed` | `String` | NBD device error (module not loaded, no free device, mount/umount failure) |
+| `ShrinkRequiresConfirmation` | `path`, `current_size_bytes`, `requested_size_bytes` | Refusing to shrink without `--shrink` flag |
+| `CompactNotApplicable` | `path`, `format` | Compact only works on qcow2 disks |
 
 ## Tests
 
 ### Without `qemu-img` / `/dev/kvm`
 
-- **`qcow2`** (3 tests): JSON field parsing from `qemu-img info` output.
-- **`clone`** (1 test): `shared_base_clone_reports_missing_source_as_io_error` — `tokio::fs::copy` returns `ENOENT` before any external process.
+- **`qcow2`** (21 tests): JSON field parsing from `qemu-img info` output, create/resize/compact operations, `ShrinkRequiresConfirmation` error path.
+- **`clone`** (4 tests): `shared_base_clone_reports_missing_source_as_io_error`, `linked_clone_points_at_source`, `full_standalone_clone_has_no_backing`, `shared_base_clone_survives_source_deletion`.
+- **`overlay`** (3 tests): `create_overlay_points_at_base_image`, `create_overlay_fails_when_base_image_missing`, `factory_reset_recreates_overlay`.
 - **`magisk`** (6 tests): `validate_magisk_dir_*` (3 tests), `find_free_nbd_device_*` (1 test), `copy_dir_recursive_*` (1 test), `unique_mount_name_*` (1 test).
 
 ### With `qemu-img` (integration tests, `#[ignore]`)

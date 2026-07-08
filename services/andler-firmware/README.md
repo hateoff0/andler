@@ -95,7 +95,7 @@ Collects GPU utilization metrics from the host. Called by `andler-qemu/src/metri
 | Module | Source | Metrics |
 |--------|--------|---------|
 | `gpu_amd.rs` | sysfs (`/sys/class/drm/card*/device/`) | VRAM used/total, GPU busy percent |
-| `gpu_nvidia.rs` | `nvidia-smi --query-gpu=... --format=csv,noheader,nounits` | VRAM used/total, GPU utilization |
+| `gpu_nvidia.rs` | NVML (`nvml-wrapper` crate, primary) + `nvidia-smi` CLI fallback | VRAM used/total, GPU utilization |
 | `gpu_intel.rs` | sysfs (`/sys/class/drm/card*/device/`) | GPU load via rc6_residency_ms delta |
 
 **Vendor priority:** AMD → NVIDIA → Intel (first found vendor wins).
@@ -122,3 +122,19 @@ pub struct HardwareDefaults {
 ```
 
 Used by the interactive wizard to pre-fill defaults.
+
+## Tests
+
+48 tests across `detect/` and `metrics/`:
+
+| Module | Tests |
+|--------|-------|
+| `detect/gpu.rs` | 10 |
+| `detect/ovmf.rs` | 6 |
+| `detect/arm.rs` | 5 |
+| `detect/audio.rs` | 5 |
+| `detect/network.rs` | 1 |
+| `metrics/gpu_intel.rs` | 11 |
+| `metrics/mod.rs` | 5 |
+| `metrics/gpu_nvidia.rs` | 4 |
+| `metrics/gpu_amd.rs` | 1 |
