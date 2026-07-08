@@ -28,7 +28,7 @@ andler create \
   --iso-path /path/to/installer.iso \
   --disk-path /path/to/disk.qcow2 \
   --ovmf-vars-template /path/to/VARS.fd \
-  [--disk-size-gib 100]
+  [--disk-size-gib 100] [--quick] [--cdrom-bus auto] [--compact-on-shutdown]
 
 # AndroidVm via CLI
 andler create \
@@ -38,7 +38,7 @@ andler create \
   --base-image-path /path/to/base.qcow2 \
   --ovmf-vars-template /path/to/VARS.fd \
   [--root magisk --magisk-dir /path/to/magisk/] \
-  [--gapps] [--microg] [--libndk] \
+  [--gapps] [--microg] [--arm-translator libndk] \
   [--overlay-size-gib 20] \
   [--instances-root /path/to/instances/]
 ```
@@ -49,16 +49,19 @@ andler create \
 |------|----------|-------------|
 | `--file <path>` | Yes* | Path to TOML config file (*mutually exclusive with `--kind`) |
 | `--kind <type>` | Yes* | VM type: `linux` or `android` (*mutually exclusive with `--file`) |
+| `--quick` | No | Skip interactive wizard, create with all defaults. Requires `--kind`. Mutually exclusive with `--file`. |
 | `--name <name>` | Yes** | Instance name (**required in CLI mode) |
 | `--ovmf-vars-template <path>` | Yes** | Path to OVMF_VARS template (**required in CLI mode) |
 | `--iso-path <path>` | Yes*** | Path to installer ISO (***required for `--kind linux`) |
 | `--disk-path <path>` | Yes*** | Path to disk file (***required for `--kind linux`) |
-| `--disk-size-gib <size>` | No | Disk size in GiB (default: 40, Linux only) |
+| `--disk-size-gib <size>` | No | Disk size in GiB (default: 256, Linux only) |
+| `--cdrom-bus <bus>` | No | CD-ROM bus: `auto` (default), `virtio`, `ide` (Linux only) |
+| `--compact-on-shutdown` | No | Auto-compact disk after shutdown (Linux only) |
 | `--android-version <ver>` | Yes**** | Android version: `11` or `13` (****required for `--kind android`) |
 | `--base-image-path <path>` | Yes**** | Path to Android base image qcow2 (****required for `--kind android`) |
 | `--gapps` | No | Include Google Apps |
 | `--microg` | No | Include microG |
-| `--libndk` | No | Include ARM→x86 translation (libhoudini/libndk) |
+| `--arm-translator <mode>` | No | ARM→x86 translation: `none` (default), `libndk`, `libhoudini` |
 | `--root <mode>` | No | Root mode: `none` (default), `magisk` |
 | `--magisk-dir <path>` | No | Path to Magisk binaries (required when `--root magisk`) |
 | `--overlay-size-gib <size>` | No | Overlay disk size in GiB (default: 20, Android only) |
@@ -78,7 +81,7 @@ Transitions: Created → Starting → Running. Fails if instance is already runn
 andler stop <instance-id> [--graceful]
 ```
 
-Without `--graceful`: kills the QEMU process immediately (SIGKILL).
+Without `--graceful`: kills the QEMU process immediately (SIGKILL) — this is the default.
 With `--graceful`: sends SIGTERM and waits up to 30 seconds for graceful shutdown.
 
 ### `pause`
@@ -108,18 +111,18 @@ Prints current state: `Created`, `Starting`, `Running`, `Paused`, `Stopping`, `S
 ### `list`
 
 ```bash
-andler list
+andler list [--state <STATE>] [--name <NAME>] [--sort <FIELD>] [--json] [--full-id]
 ```
 
-Prints all registered instances:
+Lists all registered instances. Supports filtering by state and name (partial, case-insensitive).
 
-```
-INSTANCE_ID                          STATE     NAME
-550e8400-e29b-41d4-a716-446655440000 Running   my-android
-6ba7b810-9dad-11d1-80b4-00c04fd430c8 Stopped   my-linux-vm
-```
-
-State is the daemon's record, not live backend status. Use `status` for exact state of a specific instance.
+| Flag | Description |
+|------|-------------|
+| `--state <STATE>` | Filter by state: `Created`, `Starting`, `Running`, `Paused`, `Stopping`, `Stopped`, `Error` |
+| `--name <NAME>` | Filter by instance name (partial match, case-insensitive) |
+| `--sort <FIELD>` | Sort by: `name` (default), `state`, `created` |
+| `--json` | Output as JSON array |
+| `--full-id` / `-q` | Show full UUID instead of 8-char short ID |
 
 ### `config`
 
@@ -154,7 +157,7 @@ andler clone <source-id> --name <new-name> --mode <linked|full-standalone|shared
 | `full-standalone` | Flattens entire backing chain | Expensive (full copy) | Fully independent |
 | `shared-base` | Byte-copy of source disk file | Moderate | Independent from source, thin relative to base |
 
-Source must be stopped. `LinuxVm` supports `linked` and `full-standalone`. `SharedBase` is rejected for `LinuxVm` (`SharedBaseNotSupportedForLinuxVm`).
+Source must be in a terminal state (`Created`, `Stopped`, or `Error`). `LinuxVm` supports `linked` and `full-standalone`. `SharedBase` is rejected for `LinuxVm` (`SharedBaseNotSupportedForLinuxVm`).
 
 Cloning a clone is allowed.
 
@@ -164,33 +167,42 @@ Cloning a clone is allowed.
 andler export <source-id> <dest-path>
 ```
 
-Exports the instance disk as a standalone file at `dest_path`. Does not create a new instance. Source must be stopped.
+Exports the instance disk as a standalone file at `dest_path`. Does not create a new instance. Source must be in a terminal state (`Created`, `Stopped`, or `Error`).
 
 ### `logs`
 
 ```bash
-andler logs <instance-id>
+andler logs <instance-id> [--source <SOURCE>] [--grep <PATTERN>] [--tail <LINES>]
 ```
 
-Live-tails QEMU stdout/stderr with `[stdout]`/`[stderr]` prefix. No historical output — starts from connection time.
+Streams QEMU stdout/stderr with `[stdout]`/`[stderr]` prefix. Also reads historical log file content before streaming live output.
+
+| Flag | Description |
+|------|-------------|
+| `--source <SOURCE>` | Filter by source: `stdout`, `stderr`, or `all` (default) |
+| `--grep <PATTERN>` | Filter lines by regex pattern |
+| `--tail <LINES>` | Show only the last N lines of historical output before streaming live |
 
 If instance has no running backend (never started, or already stopped), prints a warning to stderr and exits with code 0.
 
 ### `metrics`
 
 ```bash
-andler metrics <instance-id>
+andler metrics <instance-id> [--once] [--json]
 ```
 
-Streams resource metrics every second:
+Streams resource metrics every second in key=value format:
 
 ```
-  CPU%   RAM        Disk R     Disk W     Net RX     Net TX     VRAM       GPU%
- 12.34   1.23 GiB   45.6 MB/s  12.3 MB/s  1.2 MB/s   0.5 MB/s   512 MiB    67.8%
- 11.20   1.24 GiB   44.1 MB/s  11.9 MB/s  1.1 MB/s   0.4 MB/s   513 MiB    68.2%
+cpu=12.34% rss=1.23 GiB disk_r=45.6 MB/s disk_w=12.3 MB/s net_rx=1.2 MB/s net_tx=0.5 MB/s vram=512 MiB gpu=67.8%
 ```
 
-GPU columns (VRAM, GPU%) appear when AMD, NVIDIA, or Intel GPU data is available.
+| Flag | Description |
+|------|-------------|
+| `--once` | Print a single snapshot and exit |
+| `--json` | Output as JSON object |
+
+GPU fields (vram, gpu) appear when AMD, NVIDIA, or Intel GPU data is available. CPU% is delta-based (delta(utime+stime) / delta(uptime) / num_cpus * 100).
 
 ### `snapshot`
 
@@ -198,10 +210,10 @@ GPU columns (VRAM, GPU%) appear when AMD, NVIDIA, or Intel GPU data is available
 # Create (requires Running/Paused instance)
 andler snapshot <instance-id> create --tag before-update --description "Pre-upgrade state" --timeout 120
 
-# Restore (requires Stopped instance)
+# Restore (requires Running/Paused instance)
 andler snapshot <instance-id> restore --tag before-update --timeout 10
 
-# Delete (requires Stopped instance)
+# Delete (requires Running/Paused instance)
 andler snapshot <instance-id> delete --tag before-update --timeout 5
 
 # List (any state)
@@ -216,15 +228,16 @@ Disk management commands — wraps `qemu-img` operations.
 
 ```bash
 # Create a new empty disk
-andler disk create --path /path/to/disk.qcow2 --size 64GB
-andler disk create --path /path/to/disk.qcow2 --size 128000MB
-andler disk create --path /path/to/disk.qcow2 --size 1T
+andler disk create /path/to/disk.qcow2 --size 64GB
+andler disk create /path/to/disk.qcow2 --size 128000MB
+andler disk create /path/to/disk.qcow2 --size 1T
 
 # Show disk information
 andler disk info /path/to/disk.qcow2
 
 # Resize an existing disk
 andler disk resize /path/to/disk.qcow2 --size 80GB
+andler disk resize /path/to/disk.qcow2 --size 50GB --shrink  # shrink requires explicit flag
 
 # Compact a disk (reclaim unused space)
 andler disk compact /path/to/disk.qcow2
@@ -234,10 +247,52 @@ andler disk compact /path/to/disk.qcow2
 
 | Command | Description |
 |---------|-------------|
-| `create --path <path> --size <size>` | Create a new empty qcow2 disk |
+| `create <path> --size <size>` | Create a new empty qcow2 disk (default 256 GiB) |
 | `info <path>` | Show disk info (virtual size, actual usage, format, backing file) |
-| `resize <path> --size <size>` | Resize an existing disk |
-| `compact <path>` | Compact a disk (reclaim unused space via `qemu-img convert`) |
+| `resize <path> --size <size>` | Resize an existing disk (requires `--shrink` to reduce size) |
+| `compact <path>` | Compact a disk (reclaim unused space via `qemu-img convert`, only works on qcow2) |
+
+### `edit`
+
+```bash
+andler edit <instance-id> [--name <NAME>] [--disk-size-gib <SIZE>]
+```
+
+Edits instance configuration. Changes are applied to both the SQLite store and the `instance.toml` file.
+
+| Flag | Description |
+|------|-------------|
+| `--name <NAME>` | New instance name |
+| `--disk-size-gib <SIZE>` | New disk size in GiB |
+
+Protected fields (`id`, `kind`, `disk.path`) cannot be changed.
+
+### `wizard`
+
+```bash
+andler wizard
+```
+
+Interactive guided instance creation wizard. Walks through all configuration options with smart defaults and hardware auto-detection. Outputs a TOML config file for review before creation.
+
+### `completions`
+
+```bash
+andler completions <SHELL>
+```
+
+Generate shell completions for the specified shell: `bash`, `zsh`, or `fish`.
+
+```bash
+# bash
+andler completions bash > ~/.local/share/bash-completion/completions/andler
+
+# zsh
+andler completions zsh > ~/.zsh/completions/_andler
+
+# fish
+andler completions fish > ~/.config/fish/completions/andler.fish
+```
 
 ## Instance TOML File
 
@@ -326,9 +381,10 @@ ovmf_vars_path = "/path/to/VARS.fd"
 
 [audio]
 backend = "Pipewire"
+device = "VirtioSound"
 
 [input]
-tablet_mode = true
+pointer_mode = "Tablet"
 hide_host_cursor = true
 clipboard_enabled = true
 ```
@@ -361,13 +417,13 @@ Any section can be omitted entirely. If present, it must be complete (no partial
 |---------|---------|
 | `cpu` | 4 cores, 1 socket, 1 thread, no affinity, Normal priority |
 | `memory` | 8 GiB, no ballooning, no zram, KSM on |
-| `disk` | 40 GiB qcow2, no backing, thin provisioning, discard |
+| `disk` | 256 GiB qcow2, no backing, thin provisioning, discard |
 | `display` | 1920x1080, 96 DPI, no limit, SDL, no fullscreen |
 | `gpu` | Venus, 4096 MiB hostmem, blob+gl on |
 | `network` | NAT, virtio-net-pci |
 | `firmware` | OVMF_CODE at `/usr/share/edk2-ovmf/x64/OVMF_CODE.4m.fd` |
-| `audio` | PipeWire |
-| `input` | tablet+hide_cursor+clipboard all true |
+| `audio` | PipeWire, VirtioSound |
+| `input` | Tablet pointer, hide_cursor+clipboard true |
 
 ## gRPC Protocol
 
@@ -384,9 +440,10 @@ Defined in `services/andler-rpc/proto/andler.proto`. Uses `tonic`/`prost` for Ru
 | `PauseInstance` | `InstanceIdRequest` | `Empty` | Unary |
 | `ResumeInstance` | `InstanceIdRequest` | `Empty` | Unary |
 | `GetInstanceStatus` | `InstanceIdRequest` | `InstanceStatusResponse` | Unary |
-| `ListInstances` | `Empty` | `ListInstancesResponse` | Unary |
+| `ListInstances` | `ListInstancesRequest` | `ListInstancesResponse` | Unary |
 | `RemoveInstance` | `RemoveInstanceRequest` | `Empty` | Unary |
 | `GetInstanceConfig` | `InstanceIdRequest` | `GetInstanceConfigResponse` | Unary |
+| `UpdateInstanceConfig` | `UpdateInstanceConfigRequest` | `Empty` | Unary |
 | `StreamInstanceLogs` | `InstanceIdRequest` | `stream LogLineResponse` | Server-streaming |
 | `StreamResourceMetrics` | `InstanceIdRequest` | `stream ResourceMetricsResponse` | Server-streaming |
 | `CloneInstance` | `CloneInstanceRequest` | `CreateInstanceResponse` | Unary |
@@ -394,17 +451,17 @@ Defined in `services/andler-rpc/proto/andler.proto`. Uses `tonic`/`prost` for Ru
 | `CreateSnapshot` | `CreateSnapshotRequest` | `CreateSnapshotResponse` | Unary |
 | `RestoreSnapshot` | `RestoreSnapshotRequest` | `Empty` | Unary |
 | `DeleteSnapshot` | `DeleteSnapshotRequest` | `Empty` | Unary |
-| `ListSnapshots` | `InstanceIdRequest` | `ListSnapshotsResponse` | Unary |
+| `ListSnapshots` | `ListSnapshotsRequest` | `ListSnapshotsResponse` | Unary |
 
 ### Error Codes
 
 | gRPC Status | Daemon Error | When |
 |-------------|--------------|------|
-| `NOT_FOUND` | `InstanceNotFound` | Unknown instance ID |
+| `NOT_FOUND` | `InstanceNotFound`, `SnapshotNotFound`, `InstanceRefNotFound` | Unknown instance/snapshot/ref ID |
 | `UNIMPLEMENTED` | `NoBackendRegistered` | Backend kind not available |
-| `FAILED_PRECONDITION` | `InvalidTransition`, `InstanceNotRemovable`, `InstanceNotClonable`, `SharedBaseNotSupportedForLinuxVm`, `InstanceHasLiveClones`, snapshot state errors | Wrong lifecycle state |
+| `FAILED_PRECONDITION` | `InvalidTransition`, `InstanceNotRemovable`, `InstanceNotClonable`, `SharedBaseNotSupportedForLinuxVm`, `InstanceHasLiveClones`, `SnapshotOperationRequiresRunningInstance`, `SnapshotLimitExceeded` | Wrong lifecycle state or resource limit |
 | `ALREADY_EXISTS` | `SnapshotAlreadyExists` | Duplicate snapshot tag |
-| `INVALID_ARGUMENT` | `ConvertError` | Malformed request |
+| `INVALID_ARGUMENT` | `ConvertError`, `EmptyInstanceRef`, `MalformedInstanceRef`, `AmbiguousInstanceId`, `ConfigIdMismatch`, `ConfigKindChanged`, `ConfigDiskPathChanged` | Malformed request or invalid arguments |
 | `INTERNAL` | Other errors | Backend/disk/store failures |
 
 ### Key Messages
@@ -448,3 +505,15 @@ message CreateInstanceRequest {
 - `RenderBackend`: `Venus` | `VirtioGpu` | `VirGl` | `Cpu` | `Passthrough(string gpu_pci_id)`
 - `NetworkMode`: `Nat` | `Bridge(string interface)` | `Isolated`
 - `InstanceKind`: `LinuxVm(string iso_path)` | `AndroidVm(AndroidProfile profile)`
+
+**`UpdateInstanceConfigRequest`:**
+
+```protobuf
+message UpdateInstanceConfigRequest {
+  string instance_id = 1;
+  optional string name = 2;
+  optional uint32 disk_size_gib = 3;
+}
+```
+
+Protected fields (`id`, `kind`, `disk.path`) cannot be changed.
