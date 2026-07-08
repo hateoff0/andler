@@ -42,6 +42,8 @@ pub enum ConvertError {
     MissingNetworkModeKind,
     #[error("missing or unspecified clone_mode")]
     MissingCloneMode,
+    #[error("missing or unspecified backend_kind")]
+    MissingBackendKind,
     #[error("missing field `{0}` in request")]
     MissingField(&'static str),
 }
@@ -774,8 +776,18 @@ impl TryFrom<proto::CreateInstanceRequest> for InstanceConfig {
     }
 }
 
-// --- GetInstanceConfig (domain -> proto только; сервер никогда не
-// парсит GetInstanceConfigResponse обратно — это чисто исходящий ответ) -
+// --- GetInstanceConfig ---
+//
+// Изначально это была domain -> proto конвертация без обратного
+// направления ("сервер никогда не парсит `GetInstanceConfigResponse`
+// обратно — это чисто исходящий ответ"). С появлением `andler edit`
+// (см. PLAN.md, "18. Instance config editing") это перестало быть верно
+// на стороне **клиента**: CLI получает `GetInstanceConfigResponse`,
+// конвертирует его обратно в `InstanceConfig`, чтобы сериализовать в
+// TOML для редактирования. См. `TryFrom<proto::GetInstanceConfigResponse>
+// for InstanceConfig` ниже — сервер сам по-прежнему не выполняет эту
+// конвертацию (обновления идут через отдельный `UpdateInstanceConfigRequest`,
+// см. `update_request_to_instance_config`), только клиент.
 
 impl From<BackendKind> for proto::BackendKind {
     fn from(value: BackendKind) -> Self {
@@ -836,6 +848,139 @@ impl From<InstanceConfig> for proto::GetInstanceConfigResponse {
             input: Some(value.input.into()),
         }
     }
+}
+
+/// Обратное направление, используемое только клиентом (`cli/src/edit.rs`)
+/// — см. doc-комментарий раздела выше за тем, почему это не то же самое,
+/// что `update_request_to_instance_config` (тот берёт отдельно
+/// разрешённый `id`, этот — уже содержащийся в самом ответе
+/// `instance_id`, потому что `GetInstanceConfigResponse` его туда кладёт
+/// именно как разрешённый сервером, не пользовательский ввод).
+impl TryFrom<proto::GetInstanceConfigResponse> for InstanceConfig {
+    type Error = ConvertError;
+
+    fn try_from(value: proto::GetInstanceConfigResponse) -> Result<Self, Self::Error> {
+        let backend = value.backend().try_into()?;
+        Ok(InstanceConfig {
+            id: parse_instance_id(&value.instance_id)?,
+            name: value.name,
+            kind: value.kind.as_ref().ok_or(ConvertError::MissingField("kind"))?.clone().try_into()?,
+            backend,
+            cpu: value.cpu.ok_or(ConvertError::MissingField("cpu"))?.try_into()?,
+            memory: value.memory.ok_or(ConvertError::MissingField("memory"))?.into(),
+            disk: value.disk.ok_or(ConvertError::MissingField("disk"))?.try_into()?,
+            display: value.display.ok_or(ConvertError::MissingField("display"))?.try_into()?,
+            gpu: value.gpu.ok_or(ConvertError::MissingField("gpu"))?.try_into()?,
+            network: value.network.ok_or(ConvertError::MissingField("network"))?.try_into()?,
+            firmware: value.firmware.ok_or(ConvertError::MissingField("firmware"))?.into(),
+            audio: value.audio.ok_or(ConvertError::MissingField("audio"))?.try_into()?,
+            input: value.input.ok_or(ConvertError::MissingField("input"))?.into(),
+        })
+    }
+}
+
+/// Обратное направление для `UpdateInstanceConfigRequest` — до его
+/// появления `BackendKind`/`InstanceKind` конвертировались только
+/// domain -> proto (см. doc-комментарий у `From<InstanceConfig> for
+/// proto::GetInstanceConfigResponse` выше): единственный источник этих
+/// значений на входе клиента был либо неявным (`CreateInstanceRequest`
+/// всегда создаёт `Qemu`/`LinuxVm`), либо через отдельные специализированные
+/// сообщения (`CreateAndroidInstanceRequest`), не через сам `InstanceKind`
+/// oneof. `andler edit` — первый путь, где клиент шлёт `InstanceKind`
+/// целиком обратно, поэтому здесь `TryFrom`, не `From`: `UNSPECIFIED`
+/// здесь — это ошибка клиента (испорченный/вручную собранный TOML), а не
+/// осмысленный дефолт, в отличие от `CdromBus`/`NatBackend`.
+impl TryFrom<proto::BackendKind> for BackendKind {
+    type Error = ConvertError;
+
+    fn try_from(value: proto::BackendKind) -> Result<Self, Self::Error> {
+        match value {
+            proto::BackendKind::Qemu => Ok(BackendKind::Qemu),
+            proto::BackendKind::Vmm => Ok(BackendKind::Vmm),
+            proto::BackendKind::Unspecified => Err(ConvertError::MissingBackendKind),
+        }
+    }
+}
+
+impl TryFrom<proto::InstanceKind> for InstanceKind {
+    type Error = ConvertError;
+
+    fn try_from(value: proto::InstanceKind) -> Result<Self, Self::Error> {
+        use proto::instance_kind::Kind;
+
+        match value.kind.ok_or(ConvertError::MissingField("kind.kind"))? {
+            Kind::LinuxVm(linux_vm) => {
+                let cdrom_bus = linux_vm.cdrom_bus().into();
+                Ok(InstanceKind::LinuxVm {
+                    iso_path: PathBuf::from(linux_vm.iso_path),
+                    cdrom_bus,
+                })
+            }
+            Kind::AndroidVm(android_vm) => Ok(InstanceKind::AndroidVm {
+                android_profile: android_vm
+                    .android_profile
+                    .ok_or(ConvertError::MissingField("kind.android_vm.android_profile"))?
+                    .try_into()?,
+            }),
+        }
+    }
+}
+
+/// Inverse of `update_request_to_instance_config` — used by `andler edit`
+/// (`cli/src/edit.rs`) to send the user's edited config back. Goes via
+/// `proto::GetInstanceConfigResponse` (which already has a `From<InstanceConfig>`
+/// impl, see above) rather than duplicating the field-by-field `.into()`
+/// calls a second time — same field set, just re-packaged into the
+/// update-request message shape (see the proto comment on
+/// `UpdateInstanceConfigRequest` for why the two messages mirror each
+/// other field-for-field).
+pub fn instance_config_to_update_request(
+    cfg: InstanceConfig,
+    instance_ref: String,
+) -> proto::UpdateInstanceConfigRequest {
+    let response: proto::GetInstanceConfigResponse = cfg.into();
+    proto::UpdateInstanceConfigRequest {
+        instance_ref,
+        name: response.name,
+        kind: response.kind,
+        backend: response.backend,
+        cpu: response.cpu,
+        memory: response.memory,
+        disk: response.disk,
+        display: response.display,
+        gpu: response.gpu,
+        network: response.network,
+        firmware: response.firmware,
+        audio: response.audio,
+        input: response.input,
+    }
+}
+
+/// Собирает `InstanceConfig` из `UpdateInstanceConfigRequest` — свободная
+/// функция, не `TryFrom`, потому что `id` не является частью самого proto-
+/// сообщения (там только `instance_ref`, строка, разрешаемая в
+/// `InstanceId` сервером до вызова этой функции, тем же путём, что и у
+/// остальных `*Request` с частичным ID — см. `Daemon::resolve_instance_id`).
+pub fn update_request_to_instance_config(
+    id: andler_core::InstanceId,
+    req: proto::UpdateInstanceConfigRequest,
+) -> Result<InstanceConfig, ConvertError> {
+    let backend = req.backend().try_into()?;
+    Ok(InstanceConfig {
+        id,
+        name: req.name,
+        kind: req.kind.as_ref().ok_or(ConvertError::MissingField("kind"))?.clone().try_into()?,
+        backend,
+        cpu: req.cpu.ok_or(ConvertError::MissingField("cpu"))?.try_into()?,
+        memory: req.memory.ok_or(ConvertError::MissingField("memory"))?.into(),
+        disk: req.disk.ok_or(ConvertError::MissingField("disk"))?.try_into()?,
+        display: req.display.ok_or(ConvertError::MissingField("display"))?.try_into()?,
+        gpu: req.gpu.ok_or(ConvertError::MissingField("gpu"))?.try_into()?,
+        network: req.network.ok_or(ConvertError::MissingField("network"))?.try_into()?,
+        firmware: req.firmware.ok_or(ConvertError::MissingField("firmware"))?.into(),
+        audio: req.audio.ok_or(ConvertError::MissingField("audio"))?.try_into()?,
+        input: req.input.ok_or(ConvertError::MissingField("input"))?.into(),
+    })
 }
 
 /// Парсит `instance_id` из proto-запроса (строка с UUID) в `InstanceId`.
@@ -1464,5 +1609,86 @@ mod tests {
         assert!(msg.vram_used_bytes.is_none());
         assert!(msg.vram_total_bytes.is_none());
         assert!(msg.gpu_load_percent.is_none());
+    }
+
+    // --- andler edit: GetInstanceConfigResponse <-> InstanceConfig,
+    // UpdateInstanceConfigRequest -> InstanceConfig -----------------------
+
+    #[test]
+    fn get_instance_config_response_round_trips_back_to_instance_config() {
+        let cfg = sample_instance_config();
+        let response: proto::GetInstanceConfigResponse = cfg.clone().into();
+        let back: InstanceConfig = response.try_into().unwrap();
+        assert_eq!(cfg, back);
+    }
+
+    #[test]
+    fn get_instance_config_response_round_trips_android_kind() {
+        let mut cfg = sample_instance_config();
+        cfg.kind = InstanceKind::AndroidVm {
+            android_profile: AndroidProfile {
+                android_version: AndroidVersion::Android13,
+                gapps: true,
+                microg: false,
+                arm_translator: ArmTranslator::Libndk,
+                root: RootMode::None,
+            },
+        };
+        let response: proto::GetInstanceConfigResponse = cfg.clone().into();
+        let back: InstanceConfig = response.try_into().unwrap();
+        assert_eq!(cfg, back);
+    }
+
+    #[test]
+    fn get_instance_config_response_missing_kind_is_rejected() {
+        let cfg = sample_instance_config();
+        let mut response: proto::GetInstanceConfigResponse = cfg.into();
+        response.kind = None;
+        let err = InstanceConfig::try_from(response).unwrap_err();
+        assert!(matches!(err, ConvertError::MissingField("kind")));
+    }
+
+    #[test]
+    fn get_instance_config_response_unspecified_backend_is_rejected() {
+        let cfg = sample_instance_config();
+        let mut response: proto::GetInstanceConfigResponse = cfg.into();
+        response.backend = proto::BackendKind::Unspecified as i32;
+        let err = InstanceConfig::try_from(response).unwrap_err();
+        assert!(matches!(err, ConvertError::MissingBackendKind));
+    }
+
+    /// Builds an `UpdateInstanceConfigRequest` the same way `andler edit`
+    /// does, via the real `instance_config_to_update_request` — not a
+    /// hand-rolled duplicate, so this test exercises the same code path
+    /// production code uses.
+    #[test]
+    fn update_request_round_trips_to_instance_config_with_given_id() {
+        let cfg = sample_instance_config();
+        let req = instance_config_to_update_request(cfg.clone(), cfg.id.0.to_string());
+        let back = update_request_to_instance_config(cfg.id, req).unwrap();
+        assert_eq!(cfg, back);
+    }
+
+    #[test]
+    fn update_request_uses_the_passed_id_not_any_id_in_the_message() {
+        // UpdateInstanceConfigRequest has no id field at all (only
+        // instance_ref, resolved server-side) — this documents that the
+        // resulting InstanceConfig.id always comes from the function's
+        // `id` parameter.
+        let cfg = sample_instance_config();
+        let req = instance_config_to_update_request(cfg.clone(), "deadbeef".to_string());
+        let fresh_id = InstanceId::new();
+        let back = update_request_to_instance_config(fresh_id, req).unwrap();
+        assert_eq!(back.id, fresh_id);
+        assert_ne!(back.id, cfg.id);
+    }
+
+    #[test]
+    fn update_request_missing_disk_is_rejected() {
+        let cfg = sample_instance_config();
+        let mut req = instance_config_to_update_request(cfg.clone(), cfg.id.0.to_string());
+        req.disk = None;
+        let err = update_request_to_instance_config(cfg.id, req).unwrap_err();
+        assert!(matches!(err, ConvertError::MissingField("disk")));
     }
 }

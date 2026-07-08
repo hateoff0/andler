@@ -224,17 +224,48 @@ impl Daemon {
     /// Сохраняет обновлённое состояние FSM существующей записи в `store`,
     /// если персистентность включена. См. документацию
     /// `persist_new_instance` про то, почему ошибка только логируется.
-    pub(crate) async fn persist_state(&self, id: InstanceId, state: &InstanceState) {
+    /// Сохраняет обновлённую конфигурацию существующей записи в `store`
+    /// (`andler edit`, см. `Daemon::update_instance_config`), если
+    /// персистентность включена. Переиспользует `save_instance`
+    /// (`INSERT OR REPLACE`) — тот же метод, что для новых инстансов;
+    /// отдельного "update"-запроса к SQLite не нужно, upsert уже
+    /// корректно перезаписывает существующую строку по `id`. См.
+    /// документацию `persist_new_instance` про то, почему ошибка только
+    /// логируется, не возвращается наружу.
+    ///
+    /// Также опportunistически обновляет `instance_dir/instance.toml`,
+    /// если каталог реально существует (выводится из `cfg.disk.path`,
+    /// см. `write_instance_toml` — тот же файл, что пишется при создании
+    /// инстанса, см. PLAN.md, "5. Store config alongside instance"). Как
+    /// и там, это инспекционная копия, не источник истины — SQLite
+    /// остаётся им, поэтому неудача здесь тоже только логируется.
+    pub(crate) async fn persist_config_update(&self, cfg: &InstanceConfig, state: &InstanceState) {
+        if let Some(dir) = cfg.disk.path.parent() {
+            types::write_instance_toml(dir, cfg).await;
+        }
+
         let Some(store) = &self.store else {
             return;
         };
-        if let Err(err) = store.save_state(id, state).await {
+        if let Err(err) = store.save_instance(cfg, state).await {
             tracing::error!(
-                instance_id = %id.0,
+                instance_id = %cfg.id.0,
                 error = %err,
-                "failed to persist instance state transition to store"
+                "failed to persist updated instance config to store"
             );
         }
+    }
+
+    /// Persist current state for an instance looked up by ID.
+    pub(crate) async fn persist_state(&self, id: InstanceId, state: &InstanceState) {
+        let cfg = {
+            let instances = self.instances.read().await;
+            match instances.get(&id) {
+                Some(record) => record.config.clone(),
+                None => return,
+            }
+        };
+        self.persist_config_update(&cfg, state).await;
     }
 
 }
