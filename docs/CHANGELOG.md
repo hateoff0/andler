@@ -15,6 +15,8 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - **AndroidVm from TOML**: `InstanceFile` supports `android_version`, `base_image_path`, `overlay_size_gib`, `root`, `magisk_dir`, `gapps`, `microg`, `libndk`, `instances_root`. Auto-detected: presence of `android_version` or `base_image_path` → AndroidVm; otherwise LinuxVm.
 - **Snapshot timeout**: Configurable per-instance (`DiskConfig::snapshot_timeout_secs`, default 30s) and per-operation (`--timeout` flag on `create`/`restore`/`delete`).
 - **LinuxVm clone/export**: `CloneMode::Linked` and `CloneMode::FullStandalone` supported. `SharedBase` rejected with `SharedBaseNotSupportedForLinuxVm`.
+- **Path utilities**: `runtime_dir()` (XDG_RUNTIME_DIR fallback), `current_uid()` (getuid FFI), `ensure_private_dir()` / `ensure_private_dir_sync()` (0700 permissions).
+- **`ensure_qcow2_extension()`**: Auto-appends `.qcow2` extension to disk paths.
 
 #### Backend (`andler-qemu`)
 
@@ -28,20 +30,34 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 #### Services
 
 - **Offline Magisk provisioning** (`andler-disk`): `provision_magisk()` installs Magisk root access into an Android overlay disk offline via `qemu-nbd`. RAII guards ensure cleanup on all error paths.
+- **Disk error variants**: `ShrinkRequiresConfirmation` (requires `--shrink` flag), `CompactNotApplicable` (non-qcow2 disk).
 - **Snapshot metadata persistence** (`andler-store`): `snapshots` table with `ON DELETE CASCADE` from `instances`. Full CRUD for snapshot metadata.
 - **gRPC snapshot operations** (`andler-rpc`): `CreateSnapshot`, `RestoreSnapshot`, `DeleteSnapshot`, `ListSnapshots` RPCs with per-operation timeout support.
 - **gRPC metrics streaming** (`andler-rpc`): `StreamResourceMetrics` server-streaming RPC with `ResourceMetricsResponse` (all 9 optional fields including GPU).
 - **gRPC Magisk provisioning** (`andler-rpc`): `magisk_dir` field on `CreateAndroidInstanceRequest` for offline root access.
+- **gRPC config editing** (`andler-rpc`): `UpdateInstanceConfig` RPC with `UpdateInstanceConfigRequest` mirroring `GetInstanceConfigResponse` fields.
+- **NVML integration** (`andler-firmware`): `nvml-wrapper` crate for NVIDIA GPU metrics (primary), with `nvidia-smi` CLI fallback.
+- **Hardware auto-detection** (`andler-firmware`): `detect_all()` returns `HardwareDefaults` — GPU render backend, display engine, audio server, ARM translator, OVMF paths, Venus support, passt availability.
 
 #### Daemon
 
 - **Snapshot orchestration**: `create_snapshot`, `restore_snapshot`, `delete_snapshot`, `list_snapshots` methods with FSM state validation and per-operation timeout override.
 - **Metrics streaming**: `stream_resource_metrics` method returning `BoxStream<'static, ResourceMetrics>`.
 - **Magisk provisioning integration**: `create_android_instance` accepts optional `magisk_dir` parameter.
-- **Factory reset / `remove --purge`**: Full end-to-end with file cleanup (disk + OVMF vars). Refuses when live `Linked` clones exist.
+- **Factory reset / `remove --purge`**: Full end-to-end with file cleanup (disk + OVMF vars + instance directory). Refuses when live `Linked` clones exist.
 - **Clone for LinuxVm**: `clone_instance` supports `Linked` and `FullStandalone` modes.
 - **Export for LinuxVm**: `export_instance_disk` works for both AndroidVm and LinuxVm.
-- **gRPC round-trip tests**: 25 integration tests with real TCP connections.
+- **Linux VM creation**: `create_linux_instance` creates instance directory, provisions OVMF VARS, creates qcow2 disk, registers instance.
+- **Config editing**: `update_instance_config` replaces instance config (protects id, kind, disk.path).
+- **Partial instance ID** (Docker-style): `resolve_instance_id` resolves 8-char hex prefixes, rejects ambiguous/non-hex input. `--full-id`/`-q` flag on `list`.
+- **`write_instance_toml`**: Writes `instance.toml` alongside instance on create/clone.
+- **`spawn_compact_on_shutdown`**: Background compaction task when `compact_on_shutdown = true`.
+- **`purge_instance_files`**: Uses `remove_dir_all` for UUID-pattern instance directories.
+- **Signal handling**: SIGINT + SIGTERM graceful shutdown (stops all running instances).
+- **systemd user unit**: `scripts/andlerd.service` with `scripts/install.sh`.
+- **Snapshot limit**: `MAX_SNAPSHOTS_PER_INSTANCE = 20` with `SnapshotLimitExceeded` error.
+- **New error variants**: `SnapshotLimitExceeded`, `MalformedInstanceRef`, `ConfigIdMismatch`, `ConfigKindChanged`, `ConfigDiskPathChanged` (DaemonError: 23 variants total).
+- **gRPC round-trip tests**: 24 integration tests with real TCP connections.
 
 #### CLI
 
@@ -51,17 +67,47 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - **`--magisk-dir` flag**: For offline Magisk provisioning.
 - **Snapshot `--timeout` flag**: Override per-instance snapshot timeout for a single operation.
 - **`andler disk` commands**: `create`, `info`, `resize`, `compact` for disk management. Flexible size format (`64GB`, `128000MB`, `1T`).
+- **`disk resize --shrink`**: Explicit confirmation required for shrinking disks.
 - **Metrics display**: GPU columns (VRAM, GPU%) when AMD/NVIDIA/Intel data available. Human-readable byte formatting.
 - **Snapshot subcommands**: `create`, `restore`, `delete`, `list` under `andler snapshot`.
 - **`clone` and `export`**: Commands for LinuxVm + AndroidVm.
 - **Default XDG paths**: Instance data stored under `~/.local/share/andler/` by default.
+- **`edit` command**: Open instance config in `$VISUAL`/`$EDITOR` as TOML, apply changes via gRPC.
+- **`wizard` command**: Interactive VM creation wizard (also default when `andler` invoked without subcommand). Basic/Advanced modes, hardware auto-detection summary.
+- **`completions` command**: Generate shell completion scripts (bash/zsh/fish) via `clap_complete`.
+- **`list` filtering/sorting**: `--state`, `--name` (regex), `--sort` (name/state), `--json`, `--full-id`/`-q`.
+- **`logs` filtering**: `--source` (stdout/stderr), `--grep` (regex), `--tail` (backlog lines).
+- **`metrics` output modes**: `--once` (single sample), `--json` (machine-readable).
+- **`create --quick`**: Skip wizard, create with all defaults. Requires `--kind`.
+- **`--arm-translator`**: Replaces `--libndk` boolean. Values: `none`, `libndk`, `libhoudini`.
+- **Colored status output**: `colorize_status()` with ANSI codes gated on `IsTerminal`.
+- **Error formatting**: `format_grpc_error()` — human-readable gRPC error messages.
+- **"Daemon not running" error**: `looks_like_daemon_not_running()` — friendly message with startup hint.
+- **Instance ID echo**: `resolve_echo()` — prints full ID + name after lifecycle operations.
+- **Snapshot spinner**: `indicatif` spinner during snapshot create/restore (hidden when not a terminal).
+- **CLI-side validation**: `validate_linux_paths`/`validate_android_paths` — checks existence before gRPC call.
 
 ### Changed
 
 - **Monorepo restructure**: `crates/andler-*` reorganized into `core/`, `backends/`, `services/`, `daemon/`, `cli/` directories. Package names keep `andler-` prefix.
 - **Documentation language**: All docs now in English. Historical/future docs moved to `docs/archive/`.
-- **Daemon module decomposition**: `daemon/src/daemon.rs` (3209 lines) decomposed into 9 files under `daemon/src/daemon/`. Core `mod.rs` reduced to 250 lines (92% reduction). Error types, instance lifecycle, clone/export, snapshots, and queries each in separate modules. Tests split into 8 domain-specific test files.
-- **CLI module decomposition**: `cli/src/main.rs` (1185 lines) decomposed into 8 modules. Main dispatch reduced to 431 lines. Commands extracted to domain-specific files: `create.rs`, `status.rs`, `snapshot.rs`, `disk.rs`, `lifecycle.rs`, `clone.rs`, `helpers.rs`.
+- **Daemon module decomposition**: `daemon/src/daemon.rs` (3209 lines) decomposed into 9 files under `daemon/src/daemon/`. Core `mod.rs` reduced to 268 lines (92% reduction). Error types, instance lifecycle, clone/export, snapshots, and queries each in separate modules. Tests split into 9 domain-specific test files.
+- **CLI module decomposition**: `cli/src/main.rs` (1185 lines) decomposed into 8 modules. Main dispatch reduced to 769 lines. Commands extracted to domain-specific files: `create.rs`, `edit.rs`, `status.rs`, `snapshot.rs`, `disk.rs`, `lifecycle.rs`, `clone.rs`, `helpers.rs`.
+- **Disk default size**: 40 GiB → **256 GiB** (thin-provisioned qcow2, actual usage minimal).
+- **Database filename**: `state.db` → **`andlerd.db`**.
+- **Snapshot state requirements**: `restore`/`delete` now require **Running/Paused** instance (not terminal states) — QMP commands need live QEMU process.
+- **`--libndk` → `--arm-translator`**: Boolean flag replaced by enum: `none`, `libndk`, `libhoudini`.
+- **DaemonError expanded**: 14 → **23 variants** (added SnapshotLimitExceeded, MalformedInstanceRef, ConfigIdMismatch, ConfigKindChanged, ConfigDiskPathChanged, EmptyInstanceRef, InstanceRefNotFound, AmbiguousInstanceId).
+- **Environment variables**: Added `ANDLERD_LISTEN_ADDR` (daemon listen), `ANDLERD_OVMF_CODE`/`ANDLERD_OVMF_VARS` (firmware override), `ANDLERD_LOG_FORMAT` (json output). `ANDLERD_ADDR` remains for CLI client.
+- **`stop --graceful` semantics**: Now means "force stop without waiting for graceful ACPI shutdown" (flag name is historical; default behavior is graceful).
+- **`purge_instance_files`**: Uses `remove_dir_all` for UUID-pattern instance directories (was `remove_dir`, silently failed on non-empty).
+- **`provision_magisk`**: Entire pipeline wrapped in `tokio::task::spawn_blocking` (was blocking tokio executor with `std::thread::sleep`).
+- **QemuBackend pause/resume**: Lock extracted before `backend.pause().await` (was held across await, blocking all operations).
+- **Metrics output format**: `key=value` pairs (was columnar table headers).
+- **Venus default on NVIDIA**: Skips Mesa version check for NVIDIA vendor (Venus uses Vulkan, not Mesa's OpenGL).
+- **Clipboard documentation**: Wizard prints `spice-vdagent` install note when clipboard is enabled.
+- **Resolution documentation**: Help text and doc comments note this isn't applied to SDL/GTK output yet.
+- **Instance config persistence**: `write_instance_toml` writes TOML alongside instance (SQLite remains source of truth for restore).
 
 ### Fixed
 
@@ -115,6 +161,10 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Dead `--instance-kind` flag from CLI
 - `create-android` command (merged into `create`)
 - Russian-language documentation (moved to `docs/archive/`)
+- `--libndk` boolean flag (replaced by `--arm-translator` enum)
+- `KernelSU` root mode (proto value `3` reserved, cleaned from all layers)
+- WIZARD.md (fully implemented, plan document removed)
+- PLAN.md old content (replaced by current UX improvement plan)
 
 ## [0.1.0] — Pre-Release
 
