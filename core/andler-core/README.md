@@ -16,7 +16,7 @@ Single source of truth for all filesystem paths. Reads `ANDLER_HOME` env var, fa
 | `ovmf_cache_dir()` | `<home>/ovmf/` |
 | `venus_cache_dir()` | `<home>/venus-cache` |
 | `db_path()` | `<home>/andlerd.db` |
-| `runtime_dir()` | `$XDG_RUNTIME_DIR` or `/run/user/<uid>` or `std::env::temp_dir()` |
+| `runtime_dir()` | `$XDG_RUNTIME_DIR` or `/run/user/<uid>` or `std::env/temp_dir()` |
 | `current_uid()` | Raw `getuid(2)` FFI call |
 | `ensure_private_dir(dir)` | Create dir with 0700 permissions (async) |
 | `ensure_private_dir_sync(dir)` | Create dir with 0700 permissions (sync) |
@@ -33,7 +33,7 @@ Defines the `HypervisorBackend` trait — the contract that all hypervisor imple
 | `supported_render_backends` | `fn(&self) -> &[RenderBackend]` | Which GPU/render modes this backend supports |
 | `spawn` | `async fn(&self, cfg: &InstanceConfig) -> Result<BackendHandle, BackendError>` | Start a new VM instance |
 | `pause` | `async fn(&self, handle: &BackendHandle) -> Result<(), BackendError>` | Pause a running instance |
-| `resume` | `async fn(&self, handle: &BackendHandle) -> Result<(), BackendError>` | Resume a paused instance |
+| `resume` | `async fn(&self, handle: &BackendHandle) -> Result<(), BackendError>` | Resume paused instance |
 | `stop` | `async fn(&self, handle: &BackendHandle, graceful: bool) -> Result<(), BackendError>` | Stop an instance (graceful = ACPI shutdown via QMP; false = forceful process termination) |
 | `status` | `async fn(&self, handle: &BackendHandle) -> Result<BackendStatus, BackendError>` | Query current status |
 | `snapshot` | `async fn(&self, handle: &BackendHandle, tag: &str, timeout: Option<Duration>) -> Result<(), BackendError>` | Create a snapshot (default: `NotImplemented`) |
@@ -123,7 +123,7 @@ pub struct InstanceConfig {
 }
 ```
 
-Each sub-config has a `reference_default()` method that produces sensible defaults matching the reference `scripts/start.sh`.
+Each sub-config has a `reference_default()` method that produces sensible defaults matching the original reference script (now removed).
 
 #### `config::cpu`
 

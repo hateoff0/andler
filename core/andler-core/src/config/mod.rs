@@ -5,8 +5,8 @@
 //! `cpu.rs`, `memory.rs`, `gpu.rs`, `disk.rs`, `network.rs`, `display.rs` —
 //! по одному файлу на каждый блок ресурсов. `firmware.rs`, `audio.rs`,
 //! `input.rs` добавлены дополнительно при реализации `andler-qemu::cmdline`
-//! — `start.sh` содержит OVMF/audio/clipboard-параметры, для которых план
-//! не выделял отдельный тип в §4.3. `instance.rs` собирает всё в единый
+//! — `исходная референсная конфигурация` содержит OVMF/audio/clipboard-параметры,
+//! для которых план не выделял отдельный тип в §4.3. `instance.rs` собирает всё в единый
 //! `InstanceConfig` вместе с `InstanceId`/`InstanceKind`.
 
 mod audio;

@@ -18,7 +18,8 @@
 //! - [`detect::provision_vars()`] — копирует шаблон VARS в инстанс
 //!   (`tokio::fs::copy`, вызывается один раз при создании инстанса).
 //! - [`detect::reset_vars()`] — удаляет и заново копирует VARS-шаблон
-//!   (сброс EFI NVRAM), эквивалент `--reset-boot` из `start.sh`.
+//!   (сброс EFI NVRAM), эквивалент `--reset-boot` из исходной референсной
+//!   конфигурации.
 //! - [`detect::KNOWN_OVMF_CODE_PATHS`] / [`detect::KNOWN_OVMF_VARS_PATHS`]
 //!   — константы известных путей, видимые для CLI (`--help` с перечнем
 //!   проверяемых мест, подсказки wizard'а).

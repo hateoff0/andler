@@ -531,9 +531,10 @@ impl From<NetworkMode> for proto::NetworkMode {
     }
 }
 
-/// `UNSPECIFIED` -> `Slirp` — не ошибка, а фоллбэк на поведение `start.sh`,
-/// т.к. старые сохранённые конфиги (до появления `nat_backend`) физически
-/// не могли заполнить это поле (тот же приём, что для `CdromBus`).
+/// `UNSPECIFIED` -> `Slirp` — не ошибка, а фоллбэк на поведение исходной
+/// референсной конфигурации, т.к. старые сохранённые конфиги (до появления
+/// `nat_backend`) физически не могли заполнить это поле (тот же приём, что для
+/// `CdromBus`).
 impl From<proto::NatBackend> for NatBackend {
     fn from(value: proto::NatBackend) -> Self {
         match value {
@@ -1466,7 +1467,8 @@ mod tests {
     #[test]
     fn nat_backend_unspecified_falls_back_to_slirp() {
         // Старые сохранённые конфиги не могли заполнить это поле —
-        // должны читаться как Slirp (поведение start.sh), не как ошибка.
+        // должны читаться как Slirp (поведение исходной референсной конфигурации),
+        // не как ошибка.
         let domain: NatBackend = proto::NatBackend::Unspecified.into();
         assert_eq!(domain, NatBackend::Slirp);
     }

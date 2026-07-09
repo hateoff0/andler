@@ -54,7 +54,7 @@ The foundation crate. Defines all public types that other crates depend on.
 Implements `HypervisorBackend` for QEMU via process management, QMP communication, and `/proc`-based metrics.
 
 **Key components:**
-- `cmdline.rs`: Pure function translating `InstanceConfig` to QEMU CLI arguments (10 argument blocks, each tested against `scripts/start.sh`)
+- `cmdline.rs`: Pure function translating `InstanceConfig` to QEMU CLI arguments (10 argument blocks, each tested independently against reference configuration)
 - `process.rs`: `QemuProcess` — spawn, terminate, force-kill, log/metrics broadcast channels
 - `qmp.rs`: `QmpClient` — QMP protocol over unix socket (handshake, pause/resume/status, snapshot job API)
 - `backend.rs`: `QemuBackend` — ties everything together, manages `RunningInstance` registry
@@ -254,4 +254,3 @@ Offline root access provisioning via `qemu-nbd`:
 - **Cloud Hypervisor backend**: `andler-vmm` with `rust-vmm` crates
 - **GUI**: Tauri-based client (planned, not started)
 - **Guest image pipelines**: Automated Android image builds with Waydroid
-

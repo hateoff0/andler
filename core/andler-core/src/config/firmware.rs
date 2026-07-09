@@ -1,6 +1,7 @@
 //! Конфигурация firmware (UEFI/OVMF) инстанса.
 //!
-//! Источник истины — `scripts/start.sh`:
+//! Источник истины — исходная референсная конфигурация (ранее описанная в
+//! `scripts/start.sh`, который был удалён после миграции всей логики в Rust):
 //! `-drive if=pflash,format=raw,readonly=on,file=OVMF_CODE.4m.fd` +
 //! `-drive if=pflash,format=raw,file=<instance>_VARS.fd` (копия шаблона
 //! `OVMF_VARS.4m.fd`, создаваемая при первом запуске).

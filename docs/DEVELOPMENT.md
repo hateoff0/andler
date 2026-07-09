@@ -195,7 +195,7 @@ andler/
 │   │       └── error.rs          # DiskError
 │   │
 │   ├── andler-net/               # Network configuration (bridge/isolated modes)
-
+│
 │   ├── andler-firmware/
 │   │   └── src/
 │   │       ├── lib.rs
@@ -261,7 +261,6 @@ andler/
 │   └── archive/                  # Historical/planned docs
 │
 └── scripts/
-    ├── start.sh                  # Reference QEMU launch script
     ├── andlerd.service           # systemd user unit
     └── install.sh                # systemd installation script
 ```
@@ -299,50 +298,39 @@ andler/
 
 ### Adding a New Disk Operation
 
-1. Add function in `services/andler-disk/src/qcow2.rs` (or new module)
-2. Add error variant in `services/andler-disk/src/error.rs` if needed
-3. Expose through daemon if needed
-4. Write unit tests (parsing/logic) + integration tests (`#[ignore]` for real qemu-img)
+### Adding a New Test
 
-### Modifying the Metrics Pipeline
+### Updating Dependencies
 
-1. Edit `backends/andler-qemu/src/metrics.rs` for per-VM host metrics (CPU/RAM/disk/network I/O)
-2. Edit `services/andler-firmware/src/metrics/` for GPU metrics (AMD/NVIDIA/Intel — host-level, not per-VM; lives next to GPU vendor detection in `detect/gpu.rs`)
-3. Update `ResourceMetrics` in `core/andler-core/src/backend.rs` if adding fields
-4. Update proto `ResourceMetricsResponse` in `proto/andler.proto`
-5. Update conversion in `services/andler-rpc/src/convert.rs`
-6. Update CLI display format in `cli/src/status.rs`
+### Formatting and Linting
 
-### Running Specific Test Suites
+- **`cargo fmt`** for code formatting
+- **`cargo clippy`** for linting
 
-```bash
-# All unit tests
-cargo test --workspace
+### Debugging Tips
 
-# Specific crate
-cargo test -p andler-core
-cargo test -p andler-qemu
-cargo test -p andler-daemon
+- Use `tracing-subscriber` for structured logging
+- Enable QEMU QMP logging with `-qmp unix:/tmp/qmp.sock,server,nowait`
+- Use `tcpdump` or `Wireshark` for gRPC traffic analysis
 
-# Specific test module
-cargo test -p andler-daemon daemon::tests
-cargo test -p andler-daemon grpc_roundtrip
+### Release Process
 
-# Ignored (integration) tests
-cargo test -p andler-qemu -- --ignored
-cargo test -p andler-disk -- --ignored
+1. Update `CHANGELOG.md`
+2. Bump version in `Cargo.toml`
+3. Build release artifacts
+4. Tag and push
 
-# With output
-cargo test --workspace -- --nocapture
-```
+## Contributing
 
-## Code Style
+- Follow the Rust API guidelines
+- Write tests for new functionality
+- Keep backward compatibility in mind when changing APIs
 
-- **No comments unless asked** — code should be self-documenting
-- **English only** — all code, docs, commit messages
-- **Russian allowed** only in `docs/archive/` for historical context
-- **Domain types in `andler-core`** — no infrastructure dependencies
-- **`async_trait`** for `HypervisorBackend` — allows async methods in trait objects
-- **`tokio`** for async runtime, `tonic` for gRPC, `rusqlite` for SQLite
-- **`thiserror`** for error types, `tracing` for logging
-- **`serde`** for JSON (config persistence), `toml` for instance files
+## Getting Help
+
+- Check existing issues and documentation
+- Ask questions in the project repository
+
+## License
+
+GPL-3.0

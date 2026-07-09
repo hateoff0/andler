@@ -103,7 +103,7 @@ pub struct InstanceConfig {
     pub network: NetworkConfig,
     /// UEFI/OVMF firmware. См. `firmware.rs` — добавлено отдельно от
     /// исходного §4.3 архитектурного плана при реализации
-    /// `andler-qemu::cmdline`, так как `start.sh` требует pflash-дисков,
+    /// `andler-qemu::cmdline`, так как исходная референсная конфигурация требует pflash-дисков,
     /// для которых план не выделял тип.
     pub firmware: FirmwareConfig,
     pub audio: AudioConfig,

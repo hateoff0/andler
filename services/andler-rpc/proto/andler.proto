@@ -302,8 +302,8 @@ enum NatBackend {
 message NetworkConfig {
     NetworkMode mode = 1;
     string device_model = 2;
-    // `UNSPECIFIED` трактуется как `SLIRP` (дефолт `start.sh`) при
-    // конвертации proto -> core, аналогично `CdromBus`/`compact_on_shutdown`
+    // `UNSPECIFIED` трактуется как `SLIRP` (поведение исходной референсной
+    // конфигурации) при конвертации proto -> core, аналогично `CdromBus`/`compact_on_shutdown`
     // — старые клиенты, не знающие об этом поле, получают прежнее
     // поведение без явной ошибки.
     NatBackend nat_backend = 3;
@@ -332,7 +332,7 @@ enum AudioDevice {
 message AudioConfig {
     AudioBackend backend = 1;
     // `UNSPECIFIED` трактуется как `VIRTIO_SOUND` (новый дефолт ANDLER,
-    // умышленно отличается от буквального `start.sh`) при конвертации
+    // умышленно отличается от буквальной исходной референсной конфигурации) при конвертации
     // proto -> core.
     AudioDevice device = 2;
 }

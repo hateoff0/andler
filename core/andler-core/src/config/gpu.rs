@@ -1,6 +1,7 @@
 //! Конфигурация рендеринга/GPU инстанса.
 //!
-//! Источник истины — `scripts/start.sh`:
+//! Источник истины — исходная референсная конфигурация (ранее описанная в
+//! `scripts/start.sh`, который был удалён после миграции всей логики в Rust):
 //! `-device virtio-gpu-gl,hostmem=4096M,blob=true,venus=true` +
 //! `-display sdl,gl=on,show-cursor=off`. См.
 //! docs/architecture/CORE_ARCHITECTURE_PLAN.md, §2.3, §4.1.
@@ -51,14 +52,14 @@ impl RenderBackend {
 ///
 /// Отдельно от `RenderBackend`, так как один и тот же backend (например,
 /// `Venus`) может запускаться с разным объёмом выделенной видеопамяти —
-/// `hostmem` в `start.sh` это параметр устройства, а не выбор варианта
-/// рендеринга.
+    /// `hostmem` в исходной референсной конфигурации это параметр устройства, а не
+    /// выбор варианта рендеринга.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GpuConfig {
     pub render_backend: RenderBackend,
     /// Объём памяти хоста, выделенной для GPU-устройства, в байтах
-    /// (`hostmem` в `start.sh`, там `4096M`). Не имеет смысла для
-    /// `RenderBackend::Cpu`.
+    /// (`hostmem` в исходной референсной конфигурации, там `4096M`). Не имеет смысла
+    /// для `RenderBackend::Cpu`.
     pub hostmem_bytes: u64,
     /// `blob=true` — поддержка blob-модели, требуется для Venus.
     pub blob: bool,
@@ -70,8 +71,8 @@ pub struct GpuConfig {
 impl GpuConfig {
     pub const MIB: u64 = 1024 * 1024;
 
-    /// Конфигурация, соответствующая `start.sh`: Venus, 4096 MiB hostmem,
-    /// blob и gl включены.
+    /// Конфигурация, соответствующая исходной референсной конфигурации: Venus,
+    /// 4096 MiB hostmem, blob и gl включены.
     pub fn reference_default() -> Self {
         GpuConfig {
             render_backend: RenderBackend::Venus,

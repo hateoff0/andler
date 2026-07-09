@@ -1,8 +1,9 @@
 //! Конфигурация памяти инстанса.
 //!
-//! Источник истины — `scripts/start.sh`: `-m 8G` +
-//! `-object memory-backend-memfd,size=8G,share=on` (разделяемая память —
-//! предпосылка для KSM на хосте, см.
+//! Источник истины — исходная референсная конфигурация (ранее описанная в
+//! `scripts/start.sh`, который был удалён после миграции всей логики в Rust):
+//! `-m 8G` + `-object memory-backend-memfd,size=8G,share=on` (разделяемая память
+//! — предпосылка для KSM на хосте, см.
 //! docs/architecture/CORE_ARCHITECTURE_PLAN.md, §2.2 и §6.1).
 
 use serde::{Deserialize, Serialize};
@@ -38,8 +39,8 @@ impl MemoryConfig {
     /// построения конфигураций без магических чисел на каждом сайте вызова.
     pub const GIB: u64 = 1024 * 1024 * 1024;
 
-    /// Конфигурация, соответствующая `start.sh`: 8 GiB RAM, без
-    /// ballooning/zram, с разделяемой памятью для KSM.
+    /// Конфигурация, соответствующая исходной референсной конфигурации: 8 GiB
+    /// RAM, без ballooning/zram, с разделяемой памятью для KSM.
     pub fn reference_default() -> Self {
         MemoryConfig {
             size_bytes: 8 * Self::GIB,

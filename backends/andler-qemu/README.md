@@ -165,7 +165,9 @@ the base metrics sample every tick via
 
 ### Without `/dev/kvm` or QEMU binary
 
-- **`cmdline`** (27 tests): All argument blocks tested independently against `scripts/start.sh` reference. Includes edge cases: `Passthrough` panic, `None` display engine, clipboard disabled, size suffixes.
+    - **`cmdline`** (27 tests): All argument blocks tested independently against
+      исходной референсной конфигурации. Includes edge cases: `Passthrough` panic,
+      `None` display engine, clipboard disabled, size suffixes.
 - **`qmp`**: JSON parsing of QMP responses (`QmpReply`, `VmStatus`, `QueryStatusReturn`, `SnapshotInfo`, `QueryJobInfo`), plus `UnixStream::pair`-based fake-QMP-peer tests covering the real `snapshot-save`/`-load`/`-delete` wire schema (`devices`+`vmstate`, not the previously-buggy singular `device`), `wait_job_completion`'s `"concluded"`+`error` semantics (not the nonexistent `"completed"`/`"failed"`/`"aborted"` strings an earlier version checked), `job-dismiss`, and async-event skipping during polling.
 - **`backend`** (16 tests): `name_returns_qemu`, `Passthrough` validation, unknown handle handling, `VmStatus → InstanceState` mapping, empty `metrics_stream`/`log_stream`.
 - **`process`** (6 tests): `SpawnFailed` via missing binary, `drain_to_tracing` line publishing, subscriber tolerance, multiple subscribers fan-out.

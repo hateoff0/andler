@@ -1,12 +1,12 @@
 //! Сборка аргументов командной строки QEMU из `InstanceConfig`.
 //!
-//! Источник истины — `scripts/start.sh` (см.
-//! docs/architecture/CORE_ARCHITECTURE_PLAN.md, §2.4). Каждая функция здесь
-//! соответствует одному логическому блоку флагов из этого скрипта и
+//! Источник истины — исходная референсная конфигурация (ранее описанная в
+//! `scripts/start.sh`, который был удалён после миграции всей логики в Rust). Каждая функция здесь
+//! соответствует одному логическому блоку флагов из этой конфигурации и
 //! тестируется отдельно сравнением с ожидаемым результатом для
-//! `reference_default()`-конфигураций — так расхождение с `start.sh` в
-//! любом отдельном блоке (CPU, GPU, диск, ...) обнаруживается локализованно,
-//! а не "что-то не так со всей командной строкой".
+//! `reference_default()`-конфигураций — так расхождение в любом отдельном блоке
+//! (CPU, GPU, диск, ...) обнаруживается локализованно, а не "что-то не так со всей
+//! командной строкой".
 //!
 //! Все функции — чистые: `InstanceConfig -> Vec<String>`, без обращения к
 //! файловой системе или запуска процессов. Эта чистота — то, что позволяет
@@ -19,21 +19,22 @@ use andler_core::{
     NatBackend, PointerMode, RenderBackend,
 };
 
-/// Собирает полный список аргументов для `qemu-system-x86_64`, эквивалентный
-/// тому, что строит `exec qemu-system-x86_64 ...` в `start.sh`, но из
-/// декларативного `InstanceConfig` вместо фиксированных переменных скрипта.
+    /// Собирает полный список аргументов для `qemu-system-x86_64`, эквивалентный
+    /// исходной референсной конфигурации (ранее описанной в `scripts/start.sh`, который был
+    /// удалён после миграции всей логики в Rust), но из декларативного `InstanceConfig`
+    /// вместо фиксированных переменных скрипта.
 ///
 /// `qmp_socket_path` — путь к unix-сокету QMP, на котором `process.rs`
 /// должен поднять `-qmp unix:<path>,server,nowait`. Не часть `InstanceConfig`
 /// — это деталь конкретного запуска, которую решает `andler-qemu`/
 /// `andler-daemon` (обычно на основе `InstanceId`), а не декларативная
-/// конфигурация инстанса; `start.sh` не содержал этого флага явно, так как
-/// был написан для интерактивного запуска человеком, а не для
-/// программного управления через `process.rs`/`qmp.rs`.
+/// конфигурация инстанса; этот флаг отсутствовал в исходной референсной
+/// конфигурации, так как она была написана для интерактивного запуска человеком,
+/// а не для программного управления через `process.rs`/`qmp.rs`.
 ///
-/// Порядок блоков аргументов сохранён как в `start.sh`, хотя для самого
-/// QEMU порядок большинства флагов не важен — сохранение порядка облегчает
-/// построчное сравнение результата с референсным скриптом при отладке.
+/// Порядок блоков аргументов сохранён как в исходной референсной конфигурации,
+/// хотя для самого QEMU порядок большинства флагов не важен — сохранение порядка
+/// облегчает построчное сравнение результата с референсом при отладке.
 pub fn build_args(cfg: &InstanceConfig, qmp_socket_path: &Path) -> Vec<String> {
     let mut args = Vec::new();
     args.extend(name_args(cfg));
@@ -72,9 +73,10 @@ fn qmp_args(qmp_socket_path: &Path) -> Vec<String> {
 /// + `-smp cpus=N,sockets=N,dies=1,cores=N,threads=N`.
 ///
 /// `dies=1` зафиксировано как константа: `CpuConfig` (см.
-/// `andler-core::config::cpu`) не заводит поле `dies`, так как ни план, ни
-/// `start.sh` не предусматривают множественные dies — это деталь топологии
-/// QEMU без соответствующего домена в нашей модели на этом этапе.
+/// `andler-core::config::cpu`) не заводит поле `dies`, так как ни архитектурный
+    /// план, ни исходная референсная конфигурация не предусматривали множественные
+    /// dies — это деталь топологии QEMU без соответствующего домена в нашей модели
+    /// на этом этапе.
 fn machine_and_cpu_args(cfg: &InstanceConfig) -> Vec<String> {
     let cpu = &cfg.cpu;
     vec![
@@ -97,7 +99,8 @@ fn machine_and_cpu_args(cfg: &InstanceConfig) -> Vec<String> {
 /// shared-память — это именно то, что делает страницы доступными для
 /// объединения KSM на хосте (см. docs/architecture/CORE_ARCHITECTURE_PLAN.md,
 /// §6.1.1). Если `ksm = false`, memfd-backend всё равно используется (как в
-/// `start.sh`), но без `share=on` — обычная private-память процесса.
+/// исходной референсной конфигурации), но без `share=on` — обычная private-память
+/// процесса.
 fn memory_args(cfg: &InstanceConfig) -> Vec<String> {
     let size = qemu_size_suffix(cfg.memory.size_bytes);
     let share = if cfg.memory.ksm { "on" } else { "off" };
@@ -129,7 +132,8 @@ fn firmware_args(cfg: &InstanceConfig) -> Vec<String> {
 /// `-vga none` + GPU-устройство (зависит от `RenderBackend`) + `-display ...`.
 ///
 /// Соответствие `RenderBackend` -> флаги устройства:
-/// - `Venus` -> `virtio-gpu-gl,hostmem=...,blob=...,venus=true` (как в `start.sh`)
+/// - `Venus` -> `virtio-gpu-gl,hostmem=...,blob=...,venus=true` (как в исходной
+///   референсной конфигурации)
 /// - `VirGl` -> `virtio-gpu-gl,hostmem=...,blob=...` без `venus=true` —
 ///   тот же virtio-gpu-gl device, но без Vulkan-контекста, что в терминах
 ///   QEMU и есть обычный VirGL/OpenGL-рендеринг
@@ -236,7 +240,7 @@ fn gpu_display_args(cfg: &InstanceConfig) -> Vec<String> {
 /// + устройство, зависящее от `cdrom_bus` (см. `CdromBus`, PLAN.md, раздел
 /// «Монтирование ISO / CD-ROM»):
 /// - `CdromBus::Ide` — `-device ide-cd,drive=drive-cd0,id=cd0,bootindex=2`,
-///   соответствует установочному ISO в `start.sh`;
+///   соответствует установочному ISO из исходной референсной конфигурации;
 /// - `CdromBus::VirtioScsi` — сначала SCSI-контроллер
 ///   `-device virtio-scsi-pci,id=scsi0`, затем сам привод на нём:
 ///   `-device scsi-cd,drive=drive-cd0,bus=scsi0.0,id=cd0,bootindex=2`
@@ -406,9 +410,10 @@ fn audio_args(cfg: &InstanceConfig) -> Vec<String> {
 /// в флагах размера памяти (`-m`, `hostmem=...`, `size=...`).
 ///
 /// Предпочитает `G`, если число кратно гигабайту, иначе `M` — это
-/// соответствует тому, как параметры заданы в `start.sh` (`8G` для RAM,
-/// `4096M` для VRAM, хотя `4096M` тоже кратно гигабайту: `start.sh` просто
-/// использует `M` для VRAM по соглашению скрипта, а не из необходимости).
+/// соответствует тому, как параметры заданы в исходной референсной конфигурации
+/// (`8G` для RAM, `4096M` для VRAM, хотя `4096M` тоже кратно гигабайту:
+/// референсная конфигурация просто использовала `M` для VRAM по соглашению
+/// скрипта, а не из необходимости).
 /// Эта функция предпочитает `G` всегда, когда возможно — расхождение в
 /// форме (`4G` вместо `4096M`) не влияет на поведение QEMU, оба варианта
 /// эквивалентны для него.
@@ -433,7 +438,7 @@ mod tests {
     use std::path::PathBuf;
 
     /// Конфигурация `InstanceKind::LinuxVm`, дословно соответствующая
-    /// `start.sh` (имя `linux`, ISO `cachyos-desktop-linux-260426.iso`,
+    /// исходной референсной конфигурации (имя `linux`, ISO `cachyos-desktop-linux-260426.iso`,
     /// все остальные `reference_default()`).
     fn start_sh_equivalent_config() -> InstanceConfig {
         InstanceConfig {
@@ -519,7 +524,7 @@ mod tests {
     #[test]
     fn gpu_display_args_match_start_sh_for_venus() {
         let cfg = start_sh_equivalent_config();
-        // hostmem в start.sh записан как "4096M", но qemu_size_suffix
+        // hostmem в исходной референсной конфигурации записан как "4096M", но qemu_size_suffix
         // нормализует кратные гигабайту значения в форму "G" (см. её
         // документацию) — "4G" и "4096M" эквивалентны для QEMU, отличается
         // только текстовая форма, не поведение.
@@ -752,9 +757,9 @@ mod tests {
     #[test]
     fn audio_args_match_reference_default_virtio_sound() {
         // ПРИМЕЧАНИЕ: reference_default() теперь умышленно отклоняется от
-        // буквального start.sh для audio-устройства (virtio-sound-pci,
+        // буквальной исходной референсной конфигурации для audio-устройства (virtio-sound-pci,
         // не ich9-intel-hda) — см. `AudioConfig::reference_default()`.
-        // Backend хоста (pipewire) по-прежнему как в start.sh.
+        // Backend хоста (pipewire) по-прежнему как в исходной референсной конфигурации.
         let cfg = start_sh_equivalent_config();
         assert_eq!(
             audio_args(&cfg),
@@ -769,7 +774,7 @@ mod tests {
 
     #[test]
     fn audio_args_ich9_hda_matches_start_sh_literal() {
-        // Буквальный start.sh: `-device ich9-intel-hda -device
+        // Буквальная исходная референсная конфигурация: `-device ich9-intel-hda -device
         // hda-output,audiodev=snd0` — всё ещё доступно как явный выбор
         // `AudioDevice::Ich9Hda` (fallback-вариант).
         let mut cfg = start_sh_equivalent_config();
@@ -801,7 +806,7 @@ mod tests {
 
     #[test]
     fn qemu_size_suffix_falls_back_to_mib_when_not_gib_aligned() {
-        // 4096M (start.sh hostmem) на самом деле кратно гигабайту и вернёт
+        // 4096M (исходная референсная конфигурация hostmem) на самом деле кратно гигабайту и вернёт
         // "4G" — это проверяется отдельно в gpu_display_args_match_start_sh_for_venus.
         // Здесь — намеренно не кратное гигабайту значение, чтобы проверить
         // именно MiB-фоллбэк.

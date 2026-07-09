@@ -165,7 +165,7 @@ gl = true
 | `stop` | Stop instance (default: graceful ACPI shutdown; `--graceful`: force without waiting) |
 | `pause` | Pause running instance |
 | `resume` | Resume paused instance |
-| `status` | Print instance state |
+- **`cmdline`** (27 tests): All argument blocks tested independently against reference configuration. Includes edge cases: `Passthrough` panic, `None` display engine, clipboard disabled, size suffixes.
 | `list` | List all instances (`--state`, `--name` regex, `--sort`, `--json`) |
 | `config` | Print full instance configuration |
 | `remove` | Remove instance (`--purge` to delete files) |

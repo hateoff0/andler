@@ -1,6 +1,7 @@
 //! Конфигурация устройств ввода и интеграции с хостом инстанса.
 //!
-//! Источник истины — `scripts/start.sh`:
+//! Источник истины — исходная референсная конфигурация (ранее описанная в
+//! `scripts/start.sh`, который был удалён после миграции всей логики в Rust):
 //! `-device virtio-tablet-pci` (сенсорный/абсолютный ввод — важно для
 //! Android-инстансов, где приложения ожидают touch-семантику, а не
 //! относительное перемещение мыши), `-display sdl,...,show-cursor=off`,
@@ -30,8 +31,9 @@ pub enum PointerMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InputConfig {
     /// См. [`PointerMode`]. `#[serde(default)]` — старые сериализованные
-    /// конфиги без этого поля читаются как `Tablet` (поведение `start.sh`
-    /// до появления выбора pointer mode), не падают на десериализации.
+    /// конфиги без этого поля читаются как `Tablet` (поведение исходной
+    /// референсной конфигурации до появления выбора pointer mode), не падают на
+    /// десериализации.
     #[serde(default = "default_pointer_mode")]
     pub pointer_mode: PointerMode,
     /// Скрывать курсор хоста в окне отображения (`show-cursor=off`).
@@ -40,7 +42,7 @@ pub struct InputConfig {
     pub hide_host_cursor: bool,
     /// Включить буфер обмена между хостом и гостем через
     /// `qemu-vdagent`/`virtserialport` (`clipboard=on,mouse=on` в
-    /// `start.sh`).
+    /// исходной референсной конфигурации).
     pub clipboard_enabled: bool,
 }
 
@@ -49,8 +51,8 @@ fn default_pointer_mode() -> PointerMode {
 }
 
 impl InputConfig {
-    /// Конфигурация, соответствующая `start.sh`: tablet-режим, курсор хоста
-    /// скрыт, буфер обмена включён.
+    /// Конфигурация, соответствующая исходной референсной конфигурации:
+    /// tablet-режим, курсор хоста скрыт, буфер обмена включён.
     pub fn reference_default() -> Self {
         InputConfig {
             pointer_mode: PointerMode::Tablet,

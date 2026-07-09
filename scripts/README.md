@@ -2,9 +2,9 @@
 
 Helper development scripts, not part of the product.
 
-## `start.sh`
+## `start.sh` (removed)
 
-Reference QEMU launch script with 3D acceleration via Venus. This is the source of truth for `backends/andler-qemu/src/cmdline.rs` — any discrepancy between what `cmdline.rs` generates and this script should be investigated as a potential regression.
+This script was the reference QEMU launch script with 3D acceleration via Venus. It served as the source of truth for `backends/andler-qemu/src/cmdline.rs`. The functionality has been fully migrated to the Rust implementation, and the script has been removed. Any discrepancies between `cmdline.rs` and the original script should be investigated as potential regressions.
 
 ## `andlerd.service` / `install.sh`
 
