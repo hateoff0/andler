@@ -1,0 +1,53 @@
+# andlerd — user systemd service (NOT a system service).
+#
+# Deliberately a *user* unit (goes in ~/.config/systemd/user/ or
+# /usr/lib/systemd/user/, managed with `systemctl --user`), not a system
+# unit under /etc/systemd/system/ running as root or a dedicated system
+# user — unlike a typical background daemon, andlerd's own hardware
+# auto-detection depends on the *invoking user's* session:
+#
+#   - Audio backend detection reads $XDG_RUNTIME_DIR / /run/user/<uid>
+#     to find the user's own PipeWire/PulseAudio socket (see
+#     services/andler-firmware/src/detect/audio.rs).
+#   - The QEMU processes andlerd spawns need the user's display socket
+#     ($DISPLAY/$WAYLAND_DISPLAY) for SDL/GTK windows, and GPU device
+#     access, which on most desktop distros is tied to the logged-in
+#     session (e.g. `render` group membership via logind), not to a
+#     separate system service account.
+#
+# A system-wide unit running as root or a fresh "andler" system user
+# would have none of this — audio would always detect as unavailable,
+# and QEMU's window would have nowhere to display. See PLAN.md, item 9,
+# "Daemon systemd integration".
+#
+# Install with scripts/install.sh, or manually:
+#   mkdir -p ~/.config/systemd/user
+#   cp scripts/andlerd.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now andlerd
+
+[Unit]
+Description=ANDLER VM daemon (per-user)
+# Wait for the graphical session (display, XDG_RUNTIME_DIR, PipeWire) to
+# be up, not just network — andlerd/QEMU need the desktop session, not
+# just connectivity.
+After=graphical-session.target
+
+[Service]
+Type=simple
+# Overridden by install.sh to the actual resolved path at install time;
+# left as a plain command name here so `andlerd` on PATH works if this
+# file is installed by hand instead.
+ExecStart=andlerd
+Restart=on-failure
+RestartSec=5
+KillMode=mixed
+TimeoutStopSec=30
+
+# ANDLER_HOME defaults to the user's own data-local dir if unset (see
+# core/andler-core/src/paths.rs) — no override needed here for the
+# common case; uncomment to pin it explicitly:
+# Environment=ANDLER_HOME=%h/.local/share/andler
+
+[Install]
+WantedBy=default.target
