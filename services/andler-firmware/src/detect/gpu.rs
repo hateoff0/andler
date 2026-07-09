@@ -131,9 +131,18 @@ fn detect_gpu_vendor_via_lspci() -> Option<GpuVendor> {
     }
 }
 
-/// Venus requires kernel ≥6.13, QEMU ≥9.2, Mesa ≥24.2 (see WIZARD.md,
-/// "Auto-detection for GPU vendor"). Any missing tool or unparsable
-/// version output is treated as "requirement not met", never as a panic.
+/// Venus requires kernel ≥6.13, QEMU ≥9.2 always, plus Mesa ≥24.2 on
+/// AMD/Intel (see WIZARD.md, "Auto-detection for GPU vendor"). On
+/// NVIDIA, the Mesa check is skipped entirely: Venus is a Vulkan-based
+/// protocol, and on NVIDIA it runs through the proprietary NVIDIA Vulkan
+/// driver, not Mesa's OpenGL stack — `glxinfo`'s `OpenGL version string`
+/// on NVIDIA reports the NVIDIA driver version instead of a `Mesa `
+/// marker (e.g. `4.6.0 NVIDIA 610.43.02`), so `mesa_version()` always
+/// returns `None` there and unconditionally requiring it previously made
+/// Venus never selectable as a default on NVIDIA hosts even when kernel
+/// and QEMU were new enough (see PLAN.md, item 1, "Venus not default on
+/// NVIDIA"). Any missing tool or unparsable version output is treated as
+/// "requirement not met", never as a panic.
 fn check_venus_requirements() -> bool {
     let Some(kernel) = kernel_version() else {
         return false;
@@ -141,11 +150,34 @@ fn check_venus_requirements() -> bool {
     let Some(qemu) = qemu_version() else {
         return false;
     };
-    let Some(mesa) = mesa_version() else {
-        return false;
-    };
+    let vendor = detect_gpu_vendor();
+    let mesa = mesa_version();
 
-    kernel >= (6, 13, 0) && qemu >= (9, 2, 0) && mesa >= (24, 2, 0)
+    venus_requirements_met(vendor, kernel, qemu, mesa)
+}
+
+/// Pure decision logic behind [`check_venus_requirements`], separated
+/// out so it's testable without shelling out to `uname`/
+/// `qemu-system-x86_64`/`glxinfo` — same pattern as [`parse_version`] in
+/// this module. `mesa` is `None` both when `glxinfo` is missing/
+/// unparsable *and*, on NVIDIA, always (see the doc comment on
+/// [`check_venus_requirements`]) — this function is what decides that
+/// the NVIDIA case still passes despite that `None`, while every other
+/// vendor with `mesa = None` fails the check.
+fn venus_requirements_met(
+    vendor: GpuVendor,
+    kernel: (u32, u32, u32),
+    qemu: (u32, u32, u32),
+    mesa: Option<(u32, u32, u32)>,
+) -> bool {
+    if vendor == GpuVendor::Nvidia {
+        return kernel >= (6, 13, 0) && qemu >= (9, 2, 0);
+    }
+
+    match mesa {
+        Some(mesa) => kernel >= (6, 13, 0) && qemu >= (9, 2, 0) && mesa >= (24, 2, 0),
+        None => false,
+    }
 }
 
 fn kernel_version() -> Option<(u32, u32, u32)> {
@@ -236,6 +268,56 @@ mod tests {
     #[test]
     fn parse_version_returns_none_for_no_digits() {
         assert_eq!(parse_version("not a version at all"), None);
+    }
+
+    #[test]
+    fn venus_requirements_met_nvidia_ignores_missing_mesa() {
+        // Regression test for PLAN.md item 1: NVIDIA hosts always report
+        // `mesa = None` (glxinfo's OpenGL version string has no "Mesa "
+        // marker on NVIDIA), and that must not fail the check for
+        // NVIDIA specifically, unlike every other vendor.
+        assert!(venus_requirements_met(
+            GpuVendor::Nvidia,
+            (6, 13, 0),
+            (9, 2, 0),
+            None,
+        ));
+    }
+
+    #[test]
+    fn venus_requirements_met_nvidia_still_checks_kernel_and_qemu() {
+        assert!(!venus_requirements_met(
+            GpuVendor::Nvidia,
+            (6, 12, 0), // below minimum
+            (9, 2, 0),
+            None,
+        ));
+    }
+
+    #[test]
+    fn venus_requirements_met_amd_requires_mesa() {
+        assert!(!venus_requirements_met(
+            GpuVendor::Amd,
+            (6, 13, 0),
+            (9, 2, 0),
+            None,
+        ));
+        assert!(venus_requirements_met(
+            GpuVendor::Amd,
+            (6, 13, 0),
+            (9, 2, 0),
+            Some((24, 2, 0)),
+        ));
+    }
+
+    #[test]
+    fn venus_requirements_met_amd_below_mesa_minimum_fails() {
+        assert!(!venus_requirements_met(
+            GpuVendor::Amd,
+            (6, 13, 0),
+            (9, 2, 0),
+            Some((24, 1, 9)),
+        ));
     }
 
     #[test]

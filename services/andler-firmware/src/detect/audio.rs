@@ -55,14 +55,11 @@ fn runtime_dir() -> Option<String> {
     }
 }
 
-/// Raw `getuid(2)` FFI call — avoids pulling in the `libc` crate for a
-/// single syscall (same approach already used for `isatty` in
-/// `cli/src/wizard.rs`).
+/// Raw `getuid(2)` FFI call, shared with `andler_core::paths::runtime_dir`
+/// (which needed the exact same call — see its doc comment for why this
+/// isn't duplicated anymore).
 fn current_uid() -> u32 {
-    extern "C" {
-        fn getuid() -> u32;
-    }
-    unsafe { getuid() }
+    andler_core::paths::current_uid()
 }
 
 #[cfg(test)]
