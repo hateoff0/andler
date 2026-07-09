@@ -187,6 +187,12 @@ fn gpu_display_args(cfg: &InstanceConfig) -> Vec<String> {
     }
 
     let show_cursor = if cfg.input.hide_host_cursor { "off" } else { "on" };
+    // `cfg.display.resolution` is intentionally not used here: QEMU's
+    // SDL/GTK backends don't accept a resolution parameter in the
+    // `-display ...` string at all (see `DisplayConfig::resolution`'s
+    // doc comment and PLAN.md, item 4). The window/guest resolution is
+    // controlled by the guest OS itself or by EDID injection into
+    // virtio-gpu, neither of which is wired up here yet.
     let display_str = match cfg.display.display_engine {
         DisplayEngine::Sdl => format!(
             "sdl,gl={},show-cursor={}",
