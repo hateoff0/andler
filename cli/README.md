@@ -67,6 +67,16 @@ The `andler` binary — a thin gRPC client to `andlerd` via `andler-rpc`. No bus
 
 Size format: `64GB`, `128000MB`, `1T`, `512000` (bytes). Case-insensitive.
 
+### Guest Package Management
+
+| Command | Description |
+|---------|-------------|
+| `andler guest install <package> <instance-id>` | Install a package in the guest OS (auto-fallback: online via QMP if running, offline via qemu-nbd if stopped) |
+| `andler guest remove <package> <instance-id>` | Remove a package from the guest OS (auto-fallback) |
+| `andler guest list <instance-id>` | List known packages and their status in the guest OS |
+
+Known packages: `spice-vdagent` (shared folders), `qemu-guest-agent` (host-guest communication), `spice-webdavd` (webdav shared folders).
+
 ## Daemon Address
 
 Override with `--daemon-addr <url>` before the subcommand, or `ANDLERD_ADDR` env var. Default: `http://127.0.0.1:50051`.
@@ -254,6 +264,7 @@ GPU fields (vram, gpu) appear when AMD, NVIDIA, or Intel GPU data is available.
 | `create.rs` | 433 lines | `Create` command — builds gRPC request from CLI flags |
 | `edit.rs` | 96 lines | `Edit` command — open config in `$EDITOR`, send changes to daemon |
 | `disk.rs` | 77 lines | `Disk` command — create, info, resize, compact |
+| `guest.rs` | 90 lines | `Guest` command — install, remove, list packages in guest OS |
 | `status.rs` | 681 lines | `Status`, `List`, `Config`, `Logs`, `Metrics` commands |
 | `snapshot.rs` | 109 lines | `Snapshot` command — create, restore, delete, list (with spinner) |
 | `lifecycle.rs` | 124 lines | `Start`, `Stop`, `Pause`, `Resume`, `Remove` commands |

@@ -13,6 +13,35 @@ pub fn state_kind_name(kind: InstanceStateKind) -> &'static str {
     }
 }
 
+/// Wraps `state`'s display name in ANSI color codes for `andler list`/
+/// `andler status` — see PLAN.md, item 11, "Colored status output".
+/// `is_tty` must be checked by the caller (`std::io::IsTerminal`, not
+/// here) and passed in explicitly rather than checked internally: this
+/// keeps the function itself pure and unit-testable without needing to
+/// fake stdout's terminal-ness, and matches how `is_tty` is already
+/// threaded through explicitly elsewhere in the CLI (e.g.
+/// `cli/src/wizard/mod.rs`) rather than queried ad hoc in the middle of
+/// formatting code.
+///
+/// No external crate (`colored`/`termcolor`/etc.) — this is exactly the
+/// same handful of raw ANSI SGR codes the plan itself proposes, and it's
+/// the only place in the CLI that needs color at all so far.
+pub fn colorize_status(kind: InstanceStateKind, is_tty: bool) -> String {
+    let name = state_kind_name(kind);
+    if !is_tty {
+        return name.to_string();
+    }
+    let code = match kind {
+        InstanceStateKind::Running => "32",                    // green
+        InstanceStateKind::Stopped | InstanceStateKind::Created => "2", // dim
+        InstanceStateKind::Error => "31",                       // red
+        InstanceStateKind::Paused => "33",                      // yellow
+        InstanceStateKind::Starting | InstanceStateKind::Stopping => "36", // cyan
+        InstanceStateKind::InstanceStateUnspecified => return name.to_string(),
+    };
+    format!("\x1b[{code}m{name}\x1b[0m")
+}
+
 pub fn backend_kind_name(kind: BackendKind) -> &'static str {
     match kind {
         BackendKind::Unspecified => "UNSPECIFIED",
@@ -125,6 +154,60 @@ pub fn format_size(bytes: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --- colorize_status tests ---
+
+    #[test]
+    fn colorize_status_returns_plain_text_when_not_a_tty() {
+        assert_eq!(
+            colorize_status(InstanceStateKind::Running, false),
+            "Running"
+        );
+        assert_eq!(
+            colorize_status(InstanceStateKind::Error, false),
+            "Error"
+        );
+    }
+
+    #[test]
+    fn colorize_status_wraps_in_ansi_codes_when_tty() {
+        assert_eq!(
+            colorize_status(InstanceStateKind::Running, true),
+            "\x1b[32mRunning\x1b[0m"
+        );
+        assert_eq!(
+            colorize_status(InstanceStateKind::Error, true),
+            "\x1b[31mError\x1b[0m"
+        );
+        assert_eq!(
+            colorize_status(InstanceStateKind::Paused, true),
+            "\x1b[33mPaused\x1b[0m"
+        );
+        assert_eq!(
+            colorize_status(InstanceStateKind::Stopped, true),
+            "\x1b[2mStopped\x1b[0m"
+        );
+        assert_eq!(
+            colorize_status(InstanceStateKind::Created, true),
+            "\x1b[2mCreated\x1b[0m"
+        );
+        assert_eq!(
+            colorize_status(InstanceStateKind::Starting, true),
+            "\x1b[36mStarting\x1b[0m"
+        );
+        assert_eq!(
+            colorize_status(InstanceStateKind::Stopping, true),
+            "\x1b[36mStopping\x1b[0m"
+        );
+    }
+
+    #[test]
+    fn colorize_status_unspecified_is_never_colored() {
+        assert_eq!(
+            colorize_status(InstanceStateKind::InstanceStateUnspecified, true),
+            "UNSPECIFIED"
+        );
+    }
 
     // --- ensure_qcow2_extension tests ---
 

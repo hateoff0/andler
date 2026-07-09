@@ -12,7 +12,7 @@ mod summary;
 use std::path::PathBuf;
 
 use andler_core::{
-    ArmTranslator, DisplayEngine, RenderBackend,
+    ArmTranslator, AudioBackend, DisplayEngine, RenderBackend,
 };
 use andler_firmware::{FirmwareError, HardwareDefaults};
 use andler_rpc::proto::{
@@ -76,6 +76,8 @@ pub async fn run(partial: PartialArgs) -> Result<WizardResult, WizardError> {
         ));
     }
 
+    print_hardware_summary(&detected, partial.kind);
+
     let mode = ask_wizard_mode()?;
     let kind = basic::ask_kind(partial.kind)?;
     let name = basic::ask_name(partial.name)?;
@@ -134,6 +136,66 @@ pub async fn run(partial: PartialArgs) -> Result<WizardResult, WizardError> {
             Ok(WizardResult::Android(req))
         }
     }
+}
+
+/// Prints what `HardwareDefaults::detect_all()` actually found, before
+/// the first question — see PLAN.md, item 19, "19a. Show hardware
+/// detection results before questions". Only shows fields the detector
+/// genuinely produces (render backend, display engine, audio server,
+/// OVMF path, ARM translator for Android) — no invented GPU model name
+/// like the mockup in that section shows, since `HardwareDefaults`
+/// doesn't carry one (`detect_gpu_vendor` only classifies
+/// AMD/Intel/NVIDIA/None internally, it doesn't read back a marketing
+/// name); overclaiming detection detail here would be worse than not
+/// showing it.
+fn print_hardware_summary(detected: &HardwareDefaults, kind: Option<WizardKind>) {
+    println!("Hardware detected:");
+
+    let render = match detected.gpu_render {
+        RenderBackend::Venus => "Venus (Vulkan 3D)",
+        RenderBackend::VirGl => "VirGL (OpenGL 3D)",
+        RenderBackend::VirtioGpu => "VirtioGPU (2D only)",
+        RenderBackend::Cpu => "CPU (software rendering)",
+        RenderBackend::Passthrough { .. } => "CPU (software rendering)",
+    };
+    println!("  GPU render: {render}");
+
+    let display = match detected.display_engine {
+        DisplayEngine::Sdl => "SDL",
+        DisplayEngine::Gtk => "GTK",
+        DisplayEngine::Spice => "SPICE",
+        DisplayEngine::Dbus => "D-Bus",
+        DisplayEngine::None => "None (headless)",
+    };
+    println!("  Display:    {display}");
+
+    let audio = match detected.audio_server {
+        AudioBackend::Pipewire => "PipeWire",
+        AudioBackend::Pulseaudio => "PulseAudio",
+        AudioBackend::None => "None",
+    };
+    println!("  Audio:      {audio}");
+
+    // Only relevant for Android — `partial.kind` may still be `None`
+    // here (resolved by `basic::ask_kind` right after this prints), so
+    // this shows the ARM translator line whenever it *could* end up
+    // being an Android instance, not only when the user already
+    // guaranteed it via `--kind android`.
+    if kind != Some(WizardKind::Linux) {
+        let arm = match detected.arm_translator {
+            Some(ArmTranslator::Libndk) => "libndk (AMD CPU)",
+            Some(ArmTranslator::Libhoudini) => "libhoudini (Intel CPU)",
+            Some(ArmTranslator::None) | None => "none",
+        };
+        println!("  ARM:        {arm}");
+    }
+
+    match &detected.ovmf {
+        Ok(ovmf) => println!("  OVMF:       {}", ovmf.code.display()),
+        Err(err) => println!("  OVMF:       not found ({err})"),
+    }
+
+    println!();
 }
 
 fn ask_wizard_mode() -> Result<WizardMode, WizardError> {

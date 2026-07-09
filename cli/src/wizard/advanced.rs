@@ -242,7 +242,10 @@ fn ask_display_resolution(prefilled: Option<Resolution>) -> Result<Resolution, W
     let raw = Text::new("Display resolution (e.g. 1920x1080):")
         .with_default(&default)
         .with_help_message(
-            "Initial screen resolution. Format: WIDTHxHEIGHT (e.g. 1920x1080, 2560x1440).",
+            "Initial screen resolution. Format: WIDTHxHEIGHT (e.g. 1920x1080, 2560x1440). \
+             Note: not yet applied to the actual display output (QEMU's SDL/GTK backends \
+             don't take a resolution parameter) -- set it in the guest OS after boot for now. \
+             See PLAN.md, item 4.",
         )
         .with_validator(|s: &str| match parse_resolution(s) {
             Ok(_) => Ok(inquire::validator::Validation::Valid),

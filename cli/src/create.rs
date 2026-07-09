@@ -113,6 +113,11 @@ pub async fn handle(
             let disk = disk_path
                 .unwrap_or_else(|| err_exit("error: --disk-path is required for --kind linux"));
 
+            let (iso, disk) = match validate_linux_paths(&iso, &disk) {
+                Ok(paths) => paths,
+                Err(msg) => err_exit(&format!("error: {msg}")),
+            };
+
             let req = build_linux_request(
                 name,
                 iso,
@@ -137,6 +142,13 @@ pub async fn handle(
                 err_exit("error: --magisk-dir is required when --root magisk");
             }
 
+            let (bip, canonical_magisk_dir) =
+                match validate_android_paths(&bip, magisk_dir.as_deref()) {
+                    Ok(paths) => paths,
+                    Err(msg) => err_exit(&format!("error: {msg}")),
+                };
+            let magisk_dir = canonical_magisk_dir.map(PathBuf::from);
+
             let arm_translator = arm_translator.unwrap_or(CliArmTranslator::None);
 
             let req = build_android_request(
@@ -158,6 +170,101 @@ pub async fn handle(
     }
 
     Ok(())
+}
+
+/// Pre-flight checks for `andler create --kind linux` (direct CLI
+/// flags, not the wizard or `--file` paths — the wizard already
+/// validates interactively as the person types, see
+/// `wizard::basic::ask_iso_path`/`ask_base_image`, and `--file` is the
+/// user's own hand-written TOML, validated by `InstanceFile::load`).
+/// Catches obviously-wrong paths before spending a round-trip to
+/// `andlerd` on a request that's guaranteed to fail once the backend
+/// actually tries to use them — see PLAN.md, item 15, "Config
+/// validation before creation".
+///
+/// Also canonicalizes both paths (resolves `..`/`.`/symlinks to an
+/// absolute path) and returns the canonical forms — see PLAN.md, item
+/// 20c, "No path canonicalization": a relative or symlink-containing
+/// path would otherwise be sent to `andlerd` as-is and only resolved
+/// there, at whatever point it's actually opened, which is later and
+/// further from where the person's input was accepted. `disk_path`
+/// itself usually doesn't exist yet (this is the common "create a new
+/// disk" case, not "point at an existing one") — `canonicalize` requires
+/// the full path to exist, so only its *parent* is canonicalized and
+/// the (not-yet-existing) file name is reattached, rather than trying
+/// and failing to canonicalize the whole thing.
+///
+/// Deliberately narrow: only existence + canonicalization on paths the
+/// CLI itself already has in hand, not a re-implementation of every
+/// validation the daemon/backend will do anyway (disk size limits,
+/// resolution format, etc.) — duplicating those here would just be two
+/// places to keep in sync for no real benefit, since the daemon has to
+/// validate them regardless of what the CLI checked first.
+fn validate_linux_paths(iso_path: &str, disk_path: &str) -> Result<(String, String), String> {
+    let canonical_iso = if iso_path.is_empty() {
+        String::new()
+    } else {
+        let canonical = std::fs::canonicalize(iso_path)
+            .map_err(|e| format!("ISO file not found: {iso_path} ({e})"))?;
+        canonical.to_string_lossy().into_owned()
+    };
+
+    let disk = std::path::Path::new(disk_path);
+    let canonical_disk = match disk.parent() {
+        // An empty parent (e.g. a bare relative filename like
+        // "disk.qcow2") means "current directory" — nothing to
+        // canonicalize against, and always "exists" in the relevant
+        // sense (`Path::new("").exists()` would actually return `false`
+        // since `""` isn't a valid path to stat, so this must be
+        // checked explicitly).
+        Some(parent) if !parent.as_os_str().is_empty() => {
+            let canonical_parent = std::fs::canonicalize(parent).map_err(|e| {
+                format!("disk directory does not exist: {} ({e})", parent.display())
+            })?;
+            let file_name = disk
+                .file_name()
+                .ok_or_else(|| format!("invalid disk path: {disk_path}"))?;
+            canonical_parent
+                .join(file_name)
+                .to_string_lossy()
+                .into_owned()
+        }
+        _ => disk_path.to_string(),
+    };
+
+    Ok((canonical_iso, canonical_disk))
+}
+
+/// Pre-flight checks for `andler create --kind android` (direct CLI
+/// flags) — see `validate_linux_paths`'s doc comment for why this is
+/// narrow and why the wizard/`--file` paths aren't covered here too.
+/// Both `base_image_path` and `magisk_dir` (if given) are required to
+/// already exist, so — unlike `disk_path` in `validate_linux_paths` —
+/// both can be canonicalized directly, no "doesn't exist yet" case to
+/// special-case. Returns `(canonical_base_image_path,
+/// canonical_magisk_dir)`.
+fn validate_android_paths(
+    base_image_path: &str,
+    magisk_dir: Option<&std::path::Path>,
+) -> Result<(String, Option<String>), String> {
+    let canonical_base_image = std::fs::canonicalize(base_image_path)
+        .map_err(|e| format!("base image not found: {base_image_path} ({e})"))?
+        .to_string_lossy()
+        .into_owned();
+
+    let canonical_magisk_dir = match magisk_dir {
+        Some(dir) => Some(
+            std::fs::canonicalize(dir)
+                .map_err(|e| {
+                    format!("Magisk directory does not exist: {} ({e})", dir.display())
+                })?
+                .to_string_lossy()
+                .into_owned(),
+        ),
+        None => None,
+    };
+
+    Ok((canonical_base_image, canonical_magisk_dir))
 }
 
 fn build_linux_request(
@@ -243,5 +350,84 @@ fn build_android_request(
         magisk_dir: magisk_dir
             .map(|p| p.to_string_lossy().into_owned())
             .unwrap_or_default(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validate_linux_paths_empty_iso_is_allowed() {
+        // Empty ISO path means "boot from existing disk" — not an error.
+        assert!(validate_linux_paths("", "/tmp").is_ok());
+    }
+
+    #[test]
+    fn validate_linux_paths_missing_iso_is_rejected() {
+        let err = validate_linux_paths("/nonexistent/path/to.iso", "/tmp").unwrap_err();
+        assert!(err.contains("ISO file not found"));
+    }
+
+    #[test]
+    fn validate_linux_paths_missing_disk_directory_is_rejected() {
+        let err =
+            validate_linux_paths("", "/nonexistent/andler-test-dir/disk.qcow2").unwrap_err();
+        assert!(err.contains("disk directory does not exist"));
+    }
+
+    #[test]
+    fn validate_linux_paths_bare_relative_disk_filename_is_allowed() {
+        // No parent component at all (current directory) — must not be
+        // treated as "parent doesn't exist".
+        assert!(validate_linux_paths("", "disk.qcow2").is_ok());
+    }
+
+    #[test]
+    fn validate_linux_paths_existing_disk_directory_is_allowed() {
+        assert!(validate_linux_paths("", "/tmp/disk.qcow2").is_ok());
+    }
+
+    #[test]
+    fn validate_linux_paths_canonicalizes_disk_directory() {
+        // "/tmp/../tmp/disk.qcow2" and "/tmp/disk.qcow2" must resolve to
+        // the same canonical path — the whole point of item 20c is that
+        // a `..`-containing path doesn't reach `andlerd` as-is.
+        let (_, disk) = validate_linux_paths("", "/tmp/../tmp/my-disk.qcow2").unwrap();
+        assert!(!disk.contains(".."));
+        assert!(disk.ends_with("my-disk.qcow2"));
+    }
+
+    #[test]
+    fn validate_linux_paths_canonicalizes_iso_path() {
+        // Reuse /tmp itself as a stand-in "ISO" — canonicalize only
+        // cares that the path exists and resolves it, doesn't care
+        // whether it's actually an ISO file.
+        let (iso, _) = validate_linux_paths("/tmp/../tmp", "disk.qcow2").unwrap();
+        assert!(!iso.contains(".."));
+    }
+
+    #[test]
+    fn validate_android_paths_missing_base_image_is_rejected() {
+        let err = validate_android_paths("/nonexistent/base.qcow2", None).unwrap_err();
+        assert!(err.contains("base image not found"));
+    }
+
+    #[test]
+    fn validate_android_paths_missing_magisk_dir_is_rejected() {
+        let dir = std::path::Path::new("/nonexistent/magisk-dir");
+        let err = validate_android_paths("/tmp", Some(dir)).unwrap_err();
+        assert!(err.contains("Magisk directory does not exist"));
+    }
+
+    #[test]
+    fn validate_android_paths_existing_paths_are_allowed() {
+        assert!(validate_android_paths("/tmp", Some(std::path::Path::new("/tmp"))).is_ok());
+    }
+
+    #[test]
+    fn validate_android_paths_canonicalizes_base_image() {
+        let (base_image, _) = validate_android_paths("/tmp/../tmp", None).unwrap();
+        assert!(!base_image.contains(".."));
     }
 }

@@ -1,11 +1,14 @@
 use andler_rpc::proto::andler_service_client::AndlerServiceClient;
 use andler_rpc::proto::{
     instance_kind, network_mode, render_backend, AudioBackend, CpuPriority, DiskFormat,
-    DisplayEngine, Empty, GetInstanceConfigResponse, InstanceIdRequest, LogStreamSource,
+    DisplayEngine, Empty, GetInstanceConfigResponse, InstanceIdRequest, InstanceStateKind,
+    LogStreamSource,
 };
+use std::io::IsTerminal;
 use tonic::transport::Channel;
 
-use crate::helpers::{format_bytes, format_bytes_per_sec, state_kind_name};
+use crate::helpers::{colorize_status, format_bytes, format_bytes_per_sec, state_kind_name};
+use crate::{CliLogSource, ListSortKey};
 
 pub async fn handle_status(
     client: &mut AndlerServiceClient<Channel>,
@@ -16,7 +19,10 @@ pub async fn handle_status(
         .await?
         .into_inner();
     let state = response.state();
-    println!("state: {}", state_kind_name(state));
+    println!(
+        "state: {}",
+        colorize_status(state, std::io::stdout().is_terminal())
+    );
     if !response.detail.is_empty() {
         println!("detail: {}", response.detail);
     }
@@ -26,15 +32,106 @@ pub async fn handle_status(
     Ok(())
 }
 
+/// Parses `--state` case-insensitively against the same display names
+/// `state_kind_name` produces (`Running`, `Stopped`, ...) — not
+/// prost's raw `InstanceStateKind::from_str_name` (`RUNNING`,
+/// `INSTANCE_STATE_UNSPECIFIED`, ...), which is the wire/proto spelling,
+/// not something a person would type on a command line.
+fn parse_state_filter(s: &str) -> Option<InstanceStateKind> {
+    [
+        InstanceStateKind::Created,
+        InstanceStateKind::Starting,
+        InstanceStateKind::Running,
+        InstanceStateKind::Paused,
+        InstanceStateKind::Stopping,
+        InstanceStateKind::Stopped,
+        InstanceStateKind::Error,
+    ]
+    .into_iter()
+    .find(|&kind| state_kind_name(kind).eq_ignore_ascii_case(s))
+}
+
+/// JSON shape for `andler list --json` — see `MetricsJson`'s doc comment
+/// for why this is a local struct rather than deriving `Serialize` on
+/// the generated `InstanceListEntry` directly. `state` is the same
+/// display name shown in the human-readable output (`"Running"`, not
+/// the proto's `"RUNNING"`) — a scripting consumer piping `--json`
+/// output would otherwise see a different spelling than someone reading
+/// the default output right next to it.
+#[derive(serde::Serialize)]
+struct InstanceListJson<'a> {
+    id: &'a str,
+    name: &'a str,
+    state: &'a str,
+}
+
 pub async fn handle_list(
     client: &mut AndlerServiceClient<Channel>,
     full_id: bool,
+    state: Option<String>,
+    name: Option<String>,
+    sort: ListSortKey,
+    json: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let state_filter = match state {
+        Some(raw) => match parse_state_filter(&raw) {
+            Some(kind) => Some(kind),
+            None => {
+                eprintln!(
+                    "unknown state {raw:?} (expected one of: Created, Starting, Running, \
+                     Paused, Stopping, Stopped, Error)"
+                );
+                std::process::exit(2);
+            }
+        },
+        None => None,
+    };
+    let name_filter = match name {
+        Some(pattern) => match regex::Regex::new(&pattern) {
+            Ok(re) => Some(re),
+            Err(err) => {
+                eprintln!("invalid --name regex {pattern:?}: {err}");
+                std::process::exit(2);
+            }
+        },
+        None => None,
+    };
+
     let response = client.list_instances(Empty {}).await?.into_inner();
-    if response.instances.is_empty() {
+    let is_tty = std::io::stdout().is_terminal();
+
+    let mut instances: Vec<_> = response
+        .instances
+        .into_iter()
+        .filter(|entry| state_filter.is_none_or(|want| entry.state() == want))
+        .filter(|entry| name_filter.as_ref().is_none_or(|re| re.is_match(&entry.name)))
+        .collect();
+
+    match sort {
+        ListSortKey::None => {}
+        ListSortKey::Name => instances.sort_by(|a, b| a.name.cmp(&b.name)),
+        ListSortKey::State => {
+            instances.sort_by_key(|entry| state_kind_name(entry.state()).to_string())
+        }
+    }
+
+    if json {
+        let entries: Vec<InstanceListJson> = instances
+            .iter()
+            .map(|entry| InstanceListJson {
+                id: &entry.instance_id,
+                name: &entry.name,
+                state: state_kind_name(entry.state()),
+            })
+            .collect();
+        println!("{}", serde_json::to_string(&entries)?);
+        return Ok(());
+    }
+
+    if instances.is_empty() {
         println!("no instances");
     } else {
-        for entry in response.instances {
+        for entry in instances {
             // Shortened, Docker-`ps`-style prefix by default; any prefix
             // of this (down to a single hex char) is accepted by every
             // command that takes an `<instance_id>` — see
@@ -45,7 +142,12 @@ pub async fn handle_list(
             } else {
                 short_id(&entry.instance_id)
             };
-            println!("{}  {}  {}", id, state_kind_name(entry.state()), entry.name);
+            println!(
+                "{}  {}  {}",
+                id,
+                colorize_status(entry.state(), is_tty),
+                entry.name
+            );
         }
     }
     Ok(())
@@ -71,24 +173,99 @@ pub async fn handle_config(
     Ok(())
 }
 
+/// Pure filter logic behind `--source`/`--grep` on `andler logs` —
+/// extracted so it's unit-testable without a real gRPC stream. See
+/// PLAN.md, item 17, "Logs filtering and tail".
+fn log_line_matches_filters(
+    line: &andler_rpc::proto::LogLineResponse,
+    source: &Option<CliLogSource>,
+    grep_re: &Option<regex::Regex>,
+) -> bool {
+    let source_ok = match source {
+        None => true,
+        Some(CliLogSource::Stdout) => line.source() == LogStreamSource::Stdout,
+        Some(CliLogSource::Stderr) => line.source() == LogStreamSource::Stderr,
+    };
+    source_ok && grep_re.as_ref().is_none_or(|re| re.is_match(&line.line))
+}
+
 pub async fn handle_logs(
     client: &mut AndlerServiceClient<Channel>,
     instance_id: String,
+    source: Option<CliLogSource>,
+    grep: Option<String>,
+    tail: Option<usize>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let grep_re = match grep {
+        Some(pattern) => match regex::Regex::new(&pattern) {
+            Ok(re) => Some(re),
+            Err(err) => {
+                eprintln!("invalid --grep regex {pattern:?}: {err}");
+                std::process::exit(2);
+            }
+        },
+        None => None,
+    };
+
     let mut stream = client
         .stream_instance_logs(InstanceIdRequest { instance_id })
         .await?
         .into_inner();
 
-    let mut got_any_line = false;
-    while let Some(line) = stream.message().await? {
-        got_any_line = true;
+    let print_line = |line: &andler_rpc::proto::LogLineResponse| {
         let prefix = match line.source() {
             LogStreamSource::Stdout => "stdout",
             LogStreamSource::Stderr => "stderr",
             LogStreamSource::Unspecified => "unspecified",
         };
         println!("[{prefix}] {}", line.line);
+    };
+
+    let mut got_any_line = false;
+
+    if let Some(n) = tail {
+        // See the `--tail` doc comment on `Command::Logs` in main.rs:
+        // andlerd sends history and live lines as one unbroken stream
+        // with no marker between them, so a short idle gap is used as a
+        // heuristic for "history looks done". A ring buffer holds at
+        // most `n` filtered lines while waiting for that gap (or the
+        // stream ending); once observed, the buffer is flushed and this
+        // switches to the exact same plain streaming loop used without
+        // `--tail`, reusing the same `stream` (nothing is lost or
+        // re-read at the switch — it's still one single stream, this
+        // just stops timing individual `.message()` calls).
+        let mut ring: std::collections::VecDeque<andler_rpc::proto::LogLineResponse> =
+            std::collections::VecDeque::with_capacity(n.min(10_000));
+        const IDLE_GAP: std::time::Duration = std::time::Duration::from_millis(300);
+
+        loop {
+            match tokio::time::timeout(IDLE_GAP, stream.message()).await {
+                Ok(Ok(Some(line))) => {
+                    got_any_line = true;
+                    if log_line_matches_filters(&line, &source, &grep_re) {
+                        if ring.len() == n {
+                            ring.pop_front();
+                        }
+                        if n > 0 {
+                            ring.push_back(line);
+                        }
+                    }
+                }
+                Ok(Ok(None)) => break, // stream closed before any gap — flush and stop below
+                Ok(Err(status)) => return Err(status.into()),
+                Err(_elapsed) => break, // idle gap observed — assume history is done
+            }
+        }
+        for line in ring.drain(..) {
+            print_line(&line);
+        }
+    }
+
+    while let Some(line) = stream.message().await? {
+        got_any_line = true;
+        if log_line_matches_filters(&line, &source, &grep_re) {
+            print_line(&line);
+        }
     }
 
     if !got_any_line {
@@ -100,9 +277,35 @@ pub async fn handle_logs(
     Ok(())
 }
 
+/// JSON shape for a single metrics sample (`--json`). A local struct
+/// rather than deriving `Serialize` on the proto-generated
+/// `ResourceMetricsResponse` directly — prost doesn't derive `Serialize`
+/// for generated messages in this project (see `services/andler-rpc`),
+/// so this mirrors its fields instead of adding a serde dependency to
+/// the wire format itself. Field names match the plan's own example
+/// output (`cpu_percent`, `rss_bytes`, ...) for the CLI's `--json`
+/// consumers, not the internal proto field names verbatim (e.g.
+/// `memory_used_bytes` becomes `rss_bytes` here, matching what a
+/// scripting consumer of `andler metrics --json` would expect to see
+/// after already reading `--once`'s human-readable `rss=` column).
+#[derive(serde::Serialize)]
+struct MetricsJson {
+    cpu_percent: Option<f32>,
+    rss_bytes: Option<u64>,
+    disk_read_bytes_sec: Option<u64>,
+    disk_write_bytes_sec: Option<u64>,
+    net_rx_bytes_sec: Option<u64>,
+    net_tx_bytes_sec: Option<u64>,
+    vram_used_bytes: Option<u64>,
+    vram_total_bytes: Option<u64>,
+    gpu_load_percent: Option<f32>,
+}
+
 pub async fn handle_metrics(
     client: &mut AndlerServiceClient<Channel>,
     instance_id: String,
+    once: bool,
+    json: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut stream = client
         .stream_resource_metrics(InstanceIdRequest { instance_id })
@@ -112,45 +315,65 @@ pub async fn handle_metrics(
     let mut got_any_sample = false;
     while let Some(m) = stream.message().await? {
         got_any_sample = true;
-        let cpu = m
-            .cpu_percent
-            .map(|v| format!("{:.1}%", v))
-            .unwrap_or_else(|| "N/A".to_string());
-        let rss = m
-            .memory_used_bytes
-            .map(|v| format_bytes(v))
-            .unwrap_or_else(|| "N/A".to_string());
-        let dr = m
-            .disk_read_bytes_per_sec
-            .map(|v| format_bytes_per_sec(v))
-            .unwrap_or_else(|| "N/A".to_string());
-        let dw = m
-            .disk_write_bytes_per_sec
-            .map(|v| format_bytes_per_sec(v))
-            .unwrap_or_else(|| "N/A".to_string());
-        let nr = m
-            .net_rx_bytes_per_sec
-            .map(|v| format_bytes_per_sec(v))
-            .unwrap_or_else(|| "N/A".to_string());
-        let nt = m
-            .net_tx_bytes_per_sec
-            .map(|v| format_bytes_per_sec(v))
-            .unwrap_or_else(|| "N/A".to_string());
-        let vram = match (m.vram_used_bytes, m.vram_total_bytes) {
-            (Some(used), Some(total)) => {
-                format!("{}/{}", format_bytes(used), format_bytes(total))
-            }
-            (Some(used), None) => format_bytes(used),
-            _ => "N/A".to_string(),
-        };
-        let gpu_load = m
-            .gpu_load_percent
-            .map(|v| format!("{:.0}%", v))
-            .unwrap_or_else(|| "N/A".to_string());
-        println!(
-            "cpu={cpu:<8} rss={rss:<10} disk_r={dr:<12} disk_w={dw:<12} \
-             net_rx={nr:<12} net_tx={nt:<12} vram={vram:<16} gpu={gpu_load:<6}"
-        );
+
+        if json {
+            let sample = MetricsJson {
+                cpu_percent: m.cpu_percent,
+                rss_bytes: m.memory_used_bytes,
+                disk_read_bytes_sec: m.disk_read_bytes_per_sec,
+                disk_write_bytes_sec: m.disk_write_bytes_per_sec,
+                net_rx_bytes_sec: m.net_rx_bytes_per_sec,
+                net_tx_bytes_sec: m.net_tx_bytes_per_sec,
+                vram_used_bytes: m.vram_used_bytes,
+                vram_total_bytes: m.vram_total_bytes,
+                gpu_load_percent: m.gpu_load_percent,
+            };
+            println!("{}", serde_json::to_string(&sample)?);
+        } else {
+            let cpu = m
+                .cpu_percent
+                .map(|v| format!("{:.1}%", v))
+                .unwrap_or_else(|| "N/A".to_string());
+            let rss = m
+                .memory_used_bytes
+                .map(|v| format_bytes(v))
+                .unwrap_or_else(|| "N/A".to_string());
+            let dr = m
+                .disk_read_bytes_per_sec
+                .map(|v| format_bytes_per_sec(v))
+                .unwrap_or_else(|| "N/A".to_string());
+            let dw = m
+                .disk_write_bytes_per_sec
+                .map(|v| format_bytes_per_sec(v))
+                .unwrap_or_else(|| "N/A".to_string());
+            let nr = m
+                .net_rx_bytes_per_sec
+                .map(|v| format_bytes_per_sec(v))
+                .unwrap_or_else(|| "N/A".to_string());
+            let nt = m
+                .net_tx_bytes_per_sec
+                .map(|v| format_bytes_per_sec(v))
+                .unwrap_or_else(|| "N/A".to_string());
+            let vram = match (m.vram_used_bytes, m.vram_total_bytes) {
+                (Some(used), Some(total)) => {
+                    format!("{}/{}", format_bytes(used), format_bytes(total))
+                }
+                (Some(used), None) => format_bytes(used),
+                _ => "N/A".to_string(),
+            };
+            let gpu_load = m
+                .gpu_load_percent
+                .map(|v| format!("{:.0}%", v))
+                .unwrap_or_else(|| "N/A".to_string());
+            println!(
+                "cpu={cpu:<8} rss={rss:<10} disk_r={dr:<12} disk_w={dw:<12} \
+                 net_rx={nr:<12} net_tx={nt:<12} vram={vram:<16} gpu={gpu_load:<6}"
+            );
+        }
+
+        if once {
+            break;
+        }
     }
 
     if !got_any_sample {
@@ -338,7 +561,112 @@ fn print_instance_config(config: GetInstanceConfigResponse) {
 
 #[cfg(test)]
 mod tests {
-    use super::short_id;
+    use super::{log_line_matches_filters, parse_state_filter, short_id, MetricsJson};
+    use crate::CliLogSource;
+    use andler_rpc::proto::{InstanceStateKind, LogLineResponse, LogStreamSource};
+
+    fn line(source: LogStreamSource, text: &str) -> LogLineResponse {
+        let mut msg = LogLineResponse {
+            line: text.to_string(),
+            ..Default::default()
+        };
+        msg.set_source(source);
+        msg
+    }
+
+    #[test]
+    fn log_filter_no_filters_matches_everything() {
+        let l = line(LogStreamSource::Stdout, "anything at all");
+        assert!(log_line_matches_filters(&l, &None, &None));
+    }
+
+    #[test]
+    fn log_filter_source_stdout_excludes_stderr() {
+        let stdout_line = line(LogStreamSource::Stdout, "hello");
+        let stderr_line = line(LogStreamSource::Stderr, "hello");
+        let filter = Some(CliLogSource::Stdout);
+        assert!(log_line_matches_filters(&stdout_line, &filter, &None));
+        assert!(!log_line_matches_filters(&stderr_line, &filter, &None));
+    }
+
+    #[test]
+    fn log_filter_source_stderr_excludes_stdout() {
+        let stdout_line = line(LogStreamSource::Stdout, "hello");
+        let stderr_line = line(LogStreamSource::Stderr, "hello");
+        let filter = Some(CliLogSource::Stderr);
+        assert!(!log_line_matches_filters(&stdout_line, &filter, &None));
+        assert!(log_line_matches_filters(&stderr_line, &filter, &None));
+    }
+
+    #[test]
+    fn log_filter_grep_matches_pattern() {
+        let re = Some(regex::Regex::new("error|warning").unwrap());
+        let matching = line(LogStreamSource::Stderr, "a warning occurred");
+        let non_matching = line(LogStreamSource::Stdout, "all good here");
+        assert!(log_line_matches_filters(&matching, &None, &re));
+        assert!(!log_line_matches_filters(&non_matching, &None, &re));
+    }
+
+    #[test]
+    fn log_filter_source_and_grep_combine_with_and() {
+        let re = Some(regex::Regex::new("error").unwrap());
+        let filter = Some(CliLogSource::Stderr);
+        // Right source, wrong content.
+        let l1 = line(LogStreamSource::Stderr, "all fine");
+        assert!(!log_line_matches_filters(&l1, &filter, &re));
+        // Right content, wrong source.
+        let l2 = line(LogStreamSource::Stdout, "an error happened");
+        assert!(!log_line_matches_filters(&l2, &filter, &re));
+        // Both right.
+        let l3 = line(LogStreamSource::Stderr, "an error happened");
+        assert!(log_line_matches_filters(&l3, &filter, &re));
+    }
+
+    #[test]
+    fn parse_state_filter_is_case_insensitive() {
+        assert_eq!(parse_state_filter("running"), Some(InstanceStateKind::Running));
+        assert_eq!(parse_state_filter("RUNNING"), Some(InstanceStateKind::Running));
+        assert_eq!(parse_state_filter("Running"), Some(InstanceStateKind::Running));
+    }
+
+    #[test]
+    fn parse_state_filter_covers_every_real_state() {
+        for (input, expected) in [
+            ("Created", InstanceStateKind::Created),
+            ("Starting", InstanceStateKind::Starting),
+            ("Paused", InstanceStateKind::Paused),
+            ("Stopping", InstanceStateKind::Stopping),
+            ("Stopped", InstanceStateKind::Stopped),
+            ("Error", InstanceStateKind::Error),
+        ] {
+            assert_eq!(parse_state_filter(input), Some(expected));
+        }
+    }
+
+    #[test]
+    fn parse_state_filter_rejects_unknown_input() {
+        assert_eq!(parse_state_filter("bogus"), None);
+        assert_eq!(parse_state_filter(""), None);
+    }
+
+    #[test]
+    fn metrics_json_serializes_expected_field_names() {
+        let sample = MetricsJson {
+            cpu_percent: Some(12.3),
+            rss_bytes: Some(2_254_857_830),
+            disk_read_bytes_sec: Some(0),
+            disk_write_bytes_sec: Some(0),
+            net_rx_bytes_sec: Some(1_258_291),
+            net_tx_bytes_sec: Some(314_572),
+            vram_used_bytes: None,
+            vram_total_bytes: None,
+            gpu_load_percent: None,
+        };
+        let json = serde_json::to_string(&sample).unwrap();
+        assert!(json.contains("\"cpu_percent\":12.3"));
+        assert!(json.contains("\"rss_bytes\":2254857830"));
+        assert!(json.contains("\"vram_used_bytes\":null"));
+    }
 
     #[test]
     fn short_id_truncates_full_uuid_to_eight_chars() {

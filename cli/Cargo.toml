@@ -16,7 +16,11 @@ andler-rpc = { path = "../services/andler-rpc" }
 tonic = { workspace = true }
 tokio = { workspace = true }
 clap = { workspace = true }
+clap_complete = "4.6"
+indicatif = "0.18"
 serde = { workspace = true }
+serde_json = "1"
+regex = "1"
 thiserror = { workspace = true }
 toml = "0.8"
 # Интерактивный wizard — стрелки/Enter/Space (Select/MultiSelect/Text/Confirm).

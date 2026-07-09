@@ -35,6 +35,19 @@ pub enum InstanceFileError {
         #[source]
         source: toml::de::Error,
     },
+    /// A path field in the TOML doesn't exist or can't be resolved — see
+    /// PLAN.md, item 20c, "No path canonicalization". Unlike `Read`/
+    /// `Parse` above, `field` names which TOML key was the problem
+    /// (`iso_path`, `disk_path`, `base_image_path`, `magisk_dir`), since
+    /// there's no single file path to report here — the *instance file*
+    /// itself parsed fine, it's a path *inside* it that's the problem.
+    #[error("invalid {field} {path:?}: {source}")]
+    InvalidPath {
+        field: &'static str,
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
 }
 
 /// Result of parsing an instance TOML file — either a LinuxVm or AndroidVm request.
@@ -156,16 +169,83 @@ pub struct InstanceFile {
 }
 
 impl InstanceFile {
-    /// Reads and parses a TOML file.
+    /// Reads and parses a TOML file, then canonicalizes every
+    /// user-supplied filesystem path field found in it (`iso_path`,
+    /// `disk_path`'s parent directory, `base_image_path`, `magisk_dir`)
+    /// — see PLAN.md, item 20c, "No path canonicalization". This is
+    /// the actual attack surface that section's own example describes
+    /// (`path = "../../etc/shadow"` in a TOML file): unlike CLI flags
+    /// (see `create.rs::validate_linux_paths`/`validate_android_paths`,
+    /// the same idea applied to `--iso-path`/`--disk-path`/etc.), a
+    /// `--file` TOML's paths previously went completely unexamined by
+    /// the CLI, straight through to whatever `into_request`/
+    /// `into_android_request` built from them.
     pub fn load(path: &Path) -> Result<Self, InstanceFileError> {
         let text = std::fs::read_to_string(path).map_err(|source| InstanceFileError::Read {
             path: path.to_path_buf(),
             source,
         })?;
-        toml::from_str(&text).map_err(|source| InstanceFileError::Parse {
+        let mut parsed: Self = toml::from_str(&text).map_err(|source| InstanceFileError::Parse {
             path: path.to_path_buf(),
             source,
-        })
+        })?;
+        parsed.canonicalize_paths()?;
+        Ok(parsed)
+    }
+
+    /// See `load`'s doc comment. `disk_path` is special-cased the same
+    /// way `create.rs::validate_linux_paths` special-cases `--disk-path`
+    /// — it usually doesn't exist yet (the common "create a new disk"
+    /// case), so only its parent directory is canonicalized and the
+    /// (not-yet-existing) file name is reattached, rather than trying
+    /// and failing to canonicalize the whole path.
+    fn canonicalize_paths(&mut self) -> Result<(), InstanceFileError> {
+        if let Some(iso_path) = &self.iso_path {
+            self.iso_path = Some(std::fs::canonicalize(iso_path).map_err(|source| {
+                InstanceFileError::InvalidPath {
+                    field: "iso_path",
+                    path: iso_path.clone(),
+                    source,
+                }
+            })?);
+        }
+
+        if let Some(disk_path) = &self.disk_path {
+            if let Some(parent) = disk_path.parent().filter(|p| !p.as_os_str().is_empty()) {
+                let canonical_parent =
+                    std::fs::canonicalize(parent).map_err(|source| InstanceFileError::InvalidPath {
+                        field: "disk_path",
+                        path: disk_path.clone(),
+                        source,
+                    })?;
+                if let Some(file_name) = disk_path.file_name() {
+                    self.disk_path = Some(canonical_parent.join(file_name));
+                }
+            }
+        }
+
+        if let Some(base_image_path) = &self.base_image_path {
+            let canonical = std::fs::canonicalize(base_image_path).map_err(|source| {
+                InstanceFileError::InvalidPath {
+                    field: "base_image_path",
+                    path: PathBuf::from(base_image_path),
+                    source,
+                }
+            })?;
+            self.base_image_path = Some(canonical.to_string_lossy().into_owned());
+        }
+
+        if let Some(magisk_dir) = &self.magisk_dir {
+            self.magisk_dir = Some(std::fs::canonicalize(magisk_dir).map_err(|source| {
+                InstanceFileError::InvalidPath {
+                    field: "magisk_dir",
+                    path: magisk_dir.clone(),
+                    source,
+                }
+            })?);
+        }
+
+        Ok(())
     }
 
     /// Determines the instance type and returns the appropriate request.
@@ -639,6 +719,87 @@ mod tests {
         assert!(matches!(err, InstanceFileError::Parse { .. }));
 
         std::fs::remove_file(&path).ok();
+        std::fs::remove_dir(&dir).ok();
+    }
+
+    #[test]
+    fn load_rejects_nonexistent_iso_path() {
+        // Regression test for PLAN.md item 20c: previously, paths
+        // referenced *inside* a successfully-parsed TOML went completely
+        // unexamined by `load()` — a nonexistent (or, per the plan's own
+        // example, maliciously traversal-ish) path would sail straight
+        // through.
+        let dir = std::env::temp_dir().join(format!(
+            "andler-cli-test-badpath-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("instance.toml");
+        std::fs::write(
+            &path,
+            r#"
+                name = "test-vm"
+                iso_path = "/nonexistent/andler-test/does-not-exist.iso"
+                disk_path = "disk.qcow2"
+                ovmf_vars_path = "/tmp/test_VARS.fd"
+            "#,
+        )
+        .unwrap();
+
+        let err = InstanceFile::load(&path).expect_err("nonexistent iso_path must be rejected");
+        assert!(matches!(
+            err,
+            InstanceFileError::InvalidPath {
+                field: "iso_path",
+                ..
+            }
+        ));
+
+        std::fs::remove_file(&path).ok();
+        std::fs::remove_dir(&dir).ok();
+    }
+
+    #[test]
+    fn load_canonicalizes_iso_path_and_disk_parent() {
+        let dir = std::env::temp_dir().join(format!(
+            "andler-cli-test-canon-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let iso_path = dir.join("test.iso");
+        std::fs::write(&iso_path, b"fake iso contents").unwrap();
+        let toml_path = dir.join("instance.toml");
+        // `..`-containing but still resolvable paths — the whole point
+        // is that `load()` resolves these before anything downstream
+        // sees them.
+        let messy_iso = dir.join("..").join(dir.file_name().unwrap()).join("test.iso");
+        std::fs::write(
+            &toml_path,
+            format!(
+                r#"
+                    name = "test-vm"
+                    iso_path = {:?}
+                    disk_path = "new-disk.qcow2"
+                    ovmf_vars_path = "/tmp/test_VARS.fd"
+                "#,
+                messy_iso.to_string_lossy()
+            ),
+        )
+        .unwrap();
+
+        let file = InstanceFile::load(&toml_path).expect("load must succeed");
+        let resolved_iso = file.iso_path.expect("iso_path must be set");
+        assert!(!resolved_iso.to_string_lossy().contains(".."));
+        assert_eq!(resolved_iso, std::fs::canonicalize(&iso_path).unwrap());
+
+        // disk_path doesn't exist yet (fresh-disk case) — only its
+        // parent gets canonicalized, the file name is preserved as-is.
+        let resolved_disk = file.disk_path.expect("disk_path must be set");
+        assert_eq!(resolved_disk.file_name().unwrap(), "new-disk.qcow2");
+        assert!(!resolved_disk.to_string_lossy().contains(".."));
+
+        std::fs::remove_file(&iso_path).ok();
+        std::fs::remove_file(&toml_path).ok();
         std::fs::remove_dir(&dir).ok();
     }
 }

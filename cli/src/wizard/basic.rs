@@ -130,16 +130,23 @@ pub fn ask_name(prefilled: Option<String>) -> Result<String, WizardError> {
 
 pub fn ask_iso_path(prefilled: Option<String>) -> Result<String, WizardError> {
     if let Some(p) = prefilled {
+        validate_iso_path(&p)?;
         return Ok(p);
     }
-    Text::new("Path to ISO image (Enter — skip, boot from disk):")
+    let path = Text::new("Path to ISO image (Enter — skip, boot from disk):")
         .with_placeholder("/home/user/isos/cachyos.iso")
         .with_help_message(
             "Enter path to .iso file, or press Enter to skip (boot from existing disk)",
         )
         .with_default("")
+        .with_validator(|s: &str| match validate_iso_path(s) {
+            Ok(()) => Ok(inquire::validator::Validation::Valid),
+            Err(e) => Ok(inquire::validator::Validation::Invalid(e.into())),
+        })
         .prompt()
-        .map_err(map_inquire_err)
+        .map_err(map_inquire_err)?;
+    validate_iso_path(&path)?;
+    Ok(path)
 }
 
 pub fn ask_base_image(prefilled: Option<String>) -> Result<String, WizardError> {
@@ -218,6 +225,26 @@ fn validate_name(
     }
 }
 
+/// Unlike [`validate_base_image_path`], an empty ISO path is valid —
+/// it means "boot from an existing disk, no install media" (see the
+/// prompt's own help text in `ask_iso_path`). Only a *non-empty* path
+/// that doesn't actually exist is rejected — this was previously not
+/// checked at all here (see PLAN.md, item 15, "Config validation before
+/// creation": found while adding the CLI-mode equivalent in
+/// `cli/src/create.rs::validate_linux_paths`), so a typo'd `--iso-path`
+/// only ever surfaced as an opaque daemon-side error well after the
+/// wizard had already finished.
+fn validate_iso_path(path: &str) -> Result<(), WizardError> {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return Ok(());
+    }
+    if !Path::new(trimmed).exists() {
+        return Err(WizardError::Inquire(format!("ISO file not found: {trimmed}")));
+    }
+    Ok(())
+}
+
 fn validate_base_image_path(path: &str) -> Result<(), WizardError> {
     let trimmed = path.trim();
     if trimmed.is_empty() {
@@ -253,5 +280,24 @@ mod tests {
         assert_eq!(linux.kind(), WizardKind::Linux);
         assert_eq!(linux.disk_size_gib(), 256);
         assert_eq!(linux.instances_root(), "/tmp/instances");
+    }
+
+    #[test]
+    fn validate_iso_path_empty_is_valid() {
+        assert!(validate_iso_path("").is_ok());
+        assert!(validate_iso_path("   ").is_ok());
+    }
+
+    #[test]
+    fn validate_iso_path_missing_file_is_rejected() {
+        let err = validate_iso_path("/nonexistent/path/to.iso").unwrap_err();
+        assert!(matches!(err, WizardError::Inquire(msg) if msg.contains("ISO file not found")));
+    }
+
+    #[test]
+    fn validate_iso_path_existing_path_is_valid() {
+        // /tmp always exists in the test environment; existence is all
+        // this function checks, not that it's specifically a file.
+        assert!(validate_iso_path("/tmp").is_ok());
     }
 }
