@@ -12,7 +12,7 @@ mod summary;
 use std::path::PathBuf;
 
 use andler_core::{
-    ArmTranslator, AudioBackend, DisplayEngine, RenderBackend,
+    ArmTranslator, AudioBackend, DisplayEngine, NetworkMode, RenderBackend,
 };
 use andler_firmware::{FirmwareError, HardwareDefaults};
 use andler_rpc::proto::{
@@ -323,7 +323,7 @@ pub(crate) fn build_linux_request(
     let gpu = build_gpu_config(advanced, detected);
     let display = build_display_config(advanced, detected, gpu.render_backend.clone());
     let audio = build_audio_config(advanced, detected);
-    let network = build_network_config(detected);
+    let network = build_network_config(advanced, detected)?;
     let input = build_input_config(advanced);
     let cpu = build_cpu_config(advanced);
     let memory = build_memory_config(advanced);
@@ -442,12 +442,29 @@ fn build_audio_config(
     audio
 }
 
-fn build_network_config(detected: &HardwareDefaults) -> andler_core::NetworkConfig {
+fn build_network_config(advanced: Option<&AdvancedConfig>, detected: &HardwareDefaults) -> Result<andler_core::NetworkConfig, WizardError> {
     let mut network = andler_core::NetworkConfig::reference_default();
-    network.nat_backend = summary::format_nat_backend(detected.passt_available);
-    network
+    
+    match advanced.map(|a| a.network_mode.clone()) {
+        Some(NetworkMode::Bridge { .. }) => {
+            network.mode = NetworkMode::Bridge {
+                interface: advanced
+                    .unwrap()
+                    .bridge_interface
+                    .clone()
+                    .ok_or(WizardError::InvalidConfig("Bridge mode requires bridge interface".to_string()))?,
+            };
+        }
+        Some(NetworkMode::Isolated) => {
+            network.mode = NetworkMode::Isolated;
+        }
+        Some(NetworkMode::Nat) | None => {
+            network.nat_backend = summary::format_nat_backend(detected.passt_available);
+        }
+    }
+    
+    Ok(network)
 }
-
 fn build_input_config(advanced: Option<&AdvancedConfig>) -> andler_core::InputConfig {
     let mut input = andler_core::InputConfig::reference_default();
     if let Some(adv) = advanced {
@@ -601,6 +618,9 @@ pub enum WizardError {
     Inquire(String),
 
     #[error("{0}")]
+    InvalidConfig(String),
+
+    #[error("{0}")]
     Firmware(#[from] FirmwareError),
 }
 
@@ -664,6 +684,8 @@ mod tests {
             gapps: false,
             microg: false,
             root_mode: None,
+            network_mode: NetworkMode::Nat,
+            bridge_interface: None,
         };
         let (req, _) = build_linux_request(&basic, Some(&advanced), &sample_detected()).unwrap();
         let input = req.input.expect("input");
@@ -772,5 +794,79 @@ mod tests {
         };
         let result = run(partial).await;
         assert!(matches!(result, Err(WizardError::NotTty)));
+    }
+
+    #[test]
+    fn test_build_network_config() {
+        let detected = sample_detected();
+        
+        // NAT mode (default)
+        let advanced = AdvancedConfig {
+            cdrom_bus: None,
+            compact_on_shutdown: false,
+            gpu_render: RenderBackend::Cpu,
+            gpu_memory_mib: 0,
+            display_resolution: Resolution::new(0, 0),
+            fullscreen: false,
+            audio_backend: AudioBackend::Pulseaudio,
+            clipboard_enabled: false,
+            input_pointer: PointerMode::Mouse,
+            cpu_cores: 1,
+            memory_gib: 1,
+            arm_translator: None,
+            gapps: false,
+            microg: false,
+            root_mode: None,
+            network_mode: NetworkMode::Nat,
+            bridge_interface: None,
+        };
+        let network = build_network_config(Some(&advanced), &detected).unwrap();
+        assert!(matches!(network.mode, NetworkMode::Nat));
+        
+        // Bridge mode
+        let advanced_bridge = AdvancedConfig {
+            cdrom_bus: None,
+            compact_on_shutdown: false,
+            gpu_render: RenderBackend::Cpu,
+            gpu_memory_mib: 0,
+            display_resolution: Resolution::new(0, 0),
+            fullscreen: false,
+            audio_backend: AudioBackend::Pulseaudio,
+            clipboard_enabled: false,
+            input_pointer: PointerMode::Mouse,
+            cpu_cores: 1,
+            memory_gib: 1,
+            arm_translator: None,
+            gapps: false,
+            microg: false,
+            root_mode: None,
+            network_mode: NetworkMode::Bridge { interface: "br0".to_string() },
+            bridge_interface: Some("br0".to_string()),
+        };
+        let network = build_network_config(Some(&advanced_bridge), &detected).unwrap();
+        assert!(matches!(network.mode, NetworkMode::Bridge { .. }));
+        
+        // Isolated mode
+        let advanced_isolated = AdvancedConfig {
+            cdrom_bus: None,
+            compact_on_shutdown: false,
+            gpu_render: RenderBackend::Cpu,
+            gpu_memory_mib: 0,
+            display_resolution: Resolution::new(0, 0),
+            fullscreen: false,
+            audio_backend: AudioBackend::Pulseaudio,
+            clipboard_enabled: false,
+            input_pointer: PointerMode::Mouse,
+            cpu_cores: 1,
+            memory_gib: 1,
+            arm_translator: None,
+            gapps: false,
+            microg: false,
+            root_mode: None,
+            network_mode: NetworkMode::Isolated,
+            bridge_interface: None,
+        };
+        let network = build_network_config(Some(&advanced_isolated), &detected).unwrap();
+        assert!(matches!(network.mode, NetworkMode::Isolated));
     }
 }

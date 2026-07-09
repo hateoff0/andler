@@ -1,7 +1,7 @@
 //! Advanced wizard questions (GPU, display, audio, input, CPU, Android extras).
 
 use andler_core::{
-    AudioBackend, CdromBus, PointerMode, RenderBackend, Resolution,
+    AudioBackend, CdromBus, NetworkMode, PointerMode, RenderBackend, Resolution,
 };
 use andler_firmware::HardwareDefaults;
 use inquire::{Confirm, CustomType, Select, Text};
@@ -37,6 +37,8 @@ pub struct AdvancedConfig {
     pub gapps: bool,
     pub microg: bool,
     pub root_mode: Option<(CliRootMode, String)>,
+    pub network_mode: NetworkMode,
+    pub bridge_interface: Option<String>,
 }
 
 pub fn run_linux(
@@ -61,6 +63,13 @@ pub fn run_linux(
         )?)
     };
 
+    let network_mode = ask_network_mode(pref.map(|p| p.network_mode.clone()))?;
+    let bridge_interface = if let NetworkMode::Bridge { .. } = network_mode {
+        ask_bridge_interface(pref.and_then(|p| p.bridge_interface.clone()))?
+    } else {
+        None
+    };
+
     Ok(AdvancedConfig {
         cdrom_bus,
         compact_on_shutdown: ask_compact_on_shutdown(pref.map(|p| p.compact_on_shutdown))?,
@@ -77,6 +86,8 @@ pub fn run_linux(
         gapps: false,
         microg: false,
         root_mode: None,
+        network_mode,
+        bridge_interface,
     })
 }
 
@@ -92,6 +103,12 @@ pub fn run_android(
         false
     } else {
         ask_microg(pref.map(|p| p.microg))?
+    };
+    let network_mode = ask_network_mode(pref.map(|p| p.network_mode.clone()))?;
+    let bridge_interface = if let NetworkMode::Bridge { .. } = network_mode {
+        ask_bridge_interface(pref.and_then(|p| p.bridge_interface.clone()))?
+    } else {
+        None
     };
 
     Ok(AdvancedConfig {
@@ -113,6 +130,8 @@ pub fn run_android(
         gapps,
         microg,
         root_mode: Some(ask_root_mode(pref.and_then(|p| p.root_mode.clone()))?),
+        network_mode,
+        bridge_interface,
     })
 }
 
@@ -558,6 +577,48 @@ pub fn parse_gpu_memory(s: &str) -> Result<u64, String> {
     }
 }
 
+/// Ask user to select network mode.
+fn ask_network_mode(_prefilled: Option<NetworkMode>) -> Result<NetworkMode, WizardError> {
+    let options = vec!["NAT (default)", "Bridge", "Isolated"];
+    let selection = Select::new("Network mode:", options)
+        .prompt()
+        .map_err(map_inquire_err)?;
+
+    Ok(match &*selection {
+        "NAT (default)" | "NAT" => NetworkMode::Nat,
+        "Bridge" => NetworkMode::Bridge { interface: String::new() },
+        "Isolated" => NetworkMode::Isolated,
+        _ => unreachable!(),
+    })
+}
+
+/// Ask user to provide bridge interface name.
+fn ask_bridge_interface(prefilled: Option<String>) -> Result<Option<String>, WizardError> {
+    let prompt = Text::new("Bridge interface name (e.g., br0):")
+        .with_placeholder("br0")
+        .with_validator(|input: &str| {
+            if input.trim().is_empty() {
+                Ok(inquire::validator::Validation::Invalid(
+                    inquire::validator::ErrorMessage::Custom("Bridge interface name cannot be empty".to_string()),
+                ))
+            } else if !input.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_') {
+                Ok(inquire::validator::Validation::Invalid(
+                    inquire::validator::ErrorMessage::Custom("Interface name can only contain letters, numbers, hyphens, and underscores".to_string()),
+                ))
+            } else {
+                Ok(inquire::validator::Validation::Valid)
+            }
+        })
+        .with_default(&prefilled.unwrap_or_default())
+        .prompt()
+        .map_err(map_inquire_err)?;
+
+    if prompt.trim().is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(prompt.trim().to_string()))
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;

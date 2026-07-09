@@ -1,7 +1,7 @@
 //! Summary screen and confirmation before VM creation.
 
 use andler_core::{
-    AudioBackend, CdromBus, DisplayEngine, NatBackend, PointerMode, RenderBackend,
+    AudioBackend, CdromBus, DisplayEngine, NetworkMode, NatBackend, PointerMode, RenderBackend,
     Resolution,
 };
 use andler_firmware::HardwareDefaults;
@@ -82,10 +82,16 @@ fn print_summary(
         detected.display_engine
     };
 
-    let nat_label = if detected.passt_available {
-        "NAT/passt"
-    } else {
-        "NAT"
+    let nat_label = match advanced.map(|a| a.network_mode.clone()) {
+        Some(NetworkMode::Bridge { .. }) => "Bridge",
+        Some(NetworkMode::Isolated) => "Isolated",
+        Some(NetworkMode::Nat) | None => {
+            if detected.passt_available {
+                "NAT/passt"
+            } else {
+                "NAT"
+            }
+        }
     };
 
     println!();
