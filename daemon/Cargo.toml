@@ -20,6 +20,13 @@ tokio = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+# Human-readable, on-disk instance config file (`instance.toml`) written
+# alongside each instance's disk/OVMF_VARS — see PLAN.md, item 5, "Store
+# config alongside instance, not in DB". SQLite remains the primary
+# source of truth for restore (see the doc comment on
+# `write_instance_toml` for why the *read* side of this proposal isn't
+# implemented yet); this is the write-only half.
+toml = "0.8"
 futures-core = "0.3"
 futures-util = "0.3"
 async-stream = "0.3"

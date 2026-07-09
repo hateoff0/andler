@@ -23,7 +23,7 @@ repository = "https://github.com/andler-project/andler"
 [workspace.dependencies]
 # Общие зависимости версионируются в одном месте, чтобы избежать
 # расхождений между крейтами workspace'а.
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "fs", "net", "sync", "time", "io-util"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "fs", "net", "sync", "time", "io-util", "signal"] }
 async-trait = "0.1"
 serde = { version = "1", features = ["derive"] }
 thiserror = "1"

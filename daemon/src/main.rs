@@ -51,6 +51,87 @@ use tonic::transport::Server;
 
 const DEFAULT_LISTEN_ADDR: &str = "127.0.0.1:50051";
 
+/// Waits for SIGINT (Ctrl+C) or SIGTERM (`systemctl stop`/`kill`), then
+/// gracefully stops every instance still `Running`/`Paused` before
+/// returning — used as the shutdown future for
+/// `Server::serve_with_shutdown` below, so the gRPC server itself only
+/// actually stops accepting connections/finishes in-flight requests
+/// *after* this completes.
+///
+/// Before this existed, killing `andlerd` (Ctrl+C or `systemctl stop`,
+/// now that item 9 adds a systemd unit) left every running QEMU process
+/// as an orphan — `Child`'s `kill_on_drop(true)` (see
+/// `andler_qemu::process::QemuProcess`) only fires when the `Child`
+/// value itself is dropped, and an ungracefully-killed `andlerd` process
+/// doesn't run any Rust destructors at all, so `kill_on_drop` never gets
+/// the chance to act. On next startup those orphaned instances were
+/// marked `Error` (see `Daemon::restore`) — correct in that it doesn't
+/// lie about being able to control them, but the QEMU processes
+/// themselves kept running unmanaged in the background instead of
+/// actually being asked to shut down. See PLAN.md, item 10, "Signal
+/// handling and graceful shutdown".
+///
+/// SIGKILL (`kill -9`) still can't be caught by any process, Rust or
+/// otherwise — this only improves the SIGINT/SIGTERM case, which covers
+/// Ctrl+C and every normal `systemctl stop`/`kill`/`kill -TERM`.
+async fn shutdown_signal(daemon: Arc<Daemon>) {
+    let ctrl_c = async {
+        if let Err(error) = tokio::signal::ctrl_c().await {
+            tracing::warn!(%error, "failed to install Ctrl+C handler");
+            std::future::pending::<()>().await;
+        }
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut sig) => {
+                sig.recv().await;
+            }
+            Err(error) => {
+                tracing::warn!(%error, "failed to install SIGTERM handler");
+                std::future::pending::<()>().await;
+            }
+        }
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {}
+        _ = terminate => {}
+    }
+
+    tracing::info!("shutdown signal received, stopping running instances gracefully");
+
+    let running_ids: Vec<andler_core::InstanceId> = {
+        let instances = daemon.instances.read().await;
+        instances
+            .iter()
+            .filter(|(_, record)| {
+                matches!(
+                    record.state,
+                    andler_core::InstanceState::Running | andler_core::InstanceState::Paused
+                )
+            })
+            .map(|(id, _)| *id)
+            .collect()
+    };
+
+    for id in running_ids {
+        tracing::info!(instance_id = %id.0, "stopping instance on shutdown");
+        if let Err(error) = daemon.stop_instance(id, true).await {
+            tracing::warn!(
+                instance_id = %id.0,
+                %error,
+                "failed to stop instance on shutdown"
+            );
+        }
+    }
+
+    tracing::info!("graceful shutdown complete");
+}
+
 /// Andler-специфичные крейты, у которых уровень меняется вместе с
 /// `-v`/`-vv` (см. `init_tracing`). Зависимости (`tonic`, `h2`, и т.д.)
 /// намеренно не включены — на `debug`/`trace` они генерируют трафик,
@@ -245,7 +326,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     })?;
 
     if let Some(parent) = std::path::Path::new(&store_path).parent() {
-        std::fs::create_dir_all(parent)?;
+        // `0700`, not just default umask — this directory holds
+        // `andlerd.db` (every instance's config in one file) plus, by
+        // default, `instances/` underneath it. See PLAN.md, item 20b.
+        andler_core::paths::ensure_private_dir(parent).await?;
     }
 
     let store = Store::open(&store_path).await?;
@@ -258,13 +342,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     let daemon = Arc::new(daemon);
-    let service = DaemonService::new(daemon, ovmf);
+    let service = DaemonService::new(Arc::clone(&daemon), ovmf);
 
     println!("andlerd: listening on {addr}");
 
     Server::builder()
         .add_service(AndlerServiceServer::new(service))
-        .serve(addr)
+        .serve_with_shutdown(addr, shutdown_signal(daemon))
         .await?;
 
     Ok(())
