@@ -325,8 +325,8 @@ fn input_args(cfg: &InstanceConfig) -> Vec<String> {
 /// `-netdev passt,id=net0 -device virtio-net-pci,netdev=net0` (NAT/passt) —
 /// см. `NatBackend`. Для других режимов сети — см. ниже.
 ///
-/// `Bridge`/`Isolated` пока не реализованы в `andler-net` (см. его README)
-/// — здесь оставлен `panic!` для непокрытых вариантов по той же причине,
+/// `Bridge`/`Isolated` реализованы через `andler-net` (см. `services/andler-net`).
+/// Здесь оставлен `panic!` для непокрытых вариантов по той же причине,
 /// что и для `RenderBackend::Passthrough` в `gpu_display_args`: молчаливая
 /// подмена на NAT была бы тихим расхождением между запрошенной и реальной
 /// конфигурацией сети, что хуже явного отказа.
@@ -346,12 +346,23 @@ fn network_args(cfg: &InstanceConfig) -> Vec<String> {
                 format!("{},netdev=net0", cfg.network.device_model),
             ],
         },
-        NetworkMode::Bridge { .. } | NetworkMode::Isolated => {
-            panic!(
-                "NetworkMode::{:?} is not yet implemented in andler-qemu::cmdline \
-                 (see crates/andler-net/README.md)",
-                cfg.network.mode
-            );
+        NetworkMode::Bridge { interface: bridge } => {
+            let tap_iface = format!("tap{}", cfg.id.0);
+            vec![
+                "-netdev".to_string(),
+                format!("tap,id=net0,ifname={},bridge={},script=no,downscript=no", tap_iface, bridge),
+                "-device".to_string(),
+                format!("{},netdev=net0", cfg.network.device_model),
+            ]
+        },
+        NetworkMode::Isolated => {
+            let vm_iface = "andler0";
+            vec![
+                "-netdev".to_string(),
+                format!("tap,id=net0,ifname={},script=no,downscript=no", vm_iface),
+                "-device".to_string(),
+                format!("{},netdev=net0", cfg.network.device_model),
+            ]
         }
     }
 }
@@ -417,7 +428,7 @@ mod tests {
     use super::*;
     use andler_core::{
         AudioConfig, BackendKind, CpuConfig, DiskConfig, DisplayConfig, FirmwareConfig, GpuConfig,
-        InputConfig, InstanceConfig, InstanceId, MemoryConfig, NetworkConfig,
+        InputConfig, InstanceConfig, InstanceId, MemoryConfig, NetworkConfig, NetworkMode,
     };
     use std::path::PathBuf;
 
@@ -701,6 +712,39 @@ mod tests {
                 "passt,id=net0",
                 "-device",
                 "virtio-net-pci,netdev=net0",
+            ]
+        );
+    }
+    #[test]
+    fn network_args_bridge_mode_generates_correct_args() {
+        let mut cfg = start_sh_equivalent_config();
+        cfg.network.mode = NetworkMode::Bridge {
+            interface: "br0".to_string(),
+        };
+        let args = network_args(&cfg);
+        assert_eq!(
+            args,
+            vec![
+                "-netdev".to_string(),
+                format!("tap,id=net0,ifname=tap{},bridge=br0,script=no,downscript=no", cfg.id.0),
+                "-device".to_string(),
+                format!("{},netdev=net0", cfg.network.device_model),
+            ]
+        );
+    }
+
+    #[test]
+    fn network_args_isolated_mode_generates_correct_args() {
+        let mut cfg = start_sh_equivalent_config();
+        cfg.network.mode = NetworkMode::Isolated;
+        let args = network_args(&cfg);
+        assert_eq!(
+            args,
+            vec![
+                "-netdev".to_string(),
+                "tap,id=net0,ifname=andler0,script=no,downscript=no".to_string(),
+                "-device".to_string(),
+                format!("{},netdev=net0", cfg.network.device_model),
             ]
         );
     }

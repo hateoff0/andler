@@ -10,12 +10,14 @@
 //! `snapshot_delete`/`snapshot_list`/`log_stream`/`metrics_stream`
 //! реализованы полноценно.
 
+use std::sync::Arc;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+use andler_net::{DefaultNetworkService, NetworkService};
 use andler_core::{
     BackendError, BackendHandle, BackendStatus, HypervisorBackend, InstanceConfig, InstanceState,
-    LogLine, LogStreamSource, RenderBackend, ResourceMetrics,
+    LogLine, LogStreamSource, NetworkMode, RenderBackend, ResourceMetrics,
 };
 use async_trait::async_trait;
 use futures_core::stream::BoxStream;
@@ -59,6 +61,15 @@ struct RunningInstance {
     /// Таймаут ожидания завершения async job (snapshot), считанный из
     /// `InstanceConfig.disk.snapshot_timeout_secs` при `spawn`.
     snapshot_timeout: std::time::Duration,
+    /// Информация о сети для последующего teardown.
+    network_info: NetworkInfo,
+}
+
+#[derive(Clone)]
+enum NetworkInfo {
+    Bridge { bridge: String, tap_iface: String },
+    Isolated { host_veth: String, vm_veth: String },
+    Nat,
 }
 
 /// Backend гипервизора поверх процесса QEMU.
@@ -70,12 +81,14 @@ struct RunningInstance {
 /// обязательна.
 pub struct QemuBackend {
     instances: Mutex<HashMap<BackendHandle, RunningInstance>>,
+    network_service: Arc<DefaultNetworkService>,
 }
 
 impl QemuBackend {
     pub fn new() -> Self {
         QemuBackend {
             instances: Mutex::new(HashMap::new()),
+            network_service: Arc::new(DefaultNetworkService::new()),
         }
     }
 
@@ -434,9 +447,41 @@ impl HypervisorBackend for QemuBackend {
             .parent()
             .map(|dir| dir.join("qemu.log"));
 
-        let process = QemuProcess::spawn(&args, qmp_socket_path, log_file_path)
-            .await
-            .map_err(process_error_to_backend_error)?;
+        // Perform network setup for Bridge/Isolated modes before spawning QEMU
+        let network_info = match &cfg.network.mode {
+            NetworkMode::Bridge { interface: bridge } => {
+                let tap_iface = format!("tap{}", cfg.id.0);
+                self.network_service
+                    .setup_bridge(bridge, &tap_iface)
+                    .await
+                    .map_err(|e| BackendError::Io(e.to_string()))?;
+                NetworkInfo::Bridge { bridge: bridge.clone(), tap_iface }
+            }
+            NetworkMode::Isolated => {
+                let vm_iface = "andler0";
+                let (host_veth, vm_veth) = self.network_service
+                    .setup_isolated(vm_iface)
+                    .await
+                    .map_err(|e| BackendError::Io(e.to_string()))?;
+                NetworkInfo::Isolated { host_veth, vm_veth }
+            }
+            NetworkMode::Nat => NetworkInfo::Nat,
+        };
+        let process = QemuProcess::spawn(&args, qmp_socket_path, log_file_path).await;
+        if let Err(err) = process {
+            // Cleanup network resources before propagating error
+            match &network_info {
+                NetworkInfo::Bridge { bridge, tap_iface } => {
+                    let _ = self.network_service.teardown_bridge(bridge, tap_iface).await;
+                }
+                NetworkInfo::Isolated { host_veth, vm_veth } => {
+                    let _ = self.network_service.teardown_isolated(host_veth, vm_veth).await;
+                }
+                NetworkInfo::Nat => {}
+            }
+            return Err(process_error_to_backend_error(err));
+        }
+        let process = process.unwrap();
 
         let mut instances = self.instances.lock().await;
         instances.insert(
@@ -447,6 +492,7 @@ impl HypervisorBackend for QemuBackend {
                 snapshot_timeout: std::time::Duration::from_secs(
                     cfg.disk.snapshot_timeout_secs.unwrap_or(30),
                 ),
+                network_info,
             },
         );
 
@@ -498,12 +544,6 @@ impl HypervisorBackend for QemuBackend {
             .ok_or_else(|| BackendError::HandleNotFound(handle.0.clone()))?;
 
         if graceful {
-            // Без снапшота/snapshot.rs это всё ещё SIGTERM, не ACPI-сигнал
-            // гостю через QMP system_powerdown — см. документацию
-            // process::QemuProcess::terminate. Использование QMP здесь
-            // для честного ACPI graceful shutdown — естественное
-            // продолжение этого модуля, но не часть текущего шага
-            // (текущий шаг — pause/resume/status, не shutdown-семантика).
             instance
                 .process
                 .terminate()
@@ -517,7 +557,27 @@ impl HypervisorBackend for QemuBackend {
                 .map_err(process_error_to_backend_error)?;
         }
 
+        // Clone network info before removing instance to allow cleanup even if teardown fails
+        let network_info = instance.network_info.clone();
         instances.remove(handle);
+
+        // Network teardown
+        match network_info {
+            NetworkInfo::Bridge { bridge, tap_iface } => {
+                self.network_service
+                    .teardown_bridge(&bridge, &tap_iface)
+                    .await
+                    .map_err(|e| BackendError::Io(e.to_string()))?;
+            }
+            NetworkInfo::Isolated { host_veth, vm_veth } => {
+                self.network_service
+                    .teardown_isolated(&host_veth, &vm_veth)
+                    .await
+                    .map_err(|e| BackendError::Io(e.to_string()))?;
+            }
+            NetworkInfo::Nat => {}
+        }
+
         Ok(())
     }
 

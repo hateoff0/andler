@@ -17,7 +17,7 @@ Pure function `build_args(&InstanceConfig, &Path) -> Vec<String>` that translate
 | GPU & Display | `gpu_display_args` | `-device virtio-gpu-pci`, `-display`, `-vga` depending on `RenderBackend` and `DisplayEngine` |
 | Disk | `disk_args` | `-drive file=...,format=qcow2,id=drive-disk0`, `-device virtio-blk-pci` |
 | Input | `input_args` | `-device virtio-tablet-pci` (or `virtio-mouse-pci`), `-device virtio-serial-pci`, `-chardev qemu-vdagent` (when clipboard enabled) |
-| Network | `network_args` | `-nic user,model=virtio-net-pci` (Slirp) or `-netdev passt` + `-device` (Passt) |
+| Network | `network_args` | `-nic user,model=virtio-net-pci` (Slirp/NAT), `-netdev passt` + `-device` (Passt), or Bridge/Isolated modes via `andler-net` |
 | Audio | `audio_args` | `-audiodev`, `-device` for PipeWire/PulseAudio |
 | QMP | `qmp_args` | `-qmp unix:<path>,server,nowait` |
 
@@ -189,9 +189,7 @@ All marked `#[ignore]` with reason — run separately in `integration-test` Dock
 - **No QMP event queue**: `qmp.rs` doesn't distinguish asynchronous events from command responses. Not a problem for current scope (stop/cont/query-status don't generate client-relevant events), but will be a limitation when event subscription is added.
 - **Hardcoded snapshot device name**: `drive-disk0`. Will need parameterization if multi-disk support is added.
 - **Snapshot timeout**: Configurable per-instance via `DiskConfig::snapshot_timeout_secs` (default 30s). For very large snapshots (hundreds of GiB), this may need per-operation tuning.
-- **Network modes**: `NetworkMode::Bridge`/`Isolated` panic in `network_args` — `andler-net` hasn't implemented them yet. This is an explicit refusal, not a silent NAT fallback.
 
 ## What Is NOT Implemented Here
 
 - `RenderBackend::Passthrough` (VFIO GPU passthrough) — `gpu_display_args` panics, but `QemuBackend::spawn` checks `RenderBackend::is_implemented()` first and returns `BackendError::InvalidConfig`, never reaching `gpu_display_args` in normal flow.
-- `NetworkMode::Bridge`/`Isolated` — panic in `network_args` until `andler-net` implements them.
