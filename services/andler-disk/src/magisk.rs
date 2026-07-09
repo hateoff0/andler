@@ -30,9 +30,11 @@
 //! guest-image (отдельный `/boot`-раздел или единый rootfs). Модуль
 //! определяет layout автоматически.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use crate::error::DiskError;
+use crate::nbd;
+use crate::nbd::unique_mount_name;
 
 /// Каталог с бинарниками Magisk, указанный пользователем через
 /// `--magisk-dir`. Должен содержать как минимум `magisk` и `magiskinit`.
@@ -41,344 +43,6 @@ use crate::error::DiskError;
 /// Проверяется до начала монтирования, чтобы не оставаться в
 /// полузвёрзнутом состоянии при невалидном входе.
 const REQUIRED_MAGISK_FILES: &[&str] = &["magisk", "magiskinit"];
-
-/// Префикс имени точки монтирования — создаётся в `/tmp/andler-mount-<id>`.
-const MOUNT_PREFIX: &str = "/tmp/andler-mount-";
-
-// ---------------------------------------------------------------------------
-// RAII- guard'ы
-// ---------------------------------------------------------------------------
-
-/// RAII-обёртка для NBD-устройства: при `drop` выполняет
-/// `qemu-nbd --disconnect`.
-struct NbdGuard {
-    device_path: PathBuf,
-}
-
-impl NbdGuard {
-    fn new(device_path: PathBuf) -> Self {
-        NbdGuard { device_path }
-    }
-
-    fn path(&self) -> &Path {
-        &self.device_path
-    }
-}
-
-impl Drop for NbdGuard {
-    fn drop(&mut self) {
-        // Раньше результат полностью игнорировался (`let _ = ...status()`) —
-        // это означало, что ни ошибка запуска `qemu-nbd`, ни ненулевой код
-        // возврата самого `--disconnect` никогда не были видны: проблема
-        // (повисшее `/dev/nbd*`-устройство) обнаруживалась бы только
-        // постфактум, при следующей попытке занять то же устройство.
-        // `Drop` не может вернуть `Result` вызывающей стороне — но может
-        // хотя бы залогировать, не маскируя ошибку полностью.
-        let result = std::process::Command::new("qemu-nbd")
-            .args(["--disconnect", &self.device_path.to_string_lossy()])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::piped())
-            .status();
-
-        match result {
-            Ok(status) if !status.success() => {
-                tracing::warn!(
-                    device = %self.device_path.display(),
-                    exit_status = %status,
-                    "qemu-nbd --disconnect exited with a non-zero status; \
-                     /dev/nbd* device may remain connected"
-                );
-            }
-            Err(error) => {
-                tracing::warn!(
-                    device = %self.device_path.display(),
-                    %error,
-                    "failed to spawn qemu-nbd --disconnect; \
-                     /dev/nbd* device may remain connected"
-                );
-            }
-            Ok(_) => {}
-        }
-    }
-}
-
-/// RAII-обёртка для точки монтирования: при `drop` выполняет `umount -l`.
-struct MountGuard {
-    mount_point: PathBuf,
-}
-
-impl MountGuard {
-    fn new(mount_point: PathBuf) -> Self {
-        MountGuard { mount_point }
-    }
-
-    fn path(&self) -> &Path {
-        &self.mount_point
-    }
-}
-
-impl Drop for MountGuard {
-    fn drop(&mut self) {
-        // `umount -l` (lazy unmount) практически никогда не проваливается
-        // синхронно — он отделяет точку монтирования от дерева сразу,
-        // даже если она ещё занята, и реально освобождается позже в фоне.
-        // Поэтому риск "повисшего" монтирования здесь ниже, чем у
-        // qemu-nbd --disconnect выше, но всё равно стоит логировать, не
-        // молчать — например, если `umount` вообще не нашёлся в `$PATH`.
-        let result = std::process::Command::new("umount")
-            .args(["-l", &self.mount_point.to_string_lossy()])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::piped())
-            .status();
-
-        match result {
-            Ok(status) if !status.success() => {
-                tracing::warn!(
-                    mount_point = %self.mount_point.display(),
-                    exit_status = %status,
-                    "umount -l exited with a non-zero status"
-                );
-            }
-            Err(error) => {
-                tracing::warn!(
-                    mount_point = %self.mount_point.display(),
-                    %error,
-                    "failed to spawn umount -l"
-                );
-            }
-            Ok(_) => {}
-        }
-
-        // Удаляем каталог точки монтирования (best-effort) — если внутри
-        // ещё что-то смонтировано (umount -l не успел отвязать), `rmdir`
-        // просто провалится с EBUSY, что безопасно проигнорировать: каталог
-        // останется, не более того, никакого риска для данных.
-        if let Err(error) = std::fs::remove_dir(&self.mount_point) {
-            tracing::warn!(
-                mount_point = %self.mount_point.display(),
-                %error,
-                "failed to remove mount point directory"
-            );
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Поиск свободного NBD-устройства
-// ---------------------------------------------------------------------------
-
-/// Ищет свободное NBD-устройство, сканируя `/sys/class/block/nbd*/size`.
-/// Свободное — это то, у которого `size == 0` (не подключено ни одного образа).
-///
-/// Возвращает путь типа `/dev/nbd0`.
-fn find_free_nbd_device() -> Result<PathBuf, DiskError> {
-    let sys_block = Path::new("/sys/class/block");
-
-    if !sys_block.exists() {
-        return Err(DiskError::NbdSetupFailed(
-            "/sys/class/block does not exist — nbd kernel module not loaded? \
-             Run: sudo modprobe nbd"
-                .to_string(),
-        ));
-    }
-
-    let mut entries: Vec<_> = std::fs::read_dir(sys_block)
-        .map_err(|e| DiskError::NbdSetupFailed(format!("read /sys/class/block: {e}")))?
-        .filter_map(|e| e.ok())
-        .filter(|e| {
-            e.file_name()
-                .to_str()
-                .map_or(false, |name| name.starts_with("nbd"))
-        })
-        .collect();
-
-    // Сортируем по имени для детерминированности (nbd0, nbd1, ...)
-    entries.sort_by_key(|e| e.file_name());
-
-    for entry in entries {
-        let size_path = entry.path().join("size");
-        let size_str = match std::fs::read_to_string(&size_path) {
-            Ok(s) => s,
-            Err(_) => continue,
-        };
-
-        let size: u64 = match size_str.trim().parse() {
-            Ok(n) => n,
-            Err(_) => continue,
-        };
-
-        if size == 0 {
-            let name = entry.file_name();
-            let dev_path = PathBuf::from(format!("/dev/{}", name.to_str().unwrap()));
-            if dev_path.exists() {
-                return Ok(dev_path);
-            }
-        }
-    }
-
-    Err(DiskError::NbdSetupFailed(
-        "no free nbd device found — all /dev/nbd* are in use \
-         or nbd module is not loaded"
-            .to_string(),
-    ))
-}
-
-// ---------------------------------------------------------------------------
-// Подключение образа через qemu-nbd
-// ---------------------------------------------------------------------------
-
-/// Подключает qcow2-образ к NBD-устройству и возвращает guard.
-///
-/// После вызова `/dev/nbdN` доступен как блочное устройство с
-/// разделами (если они есть в образе) — `/dev/nbdNp1`, `/dev/nbdNp2` и т.д.
-fn connect_nbd(overlay_path: &Path) -> Result<NbdGuard, DiskError> {
-    let device = find_free_nbd_device()?;
-
-    let output = std::process::Command::new("qemu-nbd")
-        .args([
-            "--connect",
-            device.to_str().unwrap(),
-            overlay_path.to_str().unwrap(),
-            "--format=qcow2",
-        ])
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .output()
-        .map_err(|e| DiskError::NbdSetupFailed(format!("failed to run qemu-nbd: {e}")))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(DiskError::NbdSetupFailed(format!(
-            "qemu-nbd --connect failed (exit {}): {}",
-            output.status,
-            stderr.trim()
-        )));
-    }
-
-    Ok(NbdGuard::new(device))
-}
-
-/// Ждёт появления partition-устройств для NBD-девайса.
-///
-/// После `qemu-nbd --connect` ядру может потребоваться время, чтобы
-/// просканировать таблицу разделов и создать `/dev/nbdNp1`. Функция
-/// опрашивает `/sys/block/<dev>/` до появления первого `nbdNp*` entry
-/// или таймаута (2 секунды).
-///
-/// Возвращает список найденных partition-устройств.
-fn wait_for_partitions(nbd_dev: &Path) -> Result<Vec<PathBuf>, DiskError> {
-    let dev_name = nbd_dev
-        .file_name()
-        .ok_or_else(|| DiskError::NbdSetupFailed("invalid nbd device path".to_string()))?
-        .to_str()
-        .ok_or_else(|| DiskError::NbdSetupFailed("non-utf8 device name".to_string()))?
-        .to_string();
-
-    let sys_path = PathBuf::from(format!("/sys/block/{dev_name}"));
-
-    // Ожидаем появления partitions (макс. 2 секунды)
-    for _ in 0..20 {
-        let mut partitions = Vec::new();
-
-        if let Ok(entries) = std::fs::read_dir(&sys_path) {
-            for entry in entries.flatten() {
-                let name = entry.file_name();
-                let name_str = name.to_str().unwrap_or("");
-                if name_str.starts_with(&dev_name) && name_str != dev_name {
-                    // Это partition: nbd0p1, nbd0p2 и т.д.
-                    let part_path = PathBuf::from(format!("/dev/{name_str}"));
-                    if part_path.exists() {
-                        partitions.push(part_path);
-                    }
-                }
-            }
-        }
-
-        if !partitions.is_empty() {
-            partitions.sort();
-            return Ok(partitions);
-        }
-
-        std::thread::sleep(std::time::Duration::from_millis(100));
-    }
-
-    Err(DiskError::NbdSetupFailed(format!(
-        "partitions did not appear on {dev_name} within timeout"
-    )))
-}
-
-/// Определяет раздел с rootfs (Linux/Android filesystem) из списка
-/// разделов.
-///
-/// Для простоты берём первый раздел (typical Android image layout:
-/// single partition с full rootfs).
-fn find_root_partition(partitions: &[PathBuf]) -> Result<PathBuf, DiskError> {
-    if partitions.is_empty() {
-        return Err(DiskError::NbdSetupFailed(
-            "no partitions found in image".to_string(),
-        ));
-    }
-
-    // Берём первый раздел — стандартный layout для Android images
-    Ok(partitions[0].clone())
-}
-
-// ---------------------------------------------------------------------------
-// Монтирование
-// ---------------------------------------------------------------------------
-
-/// Генерирует уникальное имя для точки монтирования на основе PID и
-/// счётчика вызовов (не требует внешних зависимостей).
-fn unique_mount_name() -> String {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-    let id = COUNTER.fetch_add(1, Ordering::Relaxed);
-    // PID + monotonic process-wide counter + nanosecond timestamp — все три
-    // вычисляются через safe Rust (`SystemTime::now()`/`duration_since` не
-    // требуют `unsafe`). PID+counter уже достаточны для уникальности внутри
-    // одного процесса andlerd; timestamp добавлен только для лучшей
-    // диагностируемости имени каталога при ручном осмотре `/tmp`, не для
-    // самой уникальности.
-    let ts = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    format!("{}-{}-{}", std::process::id(), id, ts)
-}
-
-/// Монтирует раздел в точку монтирования и возвращает guard.
-fn mount_partition(partition: &Path) -> Result<MountGuard, DiskError> {
-    let mount_point = PathBuf::from(format!("{MOUNT_PREFIX}{}", unique_mount_name()));
-
-    std::fs::create_dir_all(&mount_point).map_err(|e| DiskError::NbdSetupFailed(format!(
-        "failed to create mount point {}: {e}",
-        mount_point.display()
-    )))?;
-
-    let output = std::process::Command::new("mount")
-        .args([
-            "-o", "rw",
-            partition.to_str().unwrap(),
-            mount_point.to_str().unwrap(),
-        ])
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .output()
-        .map_err(|e| DiskError::NbdSetupFailed(format!("failed to run mount: {e}")))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let _ = std::fs::remove_dir(&mount_point);
-        return Err(DiskError::NbdSetupFailed(format!(
-            "mount {} on {} failed: {}",
-            partition.display(),
-            mount_point.display(),
-            stderr.trim()
-        )));
-    }
-
-    Ok(MountGuard::new(mount_point))
-}
 
 // ---------------------------------------------------------------------------
 // Копирование Magisk файлов
@@ -508,15 +172,22 @@ fn patch_boot_image(mount_point: &Path, magisk_dir: &Path) -> Result<(), DiskErr
         Some(p) => p.clone(),
         None => return Ok(()),
     };
+    // See PLAN.md, item 20d — computed once here since `boot_img` is
+    // reused across the unpack/patch/repack calls below, rather than
+    // repeating `.to_string_lossy().into_owned()` at each call site.
+    let boot_img_str = boot_img.to_string_lossy().into_owned();
 
-    let patch_dir = PathBuf::from(format!("/tmp/andler-magisk-patch-{}", unique_mount_name()));
-    std::fs::create_dir_all(&patch_dir).map_err(|e| DiskError::NbdSetupFailed(format!(
-        "failed to create patch dir: {e}"
-    )))?;
+    // Same rationale as `mount_dir_base()` above — see PLAN.md, item 20a.
+    let patch_dir = andler_core::paths::runtime_dir()
+        .join("andler-magisk-patch")
+        .join(unique_mount_name());
+    andler_core::paths::ensure_private_dir_sync(&patch_dir).map_err(|e| {
+        DiskError::NbdSetupFailed(format!("failed to create patch dir: {e}"))
+    })?;
 
     // Unpack
     let output = std::process::Command::new(&magiskboot)
-        .args(["unpack", boot_img.to_str().unwrap()])
+        .args(["unpack", &boot_img_str])
         .current_dir(&patch_dir)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -530,11 +201,12 @@ fn patch_boot_image(mount_point: &Path, magisk_dir: &Path) -> Result<(), DiskErr
 
     // Patch
     let patched_boot = patch_dir.join("patched_boot.img");
+    let patched_boot_str = patched_boot.to_string_lossy().into_owned();
     let output = std::process::Command::new(&magiskboot)
         .args([
             "patch",
-            boot_img.to_str().unwrap(),
-            patched_boot.to_str().unwrap(),
+            &boot_img_str,
+            &patched_boot_str,
         ])
         .current_dir(&patch_dir)
         .stdout(std::process::Stdio::piped())
@@ -551,8 +223,8 @@ fn patch_boot_image(mount_point: &Path, magisk_dir: &Path) -> Result<(), DiskErr
     let output = std::process::Command::new(&magiskboot)
         .args([
             "repack",
-            patched_boot.to_str().unwrap(),
-            boot_img.to_str().unwrap(),
+            &patched_boot_str,
+            &boot_img_str,
         ])
         .current_dir(&patch_dir)
         .stdout(std::process::Stdio::piped())
@@ -590,37 +262,50 @@ fn patch_boot_image(mount_point: &Path, magisk_dir: &Path) -> Result<(), DiskErr
 /// 6. Отмонтировывает и отключает NBD
 ///
 /// Все шаги.cleanup happens automatically via RAII guards, even on error.
-pub async fn provision_magisk(
-    overlay_path: &Path,
-    magisk_dir: &Path,
-) -> Result<(), DiskError> {
-    // Валидация входных данных до начала тяжёлых операций
+/// Async entry point — see [`provision_magisk_blocking`] for the actual
+/// work. This wrapper exists because every step of Magisk provisioning
+/// (`qemu-nbd`, partition-appearance polling, `mount`, `magiskboot`) is
+/// blocking I/O — subprocess calls and a `std::thread::sleep` poll loop
+/// — none of which belongs directly on a tokio worker thread. See
+/// PLAN.md, item 21c, "Blocking I/O in provision_magisk": the plan's own
+/// proposed fix (swap `std::thread::sleep` for `tokio::time::sleep`
+/// inside the poll loop) doesn't actually work as stated, since
+/// `wait_for_partitions` and everything it calls are plain sync `fn`s,
+/// not `async fn` — there's nothing to `.await` from inside them without
+/// converting the whole chain to async, which would then need
+/// `tokio::process::Command` throughout instead of `std::process::Command`
+/// too. `spawn_blocking` the entire synchronous pipeline as one unit is
+/// the actual fix that matches how the rest of this module is written
+/// (see the module doc comment on why these subprocess calls are sync in
+/// the first place), not a partial one that only silences the `sleep`
+/// call while every subprocess invocation still blocks the same way.
+pub async fn provision_magisk(overlay_path: &Path, magisk_dir: &Path) -> Result<(), DiskError> {
+    let overlay_path = overlay_path.to_path_buf();
+    let magisk_dir = magisk_dir.to_path_buf();
+    tokio::task::spawn_blocking(move || provision_magisk_blocking(&overlay_path, &magisk_dir))
+        .await
+        .unwrap_or_else(|join_err| {
+            Err(DiskError::NbdSetupFailed(format!(
+                "magisk provisioning task panicked: {join_err}"
+            )))
+        })
+}
+
+fn provision_magisk_blocking(overlay_path: &Path, magisk_dir: &Path) -> Result<(), DiskError> {
     validate_magisk_dir(magisk_dir)?;
 
     if !overlay_path.exists() {
         return Err(DiskError::BackingFileNotFound(overlay_path.to_path_buf()));
     }
 
-    // Шаг 1: Подключение через qemu-nbd
-    let nbd_guard = connect_nbd(overlay_path)?;
+    let nbd_guard = nbd::connect_nbd(overlay_path)?;
+    let partitions = nbd::wait_for_partitions(nbd_guard.path())?;
+    let root_partition = nbd::find_root_partition(&partitions)?;
+    let mount_guard = nbd::mount_partition(&root_partition)?;
 
-    // Шаг 2: Ожидание появления partitions
-    let partitions = wait_for_partitions(nbd_guard.path())?;
-
-    // Шаг 3: Определение root-раздела
-    let root_partition = find_root_partition(&partitions)?;
-
-    // Шаг 4: Монтирование
-    let mount_guard = mount_partition(&root_partition)?;
-
-    // Шаг 5: Копирование файлов Magisk
     copy_magisk_files(mount_guard.path(), magisk_dir)?;
 
-    // Шаг 6: Патчинг boot image (best-effort)
     let _ = patch_boot_image(mount_guard.path(), magisk_dir);
-
-    // mount_guard и nbd_guard будут drop'нуты автоматически при выходе
-    // из функции — unmount + disconnect происходит в любом случае.
 
     Ok(())
 }
@@ -665,13 +350,6 @@ mod tests {
     }
 
     #[test]
-    fn find_free_nbd_device_returns_error_when_no_nbd_module() {
-        // /sys/class/block не существует в большинстве тестовых окружений
-        let result = find_free_nbd_device();
-        assert!(result.is_err());
-    }
-
-    #[test]
     fn copy_dir_recursive_creates_structure() {
         let src = std::env::temp_dir().join("andler-test-copy-src");
         let dst = std::env::temp_dir().join("andler-test-copy-dst");
@@ -695,10 +373,4 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dst);
     }
 
-    #[test]
-    fn unique_mount_name_is_unique() {
-        let a = unique_mount_name();
-        let b = unique_mount_name();
-        assert_ne!(a, b);
-    }
 }
