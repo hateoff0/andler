@@ -58,6 +58,14 @@ pub enum DisplayEngine {
 /// Конфигурация дисплея инстанса.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DisplayConfig {
+    /// Хранится и сериализуется, но пока **не влияет** на реальный вывод
+    /// для `DisplayEngine::Sdl`/`Gtk` — QEMU не принимает `width=`/
+    /// `height=` в строке `-display sdl,...`/`gtk,...`, разрешение
+    /// зависит от гостя (его собственные настройки экрана) или от
+    /// EDID-инъекции на уровне `virtio-gpu`, которая пока не
+    /// реализована. См. PLAN.md, item 4, "Cannot pre-set resolution in
+    /// SDL" — до её реализации это поле работает только как
+    /// пожелание/документация выбора пользователя, не как гарантия.
     pub resolution: Resolution,
     pub dpi: u32,
     /// `0` означает "без ограничения" (`unlimited` в терминах §4.3 плана) —

@@ -26,12 +26,21 @@ use crate::cmdline;
 use crate::process::{ProcessError, QemuProcess};
 use crate::qmp::{QmpClient, QmpError, VmStatus};
 
-/// Каталог, в котором создаются QMP-сокеты запущенных инстансов.
-/// `andler-daemon` в перспективе должен сделать этот путь настраиваемым
-/// (например, через XDG runtime dir пользователя) — здесь фиксированная
-/// константа, так как `QemuBackend` пока не получает конфигурацию путей
-/// извне ни от чего, кроме вызова `spawn`.
-const QMP_SOCKET_DIR: &str = "/tmp/andler/qmp";
+/// Каталог, в котором создаются QMP-сокеты запущенных инстансов —
+/// подкаталог `andler/qmp` под `andler_core::paths::runtime_dir()`
+/// (`$XDG_RUNTIME_DIR` на большинстве современных Linux-хостов, а не
+/// голый `/tmp`, который на многопользовательской системе
+/// world-writable и уязвим к symlink-атаке на сокет — см. PLAN.md, item
+/// 20a, "Hardcoded `/tmp` paths for IPC sockets"; каталог создаётся с
+/// правами `0700` через `ensure_private_dir` в `spawn` ниже, не просто
+/// `create_dir_all`). Раньше это была голая константа `/tmp/andler/qmp`
+/// именно потому, что `QemuBackend` не получал информацию о путях
+/// откуда-либо ещё — с появлением единой точки резолва путей в
+/// `andler-core` (см. её собственный doc-комментарий) необходимость в
+/// отдельной константе здесь отпала.
+fn qmp_socket_dir() -> PathBuf {
+    andler_core::paths::runtime_dir().join("andler/qmp")
+}
 
 /// Запущенный инстанс с точки зрения `QemuBackend`: процесс плюс,
 /// опционально, уже установленное QMP-соединение.
@@ -80,7 +89,7 @@ impl QemuBackend {
     }
 
     fn qmp_socket_path_for(cfg: &InstanceConfig) -> PathBuf {
-        PathBuf::from(QMP_SOCKET_DIR).join(format!("{}.sock", cfg.id.0))
+        qmp_socket_dir().join(format!("{}.sock", cfg.id.0))
     }
 
     /// Возвращает рабочее QMP-соединение для инстанса, устанавливая его
@@ -98,6 +107,127 @@ impl QemuBackend {
 
         let client = QmpClient::connect(instance.process.qmp_socket_path()).await?;
         instance.qmp_client = Some(client);
+        Ok(())
+    }
+
+    /// Проверяет доступность QEMU Guest Agent для инстанса.
+    ///
+    /// Используется daemon'ом для auto-fallback: если agent недоступен,
+    /// установка/удаление пакетов делается offline через qemu-nbd.
+    pub async fn is_guest_agent_available(
+        &self,
+        handle: &BackendHandle,
+    ) -> Result<bool, BackendError> {
+        let mut instances = self.instances.lock().await;
+        let instance = instances
+            .get_mut(handle)
+            .ok_or_else(|| BackendError::HandleNotFound(handle.0.clone()))?;
+
+        Self::ensure_qmp_connected(instance)
+            .await
+            .map_err(qmp_error_to_backend_error)?;
+
+        let available = instance
+            .qmp_client
+            .as_mut()
+            .unwrap()
+            .is_guest_agent_available()
+            .await;
+
+        Ok(available)
+    }
+
+    /// Устанавливает пакет в гостевую ОС online через QEMU Guest Agent.
+    ///
+    /// Выполняет `guest-exec` с командой包管理器 (apt/dnf/pacman) для
+    /// установки пакета. Ожидает завершения через `guest-exec-status`
+    /// с таймаутом 60 секунд.
+    pub async fn guest_exec_install(
+        &self,
+        handle: &BackendHandle,
+        package: &str,
+    ) -> Result<(), BackendError> {
+        self.guest_exec_package(handle, package, true).await
+    }
+
+    /// Удаляет пакет из гостевой ОС online через QEMU Guest Agent.
+    pub async fn guest_exec_remove(
+        &self,
+        handle: &BackendHandle,
+        package: &str,
+    ) -> Result<(), BackendError> {
+        self.guest_exec_package(handle, package, false).await
+    }
+
+    /// Общая реализация: install (install=true) или remove (install=false).
+    async fn guest_exec_package(
+        &self,
+        handle: &BackendHandle,
+        package: &str,
+        install: bool,
+    ) -> Result<(), BackendError> {
+        let mut instances = self.instances.lock().await;
+        let instance = instances
+            .get_mut(handle)
+            .ok_or_else(|| BackendError::HandleNotFound(handle.0.clone()))?;
+
+        Self::ensure_qmp_connected(instance)
+            .await
+            .map_err(qmp_error_to_backend_error)?;
+
+        let qmp = instance.qmp_client.as_mut().unwrap();
+
+        // Сначала определяем пакетный менеджер через which
+        let detect_cmd = "/bin/sh";
+        let detect_args = vec!["-c", "which apt-get || which dnf || which pacman"];
+        let pid = qmp
+            .guest_exec(detect_cmd, &detect_args)
+            .await
+            .map_err(qmp_error_to_backend_error)?;
+
+        let manager = wait_for_guest_exec(qmp, pid, std::time::Duration::from_secs(10))
+            .await
+            .map_err(qmp_error_to_backend_error)?;
+
+        let pkg_bin = manager
+            .as_deref()
+            .unwrap_or("apt-get")
+            .trim();
+
+        let cmd_args: Vec<&str> = if install {
+            match pkg_bin {
+                "apt-get" => vec!["apt-get", "install", "-y", package],
+                "dnf" => vec!["dnf", "install", "-y", package],
+                "pacman" => vec!["pacman", "-S", "--noconfirm", package],
+                _ => vec!["apt-get", "install", "-y", package],
+            }
+        } else {
+            match pkg_bin {
+                "apt-get" => vec!["apt-get", "remove", "-y", package],
+                "dnf" => vec!["dnf", "remove", "-y", package],
+                "pacman" => vec!["pacman", "-R", "--noconfirm", package],
+                _ => vec!["apt-get", "remove", "-y", package],
+            }
+        };
+
+        let pid = qmp
+            .guest_exec(cmd_args[0], &cmd_args[1..])
+            .await
+            .map_err(qmp_error_to_backend_error)?;
+
+        let result = wait_for_guest_exec(qmp, pid, std::time::Duration::from_secs(60))
+            .await
+            .map_err(qmp_error_to_backend_error)?;
+
+        if let Some(output) = result {
+            tracing::info!(
+                package = %package,
+                install = %install,
+                output = %output,
+                "guest-exec completed"
+            );
+        }
+
         Ok(())
     }
 }
@@ -123,6 +253,52 @@ fn process_error_to_backend_error(err: ProcessError) -> BackendError {
 /// конвертация делается на границе с trait'ом, не внутри `qmp.rs`.
 fn qmp_error_to_backend_error(err: QmpError) -> BackendError {
     BackendError::Io(err.to_string())
+}
+
+/// Ожидает завершения команды, запущенной через `guest-exec`, poll-я
+/// `guest-exec-status` до тех пор, пока `exited` не станет `true`.
+///
+/// Возвращает stdout процесса (String) при успехе, или ошибку при провале.
+async fn wait_for_guest_exec(
+    qmp: &mut QmpClient,
+    pid: u64,
+    timeout: std::time::Duration,
+) -> Result<Option<String>, QmpError> {
+    use std::time::Instant;
+    let start = Instant::now();
+
+    loop {
+        let status = qmp.guest_exec_status(pid).await?;
+
+        if status.exited {
+            if status.exitcode != 0 {
+                let stderr = status.err_data.unwrap_or_default();
+                return Err(QmpError::CommandFailed {
+                    command: format!("guest-exec pid={pid}"),
+                    class: "GuestExecFailed".to_string(),
+                    desc: format!(
+                        "guest process exited with code {}: {}",
+                        status.exitcode,
+                        stderr.trim()
+                    ),
+                });
+            }
+            return Ok(status.out_data);
+        }
+
+        if start.elapsed() > timeout {
+            return Err(QmpError::CommandFailed {
+                command: format!("guest-exec pid={pid}"),
+                class: "Timeout".to_string(),
+                desc: format!(
+                    "guest process did not exit within {:?}",
+                    timeout
+                ),
+            });
+        }
+
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
 }
 
 /// Имя устройства для snapshot-команд QEMU.
@@ -232,7 +408,13 @@ impl HypervisorBackend for QemuBackend {
         let qmp_socket_path = Self::qmp_socket_path_for(cfg);
 
         if let Some(parent) = qmp_socket_path.parent() {
-            tokio::fs::create_dir_all(parent)
+            // `ensure_private_dir` sets `0700` on the directory, not
+            // just the default umask — see PLAN.md, item 20b, "No file
+            // permission controls". A world-readable QMP socket
+            // directory would let another local user merely *see* which
+            // instance IDs have sockets, even though connecting to the
+            // socket itself still requires knowing the exact filename.
+            andler_core::paths::ensure_private_dir(parent)
                 .await
                 .map_err(|e| BackendError::Io(e.to_string()))?;
         }
@@ -625,6 +807,89 @@ impl HypervisorBackend for QemuBackend {
                 Box::pin(history.chain(live))
             }
             None => Box::pin(futures_util::stream::empty()),
+        }
+    }
+
+    async fn is_guest_agent_available(&self, handle: &BackendHandle) -> Result<bool, BackendError> {
+        let mut instances = self.instances.lock().await;
+        let instance = instances
+            .get_mut(handle)
+            .ok_or_else(|| BackendError::HandleNotFound(handle.0.clone()))?;
+
+        Self::ensure_qmp_connected(instance)
+            .await
+            .map_err(qmp_error_to_backend_error)?;
+
+        let available = instance
+            .qmp_client
+            .as_mut()
+            .expect("qmp_client is Some after ensure_qmp_connected")
+            .is_guest_agent_available()
+            .await;
+
+        Ok(available)
+    }
+
+    async fn guest_exec_install(
+        &self,
+        handle: &BackendHandle,
+        package: &str,
+    ) -> Result<(), BackendError> {
+        self.guest_exec_package(handle, package, true).await
+    }
+
+    async fn guest_exec_remove(
+        &self,
+        handle: &BackendHandle,
+        package: &str,
+    ) -> Result<(), BackendError> {
+        self.guest_exec_package(handle, package, false).await
+    }
+
+    async fn guest_check_binary_installed(
+        &self,
+        handle: &BackendHandle,
+        binary_path: &str,
+    ) -> Result<bool, BackendError> {
+        let mut instances = self.instances.lock().await;
+        let instance = instances
+            .get_mut(handle)
+            .ok_or_else(|| BackendError::HandleNotFound(handle.0.clone()))?;
+
+        Self::ensure_qmp_connected(instance)
+            .await
+            .map_err(qmp_error_to_backend_error)?;
+
+        let qmp = instance.qmp_client.as_mut().unwrap();
+
+        // Run `test -x <binary_path>` via guest-exec
+        let cmd = format!("test -x {binary_path}");
+        let pid = qmp
+            .guest_exec("/bin/sh", &["-c", &cmd])
+            .await
+            .map_err(qmp_error_to_backend_error)?;
+
+        // Poll until exited, but treat non-zero exit as "not installed" (not error)
+        use std::time::Instant;
+        let start = Instant::now();
+        let timeout = std::time::Duration::from_secs(5);
+
+        loop {
+            let status = qmp
+                .guest_exec_status(pid)
+                .await
+                .map_err(qmp_error_to_backend_error)?;
+
+            if status.exited {
+                // exit code 0 = binary exists, non-zero = doesn't exist
+                return Ok(status.exitcode == 0);
+            }
+
+            if start.elapsed() > timeout {
+                return Ok(false);
+            }
+
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         }
     }
 }

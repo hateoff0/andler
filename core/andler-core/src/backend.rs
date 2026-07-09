@@ -238,4 +238,59 @@ pub trait HypervisorBackend: Send + Sync {
     /// комментария), это расширение, а не смена контракта: реализация,
     /// отдающая только live-tail, по-прежнему соответствует трейту.
     fn log_stream(&self, handle: &BackendHandle) -> BoxStream<'_, LogLine>;
+
+    // --- Guest Agent operations (QEMU-specific, default: NotImplemented) ---
+
+    /// Проверяет доступность QEMU Guest Agent для инстанса.
+    ///
+    /// Используется daemon'ом для auto-fallback: если agent недоступен,
+    /// установка/удаление пакетов делается offline через qemu-nbd.
+    /// Дефолтная реализация возвращает `false`.
+    async fn is_guest_agent_available(&self, handle: &BackendHandle) -> Result<bool, BackendError> {
+        let _ = handle;
+        Ok(false)
+    }
+
+    /// Устанавливает пакет в гостевую ОС через Guest Agent (online).
+    ///
+    /// Дефолтная реализация возвращает `BackendError::NotImplemented`.
+    async fn guest_exec_install(
+        &self,
+        handle: &BackendHandle,
+        package: &str,
+    ) -> Result<(), BackendError> {
+        let _ = (handle, package);
+        Err(BackendError::NotImplemented {
+            backend: self.name(),
+            operation: "guest_exec_install",
+        })
+    }
+
+    /// Удаляет пакет из гостевой ОС через Guest Agent (online).
+    ///
+    /// Дефолтная реализация возвращает `BackendError::NotImplemented`.
+    async fn guest_exec_remove(
+        &self,
+        handle: &BackendHandle,
+        package: &str,
+    ) -> Result<(), BackendError> {
+        let _ = (handle, package);
+        Err(BackendError::NotImplemented {
+            backend: self.name(),
+            operation: "guest_exec_remove",
+        })
+    }
+
+    /// Проверяет существует ли бинарник в гостевой ОС через Guest Agent.
+    ///
+    /// Возвращает `true` если файл существует и исполняемый.
+    /// Дефолтная реализация возвращает `false`.
+    async fn guest_check_binary_installed(
+        &self,
+        handle: &BackendHandle,
+        binary_path: &str,
+    ) -> Result<bool, BackendError> {
+        let _ = (handle, binary_path);
+        Ok(false)
+    }
 }

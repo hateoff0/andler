@@ -335,6 +335,79 @@ impl QmpClient {
         Ok(Vec::new())
     }
 
+    // -----------------------------------------------------------------------
+    // Guest Agent commands (guest-ping, guest-exec, guest-exec-status)
+    // -----------------------------------------------------------------------
+
+    /// `guest-ping` — проверяет доступность QEMU Guest Agent.
+    ///
+    /// Возвращает `Ok(())` если guest agent отвечает, `Err` если нет.
+    /// Используется для определения, можно ли выполнять online-операции
+    /// (установка/удаление пакетов через guest-exec).
+    pub async fn guest_ping(&mut self) -> Result<(), QmpError> {
+        self.execute_raw("guest-ping", None).await?;
+        Ok(())
+    }
+
+    /// `guest-exec` — запускает команду в гостевой ОС через Guest Agent.
+    ///
+    /// Принимает полный путь к бинарнику и аргументы. Возвращает `pid`
+    /// — идентификатор запущенного процесса для последующего poll'а через
+    /// `guest-exec-status`.
+    ///
+    /// Пример:
+    /// ```ignore
+    /// let pid = client.guest_exec("/usr/bin/apt-get", &["install", "-y", "spice-vdagent"]).await?;
+    /// // poll until complete...
+    /// let status = client.guest_exec_status(pid).await?;
+    /// ```
+    pub async fn guest_exec(
+        &mut self,
+        path: &str,
+        args: &[&str],
+    ) -> Result<u64, QmpError> {
+        let qemu_args: Vec<Value> = args.iter().map(|a| json!(a)).collect();
+        let input_data = json!({
+            "path": path,
+            "arg": qemu_args,
+            "capture-output": true,
+        });
+        let value = self.execute_raw("guest-exec", Some(input_data)).await?;
+        let pid = value
+            .get("pid")
+            .and_then(|p| p.as_u64())
+            .ok_or_else(|| QmpError::CommandFailed {
+                command: "guest-exec".to_string(),
+                class: "ParseError".to_string(),
+                desc: "response missing 'pid' field".to_string(),
+            })?;
+        Ok(pid)
+    }
+
+    /// `guest-exec-status` — проверяет статус выполнения команды,
+    /// запущенной через `guest-exec`.
+    ///
+    /// Возвращает результат выполнения: код возврата, stdout, stderr.
+    /// `exited` будет `true` когда процесс завершился.
+    pub async fn guest_exec_status(
+        &mut self,
+        pid: u64,
+    ) -> Result<GuestExecStatus, QmpError> {
+        let value = self
+            .execute_raw("guest-exec-status", Some(json!({ "pid": pid })))
+            .await?;
+        serde_json::from_value(value).map_err(QmpError::ParseError)
+    }
+
+    /// Проверяет доступность guest agent через `guest-ping`.
+    ///
+    /// Возвращает `true` если агент отвечает, `false` если нет.
+    /// Полезно для auto-fallback логики: если agent недоступен,
+    /// используем offline-метод (qemu-nbd).
+    pub async fn is_guest_agent_available(&mut self) -> bool {
+        self.guest_ping().await.is_ok()
+    }
+
     /// Отправляет команду `{"execute": command, "arguments": arguments?}`
     /// и возвращает содержимое поля `return` при успехе, либо
     /// `QmpError::CommandFailed` при `{"error": ...}` в ответе.
@@ -446,6 +519,25 @@ struct QueryJobInfo {
     status: Option<String>,
     #[serde(default)]
     error: Option<String>,
+}
+
+/// Результат выполнения команды через `guest-exec-status`.
+///
+/// Содержит код возврата и захваченный stdout/stderr. Поле `exited`
+/// указывает, завершился ли процесс (если `false` — процесс ещё
+/// выполняется, нужно poll'ить повторно).
+#[derive(Debug, Clone, Deserialize)]
+pub struct GuestExecStatus {
+    /// Код возврата процесса (0 = успех).
+    pub exitcode: i64,
+    /// Процесс завершился.
+    pub exited: bool,
+    /// Захваченный stdout (base64-encoded в QMP,但我们 decoded here).
+    #[serde(default)]
+    pub out_data: Option<String>,
+    /// Захваченный stderr (base64-encoded в QMP).
+    #[serde(default)]
+    pub err_data: Option<String>,
 }
 
 #[cfg(test)]
