@@ -56,8 +56,8 @@
 
 ### Short-term
 
-- [ ] Network modes (Bridge/Isolated) in `andler-net`
-- [ ] Host-side bridge creation and nftables rules
+- [x] Network modes (Bridge/Isolated) in `andler-net`
+- [x] Host-side bridge creation (via iproute2)
 
 ### Medium-term
 

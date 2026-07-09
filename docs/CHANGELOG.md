@@ -38,6 +38,7 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - **gRPC config editing** (`andler-rpc`): `UpdateInstanceConfig` RPC with `UpdateInstanceConfigRequest` mirroring `GetInstanceConfigResponse` fields.
 - **NVML integration** (`andler-firmware`): `nvml-wrapper` crate for NVIDIA GPU metrics (primary), with `nvidia-smi` CLI fallback.
 - **Hardware auto-detection** (`andler-firmware`): `detect_all()` returns `HardwareDefaults` — GPU render backend, display engine, audio server, ARM translator, OVMF paths, Venus support, passt availability.
+- **Network configuration service** (`andler-net`): `NetworkService` trait and `DefaultNetworkService` implementation for bridge and isolated network modes. Uses `iproute2` for host-side network setup.
 
 #### Daemon
 

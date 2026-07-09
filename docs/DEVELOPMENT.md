@@ -194,8 +194,8 @@ andler/
 │   │       ├── magisk.rs         # Offline Magisk provisioning
 │   │       └── error.rs          # DiskError
 │   │
-│   ├── andler-net/               # Stub — future networking
-│   │
+│   ├── andler-net/               # Network configuration (bridge/isolated modes)
+
 │   ├── andler-firmware/
 │   │   └── src/
 │   │       ├── lib.rs

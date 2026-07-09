@@ -78,9 +78,12 @@ Wrapper around `qemu-img` for disk creation/cloning/resizing, plus offline Magis
 
 **34 unit tests** + 8 integration tests (`#[ignore]`).
 
-### `services/andler-net` — Networking (Stub)
+### `services/andler-net` — Network Configuration
 
-Contains only `NetworkConfig`/`NetworkMode` types. No real network setup logic yet — will handle bridge creation, nftables rules when implemented.
+Implements bridge and isolated network modes for QEMU VMs via host-side network configuration.
+
+**Key components:**
+- `lib.rs`: `NetworkService` trait and `DefaultNetworkService` implementation using `iproute2` for bridge/isolated setup
 
 ### `services/andler-firmware` — Firmware & Hardware Detection
 
@@ -245,10 +248,10 @@ Offline root access provisioning via `qemu-nbd`:
 **Requires:** `nbd` kernel module, `qemu-nbd` binary.
 
 ## Future Directions
-
-- **Network modes**: Bridge/Isolated in `andler-net` with nftables integration
+- **Bridge/Isolated network modes**: Implemented in `andler-net` using `iproute2` for bridge creation and network configuration
 - **GPU passthrough**: VFIO-based `RenderBackend::Passthrough`
 - **NVIDIA/Intel GPU metrics**: Extend sysfs reader after VFIO works
 - **Cloud Hypervisor backend**: `andler-vmm` with `rust-vmm` crates
 - **GUI**: Tauri-based client (planned, not started)
 - **Guest image pipelines**: Automated Android image builds with Waydroid
+
