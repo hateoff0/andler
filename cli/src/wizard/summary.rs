@@ -48,12 +48,12 @@ fn print_summary(
 ) {
     let is_basic = advanced.is_none();
     let suffix = |explicit: bool| {
-        if is_basic && !explicit {
-            " (default)"
-        } else if !explicit && is_basic {
-            " (auto-detected)"
-        } else {
+        if explicit {
             ""
+        } else if is_basic {
+            " (default)"
+        } else {
+            " (auto-detected)"
         }
     };
 
