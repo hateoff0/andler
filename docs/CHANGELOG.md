@@ -70,6 +70,7 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - **`disk resize --shrink`**: Explicit confirmation required for shrinking disks.
 - **Metrics display**: GPU columns (VRAM, GPU%) when AMD/NVIDIA/Intel data available. Human-readable byte formatting.
 - **Snapshot subcommands**: `create`, `restore`, `delete`, `list` under `andler snapshot`.
+- **Guest package management**: `andler guest install/remove/list` — install, remove, or list known packages (`spice-vdagent`, `qemu-guest-agent`, `spice-webdavd`) in guest OS. Auto-fallback: online via QMP `guest-exec` if VM running, offline via `qemu-nbd` + mount if stopped.
 - **`clone` and `export`**: Commands for LinuxVm + AndroidVm.
 - **Default XDG paths**: Instance data stored under `~/.local/share/andler/` by default.
 - **`edit` command**: Open instance config in `$VISUAL`/`$EDITOR` as TOML, apply changes via gRPC.

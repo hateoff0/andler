@@ -46,12 +46,13 @@
 - [x] `CompactNotApplicable` error for raw format disks
 - [x] `ShrinkRequiresConfirmation` error for disk shrink without `--shrink`
 - [x] Log history from `qemu.log` before streaming live tail
+- [x] Guest package management — `andler guest install/remove/list` with auto-fallback (online via QMP guest-exec, offline via qemu-nbd)
 
 ## In Progress
 
 - (none currently)
 
-## Planned
+## Roadmap
 
 ### Short-term
 
@@ -60,15 +61,23 @@
 
 ### Medium-term
 
-- [ ] GPU passthrough via VFIO (`RenderBackend::Passthrough`)
-- [ ] Cloud Hypervisor backend (`andler-vmm` with `rust-vmm` crates)
 - [ ] Online Magisk provisioning via guest agent (without `qemu-nbd`)
+- [ ] QEMU backend: improve QMP error handling and recovery
+- [ ] Core: add VM health checks and auto-restart on failure
+- [ ] CLI: add --dry-run flag to preview QEMU args before creating
+- [ ] CLI: add --verify flag to validate instance config before start
+- [ ] Core: add disk space pre-check before snapshot operations
+- [ ] QEMU backend: add hot-plug support for disk/network devices
+- [ ] Core: add VM resource limits (CPU pinning, memory overcommit)
+- [ ] CLI: add --export flag to export VM as OCI container
+- [ ] Core: add VM template system for quick VM creation
+- [ ] Cloud Hypervisor backend (`andler-vmm` with `rust-vmm` crates)
 
 ### Long-term
 
+- [ ] GPU passthrough via VFIO (`RenderBackend::Passthrough`)
 - [ ] Tauri GUI client
 - [ ] Guest image pipelines (automated Android builds with Waydroid)
-- [ ] Guest agent integration (host↔guest communication)
 - [ ] Live migration between hosts
 - [ ] Multi-disk support (snapshot device name parameterization)
 - [ ] QMP event subscription (async events beyond command responses)

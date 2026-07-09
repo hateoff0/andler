@@ -141,6 +141,9 @@ gl = true
 # Create a snapshot
 ./target/release/andler snapshot <instance-id> create --tag before-update
 
+# List known guest packages and their status
+./target/release/andler guest list <instance-id>
+
 # Stop
 ./target/release/andler stop <instance-id>
 
@@ -172,6 +175,7 @@ gl = true
 | `metrics` | Stream resource metrics (`--once` for single sample, `--json`) |
 | `snapshot` | Snapshot CRUD (create/restore/delete/list) |
 | `disk` | Disk management (create/info/resize `--shrink`/compact) |
+| `guest` | Guest package management (install/remove/list). Auto-fallback: online via QMP if running, offline via qemu-nbd if stopped. |
 | `completions` | Generate shell completion script (bash/zsh/fish) |
 
 See [`docs/API.md`](docs/API.md) for full command reference with all flags.

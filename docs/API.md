@@ -252,6 +252,29 @@ andler disk compact /path/to/disk.qcow2
 | `resize <path> --size <size>` | Resize an existing disk (requires `--shrink` to reduce size) |
 | `compact <path>` | Compact a disk (reclaim unused space via `qemu-img convert`, only works on qcow2) |
 
+### `guest`
+
+Guest package management — install, remove, or list packages in the guest OS. Auto-fallback: if VM is running and guest agent is available → online via QMP `guest-exec`; if VM is stopped → offline via `qemu-nbd` + mount.
+
+```bash
+# Install a package
+andler guest install spice-vdagent <instance-id>
+
+# Remove a package
+andler guest remove spice-vdagent <instance-id>
+
+# List known packages and their status
+andler guest list <instance-id>
+```
+
+Known packages: `spice-vdagent` (shared folders), `qemu-guest-agent` (host-guest communication), `spice-webdavd` (webdav shared folders).
+
+| Command | Description |
+|---------|-------------|
+| `install <package> <instance-id>` | Install a package in the guest OS |
+| `remove <package> <instance-id>` | Remove a package from the guest OS |
+| `list <instance-id>` | List known packages and their status (installed/not installed) |
+
 ### `edit`
 
 ```bash
@@ -452,15 +475,18 @@ Defined in `services/andler-rpc/proto/andler.proto`. Uses `tonic`/`prost` for Ru
 | `RestoreSnapshot` | `RestoreSnapshotRequest` | `Empty` | Unary |
 | `DeleteSnapshot` | `DeleteSnapshotRequest` | `Empty` | Unary |
 | `ListSnapshots` | `ListSnapshotsRequest` | `ListSnapshotsResponse` | Unary |
+| `InstallGuestAgent` | `InstallGuestAgentRequest` | `Empty` | Unary |
+| `RemoveGuestAgent` | `RemoveGuestAgentRequest` | `Empty` | Unary |
+| `ListGuestPackages` | `InstanceIdRequest` | `ListGuestPackagesResponse` | Unary |
 
 ### Error Codes
 
 | gRPC Status | Daemon Error | When |
 |-------------|--------------|------|
-| `NOT_FOUND` | `InstanceNotFound`, `SnapshotNotFound`, `InstanceRefNotFound` | Unknown instance/snapshot/ref ID |
+| `NOT_FOUND` | `InstanceNotFound`, `SnapshotNotFound`, `InstanceRefNotFound`, `AgentNotInstalled`, `PackageManagerNotFound` | Unknown instance/snapshot/ref/package |
 | `UNIMPLEMENTED` | `NoBackendRegistered` | Backend kind not available |
-| `FAILED_PRECONDITION` | `InvalidTransition`, `InstanceNotRemovable`, `InstanceNotClonable`, `SharedBaseNotSupportedForLinuxVm`, `InstanceHasLiveClones`, `SnapshotOperationRequiresRunningInstance`, `SnapshotLimitExceeded` | Wrong lifecycle state or resource limit |
-| `ALREADY_EXISTS` | `SnapshotAlreadyExists` | Duplicate snapshot tag |
+| `FAILED_PRECONDITION` | `InvalidTransition`, `InstanceNotRemovable`, `InstanceNotClonable`, `SharedBaseNotSupportedForLinuxVm`, `InstanceHasLiveClones`, `SnapshotOperationRequiresRunningInstance`, `SnapshotLimitExceeded`, `GuestAgentUnavailable` | Wrong lifecycle state, resource limit, or guest agent unavailable |
+| `ALREADY_EXISTS` | `SnapshotAlreadyExists`, `AgentAlreadyInstalled` | Duplicate snapshot tag or package already installed |
 | `INVALID_ARGUMENT` | `ConvertError`, `EmptyInstanceRef`, `MalformedInstanceRef`, `AmbiguousInstanceId`, `ConfigIdMismatch`, `ConfigKindChanged`, `ConfigDiskPathChanged` | Malformed request or invalid arguments |
 | `INTERNAL` | Other errors | Backend/disk/store failures |
 
