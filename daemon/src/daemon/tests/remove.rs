@@ -199,6 +199,40 @@ async fn remove_instance_with_purge_keeps_non_empty_parent_directory() {
 }
 
 #[tokio::test]
+async fn remove_instance_with_purge_recursively_deletes_own_instance_directory() {
+    // Regression test for PLAN.md item 2: the instance's own directory
+    // (named after its InstanceId — unlike an arbitrary user-chosen
+    // parent, which is what the other purge tests above use via
+    // `TestTempDir`) must be removed recursively on purge, even when it
+    // contains files purge doesn't delete by name (e.g. `qemu.log`,
+    // see `andler_qemu::process::QemuProcess::spawn`). The old
+    // non-recursive `remove_dir` silently left the whole directory
+    // behind whenever it held more than just the disk + VARS files.
+    let root = TestTempDir::new();
+    let id = InstanceId::new();
+    let instance_dir = root.path().join(id.0.to_string());
+    tokio::fs::create_dir_all(&instance_dir).await.unwrap();
+
+    let disk_path = instance_dir.join("disk.qcow2");
+    let vars_path = instance_dir.join("VARS.fd");
+    let qemu_log_path = instance_dir.join("qemu.log");
+    tokio::fs::write(&disk_path, b"disk").await.unwrap();
+    tokio::fs::write(&vars_path, b"vars").await.unwrap();
+    tokio::fs::write(&qemu_log_path, b"[stdout] hi\n").await.unwrap();
+
+    let daemon = Daemon::new();
+    let mut cfg = sample_config();
+    cfg.id = id;
+    cfg.disk.path = disk_path.clone();
+    cfg.firmware.ovmf_vars_path = vars_path.clone();
+    daemon.create_instance(cfg).await.unwrap();
+
+    daemon.remove_instance(id, true).await.unwrap();
+
+    assert!(!instance_dir.exists());
+}
+
+#[tokio::test]
 async fn remove_instance_with_purge_never_deletes_shared_base_image_or_ovmf_code() {
     let dir = TestTempDir::new();
     let disk_path = dir.path().join("overlay.qcow2");

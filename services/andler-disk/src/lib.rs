@@ -6,6 +6,9 @@
 //! `clone` — три режима клонирования диска *существующего инстанса* в
 //! новый диск (не от общего `base_image`, как `overlay` — см. модульную
 //! документацию `clone` за тем, почему это разные операции).
+//! `nbd` — общие утилиты для работы с NBD-устройствами и монтированием
+//! разделов (переиспользуются `magisk` и `guest_tools`).
+//! `guest_tools` — offline установка/удаление пакетов в гостевую ФС.
 //! `error::DiskError` — общий тип ошибок всех модулей.
 //!
 //! См. README.md этой папки для границ ответственности относительно
@@ -13,12 +16,14 @@
 
 pub mod clone;
 pub mod error;
+pub mod guest_tools;
 pub mod magisk;
+pub mod nbd;
 pub mod overlay;
 pub mod qcow2;
 
 pub use clone::{full_standalone_clone, linked_clone, shared_base_clone, ClonedDisk};
 pub use error::DiskError;
+pub use guest_tools::{GuestPackage, KNOWN_PACKAGES, PackageStatus};
 pub use overlay::{create_overlay, factory_reset, OverlayDisk};
 pub use qcow2::DiskInfo;
-

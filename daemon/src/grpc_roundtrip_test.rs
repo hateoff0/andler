@@ -820,3 +820,18 @@ async fn clone_instance_linux_vm_shared_base_rejected_as_failed_precondition() {
 
     server.abort();
 }
+
+#[tokio::test]
+async fn list_guest_packages_instance_not_found() {
+    let (mut client, server) = spawn_server_and_connect().await;
+
+    let status = client
+        .list_guest_packages(InstanceIdRequest {
+            instance_id: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee".to_string(),
+        })
+        .await
+        .expect_err("nonexistent instance must fail");
+    assert_eq!(status.code(), tonic::Code::NotFound);
+
+    server.abort();
+}

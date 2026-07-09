@@ -78,11 +78,66 @@ impl Drop for InstanceDirGuard {
     }
 }
 
+/// Пишет `<instance_dir>/instance.toml` — человекочитаемая копия
+/// `InstanceConfig`, лежащая рядом с диском/`VARS.fd` самого инстанса
+/// (см. PLAN.md, item 5, "Store config alongside instance, not in DB").
+/// Вызывается из `create_android_instance`/`create_linux_instance` (не
+/// из общего `create_instance`!) — именно эти две функции сами создают
+/// и владеют `instance_dir` под `instances_root`; универсальный
+/// `create_instance` принимает уже готовый `InstanceConfig` откуда
+/// угодно (тесты, `LinuxVm` с произвольным пользовательским
+/// `disk.path`), и не может считать `disk.path.parent()` "своим"
+/// каталогом — писать туда `instance.toml` из общего пути означало бы
+/// разбрасывать файлы по каталогам, не связанным с этим инстансом.
+///
+/// Реализована пока только запись — SQLite остаётся единственным
+/// источником истины при `Daemon::restore` (чтение `instance.toml` в
+/// приоритете над SQLite, миграция legacy-инстансов без файла и
+/// TOCTOU-обработка одновременного редактирования пользователем и
+/// демоном — из полного предложения в PLAN.md не реализованы). Файл
+/// уже сейчас можно открыть текстовым редактором/`cat`/`jq` для осмотра
+/// конфигурации без обращения к демону — то есть часть непосредственной
+/// ценности предложения (инспекция, бэкап каталога) уже есть, часть
+/// (редактирование конфигурации в обход демона с последующим подхватом
+/// изменений) — нет.
+///
+/// Ошибка записи только логируется, не возвращается наружу — тот же
+/// принцип, что и у `Daemon::persist_new_instance`: `instance.toml` не
+/// является источником истины на данный момент (им остаётся SQLite),
+/// поэтому его временная недоступность (диск полон, права) не должна
+/// мешать уже совершившемуся созданию инстанса.
+pub(crate) async fn write_instance_toml(instance_dir: &std::path::Path, cfg: &InstanceConfig) {
+    let toml_string = match toml::to_string_pretty(cfg) {
+        Ok(s) => s,
+        Err(err) => {
+            tracing::error!(
+                instance_id = %cfg.id.0,
+                error = %err,
+                "failed to serialize instance.toml (instance was still created successfully)"
+            );
+            return;
+        }
+    };
+
+    let path = instance_dir.join("instance.toml");
+    if let Err(err) = tokio::fs::write(&path, toml_string).await {
+        tracing::error!(
+            instance_id = %cfg.id.0,
+            path = %path.display(),
+            error = %err,
+            "failed to write instance.toml (instance was still created successfully)"
+        );
+    }
+}
+
 /// Удаляет файлы инстанса, принадлежащие только ему (диск, персональная
-/// копия OVMF_VARS), и делает best-effort попытку убрать опустевший
-/// родительский каталог. Используется только из `Daemon::remove_instance`
-/// при `purge: true` — см. документацию там за полным обоснованием того,
-/// что удаляется и почему.
+/// копия OVMF_VARS), а затем удаляет и сам родительский каталог: если
+/// это собственный каталог инстанса (`<instances_root>/<id>/`) — целиком
+/// и рекурсивно (там могло остаться что угодно ещё, например
+/// `qemu.log`), если это чужой/пользовательский путь — только если он
+/// уже пуст. Используется только из `Daemon::remove_instance` при
+/// `purge: true` — см. документацию там за полным обоснованием того, что
+/// удаляется и почему.
 ///
 /// Каждая ошибка удаления логируется отдельно, не агрегируется и не
 /// возвращается — вызывающая сторона (`remove_instance`) уже считает
@@ -108,14 +163,50 @@ pub(crate) async fn purge_instance_files(id: InstanceId, config: &InstanceConfig
         );
     }
 
-    // Best-effort: только убирает каталог, если он уже пуст (т.е. оба
-    // файла выше были единственным его содержимым — типичный случай для
-    // `AndroidVm::instance_dir`). Непустой каталог (типичный случай для
-    // `LinuxVm` с пользовательским путём, где рядом могут быть чужие
-    // файлы) тихо остаётся на месте — это не ошибка purge, а ожидаемый
-    // исход для путей вне `instance_dir`.
+    // `remove_dir` only succeeds on an already-empty directory — that
+    // used to silently leave the instance directory behind for any
+    // instance with more than the two files above in it (e.g. Linux
+    // instances with an extra file next to the disk, or any instance at
+    // all once `qemu.log` started being written into this same
+    // directory — see `andler_qemu::process::QemuProcess::spawn`). See
+    // PLAN.md, item 2, "--purge remove does not delete instance
+    // folder".
+    //
+    // `remove_dir_all` is only safe to use unconditionally if we're sure
+    // `parent` really is *this instance's own* directory and not some
+    // unrelated, possibly user-supplied path that merely happens to be
+    // the parent of `disk.path` (a `LinuxVm` can point `disk.path`
+    // anywhere the user chose — see `create_instance`). Instance
+    // directories are always named after the instance's own UUID (see
+    // `instance_ops.rs`/`clone_ops.rs`: `instances_root.join(id.0.to_string())`),
+    // so comparing the directory's name against `id.0.to_string()`
+    // (rather than a generic "looks like some UUID" shape check) is both
+    // precise and cheap — no need to also verify `parent` sits under
+    // `instances_root`, since a name collision with a real instance's
+    // own id is not something a user-supplied `disk.path` could produce
+    // by accident.
     if let Some(parent) = config.disk.path.parent() {
-        let _ = tokio::fs::remove_dir(parent).await;
+        let is_instance_dir = parent
+            .file_name()
+            .is_some_and(|name| name.to_string_lossy() == id.0.to_string());
+
+        if is_instance_dir {
+            if let Err(err) = tokio::fs::remove_dir_all(parent).await {
+                tracing::error!(
+                    instance_id = %id.0,
+                    path = %parent.display(),
+                    error = %err,
+                    "purge: failed to remove instance directory"
+                );
+            }
+        } else {
+            // Not our own instance directory (e.g. a `LinuxVm` with a
+            // user-chosen `disk.path` elsewhere) — best-effort, only
+            // removes it if it's already empty, never recursively: we
+            // have no way to know what else might legitimately live
+            // there.
+            let _ = tokio::fs::remove_dir(parent).await;
+        }
     }
 }
 

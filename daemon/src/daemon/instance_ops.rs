@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use super::Daemon;
 use super::error::DaemonError;
-use super::types::{InstanceDirGuard, InstanceRecord};
+use super::types::{InstanceDirGuard, InstanceRecord, write_instance_toml};
 use andler_core::{
     BackendError, DiskFormat, InstanceConfig, InstanceEvent, InstanceId,
     InstanceState,
@@ -149,7 +149,12 @@ impl Daemon {
         let instance_dir = instances_root.join(id.0.to_string());
         let mut dir_guard = InstanceDirGuard::new(instance_dir.clone());
 
-        tokio::fs::create_dir_all(&instance_dir)
+        // `ensure_private_dir` sets `0700`, not just the default umask —
+        // the instance directory holds the disk image, OVMF_VARS (may
+        // contain Secure Boot keys), instance.toml, and qemu.log; none
+        // of that should be readable by other local users by default.
+        // See PLAN.md, item 20b, "No file permission controls".
+        andler_core::paths::ensure_private_dir(&instance_dir)
             .await
             .map_err(|source| DaemonError::Io {
                 path: instance_dir.clone(),
@@ -197,6 +202,8 @@ impl Daemon {
         // на диске, иначе InstanceConfig.id разойдётся с именем каталога.
         cfg.id = id;
 
+        write_instance_toml(&instance_dir, &cfg).await;
+
         let registered_id = self.create_instance(cfg).await?;
         // Вся последовательность (каталог, OVMF_VARS, overlay,
         // регистрация в Daemon) успешна — instance_dir больше не
@@ -220,7 +227,12 @@ impl Daemon {
         let instance_dir = instances_root.join(id.0.to_string());
         let mut dir_guard = InstanceDirGuard::new(instance_dir.clone());
 
-        tokio::fs::create_dir_all(&instance_dir)
+        // `ensure_private_dir` sets `0700`, not just the default umask —
+        // the instance directory holds the disk image, OVMF_VARS (may
+        // contain Secure Boot keys), instance.toml, and qemu.log; none
+        // of that should be readable by other local users by default.
+        // See PLAN.md, item 20b, "No file permission controls".
+        andler_core::paths::ensure_private_dir(&instance_dir)
             .await
             .map_err(|source| DaemonError::Io {
                 path: instance_dir.clone(),
@@ -236,12 +248,46 @@ impl Daemon {
         }
 
         if cfg.disk.format == DiskFormat::Qcow2 && !cfg.disk.path.exists() {
+            // Anchor a freshly-created disk inside our own instance_dir,
+            // the same way `ovmf_vars_path` above always is — matches
+            // `create_android_instance`'s overlay (also always inside
+            // `instance_dir`) and the documented
+            // `<instances_root>/<uuid>/{VARS.fd,disk.qcow2}` layout (see
+            // PLAN.md, item 5's storage table). Before this fix,
+            // whatever path the caller put in `cfg.disk.path` (e.g. the
+            // wizard's `<instances_root>/<name>-disk.qcow2`, flat, not
+            // nested under a per-instance directory) was used as-is —
+            // meaning disk.qcow2 and VARS.fd for the same instance ended
+            // up in two different directories, and anything keyed off
+            // `disk.path.parent()` as "the instance's own directory"
+            // (qemu.log — see `QemuProcess::spawn` — and purge's
+            // recursive-delete decision in `purge_instance_files`) was
+            // silently wrong for every Linux VM.
+            //
+            // Only for a disk that doesn't exist yet: an *existing*
+            // disk the caller points at (e.g. a hand-written TOML/CLI
+            // config referencing a disk the user manages themselves
+            // elsewhere on the filesystem) is left exactly where it is
+            // — this is the same "not our own directory" case already
+            // documented in `purge_instance_files`, we must not move a
+            // file the user didn't ask us to move.
+            let disk_file_name = cfg
+                .disk
+                .path
+                .file_name()
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("disk.qcow2"));
+            cfg.disk.path = instance_dir.join(disk_file_name);
+
             andler_disk::qcow2::create(&cfg.disk.path, cfg.disk.size_bytes)
                 .await
                 .map_err(DaemonError::Disk)?;
         }
 
         cfg.id = id;
+
+        write_instance_toml(&instance_dir, &cfg).await;
+
         let registered_id = self.create_instance(cfg).await?;
         dir_guard.disarm();
 
@@ -395,16 +441,27 @@ impl Daemon {
     /// отправки команды (теоретическая гонка) `status()` всё равно покажет
     /// правду.
     pub async fn pause_instance(&self, id: InstanceId) -> Result<(), DaemonError> {
-        let instances = self.instances.read().await;
-        let record = instances
-            .get(&id)
-            .ok_or(DaemonError::InstanceNotFound(id))?;
+        // Extract what's needed and release the lock before the QMP
+        // round-trip below — holding a read lock across `.await` would
+        // serialize every other operation on `self.instances` (create,
+        // remove, status queries, ...) behind however long `pause`
+        // takes to actually talk to QEMU. Same fix, same rationale, as
+        // `resume_instance` right below and as `start_instance`/
+        // `stop_instance` already do above. See PLAN.md, item 21b,
+        // "RwLock held across await in pause/resume".
+        let (backend, handle) = {
+            let instances = self.instances.read().await;
+            let record = instances
+                .get(&id)
+                .ok_or(DaemonError::InstanceNotFound(id))?;
 
-        let handle = record
-            .handle
-            .clone()
-            .ok_or_else(|| DaemonError::Backend(BackendError::HandleNotFound(id.0.to_string())))?;
-        let backend = self.backend_for(record.config.backend)?;
+            let handle = record.handle.clone().ok_or_else(|| {
+                DaemonError::Backend(BackendError::HandleNotFound(id.0.to_string()))
+            })?;
+            let backend = self.backend_for(record.config.backend)?.clone();
+
+            (backend, handle)
+        };
 
         backend.pause(&handle).await.map_err(DaemonError::Backend)
     }
@@ -413,16 +470,19 @@ impl Daemon {
     /// `pause_instance` про то, почему `InstanceState` записи демона не
     /// меняется здесь напрямую.
     pub async fn resume_instance(&self, id: InstanceId) -> Result<(), DaemonError> {
-        let instances = self.instances.read().await;
-        let record = instances
-            .get(&id)
-            .ok_or(DaemonError::InstanceNotFound(id))?;
+        let (backend, handle) = {
+            let instances = self.instances.read().await;
+            let record = instances
+                .get(&id)
+                .ok_or(DaemonError::InstanceNotFound(id))?;
 
-        let handle = record
-            .handle
-            .clone()
-            .ok_or_else(|| DaemonError::Backend(BackendError::HandleNotFound(id.0.to_string())))?;
-        let backend = self.backend_for(record.config.backend)?;
+            let handle = record.handle.clone().ok_or_else(|| {
+                DaemonError::Backend(BackendError::HandleNotFound(id.0.to_string()))
+            })?;
+            let backend = self.backend_for(record.config.backend)?.clone();
+
+            (backend, handle)
+        };
 
         backend.resume(&handle).await.map_err(DaemonError::Backend)
     }
@@ -545,6 +605,235 @@ impl Daemon {
         }
 
         Ok(())
+    }
+
+    /// Устанавливает пакет в гостевую ОС инстанса.
+    ///
+    /// Auto-fallback логика:
+    /// 1. Если VM запущена (Running/Paused) и guest agent доступен → online
+    ///    через guest-exec (QEMU Guest Agent).
+    /// 2. Если VM остановлена (Created/Stopped) → offline через qemu-nbd + mount.
+    /// 3. Если VM запущена, но guest agent недоступен → ошибка с инструкцией
+    ///    остановить VM для offline установки.
+    pub async fn install_guest_agent(
+        &self,
+        id: InstanceId,
+        package: String,
+    ) -> Result<(), DaemonError> {
+        let (state, disk_path, handle, backend_kind) = {
+            let instances = self.instances.read().await;
+            let record = instances
+                .get(&id)
+                .ok_or(DaemonError::InstanceNotFound(id))?;
+            (
+                record.state.clone(),
+                record.config.disk.path.clone(),
+                record.handle.clone(),
+                record.config.backend,
+            )
+        };
+
+        match &state {
+            InstanceState::Running | InstanceState::Paused => {
+                let handle = handle.ok_or_else(|| {
+                    DaemonError::GuestAgentUnavailable {
+                        instance_id: id,
+                        message: "instance is running but has no backend handle".to_string(),
+                    }
+                })?;
+
+                let backend = self.backend_for(backend_kind)?;
+
+                if !backend.is_guest_agent_available(&handle).await? {
+                    return Err(DaemonError::GuestAgentUnavailable {
+                        instance_id: id,
+                        message: format!(
+                            "VM is running but guest agent is not available; \
+                             stop the VM first to install `{package}` offline"
+                        ),
+                    });
+                }
+
+                backend.guest_exec_install(&handle, &package).await?;
+                tracing::info!(
+                    instance_id = %id.0,
+                    package = %package,
+                    "package installed via online guest-exec"
+                );
+                Ok(())
+            }
+            InstanceState::Created | InstanceState::Stopped | InstanceState::Error { .. } => {
+                if !disk_path.exists() {
+                    return Err(DaemonError::InstanceNotFound(id));
+                }
+
+                andler_disk::guest_tools::install_agent_offline(&disk_path, &package).await?;
+                tracing::info!(
+                    instance_id = %id.0,
+                    package = %package,
+                    "package installed via offline qemu-nbd"
+                );
+                Ok(())
+            }
+            other => Err(DaemonError::GuestAgentUnavailable {
+                instance_id: id,
+                message: format!(
+                    "instance is in state {other:?}; must be Running/Paused (online) \
+                     or Created/Stopped (offline)"
+                ),
+            }),
+        }
+    }
+
+    /// Удаляет пакет из гостевой ОС инстанса.
+    ///
+    /// Та же auto-fallback логика, что у `install_guest_agent`.
+    pub async fn remove_guest_agent(
+        &self,
+        id: InstanceId,
+        package: String,
+    ) -> Result<(), DaemonError> {
+        let (state, disk_path, handle, backend_kind) = {
+            let instances = self.instances.read().await;
+            let record = instances
+                .get(&id)
+                .ok_or(DaemonError::InstanceNotFound(id))?;
+            (
+                record.state.clone(),
+                record.config.disk.path.clone(),
+                record.handle.clone(),
+                record.config.backend,
+            )
+        };
+
+        match &state {
+            InstanceState::Running | InstanceState::Paused => {
+                let handle = handle.ok_or_else(|| {
+                    DaemonError::GuestAgentUnavailable {
+                        instance_id: id,
+                        message: "instance is running but has no backend handle".to_string(),
+                    }
+                })?;
+
+                let backend = self.backend_for(backend_kind)?;
+
+                if !backend.is_guest_agent_available(&handle).await? {
+                    return Err(DaemonError::GuestAgentUnavailable {
+                        instance_id: id,
+                        message: format!(
+                            "VM is running but guest agent is not available; \
+                             stop the VM first to remove `{package}` offline"
+                        ),
+                    });
+                }
+
+                backend.guest_exec_remove(&handle, &package).await?;
+                tracing::info!(
+                    instance_id = %id.0,
+                    package = %package,
+                    "package removed via online guest-exec"
+                );
+                Ok(())
+            }
+            InstanceState::Created | InstanceState::Stopped | InstanceState::Error { .. } => {
+                if !disk_path.exists() {
+                    return Err(DaemonError::InstanceNotFound(id));
+                }
+
+                andler_disk::guest_tools::remove_agent_offline(&disk_path, &package).await?;
+                tracing::info!(
+                    instance_id = %id.0,
+                    package = %package,
+                    "package removed via offline qemu-nbd"
+                );
+                Ok(())
+            }
+            other => Err(DaemonError::GuestAgentUnavailable {
+                instance_id: id,
+                message: format!(
+                    "instance is in state {other:?}; must be Running/Paused (online) \
+                     or Created/Stopped (offline)"
+                ),
+            }),
+        }
+    }
+
+    /// Возвращает списокKNOWN_PACKAGES со статусом в гостевой ОС.
+    ///
+    /// Auto-fallback: online (guest-exec) если VM запущена, offline
+    /// (qemu-nbd) если остановлена.
+    pub async fn list_guest_packages(
+        &self,
+        id: InstanceId,
+    ) -> Result<Vec<(String, String, String)>, DaemonError> {
+        let (state, disk_path, handle, backend_kind) = {
+            let instances = self.instances.read().await;
+            let record = instances
+                .get(&id)
+                .ok_or(DaemonError::InstanceNotFound(id))?;
+            (
+                record.state.clone(),
+                record.config.disk.path.clone(),
+                record.handle.clone(),
+                record.config.backend,
+            )
+        };
+
+        let mut results = Vec::new();
+
+        match &state {
+            InstanceState::Running | InstanceState::Paused => {
+                let handle = handle.ok_or_else(|| {
+                    DaemonError::GuestAgentUnavailable {
+                        instance_id: id,
+                        message: "instance is running but has no backend handle".to_string(),
+                    }
+                })?;
+
+                let backend = self.backend_for(backend_kind)?;
+
+                for pkg in andler_disk::guest_tools::KNOWN_PACKAGES {
+                    let installed = backend
+                        .guest_check_binary_installed(&handle, pkg.binary_check)
+                        .await
+                        .unwrap_or(false);
+                    results.push((
+                        pkg.name.to_string(),
+                        pkg.description.to_string(),
+                        if installed { "installed" } else { "not_installed" }.to_string(),
+                    ));
+                }
+            }
+            InstanceState::Created | InstanceState::Stopped | InstanceState::Error { .. } => {
+                if !disk_path.exists() {
+                    return Err(DaemonError::InstanceNotFound(id));
+                }
+
+                // Offline: mount and check
+                let package_status = andler_disk::guest_tools::check_all_packages_offline_with_disk(&disk_path)?;
+                for (pkg, status) in package_status {
+                    results.push((
+                        pkg.name.to_string(),
+                        pkg.description.to_string(),
+                        match status {
+                            andler_disk::guest_tools::PackageStatus::Installed => "installed",
+                            andler_disk::guest_tools::PackageStatus::NotInstalled => "not_installed",
+                            andler_disk::guest_tools::PackageStatus::Unknown => "unknown",
+                        }.to_string(),
+                    ));
+                }
+            }
+            other => {
+                return Err(DaemonError::GuestAgentUnavailable {
+                    instance_id: id,
+                    message: format!(
+                        "instance is in state {other:?}; cannot list packages"
+                    ),
+                });
+            }
+        }
+
+        Ok(results)
     }
 }
 

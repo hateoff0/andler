@@ -14,9 +14,10 @@ use andler_rpc::proto::{
     CloneInstanceRequest, CreateAndroidInstanceRequest, CreateInstanceRequest,
     CreateInstanceResponse, CreateSnapshotRequest, CreateSnapshotResponse, DeleteSnapshotRequest,
     Empty, ExportInstanceDiskRequest, ExportInstanceDiskResponse, GetInstanceConfigResponse,
-    InstanceIdRequest, InstanceListEntry, InstanceStatusResponse, ListInstancesResponse,
-    ListSnapshotsResponse, LogLineResponse, RemoveInstanceRequest, ResourceMetricsResponse,
-    RestoreSnapshotRequest, SnapshotEntry, StopInstanceRequest,
+    GuestPackageEntry, InstallGuestAgentRequest, InstanceIdRequest, InstanceListEntry,
+    InstanceStatusResponse, ListGuestPackagesResponse, ListInstancesResponse, ListSnapshotsResponse,
+    LogLineResponse, RemoveGuestAgentRequest, RemoveInstanceRequest, ResourceMetricsResponse,
+    RestoreSnapshotRequest, SnapshotEntry, StopInstanceRequest, UpdateInstanceConfigRequest,
 };
 use futures_core::Stream;
 use futures_util::StreamExt;
@@ -112,6 +113,17 @@ impl From<DaemonError> for Status {
             DaemonError::MalformedInstanceRef(_) => Status::invalid_argument(err.to_string()),
             DaemonError::InstanceRefNotFound(_) => Status::not_found(err.to_string()),
             DaemonError::AmbiguousInstanceId { .. } => Status::invalid_argument(err.to_string()),
+            // `andler edit` sent back a config that would desync the
+            // stored config from what's actually on disk/in the daemon —
+            // same category as the instance-ref errors above: the client
+            // (or the human editing the TOML) can fix these by not
+            // touching those fields, not a server-state problem.
+            DaemonError::ConfigIdMismatch { .. } => Status::invalid_argument(err.to_string()),
+            DaemonError::ConfigKindChanged(_) => Status::invalid_argument(err.to_string()),
+            DaemonError::ConfigDiskPathChanged(_) => Status::invalid_argument(err.to_string()),
+            // Guest agent operations: client can fix by stopping the VM
+            // or ensuring guest agent is installed.
+            DaemonError::GuestAgentUnavailable { .. } => Status::failed_precondition(err.to_string()),
         }
     }
 }
@@ -311,6 +323,24 @@ impl AndlerService for DaemonService {
         Ok(Response::new(config.into()))
     }
 
+    /// Соответствует `Daemon::update_instance_config` (`andler edit`).
+    /// `instance_ref` разрешается тем же путём, что и `instance_id` у
+    /// `GetInstanceConfig` (партиал-ID через `resolve_instance_id`), а не
+    /// напрямую как `InstanceId` — конвертация запроса в `InstanceConfig`
+    /// нуждается в уже разрешённом `id` (см. doc-комментарий
+    /// `convert::update_request_to_instance_config`), поэтому резолв идёт
+    /// первым шагом, до конвертации.
+    async fn update_instance_config(
+        &self,
+        request: Request<UpdateInstanceConfigRequest>,
+    ) -> Result<Response<Empty>, Status> {
+        let req = request.into_inner();
+        let id = self.daemon.resolve_instance_id(&req.instance_ref).await?;
+        let config = convert::update_request_to_instance_config(id, req)?;
+        self.daemon.update_instance_config(id, config).await?;
+        Ok(Response::new(Empty {}))
+    }
+
     /// Соответствует `Daemon::stream_instance_logs`. Не возвращает gRPC
     /// ошибку для инстанса без запущенного backend'а — `Daemon` уже сам
     /// отдаёт пустой поток в этом случае (см. документацию там), здесь
@@ -452,5 +482,50 @@ impl AndlerService for DaemonService {
             .collect();
 
         Ok(Response::new(ListSnapshotsResponse { snapshots }))
+    }
+
+    async fn install_guest_agent(
+        &self,
+        request: Request<InstallGuestAgentRequest>,
+    ) -> Result<Response<Empty>, Status> {
+        let req = request.into_inner();
+        let id = self.daemon.resolve_instance_id(&req.instance_id).await?;
+
+        self.daemon.install_guest_agent(id, req.package).await?;
+
+        Ok(Response::new(Empty {}))
+    }
+
+    async fn remove_guest_agent(
+        &self,
+        request: Request<RemoveGuestAgentRequest>,
+    ) -> Result<Response<Empty>, Status> {
+        let req = request.into_inner();
+        let id = self.daemon.resolve_instance_id(&req.instance_id).await?;
+
+        self.daemon.remove_guest_agent(id, req.package).await?;
+
+        Ok(Response::new(Empty {}))
+    }
+
+    async fn list_guest_packages(
+        &self,
+        request: Request<InstanceIdRequest>,
+    ) -> Result<Response<ListGuestPackagesResponse>, Status> {
+        let req = request.into_inner();
+        let id = self.daemon.resolve_instance_id(&req.instance_id).await?;
+
+        let packages = self.daemon.list_guest_packages(id).await?;
+
+        let entries = packages
+            .into_iter()
+            .map(|(name, description, status)| GuestPackageEntry {
+                name,
+                description,
+                status,
+            })
+            .collect();
+
+        Ok(Response::new(ListGuestPackagesResponse { packages: entries }))
     }
 }

@@ -131,7 +131,19 @@ impl Store {
         let conn = self.conn.clone();
 
         tokio::task::spawn_blocking(move || -> Result<(), StoreError> {
-            let conn = conn.lock().expect("sqlite connection mutex poisoned");
+            // `.unwrap_or_else(|e| e.into_inner())` recovers the guard
+            // even if the mutex is poisoned (a previous holder panicked
+            // while holding it) instead of panicking here too and
+            // taking down the whole task -- see PLAN.md, item 20d,
+            // "`unwrap()` in production code". This is safe specifically
+            // *because* the only thing behind this `Mutex` is a
+            // `rusqlite::Connection`: SQLite's own transaction/statement
+            // handling means a panic mid-query doesn't leave the
+            // connection itself in a torn, half-written Rust-level
+            // state the way a panic mid-mutation of a plain struct
+            // behind a `Mutex` might -- recovering and continuing to use
+            // the same connection is safe, not just convenient.
+            let conn = conn.lock().unwrap_or_else(|e| e.into_inner());
             conn.execute(
                 "INSERT OR REPLACE INTO instances (id, config_json, state_json) \
                  VALUES (?1, ?2, ?3)",
@@ -165,7 +177,7 @@ impl Store {
         let conn = self.conn.clone();
 
         let rows_changed = tokio::task::spawn_blocking(move || -> Result<usize, StoreError> {
-            let conn = conn.lock().expect("sqlite connection mutex poisoned");
+            let conn = conn.lock().unwrap_or_else(|e| e.into_inner());
             let rows = conn.execute(
                 "UPDATE instances SET state_json = ?1 WHERE id = ?2",
                 (state_json, id.0.to_string()),
@@ -187,7 +199,7 @@ impl Store {
         let conn = self.conn.clone();
 
         tokio::task::spawn_blocking(move || -> Result<StoredInstance, StoreError> {
-            let conn = conn.lock().expect("sqlite connection mutex poisoned");
+            let conn = conn.lock().unwrap_or_else(|e| e.into_inner());
             let row = conn
                 .query_row(
                     "SELECT config_json, state_json FROM instances WHERE id = ?1",
@@ -218,7 +230,7 @@ impl Store {
         let conn = self.conn.clone();
 
         tokio::task::spawn_blocking(move || -> Result<Vec<StoredInstance>, StoreError> {
-            let conn = conn.lock().expect("sqlite connection mutex poisoned");
+            let conn = conn.lock().unwrap_or_else(|e| e.into_inner());
             let mut stmt = conn.prepare("SELECT config_json, state_json FROM instances")?;
             let rows = stmt.query_map([], |row| {
                 let config_json: String = row.get(0)?;
@@ -244,7 +256,7 @@ impl Store {
         let conn = self.conn.clone();
 
         tokio::task::spawn_blocking(move || -> Result<(), StoreError> {
-            let conn = conn.lock().expect("sqlite connection mutex poisoned");
+            let conn = conn.lock().unwrap_or_else(|e| e.into_inner());
             conn.execute("DELETE FROM instances WHERE id = ?1", [id.0.to_string()])?;
             Ok(())
         })
@@ -267,7 +279,7 @@ impl Store {
         let conn = self.conn.clone();
 
         tokio::task::spawn_blocking(move || -> Result<(), StoreError> {
-            let conn = conn.lock().expect("sqlite connection mutex poisoned");
+            let conn = conn.lock().unwrap_or_else(|e| e.into_inner());
             conn.execute(
                 "INSERT OR REPLACE INTO snapshots (id, instance_id, tag, description, created_at) \
                  VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -289,7 +301,7 @@ impl Store {
         let conn = self.conn.clone();
 
         tokio::task::spawn_blocking(move || -> Result<Vec<StoredSnapshot>, StoreError> {
-            let conn = conn.lock().expect("sqlite connection mutex poisoned");
+            let conn = conn.lock().unwrap_or_else(|e| e.into_inner());
             let mut stmt = conn.prepare(
                 "SELECT id, instance_id, tag, description, created_at \
                  FROM snapshots WHERE instance_id = ?1 ORDER BY created_at",
@@ -328,7 +340,7 @@ impl Store {
         let conn = self.conn.clone();
 
         tokio::task::spawn_blocking(move || -> Result<Option<StoredSnapshot>, StoreError> {
-            let conn = conn.lock().expect("sqlite connection mutex poisoned");
+            let conn = conn.lock().unwrap_or_else(|e| e.into_inner());
             let result = conn.query_row(
                 "SELECT id, instance_id, tag, description, created_at \
                  FROM snapshots WHERE instance_id = ?1 AND tag = ?2",
@@ -369,7 +381,7 @@ impl Store {
         let conn = self.conn.clone();
 
         tokio::task::spawn_blocking(move || -> Result<(), StoreError> {
-            let conn = conn.lock().expect("sqlite connection mutex poisoned");
+            let conn = conn.lock().unwrap_or_else(|e| e.into_inner());
             conn.execute(
                 "DELETE FROM snapshots WHERE instance_id = ?1 AND tag = ?2",
                 (instance_id_str, tag),

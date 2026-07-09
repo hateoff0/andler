@@ -136,6 +136,39 @@ pub enum DaemonError {
     #[error("instance reference must not be empty")]
     EmptyInstanceRef,
 
+    /// `Daemon::update_instance_config` (`andler edit`, см. PLAN.md,
+    /// "18. Instance config editing") — присланная конфигурация ссылается
+    /// на другой `InstanceId`, чем тот, что был разрешён из запроса.
+    /// Явная ошибка, а не тихая перезапись под правильным id или запись
+    /// под чужим ключом — оба варианта хуже, чем сказать пользователю,
+    /// что именно не так.
+    #[error("cannot update instance {expected:?}: config has a different id {actual:?}")]
+    ConfigIdMismatch {
+        expected: InstanceId,
+        actual: InstanceId,
+    },
+
+    /// `update_instance_config` — присланная конфигурация меняет тип
+    /// гостя (`LinuxVm` <-> `AndroidVm`). Не поддерживается: у двух типов
+    /// принципиально разный резолв диска/firmware (`AndroidProfile::resolve`
+    /// vs прямой `DiskConfig`), смена на лету потребовала бы повторного
+    /// провижининга, а не просто замены полей структуры.
+    #[error(
+        "cannot change instance {0:?} kind (LinuxVm <-> AndroidVm) via edit; \
+         recreate the instance instead"
+    )]
+    ConfigKindChanged(InstanceId),
+
+    /// `update_instance_config` — присланная конфигурация меняет
+    /// `disk.path`. Путь к диску должен продолжать указывать на реальный
+    /// файл на диске — изменения пути должны идти через `andler disk`/
+    /// clone-команды, которые знают, как безопасно переместить/отследить
+    /// сам файл, а не через свободное редактирование этого поля.
+    #[error(
+        "cannot change instance {0:?} disk path via edit; use `andler disk` commands instead"
+    )]
+    ConfigDiskPathChanged(InstanceId),
+
     /// `Daemon::resolve_instance_id` — строка не является ни валидным UUID,
     /// ни валидным hex-префиксом (содержит символы вне [0-9a-fA-F-]).
     /// Отдельно от `InstanceRefNotFound`, потому что там ошибка про
@@ -161,5 +194,15 @@ pub enum DaemonError {
     AmbiguousInstanceId {
         prefix: String,
         candidates: Vec<InstanceId>,
+    },
+
+    /// QEMU Guest Agent недоступен для инстанса (guest-ping не ответил
+    /// или guest-exec не поддерживается). Используется когда VM запущена,
+    /// но online-установка невозможна — пользователю предлагается
+    /// остановить VM для offline-установки через qemu-nbd.
+    #[error("guest agent unavailable for instance {instance_id:?}: {message}")]
+    GuestAgentUnavailable {
+        instance_id: InstanceId,
+        message: String,
     },
 }

@@ -163,4 +163,59 @@ impl Daemon {
             .map(|record| record.config.clone())
             .ok_or(DaemonError::InstanceNotFound(id))
     }
+
+    /// Заменяет конфигурацию существующего инстанса целиком — путь
+    /// `andler edit` (см. PLAN.md, "18. Instance config editing").
+    ///
+    /// Три поля защищены от изменения этим методом (см. соответствующие
+    /// варианты `DaemonError` за полным обоснованием каждого):
+    /// - `id` должен совпадать с уже разрешённым — иначе непонятно, что
+    ///   должно произойти (перезаписать чужую запись? проигнорировать
+    ///   поле?), поэтому явная ошибка вместо угадывания.
+    /// - тип гостя (`LinuxVm`/`AndroidVm`) менять нельзя — у них разный
+    ///   резолв диска/firmware, живая замена не имеет смысла без полного
+    ///   пересоздания.
+    /// - `disk.path` менять нельзя — это должно идти через `andler disk`/
+    ///   clone-команды, которые отслеживают реальный файл, не через
+    ///   произвольную правку текстового поля.
+    ///
+    /// Не проверяет и не блокирует состояние FSM: применяется к
+    /// сохранённой записи сразу, даже если инстанс сейчас `Running` —
+    /// уже запущенный процесс QEMU получил свои аргументы командной
+    /// строки при старте и не подхватит изменения без перезапуска;
+    /// сообщить об этом пользователю — забота вызывающей стороны (CLI),
+    /// не повод отклонять сохранение здесь.
+    pub async fn update_instance_config(
+        &self,
+        id: InstanceId,
+        new_config: InstanceConfig,
+    ) -> Result<(), DaemonError> {
+        if new_config.id != id {
+            return Err(DaemonError::ConfigIdMismatch {
+                expected: id,
+                actual: new_config.id,
+            });
+        }
+
+        let (cfg_snapshot, state_snapshot) = {
+            let mut instances = self.instances.write().await;
+            let record = instances.get_mut(&id).ok_or(DaemonError::InstanceNotFound(id))?;
+
+            let kind_changed = std::mem::discriminant(&record.config.kind)
+                != std::mem::discriminant(&new_config.kind);
+            if kind_changed {
+                return Err(DaemonError::ConfigKindChanged(id));
+            }
+            if record.config.disk.path != new_config.disk.path {
+                return Err(DaemonError::ConfigDiskPathChanged(id));
+            }
+
+            record.config = new_config;
+            (record.config.clone(), record.state.clone())
+        };
+
+        self.persist_config_update(&cfg_snapshot, &state_snapshot).await;
+
+        Ok(())
+    }
 }

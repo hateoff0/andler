@@ -84,4 +84,22 @@ pub enum DiskError {
     /// convert` и не падать с непонятной ошибкой `qemu-img`.
     #[error("compact is not applicable to `{format}` disks (only qcow2 has reclaimable metadata): {path}")]
     CompactNotApplicable { path: PathBuf, format: String },
+
+    /// Пакетный менеджер не найден в смонтированной ФС гостя — невозможно
+    /// установить/удалить пакет через offline-метод.
+    #[error("no supported package manager (apt/dnf/pacman) found in guest filesystem: {mount_point}")]
+    PackageManagerNotFound { mount_point: PathBuf },
+
+    /// Запрошенный пакет уже установлен в гостевой ФС.
+    #[error("package `{package}` is already installed in guest filesystem")]
+    AgentAlreadyInstalled { package: String },
+
+    /// Запрошенный пакет не найден в гостевой ФС (для операции удаления).
+    #[error("package `{package}` is not installed in guest filesystem")]
+    AgentNotInstalled { package: String },
+
+    /// QEMU Guest Agent недоступен в запущенном инстансе (guest-ping не
+    /// ответил или guest-exec не поддерживается).
+    #[error("QEMU guest agent is not available in instance {instance_id}")]
+    GuestAgentUnavailable { instance_id: String },
 }

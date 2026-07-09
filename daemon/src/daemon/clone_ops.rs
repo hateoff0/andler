@@ -56,7 +56,12 @@ impl Daemon {
         let instance_dir = instances_root.join(new_id.0.to_string());
         let mut dir_guard = super::types::InstanceDirGuard::new(instance_dir.clone());
 
-        tokio::fs::create_dir_all(&instance_dir)
+        // `ensure_private_dir` sets `0700`, not just the default umask —
+        // the instance directory holds the disk image, OVMF_VARS (may
+        // contain Secure Boot keys), instance.toml, and qemu.log; none
+        // of that should be readable by other local users by default.
+        // See PLAN.md, item 20b, "No file permission controls".
+        andler_core::paths::ensure_private_dir(&instance_dir)
             .await
             .map_err(|source| DaemonError::Io {
                 path: instance_dir.clone(),
@@ -110,6 +115,8 @@ impl Daemon {
         new_config.disk.path = cloned_disk.disk_path;
         new_config.disk.base_image = cloned_disk.backing_file;
         new_config.firmware.ovmf_vars_path = new_ovmf_vars_path;
+
+        super::types::write_instance_toml(&instance_dir, &new_config).await;
 
         let registered_id = self.create_instance(new_config).await?;
         dir_guard.disarm();

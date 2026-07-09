@@ -69,6 +69,15 @@ service AndlerService {
     // отдельный метод, не часть ListInstances.
     rpc GetInstanceConfig(InstanceIdRequest) returns (GetInstanceConfigResponse);
 
+    // Соответствует `Daemon::update_instance_config` — см. `andler edit`
+    // в PLAN.md, "18. Instance config editing". Заменяет конфигурацию
+    // целиком (не частичный patch): клиент получает полный конфиг через
+    // `GetInstanceConfig`, редактирует локально, шлёт его обратно
+    // целиком. `id`/тип гостя (`LinuxVm`/`AndroidVm`)/путь к диску должны
+    // совпадать с текущими — см. `DaemonError::Config*` за тем, почему
+    // именно эти три поля защищены от изменения этим методом.
+    rpc UpdateInstanceConfig(UpdateInstanceConfigRequest) returns (Empty);
+
     // Соответствует Daemon::stream_instance_logs. Server-streaming —
     // соединение остаётся открытым, пока клиент не отключится или сервер
     // не закроет поток сам (инстанс остановлен/удалён, либо у него
@@ -106,6 +115,19 @@ service AndlerService {
     // StreamInstanceLogs). Метрики публикуются каждую секунду из
     // /proc/<pid>/ (CPU%, RAM, disk I/O, network I/O).
     rpc StreamResourceMetrics(InstanceIdRequest) returns (stream ResourceMetricsResponse);
+
+    // Установка пакета в гостевую ОС (например, spice-vdagent для
+    // shared clipboard). Auto-fallback: если VM запущена и guest agent
+    // доступен — online через guest-exec; если VM остановлена или
+    // agent недоступен — offline через qemu-nbd + mount.
+    rpc InstallGuestAgent(InstallGuestAgentRequest) returns (Empty);
+
+    // Удаление пакета из гостевой ОС. Та же auto-fallback логика.
+    rpc RemoveGuestAgent(RemoveGuestAgentRequest) returns (Empty);
+
+    // Список пакетов, которые ANDLER умеет устанавливать, с их статусом
+    // в гостевой ОС (installed/not installed).
+    rpc ListGuestPackages(InstanceIdRequest) returns (ListGuestPackagesResponse);
 }
 
 message Empty {}
@@ -533,6 +555,28 @@ message GetInstanceConfigResponse {
     InputConfig input = 13;
 }
 
+// Вход `rpc UpdateInstanceConfig` — намеренно то же самое поле-в-поле,
+// что `GetInstanceConfigResponse` выше (плюс `instance_ref`, который
+// поддерживает частичный ID, как и остальные запросы, в отличие от уже
+// разрешённого `instance_id` в самом ответе GetInstanceConfig) — клиент
+// (`andler edit`) получает конфиг через Get, редактирует, шлёт обратно
+// через это сообщение без промежуточного переотображения полей.
+message UpdateInstanceConfigRequest {
+    string instance_ref = 1;
+    string name = 2;
+    InstanceKind kind = 3;
+    BackendKind backend = 4;
+    CpuConfig cpu = 5;
+    MemoryConfig memory = 6;
+    DiskConfig disk = 7;
+    DisplayConfig display = 8;
+    GpuConfig gpu = 9;
+    NetworkConfig network = 10;
+    FirmwareConfig firmware = 11;
+    AudioConfig audio = 12;
+    InputConfig input = 13;
+}
+
 // Источник строки лога — см. `andler_core::LogStreamSource` за полным
 // обоснованием того, почему здесь только stdout/stderr самого процесса
 // гипервизора, не структурированные FSM-события и не гостевые логи.
@@ -653,4 +697,33 @@ message ResourceMetricsResponse {
     optional uint64 vram_used_bytes = 7;
     optional uint64 vram_total_bytes = 8;
     optional float gpu_load_percent = 9;
+}
+
+// --- Guest Agent -----------------------------------------------------------
+
+// Запрос на установку пакета в гостевую ОС.
+message InstallGuestAgentRequest {
+    string instance_id = 1;
+    // Имя пакета (например, "spice-vdagent").
+    string package = 2;
+}
+
+// Запрос на удаление пакета из гостевой ОС.
+message RemoveGuestAgentRequest {
+    string instance_id = 1;
+    // Имя пакета (например, "spice-vdagent").
+    string package = 2;
+}
+
+// Список пакетов с их статусом в гостевой ОС.
+message ListGuestPackagesResponse {
+    repeated GuestPackageEntry packages = 1;
+}
+
+// Одна запись в списке пакетов.
+message GuestPackageEntry {
+    string name = 1;
+    string description = 2;
+    // "installed", "not_installed", или "unknown" (если VM недоступна).
+    string status = 3;
 }

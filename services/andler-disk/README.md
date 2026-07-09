@@ -73,6 +73,22 @@ Installs Magisk root access into an Android overlay disk offline using `qemu-nbd
 
 **Requires**: `nbd` kernel module loaded (`sudo modprobe nbd`), `qemu-nbd` binary.
 
+### `guest_tools` — Offline Guest Package Management
+
+Checks and manages packages in guest OS filesystems via `qemu-nbd` + mount + chroot.
+
+| Function | Signature | Description |
+|----------|-----------|-------------|
+| `detect_package_manager` | `(mount_point: &Path) -> Option<PackageManager>` | Detect package manager from binary presence (`apt-get`/`dnf`/`pacman`) |
+| `is_agent_installed` | `(mount_point: &Path, pm: PackageManager, package: &str) -> bool` | Check if a package is installed via its binary |
+| `install_agent_offline` | `(disk_path: &Path, package: &str) -> Result<(), DiskError>` | Install package offline (mount + chroot + pkg install) |
+| `remove_agent_offline` | `(disk_path: &Path, package: &str) -> Result<(), DiskError>` | Remove package offline (mount + chroot + pkg remove) |
+| `check_package_status_offline` | `(mount_point: &Path, binary_check: &str) -> PackageStatus` | Check binary presence in mounted filesystem |
+| `check_all_packages_offline` | `(mount_point: &Path) -> Vec<(&GuestPackage, PackageStatus)>` | Check all KNOWN_PACKAGES in mounted filesystem |
+| `check_all_packages_offline_with_disk` | `(disk_path: &Path) -> Result<Vec<(&GuestPackage, PackageStatus)>, DiskError>` | Full offline check: NBD connect + mount + check + unmount |
+
+**Known Packages** (`KNOWN_PACKAGES`): `spice-vdagent` (`/usr/bin/spice-vdagentd`), `qemu-guest-agent` (`/usr/bin/qemu-ga`), `spice-webdavd` (`/usr/bin/spice-webdavd`).
+
 ## Error Types
 
 **`DiskError`**:
@@ -88,6 +104,10 @@ Installs Magisk root access into an Android overlay disk offline using `qemu-nbd
 | `NbdSetupFailed` | `String` | NBD device error (module not loaded, no free device, mount/umount failure) |
 | `ShrinkRequiresConfirmation` | `path`, `current_size_bytes`, `requested_size_bytes` | Refusing to shrink without `--shrink` flag |
 | `CompactNotApplicable` | `path`, `format` | Compact only works on qcow2 disks |
+| `PackageManagerNotFound` | `mount_point: PathBuf` | No known package manager binary in guest filesystem |
+| `AgentAlreadyInstalled` | `package: String` | Package already installed in guest |
+| `AgentNotInstalled` | `package: String` | Package not found in guest for removal |
+| `GuestAgentUnavailable` | `package: String` | Guest agent (qemu-ga) not available for online operations |
 
 ## Tests
 
@@ -97,6 +117,7 @@ Installs Magisk root access into an Android overlay disk offline using `qemu-nbd
 - **`clone`** (4 tests): `shared_base_clone_reports_missing_source_as_io_error`, `linked_clone_points_at_source`, `full_standalone_clone_has_no_backing`, `shared_base_clone_survives_source_deletion`.
 - **`overlay`** (3 tests): `create_overlay_points_at_base_image`, `create_overlay_fails_when_base_image_missing`, `factory_reset_recreates_overlay`.
 - **`magisk`** (6 tests): `validate_magisk_dir_*` (3 tests), `find_free_nbd_device_*` (1 test), `copy_dir_recursive_*` (1 test), `unique_mount_name_*` (1 test).
+- **`guest_tools`** (3 tests): `detect_package_manager_*` (2 tests), `package_manager_install_args` (1 test), `check_package_status_offline_*` (2 tests), `known_packages_has_entries` (1 test).
 
 ### With `qemu-img` (integration tests, `#[ignore]`)
 

@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+andler-core = { path = "../../core/andler-core" }
 tokio = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
