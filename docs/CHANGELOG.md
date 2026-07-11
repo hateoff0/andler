@@ -24,7 +24,7 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - **Resource metrics from `/proc`**: Real-time streaming of CPU%, RAM usage, disk I/O, and network I/O. No QMP required. 1-second polling interval.
 - **GPU metrics (AMD)**: Sysfs-based GPU metrics — VRAM used/total and GPU load percentage from `/sys/class/drm/card*/device/`.
 - **GPU metrics (NVIDIA)**: `nvidia-smi` CLI-based GPU metrics — VRAM used/total (MiB) and GPU load %. Automatic vendor detection with AMD→NVIDIA→Intel priority.
-- **GPU metrics (Intel)**: i915 sysfs-based GPU metrics — GPU load % via busyiffies delta, VRAM via stolen memory (approximate).
+- **GPU metrics (Intel)**: i915 sysfs-based GPU metrics — GPU load % via `power/rc6_residency_ms` idle-time delta (documented i915 ABI; an earlier draft read a non-existent `busyiffies` path — never shipped). No VRAM metric — integrated Intel VRAM accounting isn't a stable sysfs ABI.
 - **GPU vendor detection**: Automatic AMD → NVIDIA → Intel priority. First found vendor wins. Caches result to avoid repeated PATH lookups.
 
 #### Services
@@ -88,6 +88,8 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - **Instance ID echo**: `resolve_echo()` — prints full ID + name after lifecycle operations.
 - **Snapshot spinner**: `indicatif` spinner during snapshot create/restore (hidden when not a terminal).
 - **CLI-side validation**: `validate_linux_paths`/`validate_android_paths` — checks existence before gRPC call.
+- **`create --dry-run`**: Prints the resolved instance config and QEMU command line without contacting the daemon at all — client-side resolution mirrors the daemon's own logic (OVMF auto-detection, fresh-disk path relocation, `andler_qemu::cmdline::build_args`). Works in TOML mode and CLI mode; not supported with a bare `andler create` (the wizard already shows a summary before creating).
+- **`create --verify`**: Validates a resolved instance config (paths exist, OVMF found/required-for-Android, disk size sane, GPU memory/CPU/memory in range) and prints a ✓/✗ report without contacting the daemon; exits non-zero if any check fails. Shares the same client-side resolution as `--dry-run` (`cli/src/preview.rs::resolve_linux`/`resolve_android`).
 
 ### Changed
 
@@ -113,6 +115,17 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- **`create_instance` (Linux) silently discarded `--ovmf-vars-template`**: the
+  gRPC handler parsed the client's `firmware.ovmf_vars_path` into `InstanceConfig`
+  but then unconditionally passed the daemon's own auto-detected
+  `self.ovmf.vars_template` to `create_linux_instance`, overwriting it — an
+  explicit `--ovmf-vars-template` had no effect. `create_android_instance`
+  already had the correct fallback order (client value, else auto-detected);
+  the Linux path now matches it. Found while implementing `--dry-run` (the
+  preview needed to replicate this exact fallback logic client-side, which
+  is what surfaced the mismatch). Covered by
+  `create_instance_honors_explicit_ovmf_vars_template` in
+  `daemon/src/grpc_roundtrip_test.rs`.
 - **`andler-qemu` snapshot QMP wire protocol**: `snapshot-save`/`snapshot-load`/`snapshot-delete`
   were sending a singular `"device"` argument and, for save/load, omitting the required
   `"vmstate"` field — real QEMU (job-based API, 6.0+) expects a `"devices"` array plus

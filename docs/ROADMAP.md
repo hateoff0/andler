@@ -54,24 +54,46 @@
 
 ## Roadmap
 
-### Short-term
+> **Priority decision**: the second backend (`andler-vmm`/Cloud Hypervisor)
+> is explicitly the *last* thing on this roadmap, not medium-term. Until
+> the existing QEMU backend and its UX are as close to ideal as we can get
+> them, a second backend just doubles the maintenance surface without
+> making anything people actually use better. See "Why the second backend
+> is last" below.
+
+### Short-term — QEMU backend & UX polish
 
 - [x] Network modes (Bridge/Isolated) in `andler-net`
 - [x] Host-side bridge creation (via iproute2)
+- [x] `--dry-run` flag on `andler create` — prints the resolved config and
+      QEMU command line without contacting the daemon at all (client-side
+      resolution mirroring the daemon's own logic: OVMF auto-detect, disk
+      relocation, `andler_qemu::cmdline::build_args`). Covers TOML mode
+      and CLI mode; the interactive wizard already has its own summary
+      screen before creating, so `--dry-run` with a bare `andler create`
+      isn't supported — see `cli/src/preview.rs`.
+- [x] `--verify` flag — validates a resolved instance config (paths
+      exist, OVMF found/required-for-Android, disk size sane, GPU
+      memory/CPU/memory in range) and prints a ✓/✗ report, without
+      contacting the daemon. Exits non-zero if any check fails
+      (scriptable). Built on the same client-side resolution as
+      `--dry-run` (`preview::resolve_linux`/`resolve_android`) — see
+      `cli/src/verify.rs`.
+- [ ] QEMU backend: improve QMP error handling and recovery (reconnect on
+      dropped socket, distinguish "QEMU crashed" from "QMP hiccup" instead
+      of surfacing both as the same generic error)
+- [ ] Core: add disk space pre-check before snapshot operations (fail with
+      a clear message before starting a copy that will run out of space
+      partway through, not after)
+- [ ] Core: add VM health checks and auto-restart on failure
 
 ### Medium-term
 
 - [ ] Online Magisk provisioning via guest agent (without `qemu-nbd`)
-- [ ] QEMU backend: improve QMP error handling and recovery
-- [ ] Core: add VM health checks and auto-restart on failure
-- [ ] CLI: add --dry-run flag to preview QEMU args before creating
-- [ ] CLI: add --verify flag to validate instance config before start
-- [ ] Core: add disk space pre-check before snapshot operations
 - [ ] QEMU backend: add hot-plug support for disk/network devices
 - [ ] Core: add VM resource limits (CPU pinning, memory overcommit)
-- [ ] CLI: add --export flag to export VM as OCI container
+- [ ] CLI: add `--export` flag to export VM as OCI container
 - [ ] Core: add VM template system for quick VM creation
-- [ ] Cloud Hypervisor backend (`andler-vmm` with `rust-vmm` crates)
 
 ### Long-term
 
@@ -81,3 +103,20 @@
 - [ ] Live migration between hosts
 - [ ] Multi-disk support (snapshot device name parameterization)
 - [ ] QMP event subscription (async events beyond command responses)
+- [ ] **Cloud Hypervisor backend** (`andler-vmm` with `rust-vmm` crates) —
+      deliberately last. Everything above this line makes the existing,
+      working QEMU path better for people using it today; a second
+      backend is a parallel implementation of `HypervisorBackend` that
+      pays for itself only once the first one stops being the bottleneck.
+
+### Why the second backend is last
+
+`andler-vmm` currently exists as an empty stub. Standing up a real Cloud
+Hypervisor backend means re-implementing cmdline/process/QMP-equivalent
+lifecycle management, metrics, snapshotting, and every edge case the QEMU
+backend has already hit — a large, mostly independent effort that doesn't
+improve anything for the QEMU path in the meantime. Every item above it
+either fixes something that can silently go wrong today (QMP recovery,
+disk space pre-checks, health checks) or removes a "just run it and see"
+step from the most common workflow (`--dry-run`/`--verify`). Those come
+first.
