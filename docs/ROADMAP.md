@@ -79,9 +79,15 @@
       (scriptable). Built on the same client-side resolution as
       `--dry-run` (`preview::resolve_linux`/`resolve_android`) — see
       `cli/src/verify.rs`.
-- [ ] QEMU backend: improve QMP error handling and recovery (reconnect on
-      dropped socket, distinguish "QEMU crashed" from "QMP hiccup" instead
-      of surfacing both as the same generic error)
+- [x] QEMU backend: improve QMP error handling and recovery — a dropped/
+      stale QMP connection no longer stays cached forever (`pause`/
+      `resume`/`status` now clear it and reconnect once on a connection-
+      level error). New `BackendError::ProcessNotRunning` distinguishes
+      "QEMU process itself is gone" (checked via `is_alive()` before
+      giving up) from a transient QMP hiccup or a genuine command failure
+      (`CommandFailed`/`ParseError`, which are never retried — QEMU
+      already answered, retrying changes nothing). See
+      `diagnose_and_reset_qmp` in `backends/andler-qemu/src/backend.rs`.
 - [ ] Core: add disk space pre-check before snapshot operations (fail with
       a clear message before starting a copy that will run out of space
       partway through, not after)

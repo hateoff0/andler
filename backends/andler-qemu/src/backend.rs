@@ -123,6 +123,43 @@ impl QemuBackend {
         Ok(())
     }
 
+    /// Called after a QMP command fails on an *already-established*
+    /// connection (not the initial `ensure_qmp_connected` — that has its
+    /// own error path and nothing cached to reset). See ROADMAP.md,
+    /// "QEMU backend: improve QMP error handling and recovery".
+    ///
+    /// Before this fix, a dropped/broken QMP connection stayed cached in
+    /// `instance.qmp_client` forever — `ensure_qmp_connected` only checks
+    /// `is_some()`, not whether the connection actually still works, so
+    /// every subsequent `pause`/`resume`/`status` call would hit the same
+    /// dead connection and fail identically, even after QEMU (or the QMP
+    /// listener) recovered.
+    ///
+    /// Distinguishes two cases a bare `QmpError` conflates:
+    /// - **QEMU process itself has exited** -> clears the stale client and
+    ///   returns `Some(BackendError::ProcessNotRunning)` — there's no
+    ///   point reconnecting to a dead process's socket, and the caller
+    ///   gets a specific error instead of a generic I/O one.
+    /// - **Process still alive, connection just dropped** (transient QMP
+    ///   hiccup) -> clears the stale client and returns `None`, signaling
+    ///   the caller should reconnect (via `ensure_qmp_connected`) and
+    ///   retry the command once.
+    ///
+    /// Only meant to be called for connection-level errors
+    /// (`Io`/`ConnectionClosed`/`ConnectFailed`) — `CommandFailed`/
+    /// `ParseError` mean QEMU answered just fine (just with an error or
+    /// unexpected shape), so callers check for those separately and skip
+    /// this entirely; retrying wouldn't change anything about them.
+    async fn diagnose_and_reset_qmp(instance: &mut RunningInstance) -> Option<BackendError> {
+        instance.qmp_client = None;
+        let alive = instance.process.is_alive().await.unwrap_or(false);
+        if alive {
+            None
+        } else {
+            Some(BackendError::ProcessNotRunning)
+        }
+    }
+
     /// Проверяет доступность QEMU Guest Agent для инстанса.
     ///
     /// Используется daemon'ом для auto-fallback: если agent недоступен,
@@ -509,13 +546,37 @@ impl HypervisorBackend for QemuBackend {
             .await
             .map_err(qmp_error_to_backend_error)?;
 
-        instance
+        let first_attempt = instance
             .qmp_client
             .as_mut()
             .expect("qmp_client is Some after ensure_qmp_connected succeeded")
             .pause()
-            .await
-            .map_err(qmp_error_to_backend_error)
+            .await;
+
+        match first_attempt {
+            Ok(()) => Ok(()),
+            // QEMU answered, just with an error — not a connection
+            // problem, retrying changes nothing. See
+            // `diagnose_and_reset_qmp` doc comment.
+            Err(err) if matches!(err, QmpError::CommandFailed { .. } | QmpError::ParseError(_)) => {
+                Err(qmp_error_to_backend_error(err))
+            }
+            Err(_connection_level_err) => {
+                if let Some(err) = Self::diagnose_and_reset_qmp(instance).await {
+                    return Err(err);
+                }
+                Self::ensure_qmp_connected(instance)
+                    .await
+                    .map_err(qmp_error_to_backend_error)?;
+                instance
+                    .qmp_client
+                    .as_mut()
+                    .expect("qmp_client is Some after ensure_qmp_connected succeeded")
+                    .pause()
+                    .await
+                    .map_err(qmp_error_to_backend_error)
+            }
+        }
     }
 
     async fn resume(&self, handle: &BackendHandle) -> Result<(), BackendError> {
@@ -528,13 +589,34 @@ impl HypervisorBackend for QemuBackend {
             .await
             .map_err(qmp_error_to_backend_error)?;
 
-        instance
+        let first_attempt = instance
             .qmp_client
             .as_mut()
             .expect("qmp_client is Some after ensure_qmp_connected succeeded")
             .resume()
-            .await
-            .map_err(qmp_error_to_backend_error)
+            .await;
+
+        match first_attempt {
+            Ok(()) => Ok(()),
+            Err(err) if matches!(err, QmpError::CommandFailed { .. } | QmpError::ParseError(_)) => {
+                Err(qmp_error_to_backend_error(err))
+            }
+            Err(_connection_level_err) => {
+                if let Some(err) = Self::diagnose_and_reset_qmp(instance).await {
+                    return Err(err);
+                }
+                Self::ensure_qmp_connected(instance)
+                    .await
+                    .map_err(qmp_error_to_backend_error)?;
+                instance
+                    .qmp_client
+                    .as_mut()
+                    .expect("qmp_client is Some after ensure_qmp_connected succeeded")
+                    .resume()
+                    .await
+                    .map_err(qmp_error_to_backend_error)
+            }
+        }
     }
 
     async fn stop(&self, handle: &BackendHandle, graceful: bool) -> Result<(), BackendError> {
@@ -627,12 +709,20 @@ impl HypervisorBackend for QemuBackend {
                             )),
                         }),
                     },
-                    Err(qmp_err) => Ok(BackendStatus {
-                        state: InstanceState::Running,
-                        detail: Some(format!(
-                            "process is alive but QMP query-status failed: {qmp_err}"
-                        )),
-                    }),
+                    Err(qmp_err) => {
+                        // Don't leave a known-broken connection cached —
+                        // see `diagnose_and_reset_qmp` doc comment on
+                        // `pause`/`resume` for why this matters: without
+                        // it, every future call would keep hitting this
+                        // same dead connection instead of reconnecting.
+                        instance.qmp_client = None;
+                        Ok(BackendStatus {
+                            state: InstanceState::Running,
+                            detail: Some(format!(
+                                "process is alive but QMP query-status failed: {qmp_err}"
+                            )),
+                        })
+                    }
                 }
             }
             Err(qmp_err) => Ok(BackendStatus {
@@ -1213,6 +1303,60 @@ mod tests {
         assert_eq!(status.state, InstanceState::Running);
 
         backend.stop(&handle, false).await.unwrap();
+    }
+
+    /// Regression test for the QMP reconnect/recovery fix (see
+    /// `diagnose_and_reset_qmp` doc comment, ROADMAP.md "QEMU backend:
+    /// improve QMP error handling and recovery"): kills the real QEMU
+    /// process out-of-band (bypassing `backend.stop()`, which would clean
+    /// up the registry entry) and verifies `pause()` reports the specific
+    /// `BackendError::ProcessNotRunning` — not a generic `Io` error, and
+    /// not a hang waiting on a dead socket.
+    #[tokio::test]
+    async fn pause_after_external_process_kill_returns_process_not_running() {
+        let backend = QemuBackend::new();
+        let mut cfg = sample_config(RenderBackend::Cpu);
+        cfg.display.display_engine = andler_core::DisplayEngine::Sdl;
+
+        let handle = backend.spawn(&cfg).await.unwrap();
+
+        // Establish a QMP connection first (round-trips one command) so
+        // `instance.qmp_client` is `Some` — otherwise this would only
+        // exercise the *initial*-connect error path, not the
+        // reconnect-after-a-cached-connection-goes-stale path this test
+        // is actually about.
+        backend.pause(&handle).await.unwrap();
+        backend.resume(&handle).await.unwrap();
+
+        let pid = {
+            let instances = backend.instances.lock().await;
+            instances
+                .get(&handle)
+                .expect("just-spawned instance must be registered")
+                .process
+                .pid()
+        };
+
+        // SAFETY: `kill(2)` with a valid pid and a signal number is not
+        // memory-unsafe — the only way this could go wrong is signaling
+        // the wrong process, which can't happen here since `pid` was just
+        // read from the process we ourselves spawned above.
+        unsafe {
+            libc::kill(pid as i32, libc::SIGKILL);
+        }
+        // Give the kernel a moment to actually finalize the process exit
+        // so `is_alive()` (a non-blocking `try_wait()` — see
+        // `process.rs`) reliably observes it as gone, not just "signal
+        // sent". `try_wait()` itself doesn't block, so without this the
+        // check could theoretically race the kernel's own SIGKILL
+        // handling on a loaded machine.
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        let err = backend.pause(&handle).await.unwrap_err();
+        assert!(
+            matches!(err, BackendError::ProcessNotRunning),
+            "expected ProcessNotRunning, got {err:?}"
+        );
     }
 
     /// Сквозная проверка `log_stream` через весь стек `QemuBackend`

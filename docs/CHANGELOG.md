@@ -26,6 +26,7 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - **GPU metrics (NVIDIA)**: `nvidia-smi` CLI-based GPU metrics — VRAM used/total (MiB) and GPU load %. Automatic vendor detection with AMD→NVIDIA→Intel priority.
 - **GPU metrics (Intel)**: i915 sysfs-based GPU metrics — GPU load % via `power/rc6_residency_ms` idle-time delta (documented i915 ABI; an earlier draft read a non-existent `busyiffies` path — never shipped). No VRAM metric — integrated Intel VRAM accounting isn't a stable sysfs ABI.
 - **GPU vendor detection**: Automatic AMD → NVIDIA → Intel priority. First found vendor wins. Caches result to avoid repeated PATH lookups.
+- **QMP connection recovery**: `pause`/`resume`/`status` no longer get stuck on a stale cached QMP connection after a transient disconnect — they clear it and reconnect once before failing. New `BackendError::ProcessNotRunning` distinguishes "QEMU process itself exited" (checked via `is_alive()`) from a recoverable QMP hiccup or a genuine command error (`CommandFailed`/`ParseError`, never retried).
 
 #### Services
 

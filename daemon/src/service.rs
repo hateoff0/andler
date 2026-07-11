@@ -97,6 +97,12 @@ impl From<DaemonError> for Status {
             DaemonError::Backend(andler_core::BackendError::HandleNotFound(_)) => {
                 Status::failed_precondition(err.to_string())
             }
+            // The VM process is gone — same client-facing category as
+            // "instance not found in the way you expected it to be":
+            // fixable by the client re-checking status, not a server bug.
+            DaemonError::Backend(andler_core::BackendError::ProcessNotRunning) => {
+                Status::failed_precondition(err.to_string())
+            }
             DaemonError::Backend(_)
             | DaemonError::Disk(_)
             | DaemonError::Io { .. }
