@@ -167,13 +167,24 @@ impl AndlerService for DaemonService {
             cfg.firmware.ovmf_code_path = self.ovmf.code.clone();
         }
 
+        // `cfg.firmware.ovmf_vars_path` at this point holds whatever the
+        // client sent as `--ovmf-vars-template` (possibly empty). If the
+        // client gave one explicitly, it must win over the daemon's
+        // auto-detected template — this used to be unconditionally
+        // overwritten by `self.ovmf.vars_template` regardless of what the
+        // client asked for (a real bug: an explicit `--ovmf-vars-template`
+        // was silently discarded every time). `create_android_instance`
+        // right below already gets this right — this brings the Linux
+        // path in line with it.
+        let ovmf_vars_template = if cfg.firmware.ovmf_vars_path.as_os_str().is_empty() {
+            self.ovmf.vars_template.clone()
+        } else {
+            cfg.firmware.ovmf_vars_path.clone()
+        };
+
         let id = self
             .daemon
-            .create_linux_instance(
-                cfg,
-                andler_core::paths::instances_root(),
-                self.ovmf.vars_template.clone(),
-            )
+            .create_linux_instance(cfg, andler_core::paths::instances_root(), ovmf_vars_template)
             .await?;
         Ok(Response::new(CreateInstanceResponse {
             instance_id: id.0.to_string(),

@@ -19,9 +19,9 @@ use andler_rpc::proto::andler_service_client::AndlerServiceClient;
 use andler_rpc::proto::andler_service_server::AndlerServiceServer;
 use andler_rpc::proto::{
     AudioConfig, CloneInstanceRequest, CloneMode, CpuConfig, CreateInstanceRequest, DiskConfig,
-    DisplayConfig, Empty, ExportInstanceDiskRequest, FirmwareConfig, GpuConfig, InputConfig,
-    InstanceIdRequest, InstanceStateKind, MemoryConfig, NetworkConfig, RemoveInstanceRequest,
-    Resolution,
+    DisplayConfig, Empty, ExportInstanceDiskRequest, FirmwareConfig, GetInstanceConfigResponse,
+    GpuConfig, InputConfig, InstanceIdRequest, InstanceStateKind, MemoryConfig, NetworkConfig,
+    RemoveInstanceRequest, Resolution,
 };
 use tokio::net::TcpListener;
 use tokio_stream::wrappers::TcpListenerStream;
@@ -212,7 +212,16 @@ fn sample_create_instance_request() -> CreateInstanceRequest {
 
     let firmware = FirmwareConfig {
         ovmf_code_path: "/usr/share/edk2/x64/OVMF_CODE.4m.fd".to_string(),
-        ovmf_vars_path: "/tmp/test_VARS.fd".to_string(),
+        // Empty — falls back to the test daemon's own `test_ovmf.vars_template`
+        // (see `spawn_server_and_connect`). A non-empty path here is now
+        // actually used for a real `provision_vars` file copy (see
+        // `create_instance`'s fix for silently discarding an explicit
+        // `--ovmf-vars-template`) — this fixture doesn't create any such
+        // file, so a hardcoded path would make this test depend on
+        // filesystem state outside its control. See
+        // `create_instance_honors_explicit_ovmf_vars_template` below for
+        // the actual override behavior.
+        ovmf_vars_path: String::new(),
     };
 
     let mut audio = AudioConfig::default();
@@ -277,6 +286,62 @@ async fn create_instance_round_trips_over_real_grpc_and_status_reports_created()
         .into_inner();
     assert_eq!(status.state, InstanceStateKind::Created as i32);
 
+    server.abort();
+}
+
+#[tokio::test]
+async fn create_instance_honors_explicit_ovmf_vars_template() {
+    // Regression test for a real bug: `create_instance`'s gRPC handler
+    // unconditionally passed the daemon's own auto-detected
+    // `self.ovmf.vars_template` to `create_linux_instance`, silently
+    // discarding whatever the client put in `firmware.ovmf_vars_path`
+    // (i.e. `--ovmf-vars-template`) — the request field was parsed into
+    // `InstanceConfig` and then immediately overwritten.
+    // `create_android_instance` right next to it already got this right
+    // (`if req.ovmf_vars_template.is_empty() { auto-detected } else { the
+    // client's value }`); this test locks the Linux path to the same
+    // behavior.
+    let (mut client, server) = spawn_server_and_connect().await;
+
+    // A real file with distinguishable content — the only way to prove
+    // *this* template was copied into the instance's VARS.fd, not the
+    // daemon's own `test_ovmf.vars_template` (which points at a path that
+    // doesn't exist in this sandbox and would make `provision_vars` fail
+    // outright if it were used instead).
+    let custom_template = std::env::temp_dir().join(format!(
+        "andler-test-custom-ovmf-vars-{}.fd",
+        uuid::Uuid::new_v4()
+    ));
+    std::fs::write(&custom_template, b"custom-vars-marker").expect("write test fixture file");
+
+    let mut request = sample_create_instance_request();
+    request.firmware.as_mut().unwrap().ovmf_vars_path =
+        custom_template.to_string_lossy().into_owned();
+
+    let response = client
+        .create_instance(request)
+        .await
+        .expect("creation with an explicit, existing ovmf_vars_path must succeed")
+        .into_inner();
+
+    let config: GetInstanceConfigResponse = client
+        .get_instance_config(InstanceIdRequest {
+            instance_id: response.instance_id.clone(),
+        })
+        .await
+        .expect("freshly created instance must be found")
+        .into_inner();
+
+    let provisioned_vars_path = config.firmware.expect("firmware must be set").ovmf_vars_path;
+    let provisioned_content =
+        std::fs::read_to_string(&provisioned_vars_path).expect("provisioned VARS.fd must exist");
+    assert_eq!(
+        provisioned_content, "custom-vars-marker",
+        "provisioned VARS.fd must be a copy of the client's explicit \
+         ovmf_vars_path, not the daemon's auto-detected template"
+    );
+
+    let _ = std::fs::remove_file(&custom_template);
     server.abort();
 }
 
