@@ -406,6 +406,7 @@ dependencies = [
  "andler-core",
  "andler-disk",
  "andler-firmware",
+ "andler-qemu",
  "andler-rpc",
  "clap",
  "clap_complete",
