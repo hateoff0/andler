@@ -22,6 +22,8 @@ pub async fn handle(
     compact_on_shutdown: bool,
     cdrom_bus: CliCdromBus,
     quick: bool,
+    dry_run: bool,
+    verify: bool,
     android_version: Option<CliAndroidVersion>,
     base_image_path: Option<String>,
     gapps: bool,
@@ -47,16 +49,40 @@ pub async fn handle(
         err_exit("error: --quick requires --kind to specify VM type");
     }
 
+    if dry_run && quick {
+        err_exit("error: --dry-run and --quick are mutually exclusive — --quick creates immediately, --dry-run never creates");
+    }
+
+    if verify && quick {
+        err_exit("error: --verify and --quick are mutually exclusive — --quick creates immediately, --verify never creates");
+    }
+
+    if dry_run && verify {
+        err_exit("error: --dry-run and --verify are mutually exclusive — pass one or the other");
+    }
+
     // --- TOML mode ---
     if has_file {
         let file = file.unwrap();
         let instance_file = InstanceFile::load(&file)?;
         match instance_file.into_result() {
             InstanceFileResult::Linux(req) => {
+                if dry_run {
+                    return crate::preview::print_linux_preview(&req);
+                }
+                if verify {
+                    return exit_on_verify_result(crate::verify::verify_linux(&req)?);
+                }
                 let response = client.create_instance(req).await?;
                 println!("{}", response.into_inner().instance_id);
             }
             InstanceFileResult::Android(req) => {
+                if dry_run {
+                    return crate::preview::print_android_preview(&req);
+                }
+                if verify {
+                    return exit_on_verify_result(crate::verify::verify_android(&req)?);
+                }
                 let response = client.create_android_instance(req).await?;
                 println!("{}", response.into_inner().instance_id);
             }
@@ -73,6 +99,21 @@ pub async fn handle(
     let needs_wizard = quick || no_kind || linux_required || android_required;
 
     if needs_wizard {
+        if dry_run {
+            err_exit(
+                "error: --dry-run requires --file or all CLI-mode flags for the chosen --kind \
+                 (the interactive wizard already shows a full summary before creating, so \
+                 --dry-run with a bare `andler create` isn't supported)",
+            );
+        }
+        if verify {
+            err_exit(
+                "error: --verify requires --file or all CLI-mode flags for the chosen --kind \
+                 (the interactive wizard already shows a full summary before creating, so \
+                 --verify with a bare `andler create` isn't supported)",
+            );
+        }
+
         let partial = PartialArgs {
             kind: kind.map(|k| match k {
                 CliKind::Linux => WizardKind::Linux,
@@ -127,6 +168,12 @@ pub async fn handle(
                 cdrom_bus,
                 ovmf,
             );
+            if dry_run {
+                return crate::preview::print_linux_preview(&req);
+            }
+            if verify {
+                return exit_on_verify_result(crate::verify::verify_linux(&req)?);
+            }
             let response = client.create_instance(req).await?;
             println!("{}", response.into_inner().instance_id);
         }
@@ -164,12 +211,31 @@ pub async fn handle(
                 overlay_size_gib,
                 magisk_dir,
             );
+            if dry_run {
+                return crate::preview::print_android_preview(&req);
+            }
+            if verify {
+                return exit_on_verify_result(crate::verify::verify_android(&req)?);
+            }
             let response = client.create_android_instance(req).await?;
             println!("{}", response.into_inner().instance_id);
         }
     }
 
     Ok(())
+}
+
+/// `--verify`'s exit-code contract: 0 if every check passed, 1 if any
+/// failed — scriptable (`andler create --verify ... && andler create
+/// ...`), not just human-readable output. The report itself is already
+/// printed by `verify::verify_linux`/`verify_android` before this runs;
+/// this only decides the process exit code.
+fn exit_on_verify_result(all_passed: bool) -> Result<(), Box<dyn std::error::Error>> {
+    if all_passed {
+        Ok(())
+    } else {
+        std::process::exit(1);
+    }
 }
 
 /// Pre-flight checks for `andler create --kind linux` (direct CLI

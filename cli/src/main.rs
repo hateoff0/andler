@@ -10,8 +10,10 @@ mod guest;
 mod helpers;
 mod instance_file;
 mod lifecycle;
+mod preview;
 mod snapshot;
 mod status;
+mod verify;
 mod wizard;
 
 use andler_rpc::proto::andler_service_client::AndlerServiceClient;
@@ -121,6 +123,24 @@ enum Command {
         /// Requires `--kind`. Mutually exclusive with `--file`.
         #[arg(long)]
         quick: bool,
+
+        /// Print the resolved config and QEMU command line without
+        /// actually creating the instance — the daemon is never
+        /// contacted. Only works in TOML mode (--file) or CLI mode (all
+        /// required flags given); the interactive wizard already shows a
+        /// full summary before creating, so --dry-run with a bare
+        /// `andler create` isn't supported — pass --file or the required
+        /// flags explicitly instead.
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Validate the resolved config (paths exist, OVMF found, disk
+        /// size sane) and print a pass/fail report, without creating
+        /// anything or contacting the daemon. Exits non-zero if any
+        /// check fails. Same scope restriction as --dry-run: TOML/CLI
+        /// mode only, not the interactive wizard.
+        #[arg(long)]
+        verify: bool,
 
         // --- Android-specific (required when --kind android) ---
 
@@ -626,6 +646,8 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             compact_on_shutdown,
             cdrom_bus,
             quick,
+            dry_run,
+            verify,
             android_version,
             base_image_path,
             gapps,
@@ -639,7 +661,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             create::handle(
                 &mut client, file, kind, name, ovmf_vars_template,
                 iso_path, disk_path, disk_size_gib, compact_on_shutdown, cdrom_bus,
-                quick,
+                quick, dry_run, verify,
                 android_version, base_image_path, gapps, microg, arm_translator, root,
                 instances_root, overlay_size_gib, magisk_dir,
             ).await?;
