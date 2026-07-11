@@ -576,6 +576,10 @@ pub async fn send_result(
 }
 
 pub(crate) fn is_tty() -> bool {
+    // Allow test override via environment variable
+    if std::env::var("ANDLER_WIZARD_NOT_TTY").is_ok() {
+        return false;
+    }
     use std::os::unix::io::AsRawFd;
     libc_isatty(std::io::stdin().as_raw_fd())
 }
@@ -772,16 +776,14 @@ mod tests {
             ..Default::default()
         };
         let result = build_quick(partial, &sample_detected());
-        match result {
-            Err(WizardError::Inquire(msg)) => {
-                assert!(msg.contains("Base image not found"));
-            }
-            other => panic!("expected base-image-not-found error, got {other:?}"),
-        }
+        assert!(matches!(
+            result,
+            Err(WizardError::Inquire(msg)) if msg.contains("Base image not found")
+        ));
     }
-
     #[tokio::test]
     async fn test_wizard_not_tty() {
+        std::env::set_var("ANDLER_WIZARD_NOT_TTY", "1");
         // Calls the real public `run()` entry point (not a fake/mock): the
         // cargo test harness does not attach a TTY to stdin, so `is_tty()`
         // is false here for real, and this exercises the actual NotTty
