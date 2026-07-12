@@ -102,4 +102,22 @@ pub enum DiskError {
     /// ответил или guest-exec не поддерживается).
     #[error("QEMU guest agent is not available in instance {instance_id}")]
     GuestAgentUnavailable { instance_id: String },
+
+    /// Свободного места на файловой системе, где лежит `path`, меньше,
+    /// чем операция, скорее всего, потребует — проверено *до* её начала
+    /// (см. `diskspace::check_available_space`). Не гарантия: реальный
+    /// расход места у qcow2-снапшотов заранее не известен точно
+    /// (`required_bytes` — консервативная оценка сверху, см. doc-
+    /// комментарий на месте вызова), но лучше отказать заранее с понятной
+    /// причиной, чем дать операции упасть посередине с непонятной
+    /// ошибкой `qemu-img`/ENOSPC.
+    #[error(
+        "not enough disk space at {path}: {available_bytes} bytes free, \
+         ~{required_bytes} bytes needed"
+    )]
+    InsufficientDiskSpace {
+        path: PathBuf,
+        required_bytes: u64,
+        available_bytes: u64,
+    },
 }

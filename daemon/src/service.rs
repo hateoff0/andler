@@ -103,6 +103,13 @@ impl From<DaemonError> for Status {
             DaemonError::Backend(andler_core::BackendError::ProcessNotRunning) => {
                 Status::failed_precondition(err.to_string())
             }
+            // The semantically correct gRPC code for "out of space" —
+            // distinct from the generic Disk(_) internal-error arm below,
+            // so clients can tell "you're out of disk space" apart from
+            // an actual qemu-img/filesystem bug.
+            DaemonError::Disk(andler_disk::DiskError::InsufficientDiskSpace { .. }) => {
+                Status::resource_exhausted(err.to_string())
+            }
             DaemonError::Backend(_)
             | DaemonError::Disk(_)
             | DaemonError::Io { .. }

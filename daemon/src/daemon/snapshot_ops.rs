@@ -31,7 +31,7 @@ impl Daemon {
         description: Option<String>,
         timeout_secs: Option<u64>,
     ) -> Result<SnapshotRecord, DaemonError> {
-        let (backend, handle) = {
+        let (backend, handle, disk_path, memory_size_bytes) = {
             let instances = self.instances.read().await;
             let record = instances
                 .get(&id)
@@ -56,6 +56,8 @@ impl Daemon {
             (
                 self.backend_for(record.config.backend)?.clone(),
                 handle,
+                record.config.disk.path.clone(),
+                record.config.memory.size_bytes,
             )
         };
 
@@ -71,6 +73,17 @@ impl Daemon {
         if let Ok(existing) = backend.snapshot_list(&handle).await {
             check_snapshot_limit(id, existing.len(), MAX_SNAPSHOTS_PER_INSTANCE)?;
         }
+
+        // Внутренний qcow2-снапшот дописывает vmstate (дамп RAM гостя +
+        // состояние устройств) в тот же файл диска — точный размер
+        // заранее не известен (зависит от того, что реально изменилось с
+        // прошлого снапшота), но объём RAM гостя — разумная консервативная
+        // верхняя оценка (устройства добавляют не более нескольких MiB
+        // сверху). Лучше отказать заранее с понятной причиной, чем дать
+        // операции упасть посередине с ENOSPC от самого qemu-img/QEMU —
+        // см. ROADMAP.md, "Core: add disk space pre-check before snapshot
+        // operations".
+        andler_disk::check_available_space(&disk_path, memory_size_bytes)?;
 
         let timeout = timeout_secs.map(std::time::Duration::from_secs);
         backend.snapshot(&handle, &tag, timeout).await?;

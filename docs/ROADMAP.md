@@ -88,9 +88,14 @@
       (`CommandFailed`/`ParseError`, which are never retried — QEMU
       already answered, retrying changes nothing). See
       `diagnose_and_reset_qmp` in `backends/andler-qemu/src/backend.rs`.
-- [ ] Core: add disk space pre-check before snapshot operations (fail with
-      a clear message before starting a copy that will run out of space
-      partway through, not after)
+- [x] Core: add disk space pre-check before snapshot operations — checks
+      free space on the disk's filesystem via `statvfs(2)` before calling
+      `backend.snapshot()`, using guest RAM size as a conservative upper
+      bound for vmstate size (exact snapshot size isn't knowable in
+      advance). Fails with `DiskError::InsufficientDiskSpace` (mapped to
+      `Status::resource_exhausted`) instead of letting the operation run
+      out of space partway through. See
+      `services/andler-disk/src/diskspace.rs`.
 - [ ] Core: add VM health checks and auto-restart on failure
 
 ### Medium-term

@@ -9,3 +9,4 @@ andler-core = { path = "../../core/andler-core" }
 tokio = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+libc = "0.2"

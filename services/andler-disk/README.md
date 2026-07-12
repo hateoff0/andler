@@ -89,6 +89,16 @@ Checks and manages packages in guest OS filesystems via `qemu-nbd` + mount + chr
 
 **Known Packages** (`KNOWN_PACKAGES`): `spice-vdagent` (`/usr/bin/spice-vdagentd`), `qemu-guest-agent` (`/usr/bin/qemu-ga`), `spice-webdavd` (`/usr/bin/spice-webdavd`).
 
+### `diskspace` — Free Disk Space Pre-check
+
+Checks free space on a path's filesystem via `statvfs(2)` before an operation that could otherwise fail partway through with a raw ENOSPC — see ROADMAP.md, "Core: add disk space pre-check before snapshot operations".
+
+| Function | Signature | Description |
+|----------|-----------|--------------|
+| `check_available_space` | `(path: &Path, required_bytes: u64) -> Result<(), DiskError>` | Fails with `InsufficientDiskSpace` if fewer than `required_bytes` are free on `path`'s filesystem (resolved to its nearest existing ancestor if `path` doesn't exist yet) |
+
+Uses `f_bavail` (blocks available to an unprivileged user), not `f_bfree` (which includes root-reserved blocks the daemon may not actually be able to use, e.g. ext4's default 5% reservation).
+
 ## Error Types
 
 **`DiskError`**:
@@ -108,6 +118,7 @@ Checks and manages packages in guest OS filesystems via `qemu-nbd` + mount + chr
 | `AgentAlreadyInstalled` | `package: String` | Package already installed in guest |
 | `AgentNotInstalled` | `package: String` | Package not found in guest for removal |
 | `GuestAgentUnavailable` | `package: String` | Guest agent (qemu-ga) not available for online operations |
+| `InsufficientDiskSpace` | `path`, `required_bytes`, `available_bytes` | Not enough free space on `path`'s filesystem for the operation (pre-checked, not a failure mid-operation) |
 
 ## Tests
 
