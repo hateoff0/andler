@@ -3,9 +3,19 @@
 //! Состояния и переходы соответствуют операциям `HypervisorBackend`
 //! (см. `backend.rs`): `spawn` -> `Starting`, успешный запуск -> `Running`,
 //! `pause`/`resume` переключают `Running`/`Paused`, `stop` ведёт в `Stopping`
-//! -> `Stopped`. Любая ошибка backend'а уводит в `Error` — единственное
-//! состояние без исходящих переходов средствами этого FSM (восстановление
-//! из `Error` — это создание нового инстанса, а не часть машины состояний).
+//! -> `Stopped`. Любая ошибка backend'а уводит в `Error`.
+//!
+//! `Stopped`/`Error` — не "конец" в смысле "эту запись больше нельзя
+//! трогать": оба принимают `Start` и возвращаются в `Starting` — тот же
+//! путь, что и заново созданный инстанс, но с уже существующим
+//! `InstanceConfig`/`InstanceId` (см. `Daemon::start_instance`, которая
+//! не делает ничего специфичного для `Created` — просто вызывает
+//! `HypervisorBackend::spawn` с уже сохранённым конфигом, так что этот
+//! путь работал бы для любого состояния с самого начала, если бы FSM это
+//! разрешала). `is_terminal()` по-прежнему считает их терминальными — это
+//! про "текущий запуск завершён", не про "исходящих переходов больше не
+//! существует"; см. её doc-комментарий.
+//!
 //! Набор состояний соответствует §4.1 docs/architecture/CORE_ARCHITECTURE_PLAN.md.
 //!
 //! `andler-store` сохраняет текущее `InstanceState`, но сама логика
@@ -34,8 +44,10 @@ pub enum InstanceState {
     /// Процесс корректно завершён, ресурсы освобождены.
     Stopped,
     /// Backend вернул ошибку, из которой FSM не знает, как восстановиться
-    /// автоматически. Финальное состояние для этого жизненного цикла.
-    /// `message` — диагностика причины (например, текст из
+    /// автоматически сама. Можно перезапустить вручную (`Start` ->
+    /// `Starting`, тот же путь, что у `Stopped`) — это не тупик,
+    /// а сигнал "текущий запуск закончился неудачно", см. doc-комментарий
+    /// модуля. `message` — диагностика причины (например, текст из
     /// `BackendError`/`BackendStatus::detail`).
     Error { message: String },
 }
@@ -104,6 +116,17 @@ impl InstanceState {
             (S::Starting, E::Stop) => S::Stopping,
             (S::Stopping, E::StopCompleted) => S::Stopped,
 
+            // Restart: `Stopped`/`Error` accept `Start` the same as a
+            // freshly-`Created` instance — see module doc comment for
+            // why this doesn't need any change to `Daemon::start_instance`
+            // itself (it was already generic over the source state; only
+            // the FSM was refusing to let it through). `Error { .. }`
+            // matches regardless of its `message` — the diagnostic text
+            // of a past failure has no bearing on whether a retry is
+            // allowed.
+            (S::Stopped, E::Start) => S::Starting,
+            (S::Error { .. }, E::Start) => S::Starting,
+
             // `Fail` разрешён из любого состояния, кроме уже финальных —
             // ошибка backend'а может произойти на любом активном этапе.
             (S::Created, E::Fail(message))
@@ -123,8 +146,14 @@ impl InstanceState {
         Ok(next)
     }
 
-    /// `true`, если из этого состояния больше нет исходящих переходов
-    /// средствами FSM (требуется создание нового инстанса).
+    /// `true` if the instance's *current run* has ended — `Stopped`
+    /// (clean exit) or `Error` (failed). **Not** "no outgoing transitions
+    /// exist at all": both accept `Start` and go back to `Starting` (see
+    /// module doc comment) — this predicate is about whether the
+    /// instance is presently active, e.g. for UI/status purposes, not
+    /// about the shape of the transition graph. Doesn't include
+    /// `Created`: an instance that has never run isn't "finished"
+    /// anything, it just hasn't started yet.
     pub fn is_terminal(&self) -> bool {
         matches!(self, InstanceState::Stopped | InstanceState::Error { .. })
     }
@@ -190,7 +219,7 @@ mod tests {
     }
 
     #[test]
-    fn terminal_states_have_no_outgoing_transitions() {
+    fn terminal_states_accept_only_start_and_reject_everything_else() {
         let terminal_states = [
             InstanceState::Stopped,
             InstanceState::Error {
@@ -199,8 +228,15 @@ mod tests {
         ];
         for state in terminal_states {
             assert!(state.is_terminal());
-            let events = [
-                InstanceEvent::Start,
+
+            // The one allowed way out: restart into a fresh Starting run.
+            assert_eq!(
+                state.clone().apply(InstanceEvent::Start).unwrap(),
+                InstanceState::Starting,
+                "expected {state:?} to accept Start (restart)"
+            );
+
+            let rejected_events = [
                 InstanceEvent::StartCompleted,
                 InstanceEvent::Pause,
                 InstanceEvent::Resume,
@@ -208,12 +244,26 @@ mod tests {
                 InstanceEvent::StopCompleted,
                 InstanceEvent::Fail("boom".to_string()),
             ];
-            for event in events {
+            for event in rejected_events {
                 assert!(
                     state.clone().apply(event.clone()).is_err(),
                     "expected no transition from {state:?} on {event:?}"
                 );
             }
         }
+    }
+
+    #[test]
+    fn restarting_from_error_discards_the_previous_failure_message() {
+        // Regardless of what the previous failure said, Start always
+        // leads to a clean Starting — the old `message` doesn't leak
+        // into the new run's state.
+        let errored = InstanceState::Error {
+            message: "previous crash: out of memory".to_string(),
+        };
+        assert_eq!(
+            errored.apply(InstanceEvent::Start).unwrap(),
+            InstanceState::Starting
+        );
     }
 }

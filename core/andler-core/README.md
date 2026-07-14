@@ -85,14 +85,14 @@ Created → Starting → Running ⇄ Paused → Stopping → Stopped → Created
 | `Running` | VM is executing |
 | `Paused` | Suspended via `pause` |
 | `Stopping` | Stop requested, awaiting termination |
-| `Stopped` | Process terminated, resources freed |
-| `Error { message: String }` | Backend returned an error. Terminal state. |
+| `Stopped` | Process terminated, resources freed. Accepts `Start` (restart into `Starting`, same path as `Created`). |
+| `Error { message: String }` | Backend returned an error. Also accepts `Start` — same restart path as `Stopped`. |
 
 **`InstanceEvent`**: `Start`, `StartCompleted`, `Pause`, `Resume`, `Stop`, `StopCompleted`, `Fail(String)`.
 
 **`InstanceState::apply(self, event) -> Result<InstanceState, FsmError>`**: Pure function — applies an event to the current state and returns the new state. No side effects.
 
-**`InstanceState::is_terminal(&self) -> bool`**: `true` for `Stopped` and `Error` — no outgoing transitions.
+**`InstanceState::is_terminal(&self) -> bool`**: `true` for `Stopped` and `Error` — means "this run has ended", not "no outgoing transitions exist"; both accept `Start` and return to `Starting`.
 
 ### `config/` — Instance Configuration
 
@@ -212,7 +212,7 @@ Each sub-config has a `reference_default()` method that produces sensible defaul
 |--------|-------|
 | `paths` | `andler_home_respects_env_override`, `andler_home_ignores_empty_env_override`, `derived_paths_are_nested_under_andler_home`, `runtime_dir_respects_xdg_runtime_dir_env`, `runtime_dir_ignores_empty_xdg_runtime_dir_env`, `ensure_private_dir_sync_creates_dir_with_0700`, `ensure_private_dir_async_creates_dir_with_0700` |
 | `clone` | `clone_mode_variants_are_distinct` |
-| `fsm` | `happy_path_start_pause_resume_stop`, `cannot_resume_from_running`, `cannot_pause_from_created`, `fail_is_reachable_from_every_active_state`, `terminal_states_have_no_outgoing_transitions` |
+| `fsm` | `happy_path_start_pause_resume_stop`, `cannot_resume_from_running`, `cannot_pause_from_created`, `fail_is_reachable_from_every_active_state`, `terminal_states_accept_only_start_and_reject_everything_else` |
 | `android_profile` | `cache_key_differs_on_arm_translator`, `cache_key_does_not_depend_on_root_mode`, `cache_key_differs_on_gapps`, `resolve_produces_overlay_disk_pointing_at_base_image` |
 | `config::instance` | `instance_id_is_unique`, `config_round_trips_through_serde_json` |
 | `config::cpu` | `reference_default_matches_start_sh` |
