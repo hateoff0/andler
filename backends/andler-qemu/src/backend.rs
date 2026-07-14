@@ -469,6 +469,19 @@ impl HypervisorBackend for QemuBackend {
                 .map_err(|e| BackendError::Io(e.to_string()))?;
         }
 
+        // `qmp_socket_path_for` is deterministic per instance id — a
+        // previous run of the *same* instance (now reachable via restart:
+        // `Stopped`/`Error -> Starting`, see `andler_core::fsm`) can leave
+        // a stale socket file behind if the process died without cleanly
+        // unlinking it. QEMU's own `-qmp unix:PATH,server=on` does not
+        // remove a pre-existing file at that path itself — left alone,
+        // the next QEMU would fail to bind with "address already in use"
+        // even though nothing is actually listening there anymore.
+        // Best-effort: if this fails (e.g. permission issue, or the file
+        // genuinely doesn't exist), the bind attempt below will surface
+        // whatever the real problem is instead.
+        let _ = tokio::fs::remove_file(&qmp_socket_path).await;
+
         let args = cmdline::build_args(cfg, &qmp_socket_path);
 
         // `cfg.disk.path`'s parent is the instance's own directory

@@ -185,15 +185,22 @@ andler-store (andlerd.db)
               │Resume    │          │StopCompleted
               └────►┌────┘          ▼
                     │          ┌─────────┐
-                    │          │ Stopped │──(Start)──►Created
+                    │          │ Stopped │──(Start)──►Starting
                     │          └─────────┘
                     │
               Fail(msg)
                     ▼
               ┌─────────┐
-              │  Error  │ (terminal)
+              │  Error  │──(Start)──►Starting
               └─────────┘
 ```
+
+`Stopped`/`Error` both accept `Start` and return to `Starting` — restarting
+the same instance record works the same way a fresh `Created` instance does
+(`Daemon::start_instance` is generic over the source state; this was purely
+an FSM-level restriction that's since been lifted). `is_terminal()` still
+returns `true` for both — that means "this run has ended", not "no
+transitions remain".
 
 Any active state (Created/Starting/Running/Paused/Stopping) can transition to `Error` via `Fail(msg)`.
 

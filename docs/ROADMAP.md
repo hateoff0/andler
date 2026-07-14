@@ -96,7 +96,32 @@
       `Status::resource_exhausted`) instead of letting the operation run
       out of space partway through. See
       `services/andler-disk/src/diskspace.rs`.
-- [ ] Core: add VM health checks and auto-restart on failure
+- [x] Core: add VM health checks — periodic background task
+      (`ANDLERD_HEALTH_CHECK_INTERVAL_SECS`, default 30s, `0` disables)
+      polls every `Running` instance's real backend status; if the
+      process has died outside the normal `stop_instance` path, the FSM
+      record is transitioned to `Error` and persisted, so a crash is
+      visible in `andler status` instead of silently going unnoticed
+      until someone happens to check. See
+      `daemon/src/daemon/health_ops.rs`.
+      **Auto-restart not implemented as an automatic behavior** — but the
+      underlying blocker found while implementing this (the FSM had no
+      `Start` transition out of `Stopped`/`Error` at all, so *even manual*
+      `andler start` didn't work on a stopped/crashed instance) is fixed,
+      see the item right below. What's left out is specifically the
+      *automatic, unattended* retry-on-crash policy (attempt limits,
+      backoff) — a product decision to make deliberately, not bundle in
+      silently with a monitoring feature.
+- [x] Core: allow restarting a `Stopped`/`Error` instance without
+      recreating it — `andler_core::fsm` now accepts `Start` from both
+      (returns to `Starting`, same path as a fresh `Created` instance);
+      `Daemon::start_instance` needed no changes at all, it was already
+      generic over the source state, only the FSM was refusing to let it
+      through. `is_terminal()` keeps its old meaning ("this run has
+      ended"), not "no transitions remain" — see the updated doc comments
+      in `fsm.rs`. `backend.rs::spawn` also now removes a stale QMP socket
+      file from a previous run before binding a new one (the deterministic
+      per-instance socket path could otherwise collide on restart).
 
 ### Medium-term
 

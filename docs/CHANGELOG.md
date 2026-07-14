@@ -17,11 +17,13 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - **LinuxVm clone/export**: `CloneMode::Linked` and `CloneMode::FullStandalone` supported. `SharedBase` rejected with `SharedBaseNotSupportedForLinuxVm`.
 - **Path utilities**: `runtime_dir()` (XDG_RUNTIME_DIR fallback), `current_uid()` (getuid FFI), `ensure_private_dir()` / `ensure_private_dir_sync()` (0700 permissions).
 - **`ensure_qcow2_extension()`**: Auto-appends `.qcow2` extension to disk paths.
+- **FSM: restart from `Stopped`/`Error`**: `Start` is now a valid transition from both (-> `Starting`), same path as a fresh `Created` instance. Found while implementing VM health checks that this wasn't previously possible at all — not just for crashed instances, `andler start` didn't work on a manually-stopped one either. `Daemon::start_instance` needed no changes (it was already generic over the source state). `is_terminal()` keeps its previous meaning ("this run has ended"), not "no outgoing transitions exist".
 
 #### Backend (`andler-qemu`)
 
 - **QEMU VM snapshots**: Full CRUD — create, restore, delete, list snapshots via QEMU's `snapshot-save`/`snapshot-load`/`snapshot-delete` job API. Polls `query-jobs` for completion with configurable timeout.
 - **Resource metrics from `/proc`**: Real-time streaming of CPU%, RAM usage, disk I/O, and network I/O. No QMP required. 1-second polling interval.
+- **Stale QMP socket cleanup on spawn**: removes a leftover socket file from a previous run before binding a new one — the per-instance QMP socket path is deterministic, so restarting the same instance (see FSM restart above) could otherwise fail to bind with "address already in use" even though nothing was actually listening there anymore.
 - **GPU metrics (AMD)**: Sysfs-based GPU metrics — VRAM used/total and GPU load percentage from `/sys/class/drm/card*/device/`.
 - **GPU metrics (NVIDIA)**: `nvidia-smi` CLI-based GPU metrics — VRAM used/total (MiB) and GPU load %. Automatic vendor detection with AMD→NVIDIA→Intel priority.
 - **GPU metrics (Intel)**: i915 sysfs-based GPU metrics — GPU load % via `power/rc6_residency_ms` idle-time delta (documented i915 ABI; an earlier draft read a non-existent `busyiffies` path — never shipped). No VRAM metric — integrated Intel VRAM accounting isn't a stable sysfs ABI.
@@ -44,6 +46,7 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 #### Daemon
 
 - **Snapshot orchestration**: `create_snapshot`, `restore_snapshot`, `delete_snapshot`, `list_snapshots` methods with FSM state validation and per-operation timeout override.
+- **Health checks**: periodic background task (`ANDLERD_HEALTH_CHECK_INTERVAL_SECS`, default 30s) polls every `Running` instance's real backend status; a process that died outside `stop_instance` is transitioned to `Error` and persisted instead of going unnoticed. Auto-restart deliberately not included — see `health_ops.rs` module doc for why (the FSM currently has no supported way to restart the *same* instance record once `Stopped`/`Error`, a pre-existing constraint this surfaced, not something this change could safely work around).
 - **Metrics streaming**: `stream_resource_metrics` method returning `BoxStream<'static, ResourceMetrics>`.
 - **Magisk provisioning integration**: `create_android_instance` accepts optional `magisk_dir` parameter.
 - **Factory reset / `remove --purge`**: Full end-to-end with file cleanup (disk + OVMF vars + instance directory). Refuses when live `Linked` clones exist.

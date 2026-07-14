@@ -18,6 +18,7 @@ daemon/
 ├── instance_ops.rs →  create, create_linux_instance, start, stop, pause, resume, remove, resolve_instance_id
 ├── clone_ops.rs    →  clone_instance, export_instance_disk, find_live_clones
 ├── snapshot_ops.rs →  create/restore/delete/list snapshots (requires Running/Paused for QMP commands)
+├── health_ops.rs   →  periodic crash detection for Running instances (Error transition, no auto-restart)
 └── query_ops.rs    →  status, list_instances, get_instance_config, update_instance_config, stream logs/metrics
                ↓
            HypervisorBackend trait → QemuBackend / VmmBackend
@@ -147,6 +148,10 @@ Handles: `clone_instance` (Linked/FullStandalone/SharedBase modes), `export_inst
 ### `daemon/snapshot_ops.rs` — Snapshot Management
 
 Handles: `create_snapshot`, `restore_snapshot`, `delete_snapshot`, `list_snapshots`.
+
+### `daemon/health_ops.rs` — Crash Detection
+
+Handles: `run_health_check_once` (spawned periodically from `main.rs`, `ANDLERD_HEALTH_CHECK_INTERVAL_SECS`, default 30s). Polls every `Running` instance's real backend status; if the process has died outside `stop_instance`, transitions the FSM record to `Error` and persists it. Doesn't auto-restart the instance itself — `andler start <id>` works on it right after (see `fsm.rs`: `Stopped`/`Error` accept `Start`), this is a deliberate policy choice (silent auto-restart on top of a possibly-broken config risks masking a real failure behind a crash loop with no attempt limit/backoff), not a technical limitation. See the module doc comment for the full reasoning.
 
 ### `daemon/query_ops.rs` — Status & Streaming
 
