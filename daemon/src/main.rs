@@ -344,6 +344,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let daemon = Arc::new(daemon);
     let service = DaemonService::new(Arc::clone(&daemon), ovmf);
 
+    spawn_health_check_task(Arc::clone(&daemon));
+
     println!("andlerd: listening on {addr}");
 
     Server::builder()
@@ -352,4 +354,40 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
 
     Ok(())
+}
+
+/// Spawns the background health-check loop (see
+/// `daemon::health_ops::run_health_check_once`, ROADMAP.md "Core: add VM
+/// health checks and auto-restart on failure"). Interval configurable via
+/// `ANDLERD_HEALTH_CHECK_INTERVAL_SECS` (default 30s); set to `0` to
+/// disable entirely (e.g. for tests or environments that don't want the
+/// extra periodic `backend.status()` calls).
+///
+/// Not wired into `shutdown_signal`/graceful shutdown — this task holds
+/// no state that needs flushing (it only ever reads `daemon.instances`
+/// and, on a detected crash, goes through the same `persist_state` path
+/// every other state transition already uses), so letting it end
+/// abruptly when the process exits is fine; there's nothing to lose.
+fn spawn_health_check_task(daemon: Arc<Daemon>) {
+    let interval_secs: u64 = std::env::var("ANDLERD_HEALTH_CHECK_INTERVAL_SECS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(30);
+
+    if interval_secs == 0 {
+        tracing::info!("health checks disabled (ANDLERD_HEALTH_CHECK_INTERVAL_SECS=0)");
+        return;
+    }
+
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
+        // The first tick fires immediately — skip it so we don't run a
+        // health check the instant the daemon starts, before anything
+        // has necessarily even been asked to start yet.
+        ticker.tick().await;
+        loop {
+            ticker.tick().await;
+            daemon.run_health_check_once().await;
+        }
+    });
 }

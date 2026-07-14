@@ -18,6 +18,7 @@ mod snapshot_ops;
 mod query_ops;
 mod instance_ops;
 mod clone_ops;
+mod health_ops;
 
 pub use error::DaemonError;
 pub(crate) use types::InstanceRecord;
