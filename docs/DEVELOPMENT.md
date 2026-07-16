@@ -62,7 +62,7 @@ ANDLERD_LISTEN_ADDR=0.0.0.0:50051 ./target/release/andlerd
 
 ### Store Path
 
-Default: `~/.local/share/andler/andlerd.db`. Override with:
+Default: `~/.andler/andlerd.db`. Override with:
 
 ```bash
 ANDLERD_STORE_PATH=/path/to/andlerd.db ./target/release/andlerd
@@ -70,10 +70,10 @@ ANDLERD_STORE_PATH=/path/to/andlerd.db ./target/release/andlerd
 
 ### Default Paths
 
-All instance data lives under `~/.local/share/andler/`:
+All instance data lives under `~/.andler/`:
 
 ```
-~/.local/share/andler/
+~/.andler/
 ├── andlerd.db                    # SQLite state store
 ├── instances/
 │   └── <uuid>/

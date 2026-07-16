@@ -6,7 +6,7 @@ Domain model for ANDLER: instance configuration, finite state machine, and hyper
 
 ### `paths` — Unified Path Resolution
 
-Single source of truth for all filesystem paths. Reads `ANDLER_HOME` env var, falls back to `~/.local/share/andler/`.
+Single source of truth for all filesystem paths. Reads `ANDLER_HOME` env var, falls back to `~/.andler/`.
 
 | Function | Returns |
 |----------|---------|

@@ -17,6 +17,7 @@ pub struct LinuxBasicResult {
     pub iso_path: String,
     pub disk_size_gib: u64,
     pub instances_root: String,
+    pub enable_uefi: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -73,11 +74,13 @@ pub fn run_linux(
     let iso = ask_iso_path(iso_path)?;
     let disk_size_gib = ask_disk_size(DEFAULT_DISK_GIB)?;
     let instances_root = instances_root.unwrap_or_else(default_instances_root);
+    let enable_uefi = ask_enable_uefi()?;
     Ok(LinuxBasicResult {
         name,
         iso_path: iso,
         disk_size_gib,
         instances_root,
+        enable_uefi,
     })
 }
 
@@ -209,6 +212,15 @@ pub fn ask_disk_size(default_gib: u64) -> Result<u64, WizardError> {
         .map_err(map_inquire_err)
 }
 
+fn ask_enable_uefi() -> Result<bool, WizardError> {
+    let use_uefi = inquire::Confirm::new("Use UEFI/OVMF firmware?")
+        .with_help_message("Recommended — requires edk2-ovmf. Legacy BIOS if declined.")
+        .with_default(true)
+        .prompt()
+        .map_err(map_inquire_err)?;
+    Ok(use_uefi)
+}
+
 fn validate_name(
     s: &str,
 ) -> Result<inquire::validator::Validation, Box<dyn std::error::Error + Send + Sync>> {
@@ -275,6 +287,7 @@ mod tests {
             iso_path: String::new(),
             disk_size_gib: 256,
             instances_root: "/tmp/instances".into(),
+            enable_uefi: true,
         });
         assert_eq!(linux.name(), "test-vm");
         assert_eq!(linux.kind(), WizardKind::Linux);

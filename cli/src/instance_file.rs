@@ -110,6 +110,10 @@ pub struct InstanceFile {
     // --- Common ---
     /// Path to OVMF_VARS template. Required for both types.
     pub ovmf_vars_path: PathBuf,
+    /// Enable UEFI/OVMF firmware. If `false`, legacy BIOS is used.
+    /// Optional (default: `true`). Linux only — ignored for Android.
+    #[serde(default = "default_true")]
+    pub enable_uefi: bool,
 
     // --- Android-specific (presence = AndroidVm) ---
     /// Android version. If present, this is an AndroidVm config.
@@ -309,6 +313,7 @@ impl InstanceFile {
                 // авто-детект daemon'а" — это соглашение между CLI и
                 // service.rs, задокументированное в обоих местах.
                 andler_core::FirmwareConfig {
+                    enable_uefi: self.enable_uefi,
                     ovmf_code_path: std::path::PathBuf::new(),
                     ovmf_vars_path: self.ovmf_vars_path.clone(),
                 }
@@ -401,6 +406,10 @@ fn default_instances_root() -> String {
     andler_core::paths::instances_root()
         .to_string_lossy()
         .into_owned()
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[cfg(test)]

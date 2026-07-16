@@ -14,7 +14,7 @@ ANDLER manages the complete lifecycle of QEMU-based virtual machines with a focu
 - **Snapshots** — save/restore VM state instantly via QEMU's async job API
 - **Clone & export** — duplicate VMs cheaply (linked overlays) or create standalone copies
 
-All managed through a single `andler` CLI or gRPC API, with data stored under `~/.local/share/andler/` (no root required).
+All managed through a single `andler` CLI or gRPC API, with data stored under `~/.andler/` (no root required).
 
 ## Features
 
@@ -38,7 +38,7 @@ Venus and VirGL provide **paravirtualized 3D acceleration** — the guest sees a
 - **Full lifecycle control** — start, stop, pause, resume, status
 - **Factory reset** — `remove --purge` deletes instance files (disk + OVMF vars)
 - **Clone & export** — three clone modes (linked, full-standalone, shared-base) for both Linux and Android VMs
-- **Default XDG paths** — all data under `~/.local/share/andler/`, no root required
+- **Default XDG paths** — all data under `~/.andler/`, no root required
 
 ### Snapshots
 
@@ -378,10 +378,10 @@ andler/
 
 ## Default Paths
 
-All data under `~/.local/share/andler/` (XDG data directory):
+All data under `~/.andler/`:
 
 ```
-~/.local/share/andler/
+~/.andler/
 ├── andlerd.db                   SQLite state store
 ├── instances/
 │   └── <uuid>/

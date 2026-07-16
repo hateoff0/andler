@@ -15,10 +15,9 @@
 //! 1. Если задана переменная окружения `ANDLER_HOME` — используется она
 //!    как есть (без дополнительной проверки существования: создание при
 //!    необходимости — забота вызывающего кода, не этого модуля).
-//! 2. Иначе — `dirs::data_local_dir()/andler`, с фоллбэком на
-//!    `~/.local/share/andler`, если `data_local_dir()` не смог
-//!    определиться (нет `$HOME`/`$XDG_DATA_HOME`, экзотическое
-//!    окружение).
+//! 2. Иначе — `dirs::home_dir()/.andler`, с фоллбэком на
+//!    `~/.andler`, если `home_dir()` не смог определиться
+//!    (нет `$HOME`, экзотическое окружение).
 //!
 //! ## Важно: миграции нет
 //!
@@ -34,19 +33,17 @@ use std::path::PathBuf;
 /// директорию ANDLER целиком.
 pub const ANDLER_HOME_ENV: &str = "ANDLER_HOME";
 
-/// Корневая директория ANDLER.
-///
 /// `$ANDLER_HOME`, если задана и непуста; иначе
-/// `dirs::data_local_dir()/andler`; иначе `~/.local/share/andler`.
+/// `dirs::home_dir()/.andler`; иначе `~/.andler`.
 pub fn andler_home() -> PathBuf {
     if let Ok(value) = std::env::var(ANDLER_HOME_ENV) {
         if !value.is_empty() {
             return PathBuf::from(value);
         }
     }
-    dirs::data_local_dir()
-        .unwrap_or_else(|| PathBuf::from("~/.local/share"))
-        .join("andler")
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("~"))
+        .join(".andler")
 }
 
 /// `<ANDLER_HOME>/instances` — корень для директорий отдельных
@@ -55,21 +52,19 @@ pub fn instances_root() -> PathBuf {
     andler_home().join("instances")
 }
 
-/// `<ANDLER_HOME>/base-images` — разделяемые базовые образы (Android,
-/// Linux), на которые могут ссылаться несколько инстансов.
+/// `<ANDLER_HOME>/cache/base-images` — базовые образы гостей
+/// (Linux/Android), на основе которых создаются overlay-диски
+/// инстансов. Плейсхолдер: структура фиксируется сейчас, логика
+/// скачивания — отдельная задача.
 pub fn base_images_dir() -> PathBuf {
-    andler_home().join("base-images")
+    andler_home().join("cache/base-images")
 }
 
-/// `<ANDLER_HOME>/ovmf` — кэш найденных/скачанных системных OVMF-файлов
-/// (`OVMF_CODE.fd`, шаблон `OVMF_VARS.fd`).
-pub fn ovmf_cache_dir() -> PathBuf {
-    andler_home().join("ovmf")
-}
-
-/// `<ANDLER_HOME>/venus-cache` — кэш шейдеров Venus.
-pub fn venus_cache_dir() -> PathBuf {
-    andler_home().join("venus-cache")
+/// `<ANDLER_HOME>/cache/arm-translators` — кэш трансляторов
+/// архитектур (libhoudini, libndk и т.п.). Плейсхолдер: структура
+/// фиксируется сейчас, логика скачивания — отдельная задача.
+pub fn arm_translators_dir() -> PathBuf {
+    andler_home().join("cache/arm-translators")
 }
 
 /// `<ANDLER_HOME>/andlerd.db` — единая SQLite база состояния daemon'а
@@ -203,15 +198,11 @@ mod tests {
         );
         assert_eq!(
             base_images_dir(),
-            PathBuf::from("/tmp/andler-test-home/base-images")
+            PathBuf::from("/tmp/andler-test-home/cache/base-images")
         );
         assert_eq!(
-            ovmf_cache_dir(),
-            PathBuf::from("/tmp/andler-test-home/ovmf")
-        );
-        assert_eq!(
-            venus_cache_dir(),
-            PathBuf::from("/tmp/andler-test-home/venus-cache")
+            arm_translators_dir(),
+            PathBuf::from("/tmp/andler-test-home/cache/arm-translators")
         );
         assert_eq!(
             db_path(),

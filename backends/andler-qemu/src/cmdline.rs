@@ -117,6 +117,9 @@ fn memory_args(cfg: &InstanceConfig) -> Vec<String> {
 /// `-drive if=pflash,format=raw,readonly=on,file=<OVMF_CODE>` +
 /// `-drive if=pflash,format=raw,file=<OVMF_VARS>`.
 fn firmware_args(cfg: &InstanceConfig) -> Vec<String> {
+    if !cfg.firmware.enable_uefi {
+        return vec![];
+    }
     let fw = &cfg.firmware;
     vec![
         "-drive".to_string(),
@@ -519,6 +522,13 @@ mod tests {
                 "if=pflash,format=raw,file=linux_VARS.fd",
             ]
         );
+    }
+
+    #[test]
+    fn firmware_args_empty_when_uefi_disabled() {
+        let mut cfg = start_sh_equivalent_config();
+        cfg.firmware.enable_uefi = false;
+        assert!(firmware_args(&cfg).is_empty());
     }
 
     #[test]

@@ -21,6 +21,7 @@ pub async fn handle(
     disk_size_gib: Option<u64>,
     compact_on_shutdown: bool,
     cdrom_bus: CliCdromBus,
+    no_uefi: bool,
     quick: bool,
     dry_run: bool,
     verify: bool,
@@ -167,6 +168,7 @@ pub async fn handle(
                 compact_on_shutdown,
                 cdrom_bus,
                 ovmf,
+                !no_uefi,
             );
             if dry_run {
                 return crate::preview::print_linux_preview(&req);
@@ -341,6 +343,7 @@ fn build_linux_request(
     compact_on_shutdown: bool,
     cdrom_bus: CliCdromBus,
     ovmf_vars_template: String,
+    enable_uefi: bool,
 ) -> CreateInstanceRequest {
     let mut disk = andler_core::DiskConfig::reference_default(std::path::PathBuf::from(&disk_path));
     if let Some(gib) = disk_size_gib {
@@ -369,6 +372,7 @@ fn build_linux_request(
         network: Some(andler_core::NetworkConfig::reference_default().into()),
         firmware: Some(
             andler_core::FirmwareConfig {
+                enable_uefi,
                 ovmf_code_path: std::path::PathBuf::new(),
                 ovmf_vars_path: std::path::PathBuf::from(&ovmf_vars_template),
             }

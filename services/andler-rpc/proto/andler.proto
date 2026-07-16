@@ -310,6 +310,7 @@ message NetworkConfig {
 }
 
 message FirmwareConfig {
+    bool enable_uefi = 3;
     string ovmf_code_path = 1;
     string ovmf_vars_path = 2;
 }

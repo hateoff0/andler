@@ -88,8 +88,8 @@ Override with `--daemon-addr <url>` before the subcommand, or `ANDLERD_ADDR` env
 ```toml
 name = "my-linux-vm"
 iso_path = "/home/user/isos/cachyos.iso"
-disk_path = "/home/user/.local/share/andler/my-linux-vm/disk.qcow2"
-ovmf_vars_path = "/home/user/.local/share/andler/my-linux-vm/VARS.fd"
+disk_path = "/home/user/.andler/my-linux-vm/disk.qcow2"
+ovmf_vars_path = "/home/user/.andler/my-linux-vm/VARS.fd"
 ```
 
 ### Android VM (minimal)
@@ -117,7 +117,7 @@ magisk_dir = "/path/to/magisk/"
 gapps = false
 microg = false
 arm_translator = "libndk"
-instances_root = "/home/user/.local/share/andler/instances"
+instances_root = "/home/user/.andler/instances"
 ```
 
 ### Linux VM (full example)
@@ -125,8 +125,8 @@ instances_root = "/home/user/.local/share/andler/instances"
 ```toml
 name = "my-linux-vm"
 iso_path = "/home/user/isos/cachyos.iso"
-disk_path = "/home/user/.local/share/andler/my-linux-vm/disk.qcow2"
-ovmf_vars_path = "/home/user/.local/share/andler/my-linux-vm/VARS.fd"
+disk_path = "/home/user/.andler/my-linux-vm/disk.qcow2"
+ovmf_vars_path = "/home/user/.andler/my-linux-vm/VARS.fd"
 
 disk_size_gib = 100
 snapshot_timeout_secs = 60

@@ -119,6 +119,11 @@ enum Command {
         #[arg(long, value_enum, default_value = "auto")]
         cdrom_bus: CliCdromBus,
 
+        /// Disable UEFI/OVMF, use legacy BIOS instead. Linux only.
+        /// Ignored for Android (which requires UEFI).
+        #[arg(long)]
+        no_uefi: bool,
+
         /// Skip the interactive wizard and create with all defaults.
         /// Requires `--kind`. Mutually exclusive with `--file`.
         #[arg(long)]
@@ -170,7 +175,7 @@ enum Command {
         #[arg(long, value_enum, default_value_t = CliRootMode::None)]
         root: CliRootMode,
 
-        /// Instance directory root (default: ~/.local/share/andler/instances).
+        /// Instance directory root (default: ~/.andler/instances).
         #[arg(long, default_value_t = default_instances_root())]
         instances_root: String,
 
@@ -645,6 +650,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             disk_size_gib,
             compact_on_shutdown,
             cdrom_bus,
+            no_uefi,
             quick,
             dry_run,
             verify,
@@ -661,7 +667,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             create::handle(
                 &mut client, file, kind, name, ovmf_vars_template,
                 iso_path, disk_path, disk_size_gib, compact_on_shutdown, cdrom_bus,
-                quick, dry_run, verify,
+                no_uefi, quick, dry_run, verify,
                 android_version, base_image_path, gapps, microg, arm_translator, root,
                 instances_root, overlay_size_gib, magisk_dir,
             ).await?;

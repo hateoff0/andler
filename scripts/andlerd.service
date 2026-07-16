@@ -47,7 +47,7 @@ TimeoutStopSec=30
 # ANDLER_HOME defaults to the user's own data-local dir if unset (see
 # core/andler-core/src/paths.rs) — no override needed here for the
 # common case; uncomment to pin it explicitly:
-# Environment=ANDLER_HOME=%h/.local/share/andler
+# Environment=ANDLER_HOME=%h/.andler
 
 [Install]
 WantedBy=default.target

@@ -29,7 +29,7 @@ daemon/
 ### `main.rs` — Entry Point
 
 - Sets up `tracing` subscriber (verbosity: `-v` = debug, `-vv` = trace)
-- Opens `Store` at `ANDLERD_STORE_PATH` (default: `~/.local/share/andler/andlerd.db`)
+- Opens `Store` at `ANDLERD_STORE_PATH` (default: `~/.andler/andlerd.db`)
 - Calls `Daemon::restore(store)` to recover instances from previous sessions
 - Handles `SIGINT`/`SIGTERM` for graceful shutdown (stops all running instances)
 - Starts tonic `Server` on `DEFAULT_LISTEN_ADDR` (`127.0.0.1:50051`)

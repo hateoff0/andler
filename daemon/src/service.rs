@@ -5,6 +5,7 @@
 //! README `andler-daemon` описывал будущий `service.rs` с самого начала.
 
 use std::pin::Pin;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use andler_core::{CloneMode, InstanceConfig};
@@ -189,7 +190,9 @@ impl AndlerService for DaemonService {
         // was silently discarded every time). `create_android_instance`
         // right below already gets this right — this brings the Linux
         // path in line with it.
-        let ovmf_vars_template = if cfg.firmware.ovmf_vars_path.as_os_str().is_empty() {
+        let ovmf_vars_template = if !cfg.firmware.enable_uefi {
+            PathBuf::new()
+        } else if cfg.firmware.ovmf_vars_path.as_os_str().is_empty() {
             self.ovmf.vars_template.clone()
         } else {
             cfg.firmware.ovmf_vars_path.clone()

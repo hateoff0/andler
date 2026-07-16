@@ -238,18 +238,22 @@ fn build_quick(
                 .instances_root
                 .unwrap_or_else(default_instances_root);
 
-            if detected.ovmf.is_err() {
+            let enable_uefi = if detected.ovmf.is_err() {
                 eprintln!(
                     "⚠  OVMF not found. Legacy BIOS will be used. \
                      Install edk2-ovmf for UEFI support."
                 );
-            }
+                false
+            } else {
+                true
+            };
 
             let basic = LinuxBasicResult {
                 name,
                 iso_path: iso,
                 disk_size_gib: 256,
                 instances_root,
+                enable_uefi,
             };
             let (req, root) = build_linux_request(&basic, None, detected)?;
             Ok(WizardResult::Linux(req, root))
@@ -341,6 +345,7 @@ pub(crate) fn build_linux_request(
         network: Some(network.into()),
         firmware: Some(
             andler_core::FirmwareConfig {
+                enable_uefi: basic.enable_uefi,
                 ovmf_code_path: PathBuf::new(),
                 ovmf_vars_path: PathBuf::from(&ovmf_vars_template),
             }
@@ -656,6 +661,7 @@ mod tests {
             iso_path: "/tmp/test.iso".into(),
             disk_size_gib: 256,
             instances_root: "/tmp/instances".into(),
+            enable_uefi: true,
         };
         let detected = sample_detected();
         let (req, root) = build_linux_request(&basic, None, &detected).unwrap();
@@ -671,6 +677,7 @@ mod tests {
             iso_path: String::new(),
             disk_size_gib: 128,
             instances_root: "/tmp/instances".into(),
+            enable_uefi: true,
         };
         let advanced = AdvancedConfig {
             cdrom_bus: None,

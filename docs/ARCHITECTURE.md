@@ -9,7 +9,7 @@ ANDLER (**ANDLER** = *Android Linux Emulator & Runtime*) is a Rust monorepo for 
 3. **Explicit state machine**: Instance lifecycle is governed by a strict FSM with named states and validated transitions. No implicit state changes.
 4. **Persistence is optional**: The daemon works with or without SQLite persistence. In-memory state is always the source of truth for the current session. Store errors are logged but don't fail operations.
 5. **No global state**: Each crate has clear responsibilities. `andler-core` knows nothing about QEMU, gRPC, or SQL. `andler-qemu` knows nothing about the daemon or CLI.
-6. **User-mode by default**: All paths under `~/.local/share/andler/`. No root/sudo required for normal operation.
+6. **User-mode by default**: All paths under `~/.andler/`. No root/sudo required for normal operation.
 
 ## Crate Dependency Graph
 

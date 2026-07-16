@@ -161,6 +161,13 @@ impl Daemon {
                 source,
             })?;
 
+        // Android requires UEFI — reject creation without OVMF template.
+        if ovmf_vars_template.as_os_str().is_empty() {
+            return Err(DaemonError::Firmware(
+                "Android requires UEFI/OVMF. Provide an OVMF_VARS template.".to_string(),
+            ));
+        }
+
         let ovmf_vars_path = instance_dir.join("VARS.fd");
         andler_firmware::provision_vars(&ovmf_vars_template, &ovmf_vars_path)
             .await

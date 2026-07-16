@@ -65,7 +65,7 @@ andler create \
 | `--root <mode>` | No | Root mode: `none` (default), `magisk` |
 | `--magisk-dir <path>` | No | Path to Magisk binaries (required when `--root magisk`) |
 | `--overlay-size-gib <size>` | No | Overlay disk size in GiB (default: 20, Android only) |
-| `--instances-root <path>` | No | Instance directory root (default: `~/.local/share/andler/instances`) |
+| `--instances-root <path>` | No | Instance directory root (default: `~/.andler/instances`) |
 
 ### `start`
 
@@ -324,8 +324,8 @@ andler completions fish > ~/.config/fish/completions/andler.fish
 ```toml
 name = "my-linux-vm"
 iso_path = "/home/user/isos/cachyos.iso"
-disk_path = "/home/user/.local/share/andler/my-linux-vm/disk.qcow2"
-ovmf_vars_path = "/home/user/.local/share/andler/my-linux-vm/VARS.fd"
+disk_path = "/home/user/.andler/my-linux-vm/disk.qcow2"
+ovmf_vars_path = "/home/user/.andler/my-linux-vm/VARS.fd"
 ```
 
 ### Android VM (minimal)
@@ -354,7 +354,7 @@ magisk_dir = "/path/to/magisk/"
 gapps = false
 microg = false
 libndk = false
-instances_root = "/home/user/.local/share/andler/instances"
+instances_root = "/home/user/.andler/instances"
 ```
 
 ### Linux VM (full example)
@@ -362,8 +362,8 @@ instances_root = "/home/user/.local/share/andler/instances"
 ```toml
 name = "my-linux-vm"
 iso_path = "/home/user/isos/cachyos.iso"
-disk_path = "/home/user/.local/share/andler/my-linux-vm/disk.qcow2"
-ovmf_vars_path = "/home/user/.local/share/andler/my-linux-vm/VARS.fd"
+disk_path = "/home/user/.andler/my-linux-vm/disk.qcow2"
+ovmf_vars_path = "/home/user/.andler/my-linux-vm/VARS.fd"
 
 disk_size_gib = 100
 snapshot_timeout_secs = 60

@@ -586,6 +586,7 @@ impl From<NetworkConfig> for proto::NetworkConfig {
 impl From<proto::FirmwareConfig> for FirmwareConfig {
     fn from(value: proto::FirmwareConfig) -> Self {
         FirmwareConfig {
+            enable_uefi: value.enable_uefi,
             ovmf_code_path: PathBuf::from(value.ovmf_code_path),
             ovmf_vars_path: PathBuf::from(value.ovmf_vars_path),
         }
@@ -595,6 +596,7 @@ impl From<proto::FirmwareConfig> for FirmwareConfig {
 impl From<FirmwareConfig> for proto::FirmwareConfig {
     fn from(value: FirmwareConfig) -> Self {
         proto::FirmwareConfig {
+            enable_uefi: value.enable_uefi,
             ovmf_code_path: value.ovmf_code_path.to_string_lossy().into_owned(),
             ovmf_vars_path: value.ovmf_vars_path.to_string_lossy().into_owned(),
         }

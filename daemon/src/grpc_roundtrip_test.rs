@@ -211,6 +211,7 @@ fn sample_create_instance_request() -> CreateInstanceRequest {
     };
 
     let firmware = FirmwareConfig {
+        enable_uefi: true,
         ovmf_code_path: "/usr/share/edk2/x64/OVMF_CODE.4m.fd".to_string(),
         // Empty — falls back to the test daemon's own `test_ovmf.vars_template`
         // (see `spawn_server_and_connect`). A non-empty path here is now
