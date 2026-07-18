@@ -104,7 +104,6 @@ async fn create_android_instance_resolves_profile_and_creates_overlay() {
         gapps: true,
         microg: false,
         arm_translator: ArmTranslator::Libndk,
-        root: RootMode::None,
     };
 
     let id = daemon
@@ -115,7 +114,6 @@ async fn create_android_instance_resolves_profile_and_creates_overlay() {
             instances_root.clone(),
             20 * 1024 * 1024 * 1024,
             ovmf_template,
-            None,
         )
         .await
         .unwrap();
@@ -172,7 +170,6 @@ async fn create_android_instance_fails_when_base_image_missing() {
         gapps: false,
         microg: true,
         arm_translator: ArmTranslator::None,
-        root: RootMode::None,
     };
 
     let err = daemon
@@ -183,7 +180,6 @@ async fn create_android_instance_fails_when_base_image_missing() {
             instances_root.clone(),
             20 * 1024 * 1024 * 1024,
             ovmf_template,
-            None,
         )
         .await
         .unwrap_err();
@@ -217,7 +213,6 @@ async fn create_android_instance_cleans_up_instance_dir_on_missing_ovmf_template
         gapps: false,
         microg: true,
         arm_translator: ArmTranslator::None,
-        root: RootMode::None,
     };
 
     let err = daemon
@@ -228,7 +223,6 @@ async fn create_android_instance_cleans_up_instance_dir_on_missing_ovmf_template
             instances_root.clone(),
             20 * 1024 * 1024 * 1024,
             missing_ovmf_template,
-            None,
         )
         .await
         .unwrap_err();

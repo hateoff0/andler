@@ -404,7 +404,6 @@ async fn clone_instance_with_linked_mode_creates_overlay_pointing_at_source_disk
         gapps: false,
         microg: false,
         arm_translator: ArmTranslator::None,
-        root: RootMode::None,
     };
     let source_id = daemon
         .create_android_instance(
@@ -414,8 +413,7 @@ async fn clone_instance_with_linked_mode_creates_overlay_pointing_at_source_disk
             instances_root.clone(),
             20 * 1024 * 1024 * 1024,
             ovmf_template,
-            None,
-        )
+                    )
         .await
         .unwrap();
     let source_disk_path = daemon
@@ -473,7 +471,6 @@ async fn clone_instance_with_full_standalone_mode_has_no_base_image() {
         gapps: false,
         microg: false,
         arm_translator: ArmTranslator::None,
-        root: RootMode::None,
     };
     let source_id = daemon
         .create_android_instance(
@@ -483,8 +480,7 @@ async fn clone_instance_with_full_standalone_mode_has_no_base_image() {
             instances_root.clone(),
             20 * 1024 * 1024 * 1024,
             ovmf_template,
-            None,
-        )
+                    )
         .await
         .unwrap();
 
@@ -528,7 +524,6 @@ async fn clone_instance_with_shared_base_mode_survives_source_purge() {
         gapps: false,
         microg: false,
         arm_translator: ArmTranslator::None,
-        root: RootMode::None,
     };
     let source_id = daemon
         .create_android_instance(
@@ -538,8 +533,7 @@ async fn clone_instance_with_shared_base_mode_survives_source_purge() {
             instances_root.clone(),
             20 * 1024 * 1024 * 1024,
             ovmf_template,
-            None,
-        )
+                    )
         .await
         .unwrap();
 
@@ -584,7 +578,6 @@ async fn clone_instance_of_a_clone_is_allowed() {
         gapps: false,
         microg: false,
         arm_translator: ArmTranslator::None,
-        root: RootMode::None,
     };
     let source_id = daemon
         .create_android_instance(
@@ -594,8 +587,7 @@ async fn clone_instance_of_a_clone_is_allowed() {
             instances_root.clone(),
             20 * 1024 * 1024 * 1024,
             ovmf_template,
-            None,
-        )
+                    )
         .await
         .unwrap();
 
@@ -651,7 +643,6 @@ async fn export_instance_disk_creates_standalone_file_without_registering_instan
         gapps: false,
         microg: false,
         arm_translator: ArmTranslator::None,
-        root: RootMode::None,
     };
     let source_id = daemon
         .create_android_instance(
@@ -661,8 +652,7 @@ async fn export_instance_disk_creates_standalone_file_without_registering_instan
             instances_root,
             20 * 1024 * 1024 * 1024,
             ovmf_template,
-            None,
-        )
+                    )
         .await
         .unwrap();
 

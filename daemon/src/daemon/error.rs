@@ -205,4 +205,21 @@ pub enum DaemonError {
         instance_id: InstanceId,
         message: String,
     },
+
+    /// `set_instance_config` — ключ конфигурации не является валидным
+    /// ключом (например, "arm_translator", "name", "root") или значение
+    /// не может быть распарсено.
+    #[error("invalid config key: {0:?}")]
+    InvalidConfigKey(String),
+
+    /// `switch_arm_translator` — инстанс не является AndroidVm.
+    #[error("instance {0:?} is not an Android VM")]
+    NotAndroid(InstanceId),
+
+    /// `set_instance_config`/`switch_arm_translator` — инстанс должен
+    /// быть в нетерминальном состоянии (Stopped) для изменений,
+    /// затрагивающих overlay-диск.
+    #[error("instance {0:?} must be stopped (currently {1:?}) to change config")]
+    InstanceMustBeStopped(InstanceId, InstanceState),
+
 }

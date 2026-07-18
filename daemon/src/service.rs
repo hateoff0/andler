@@ -18,7 +18,8 @@ use andler_rpc::proto::{
     GuestPackageEntry, InstallGuestAgentRequest, InstanceIdRequest, InstanceListEntry,
     InstanceStatusResponse, ListGuestPackagesResponse, ListInstancesResponse, ListSnapshotsResponse,
     LogLineResponse, RemoveGuestAgentRequest, RemoveInstanceRequest, ResourceMetricsResponse,
-    RestoreSnapshotRequest, SnapshotEntry, StopInstanceRequest, UpdateInstanceConfigRequest,
+    RestoreSnapshotRequest, SetInstanceConfigRequest, SnapshotEntry, StopInstanceRequest,
+    SwitchArmTranslatorRequest, UpdateInstanceConfigRequest,
 };
 use futures_core::Stream;
 use futures_util::StreamExt;
@@ -138,6 +139,11 @@ impl From<DaemonError> for Status {
             // Guest agent operations: client can fix by stopping the VM
             // or ensuring guest agent is installed.
             DaemonError::GuestAgentUnavailable { .. } => Status::failed_precondition(err.to_string()),
+            // ARM translator / config set operations: client can fix
+            // by stopping the instance or providing valid key/value.
+            DaemonError::InvalidConfigKey(_) => Status::invalid_argument(err.to_string()),
+            DaemonError::NotAndroid(_) => Status::failed_precondition(err.to_string()),
+            DaemonError::InstanceMustBeStopped(_, _) => Status::failed_precondition(err.to_string()),
         }
     }
 }
@@ -234,11 +240,6 @@ impl AndlerService for DaemonService {
                 req.instances_root.into(),
                 req.overlay_size_bytes,
                 ovmf_vars_template,
-                if req.magisk_dir.is_empty() {
-                    None
-                } else {
-                    Some(req.magisk_dir.into())
-                },
             )
             .await?;
 
@@ -399,9 +400,8 @@ impl AndlerService for DaemonService {
     /// Соответствует `Daemon::clone_instance`. `mode` — proto-enum
     /// (`i32` на уровне сообщения, см. `req.mode()`), конвертация в
     /// доменный `CloneMode` через `TryFrom` (`andler_rpc::convert`) —
-    /// `CLONE_MODE_UNSPECIFIED` отклоняется тем же путём, что и
-    /// `ANDROID_VERSION_UNSPECIFIED`/`ROOT_MODE_UNSPECIFIED` у
-    /// `create_android_instance`.
+/// `CLONE_MODE_UNSPECIFIED` отклоняется тем же путём, что и
+/// `ANDROID_VERSION_UNSPECIFIED` у `create_android_instance`.
     async fn clone_instance(
         &self,
         request: Request<CloneInstanceRequest>,
@@ -555,4 +555,29 @@ impl AndlerService for DaemonService {
 
         Ok(Response::new(ListGuestPackagesResponse { packages: entries }))
     }
+
+    async fn switch_arm_translator(
+        &self,
+        request: Request<SwitchArmTranslatorRequest>,
+    ) -> Result<Response<Empty>, Status> {
+        let cmd = convert::SwitchArmTranslatorCmd::try_from(request.into_inner())?;
+        let id = self.daemon.resolve_instance_id(&cmd.instance_ref).await?;
+        self.daemon
+            .switch_arm_translator(id, cmd.translator, cmd.translator_dir)
+            .await?;
+        Ok(Response::new(Empty {}))
+    }
+
+    async fn set_instance_config(
+        &self,
+        request: Request<SetInstanceConfigRequest>,
+    ) -> Result<Response<Empty>, Status> {
+        let cmd = convert::SetInstanceConfigCmd::try_from(request.into_inner())?;
+        let id = self.daemon.resolve_instance_id(&cmd.instance_ref).await?;
+        self.daemon
+            .set_instance_config(id, &cmd.key, &cmd.value)
+            .await?;
+        Ok(Response::new(Empty {}))
+    }
+
 }

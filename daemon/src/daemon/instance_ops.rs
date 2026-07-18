@@ -5,7 +5,7 @@ use super::error::DaemonError;
 use super::types::{InstanceDirGuard, InstanceRecord, write_instance_toml};
 use andler_core::{
     BackendError, DiskFormat, InstanceConfig, InstanceEvent, InstanceId,
-    InstanceState,
+    InstanceKind, InstanceState,
 };
 
 impl Daemon {
@@ -143,7 +143,6 @@ impl Daemon {
         instances_root: PathBuf,
         overlay_size_bytes: u64,
         ovmf_vars_template: PathBuf,
-        magisk_dir: Option<PathBuf>,
     ) -> Result<InstanceId, DaemonError> {
         let id = InstanceId::new();
         let instance_dir = instances_root.join(id.0.to_string());
@@ -179,22 +178,6 @@ impl Daemon {
             overlay_size_bytes,
         )
         .await?;
-
-        // Magisk provisioning — offline-установка root-доступа в overlay
-        // перед первым запуском. Выполняется до регистрации инстанса, чтобы
-        // при ошибке provisioning instance_dir был автоматически очищен
-        // через dir_guard (инстанс не остаётся в битом состоянии).
-        if profile.root == andler_core::RootMode::Magisk {
-            let magisk_dir = magisk_dir.ok_or_else(|| DaemonError::Disk(
-                andler_disk::DiskError::NbdSetupFailed(
-                    "--magisk-dir is required when root=magisk".to_string(),
-                ),
-            ))?;
-            andler_disk::magisk::provision_magisk(
-                &overlay.overlay_path,
-                &magisk_dir,
-            ).await?;
-        }
 
         let mut cfg = profile.resolve(
             instance_name,
@@ -680,7 +663,18 @@ impl Daemon {
                     return Err(DaemonError::InstanceNotFound(id));
                 }
 
-                andler_disk::guest_tools::install_agent_offline(&disk_path, &package).await?;
+                match package.as_str() {
+                    "libndk" | "libhoudini" => {
+                        return Err(DaemonError::InvalidConfigKey(format!(
+                            "ARM translator packages must be installed via SwitchArmTranslator RPC, \
+                             not InstallGuestAgent"
+                        )));
+                    }
+                    _ => {
+                        andler_disk::guest_tools::install_agent_offline(&disk_path, &package)
+                            .await?;
+                    }
+                }
                 tracing::info!(
                     instance_id = %id.0,
                     package = %package,
@@ -698,8 +692,6 @@ impl Daemon {
         }
     }
 
-    /// Удаляет пакет из гостевой ОС инстанса.
-    ///
     /// Та же auto-fallback логика, что у `install_guest_agent`.
     pub async fn remove_guest_agent(
         &self,
@@ -753,7 +745,18 @@ impl Daemon {
                     return Err(DaemonError::InstanceNotFound(id));
                 }
 
-                andler_disk::guest_tools::remove_agent_offline(&disk_path, &package).await?;
+                match package.as_str() {
+                    "libndk" | "libhoudini" => {
+                        return Err(DaemonError::InvalidConfigKey(format!(
+                            "ARM translator packages must be removed via SwitchArmTranslator RPC, \
+                             not RemoveGuestAgent"
+                        )));
+                    }
+                    _ => {
+                        andler_disk::guest_tools::remove_agent_offline(&disk_path, &package)
+                            .await?;
+                    }
+                }
                 tracing::info!(
                     instance_id = %id.0,
                     package = %package,
@@ -779,7 +782,7 @@ impl Daemon {
         &self,
         id: InstanceId,
     ) -> Result<Vec<(String, String, String)>, DaemonError> {
-        let (state, disk_path, handle, backend_kind) = {
+        let (state, disk_path, handle, backend_kind, config_kind) = {
             let instances = self.instances.read().await;
             let record = instances
                 .get(&id)
@@ -789,6 +792,7 @@ impl Daemon {
                 record.config.disk.path.clone(),
                 record.handle.clone(),
                 record.config.backend,
+                record.config.kind.clone(),
             )
         };
 
@@ -805,7 +809,16 @@ impl Daemon {
 
                 let backend = self.backend_for(backend_kind)?;
 
-                for pkg in andler_disk::guest_tools::KNOWN_PACKAGES {
+                let is_android = matches!(
+                    &config_kind,
+                    InstanceKind::AndroidVm { .. }
+                );
+                let packages = if is_android {
+                    andler_disk::guest_tools::ANDROID_PACKAGES
+                } else {
+                    andler_disk::guest_tools::KNOWN_PACKAGES
+                };
+                for pkg in packages {
                     let installed = backend
                         .guest_check_binary_installed(&handle, pkg.binary_check)
                         .await
@@ -823,7 +836,15 @@ impl Daemon {
                 }
 
                 // Offline: mount and check
-                let package_status = andler_disk::guest_tools::check_all_packages_offline_with_disk(&disk_path)?;
+                let is_android = matches!(
+                    &config_kind,
+                    InstanceKind::AndroidVm { .. }
+                );
+                let package_status = if is_android {
+                    andler_disk::guest_tools::check_android_packages_offline_with_disk(&disk_path)?
+                } else {
+                    andler_disk::guest_tools::check_all_packages_offline_with_disk(&disk_path)?
+                };
                 for (pkg, status) in package_status {
                     results.push((
                         pkg.name.to_string(),
@@ -848,6 +869,124 @@ impl Daemon {
 
         Ok(results)
     }
+
+    /// Переключает ARM-транслятор в offline-режиме (через qemu-nbd).
+    ///
+    /// Инстанс должен быть `AndroidVm` в завершённом состоянии
+    /// (Created/Stopped/Error) — VM не должна быть запущена или в процессе
+    /// перехода. Если VM запущена или стартует — ошибка.
+    ///
+    /// Вызывает `andler_disk::arm_translator::switch_translator` для
+    /// монтирования диска, удаления старого транслятора, установки нового
+    /// и обновления build.prop.
+    pub async fn switch_arm_translator(
+        &self,
+        id: InstanceId,
+        translator: andler_core::android_profile::ArmTranslator,
+        translator_dir: Option<PathBuf>,
+    ) -> Result<(), DaemonError> {
+        let (overlay_path, android_version) = {
+            let instances = self.instances.read().await;
+            let record = instances
+                .get(&id)
+                .ok_or(DaemonError::InstanceNotFound(id))?;
+
+            match &record.config.kind {
+                andler_core::config::InstanceKind::AndroidVm { .. } => {}
+                _ => return Err(DaemonError::NotAndroid(id)),
+            }
+
+            if !record.state.is_disk_idle() {
+                return Err(DaemonError::InstanceMustBeStopped(
+                    id,
+                    record.state.clone(),
+                ));
+            }
+
+            let android_version = match &record.config.kind {
+                andler_core::config::InstanceKind::AndroidVm { android_profile } => {
+                    android_profile.android_version.to_string()
+                }
+                _ => "13".to_string(),
+            };
+
+            (
+                record.config.disk.path.clone(),
+                android_version,
+            )
+        };
+
+        andler_disk::arm_translator::switch_translator(
+            &overlay_path,
+            translator,
+            translator_dir,
+            &android_version,
+        )
+        .await?;
+
+        tracing::info!(
+            instance_id = %id.0,
+            translator = ?translator,
+            "ARM translator switched successfully"
+        );
+        Ok(())
+    }
+    /// Частичное обновление конфигурации инстанса по ключу/значению.
+    ///
+    /// Поддерживаемые ключи:
+    /// - `name` → новое имя
+    /// - `arm_translator` → переключение транслятора (вызывает `switch_arm_translator`)
+    ///
+    /// Инстанс должен быть в завершённом состоянии (Created/Stopped/Error)
+    /// для изменений, затрагивающих overlay-диск.
+    pub async fn set_instance_config(
+        &self,
+        id: InstanceId,
+        key: &str,
+        value: &str,
+    ) -> Result<(), DaemonError> {
+        {
+            let instances = self.instances.read().await;
+            let record = instances
+                .get(&id)
+                .ok_or(DaemonError::InstanceNotFound(id))?;
+
+            if !record.state.is_disk_idle() {
+                return Err(DaemonError::InstanceMustBeStopped(
+                    id,
+                    record.state.clone(),
+                ));
+            }
+        }
+
+        match key {
+            "name" => {
+                let mut instances = self.instances.write().await;
+                if let Some(record) = instances.get_mut(&id) {
+                    record.config.name = value.to_string();
+                }
+            }
+            "arm_translator" => {
+                let translator: andler_core::android_profile::ArmTranslator = value
+                    .parse()
+                    .map_err(|_| DaemonError::InvalidConfigKey(key.to_string()))?;
+                self.switch_arm_translator(id, translator, None).await?;
+            }
+            _ => return Err(DaemonError::InvalidConfigKey(key.to_string())),
+        }
+
+        // Persist config update
+        let (cfg_snapshot, state_snapshot) = {
+            let instances = self.instances.read().await;
+            let record = instances.get(&id).ok_or(DaemonError::InstanceNotFound(id))?;
+            (record.config.clone(), record.state.clone())
+        };
+        self.persist_config_update(&cfg_snapshot, &state_snapshot)
+            .await;
+
+        Ok(())
+    }
+
 }
 
 /// Запускает компактификацию диска инстанса в фоне (`tokio::spawn`), если

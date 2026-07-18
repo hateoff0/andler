@@ -3,7 +3,7 @@ use andler_core::{
     AndroidProfile, ArmTranslator, AudioConfig, CdromBus, CpuConfig, DiskConfig, DisplayConfig, FirmwareConfig,
     GpuConfig, InputConfig, InstanceKind, MemoryConfig, NetworkConfig,
 };
-pub(crate) use andler_core::{AndroidVersion, RootMode};
+pub(crate) use andler_core::AndroidVersion;
 use std::path::PathBuf;
 
 pub(crate) struct TestTempDir(PathBuf);
@@ -60,7 +60,6 @@ pub(crate) fn sample_android_config(disk_path: PathBuf, base_image: PathBuf) -> 
             gapps: false,
             microg: false,
             arm_translator: ArmTranslator::None,
-            root: RootMode::None,
         },
     };
     cfg.disk = DiskConfig::overlay(disk_path, base_image, 20 * DiskConfig::GIB);
