@@ -11,19 +11,17 @@ use andler_core::{
     BackendKind, CdromBus, CloneMode, CpuConfig, CpuPriority, DiskConfig, DiskFormat,
     DisplayConfig, DisplayEngine, FirmwareConfig, GpuConfig, InputConfig, InstanceConfig,
     InstanceId, InstanceKind, InstanceState, LogLine, LogStreamSource, MemoryConfig, NatBackend,
-    NetworkConfig, NetworkMode, PointerMode, RenderBackend, Resolution, ResourceMetrics, RootMode,
+    NetworkConfig, NetworkMode, PointerMode, RenderBackend, Resolution, ResourceMetrics,
 };
 
 /// Ошибка конвертации proto-сообщения в доменный тип — на практике сейчас
 /// только "пришло значение enum'а, для которого нет соответствия"
-/// (`ANDROID_VERSION_UNSPECIFIED`/`ROOT_MODE_UNSPECIFIED`, либо вообще не
+/// (`ANDROID_VERSION_UNSPECIFIED`, либо вообще не
 /// входящее в диапазон известных `prost` значение).
 #[derive(Debug, thiserror::Error)]
 pub enum ConvertError {
     #[error("missing or unspecified android_version")]
     MissingAndroidVersion,
-    #[error("missing or unspecified root_mode")]
-    MissingRootMode,
     #[error("missing instance_id")]
     MissingInstanceId,
     #[error("invalid instance_id {0:?}: {1}")]
@@ -82,27 +80,6 @@ impl TryFrom<proto::CloneMode> for CloneMode {
     }
 }
 
-impl TryFrom<proto::RootMode> for RootMode {
-    type Error = ConvertError;
-
-    fn try_from(value: proto::RootMode) -> Result<Self, Self::Error> {
-        match value {
-            proto::RootMode::None => Ok(RootMode::None),
-            proto::RootMode::Magisk => Ok(RootMode::Magisk),
-            proto::RootMode::Unspecified => Err(ConvertError::MissingRootMode),
-        }
-    }
-}
-
-impl From<RootMode> for proto::RootMode {
-    fn from(value: RootMode) -> Self {
-        match value {
-            RootMode::None => proto::RootMode::None,
-            RootMode::Magisk => proto::RootMode::Magisk,
-        }
-    }
-}
-
 /// `UNSPECIFIED` -> `ArmTranslator::None` — не ошибка: старые клиенты,
 /// которые не знали об этом поле, физически не имели транслятора, так
 /// что это точное, а не приблизительное значение по умолчанию.
@@ -135,7 +112,6 @@ impl TryFrom<proto::AndroidProfile> for AndroidProfile {
             gapps: value.gapps,
             microg: value.microg,
             arm_translator: value.arm_translator().into(),
-            root: value.root().try_into()?,
         })
     }
 }
@@ -148,7 +124,6 @@ impl From<AndroidProfile> for proto::AndroidProfile {
             ..Default::default()
         };
         msg.set_android_version(value.android_version.into());
-        msg.set_root(value.root.into());
         msg.set_arm_translator(value.arm_translator.into());
         msg
     }
@@ -1070,6 +1045,56 @@ impl From<ResourceMetrics> for proto::ResourceMetricsResponse {
     }
 }
 
+/// Command to switch an ARM translator — extracted from
+/// `SwitchArmTranslatorRequest` for use by `Daemon::switch_arm_translator`.
+pub struct SwitchArmTranslatorCmd {
+    pub instance_ref: String,
+    pub translator: ArmTranslator,
+    pub translator_dir: Option<PathBuf>,
+}
+
+impl TryFrom<proto::SwitchArmTranslatorRequest> for SwitchArmTranslatorCmd {
+    type Error = ConvertError;
+
+    fn try_from(req: proto::SwitchArmTranslatorRequest) -> Result<Self, Self::Error> {
+        let translator = match req.translator() {
+            proto::ArmTranslator::Unspecified => ArmTranslator::None,
+            proto::ArmTranslator::None => ArmTranslator::None,
+            proto::ArmTranslator::Libndk => ArmTranslator::Libndk,
+            proto::ArmTranslator::Libhoudini => ArmTranslator::Libhoudini,
+        };
+        Ok(Self {
+            instance_ref: req.instance_ref,
+            translator,
+            translator_dir: if req.translator_dir.is_empty() {
+                None
+            } else {
+                Some(req.translator_dir.into())
+            },
+        })
+    }
+}
+
+/// Command to set a single config key/value — extracted from
+/// `SetInstanceConfigRequest` for use by `Daemon::set_instance_config`.
+pub struct SetInstanceConfigCmd {
+    pub instance_ref: String,
+    pub key: String,
+    pub value: String,
+}
+
+impl TryFrom<proto::SetInstanceConfigRequest> for SetInstanceConfigCmd {
+    type Error = ConvertError;
+
+    fn try_from(req: proto::SetInstanceConfigRequest) -> Result<Self, Self::Error> {
+        Ok(Self {
+            instance_ref: req.instance_ref,
+            key: req.key,
+            value: req.value,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1081,7 +1106,6 @@ mod tests {
             gapps: true,
             microg: false,
             arm_translator: ArmTranslator::Libndk,
-            root: RootMode::Magisk,
         };
 
         let msg: proto::AndroidProfile = profile.clone().into();
@@ -1096,7 +1120,6 @@ mod tests {
         let mut msg = proto::AndroidProfile {
             gapps: false,
             microg: false,
-            root: proto::RootMode::None as i32,
             ..Default::default()
         };
         msg.set_android_version(proto::AndroidVersion::Android13);
@@ -1112,7 +1135,6 @@ mod tests {
             android_version: proto::AndroidVersion::Unspecified as i32,
             gapps: false,
             microg: false,
-            root: proto::RootMode::None as i32,
             ..Default::default()
         };
         let err = AndroidProfile::try_from(msg).unwrap_err();
@@ -1403,7 +1425,6 @@ mod tests {
                 gapps: true,
                 microg: false,
                 arm_translator: ArmTranslator::None,
-                root: RootMode::Magisk,
             },
         };
         let response: proto::GetInstanceConfigResponse = cfg.into();
@@ -1415,7 +1436,6 @@ mod tests {
                     .android_profile
                     .expect("android_profile must be Some");
                 assert!(profile.gapps);
-                assert_eq!(profile.root(), proto::RootMode::Magisk);
             }
             other => panic!("expected AndroidVm kind, got {other:?}"),
         }
@@ -1635,7 +1655,6 @@ mod tests {
                 gapps: true,
                 microg: false,
                 arm_translator: ArmTranslator::Libndk,
-                root: RootMode::None,
             },
         };
         let response: proto::GetInstanceConfigResponse = cfg.clone().into();

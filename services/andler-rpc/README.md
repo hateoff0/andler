@@ -31,7 +31,7 @@ gRPC protocol definition (`proto/andler.proto`) and generated server/client code
 ### Instance Configuration
 
 - **`CreateInstanceRequest`**: `name`, `iso_path`, `cpu`, `memory`, `disk`, `display`, `gpu`, `network`, `firmware`, `audio`, `input`, `cdrom_bus` — all 10 sub-configs as explicit fields. No intermediate resolution. Generates `InstanceId::new()` on the server side.
-- **`CreateAndroidInstanceRequest`**: `name`, `profile` (AndroidProfile), `base_image_path`, `instances_root`, `overlay_size_bytes`, `ovmf_vars_template`, `magisk_dir` (optional, for Magisk provisioning).
+- **`CreateAndroidInstanceRequest`**: `name`, `profile` (AndroidProfile), `base_image_path`, `instances_root`, `overlay_size_bytes`, `ovmf_vars_template`.
 - **`GetInstanceConfigResponse`**: Full `InstanceConfig` with `instance_id`, `name`, `kind`, `backend`, and all 9 sub-configs.
 
 ### Sub-Config Messages
@@ -67,7 +67,7 @@ gRPC protocol definition (`proto/andler.proto`) and generated server/client code
 
 ### Enums
 
-`CpuPriority`, `DiskFormat`, `DisplayEngine`, `AndroidVersion`, `RootMode`, `AudioBackend`, `AudioDevice`, `CdromBus`, `NatBackend`, `PointerMode`, `ArmTranslator`, `InstanceStateKind`, `BackendKind`, `CloneMode`, `LogStreamSource` — all with `UNSPECIFIED = 0` as default.
+`CpuPriority`, `DiskFormat`, `DisplayEngine`, `AndroidVersion`, `AudioBackend`, `AudioDevice`, `CdromBus`, `NatBackend`, `PointerMode`, `ArmTranslator`, `InstanceStateKind`, `BackendKind`, `CloneMode`, `LogStreamSource` — all with `UNSPECIFIED = 0` as default.
 
 ## Conversions (`src/convert.rs`)
 
@@ -98,7 +98,7 @@ Bidirectional conversions between proto and domain types:
 44 tests in `convert::tests`:
 
 - AndroidProfile round-trip through proto
-- Unspecified enum rejection (AndroidVersion, RootMode, CpuPriority, DiskFormat, DisplayEngine, AudioBackend, CloneMode)
+- Unspecified enum rejection (AndroidVersion, CpuPriority, DiskFormat, DisplayEngine, AudioBackend, CloneMode)
 - `parse_instance_id`: valid UUID, empty string, garbage
 - `InstanceState::Error` carries message into detail tuple
 - Full `CreateInstanceRequest` round-trip (all sub-configs)

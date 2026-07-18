@@ -128,6 +128,14 @@ service AndlerService {
     // Список пакетов, которые ANDLER умеет устанавливать, с их статусом
     // в гостевой ОС (installed/not installed).
     rpc ListGuestPackages(InstanceIdRequest) returns (ListGuestPackagesResponse);
+    // Переключение ARM-транслятора в offline-режиме (через qemu-nbd).
+    // Соответствует Daemon::switch_arm_translator.
+    rpc SwitchArmTranslator(SwitchArmTranslatorRequest) returns (Empty);
+
+    // Частичное обновление конфигурации инстанса по ключу/значению.
+    // Соответствует Daemon::set_instance_config.
+    rpc SetInstanceConfig(SetInstanceConfigRequest) returns (Empty);
+
 }
 
 message Empty {}
@@ -389,13 +397,6 @@ enum AndroidVersion {
     ANDROID_13 = 2;
 }
 
-enum RootMode {
-    ROOT_MODE_UNSPECIFIED = 0;
-    ROOT_MODE_NONE = 1;
-    ROOT_MODE_MAGISK = 2;
-    reserved 3; // was ROOT_MODE_KERNEL_SU, removed
-}
-
 // См. `andler_core::android_profile::ArmTranslator`.
 enum ArmTranslator {
     ARM_TRANSLATOR_UNSPECIFIED = 0;
@@ -413,7 +414,6 @@ message AndroidProfile {
     // которые всё ещё шлют bool по номеру 4.
     reserved 4;
     reserved "libndk";
-    RootMode root = 5;
     // `UNSPECIFIED`/отсутствие поля трактуется как `ARM_TRANSLATOR_NONE`
     // при конвертации proto -> core (безопасный дефолт — старые клиенты
     // не знали об этом поле и не имели транслятора вовсе).
@@ -429,11 +429,7 @@ message CreateAndroidInstanceRequest {
     string instances_root = 4;
     uint64 overlay_size_bytes = 5;
     string ovmf_vars_template = 6;
-    // Каталог с бинарниками Magisk (результат распаковки Magisk release ZIP).
-    // Обязателен, если profile.root == ROOT_MODE_MAGISK. Если не указан при
-    // root=magisk, daemon вернёт INVALID_ARGUMENT. Игнорируется при root !=
-    // Magisk (поле просто не используется, даже если передано).
-    string magisk_dir = 7;
+    reserved 7;
 }
 
 message CreateInstanceResponse {
@@ -584,7 +580,7 @@ message UpdateInstanceConfigRequest {
 //
 // `LOG_STREAM_SOURCE_UNSPECIFIED = 0` недостижим на практике: сервер сам
 // заполняет это поле в каждом `LogLineResponse` (в отличие от
-// `CpuPriority`/`AndroidVersion`/`RootMode`, которые парсятся из
+// `CpuPriority`/`AndroidVersion`, которые парсятся из
 // клиентских запросов и поэтому нуждаются в `TryFrom`-проверке на
 // unspecified) — оставлен здесь только для консистентности со
 // стилем остальных enum'ов этого файла (см. их комментарии), не
@@ -721,6 +717,31 @@ message ListGuestPackagesResponse {
     repeated GuestPackageEntry packages = 1;
 }
 
+
+// --- ARM Translator Switching -----------------------------------------------
+
+// Запрос на переключение ARM-транслятора в offline-режиме.
+message SwitchArmTranslatorRequest {
+    // Ссылка на инстанс (полный UUID или префикс).
+    string instance_ref = 1;
+    // Целевой транслятор (libndk, libhoudini, none для удаления).
+    ArmTranslator translator = 2;
+    // Путь к локальной директории с файлами транслятора (опционально).
+    // Если не передан — файлы будут скачаны автоматически.
+    string translator_dir = 3;
+}
+
+// --- Config Set -------------------------------------------------------------
+
+// Запрос на частичное обновление конфигурации инстанса.
+message SetInstanceConfigRequest {
+    // Ссылка на инстанс (полный UUID или префикс).
+    string instance_ref = 1;
+    // Ключ конфигурации (например, "arm_translator", "name").
+    string key = 2;
+    // Значение (например, "libndk", "my-vm").
+    string value = 3;
+}
 // Одна запись в списке пакетов.
 message GuestPackageEntry {
     string name = 1;
