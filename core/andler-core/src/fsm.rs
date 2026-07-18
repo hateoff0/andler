@@ -157,6 +157,20 @@ impl InstanceState {
     pub fn is_terminal(&self) -> bool {
         matches!(self, InstanceState::Stopped | InstanceState::Error { .. })
     }
+
+    /// `true` if the instance is not actively running or transitioning —
+    /// safe to modify the disk image offline (e.g., ARM translator switch,
+    /// guest tools install/remove). Includes `Created` (disk exists but
+    /// VM has never started), `Stopped` (clean exit), and `Error`
+    /// (failed run, but process is gone). Excludes `Starting`/`Running`/
+    /// `Paused`/`Stopping` — all of which mean a QEMU process may hold
+    /// the disk open.
+    pub fn is_disk_idle(&self) -> bool {
+        matches!(
+            self,
+            InstanceState::Created | InstanceState::Stopped | InstanceState::Error { .. }
+        )
+    }
 }
 
 #[cfg(test)]

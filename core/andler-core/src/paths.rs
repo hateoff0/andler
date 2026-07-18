@@ -75,7 +75,7 @@ pub fn db_path() -> PathBuf {
 
 /// Базовая директория для короткоживущих IPC-ресурсов текущего
 /// пользователя — QMP-сокеты (`andler-qemu`), временные точки
-/// монтирования и патч-каталоги Magisk-провижининга (`andler-disk`). См.
+/// монтирования и временные каталоги (`andler-disk`). См.
 /// PLAN.md, item 20a, "Hardcoded `/tmp` paths for IPC sockets".
 ///
 /// `$XDG_RUNTIME_DIR`, если задана (systemd user session — стандартный
@@ -93,8 +93,8 @@ pub fn db_path() -> PathBuf {
 /// (см. `ensure_private_dir`), раз общий `/tmp` может быть
 /// world-writable.
 ///
-/// Раньше QMP-сокеты и Magisk-временные файлы шли прямо в
-/// `/tmp/andler/...`/`/tmp/andler-mount-*` без разбора — на
+/// Раньше QMP-сокеты и временные файлы шли прямо в
+/// `/tmp/andler/...` без разбора — на
 /// многопользовательской системе с world-writable `/tmp` это открывает
 /// symlink-атаку (см. PLAN.md за полным описанием). Использование
 /// `runtime_dir()` не устраняет риск полностью на системах без
@@ -150,7 +150,7 @@ pub async fn ensure_private_dir(dir: &std::path::Path) -> std::io::Result<()> {
 /// через `std::fs` напрямую (обычно потому, что сами вызываются внутри
 /// `tokio::task::spawn_blocking`, где async I/O не даёт преимуществ и
 /// просто добавляет накладные расходы), например
-/// `services/andler-disk/src/magisk.rs`. Та же логика, тот же `0700`,
+/// `services/andler-disk/src/guest_tools.rs`. Та же логика, тот же `0700`,
 /// просто без `.await`.
 pub fn ensure_private_dir_sync(dir: &std::path::Path) -> std::io::Result<()> {
     std::fs::create_dir_all(dir)?;

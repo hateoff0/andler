@@ -658,7 +658,7 @@ mod tests {
 
     #[test]
     fn disk_args_have_no_cdrom_for_android_vm() {
-        use andler_core::{AndroidProfile, AndroidVersion, ArmTranslator, RootMode};
+        use andler_core::{AndroidProfile, AndroidVersion, ArmTranslator};
 
         let mut cfg = start_sh_equivalent_config();
         cfg.kind = InstanceKind::AndroidVm {
@@ -667,7 +667,6 @@ mod tests {
                 gapps: true,
                 microg: false,
                 arm_translator: ArmTranslator::Libndk,
-                root: RootMode::None,
             },
         };
         let args = disk_args(&cfg);

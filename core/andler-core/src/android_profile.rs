@@ -33,6 +33,15 @@ pub enum AndroidVersion {
     Android13,
 }
 
+impl std::fmt::Display for AndroidVersion {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AndroidVersion::Android11 => write!(f, "11"),
+            AndroidVersion::Android13 => write!(f, "13"),
+        }
+    }
+}
+
 /// Транслятор архитектур ARM -> x86, нужен для приложений, скомпилированных
 /// только под ARM. Только один активен одновременно — это не набор флагов,
 /// а выбор одного из трёх взаимоисключающих вариантов.
@@ -46,15 +55,6 @@ pub enum ArmTranslator {
     /// Рекомендуется для Intel CPU (см. `andler-firmware::detect::arm`).
     Libhoudini,
 }
-
-/// Режим root-доступа внутри гостя.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub enum RootMode {
-    #[default]
-    None,
-    Magisk,
-}
-
 /// Параметры конкретного варианта Android-инстанса — то, что пользователь
 /// выбирает при создании `InstanceKind::AndroidVm`. Однозначно определяет,
 /// какой вариант базового образа из матрицы сборки `guest-image/` нужен
@@ -69,16 +69,12 @@ pub struct AndroidProfile {
     /// если приложение скомпилировано только под ARM. См.
     /// [`ArmTranslator`].
     pub arm_translator: ArmTranslator,
-    pub root: RootMode,
 }
 
 impl AndroidProfile {
     /// Ключ кэша/версионирования базового образа — однозначно определяет,
     /// какой именно артефакт из матрицы сборки `guest-image/` нужен этому
-    /// профилю. `RootMode` сюда не входит: root применяется provisioning-
-    /// шагом над уже готовым overlay (см. `resolve()` ниже), а не запекается
-    /// в базовый образ, поэтому два профиля с разным `root`, но одинаковым
-    /// остальным набором полей делят один и тот же базовый образ.
+    /// профилю.
     pub fn cache_key(&self) -> String {
         format!(
             "{:?}-gapps_{}-microg_{}-arm_{:?}",
@@ -131,6 +127,31 @@ impl AndroidProfile {
     }
 }
 
+impl std::str::FromStr for ArmTranslator {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "none" | "no" | "" => Ok(ArmTranslator::None),
+            "libndk" | "ndk" => Ok(ArmTranslator::Libndk),
+            "libhoudini" | "houdini" => Ok(ArmTranslator::Libhoudini),
+            _ => Err(format!(
+                "unknown ARM translator: {s:?} (expected: none, libndk, or libhoudini)"
+            )),
+        }
+    }
+}
+
+impl std::fmt::Display for ArmTranslator {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ArmTranslator::None => write!(f, "none"),
+            ArmTranslator::Libndk => write!(f, "libndk"),
+            ArmTranslator::Libhoudini => write!(f, "libhoudini"),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -141,7 +162,6 @@ mod tests {
             gapps: true,
             microg: false,
             arm_translator: ArmTranslator::Libndk,
-            root: RootMode::None,
         }
     }
 
@@ -152,15 +172,6 @@ mod tests {
         a.arm_translator = ArmTranslator::Libndk;
         b.arm_translator = ArmTranslator::Libhoudini;
         assert_ne!(a.cache_key(), b.cache_key());
-    }
-
-    #[test]
-    fn cache_key_does_not_depend_on_root_mode() {
-        let mut a = sample_profile();
-        let mut b = sample_profile();
-        a.root = RootMode::None;
-        b.root = RootMode::Magisk;
-        assert_eq!(a.cache_key(), b.cache_key());
     }
 
     #[test]

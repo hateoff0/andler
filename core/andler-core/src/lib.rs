@@ -13,7 +13,7 @@ pub mod error;
 pub mod fsm;
 pub mod paths;
 
-pub use android_profile::{AndroidProfile, AndroidVersion, ArmTranslator, RootMode};
+pub use android_profile::{AndroidProfile, AndroidVersion, ArmTranslator};
 pub use backend::{
     BackendHandle, BackendStatus, HypervisorBackend, LogLine, LogStreamSource, ResourceMetrics,
     SnapshotInfo,
