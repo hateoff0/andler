@@ -1,49 +1,59 @@
 //! Обработка команд `andler guest install/remove/list <package> <instance-id>`.
 
 use andler_rpc::proto::andler_service_client::AndlerServiceClient;
-use andler_rpc::proto::{InstallGuestAgentRequest, InstanceIdRequest, RemoveGuestAgentRequest};
+use andler_rpc::proto::{
+    InstallGuestAgentRequest, InstanceIdRequest, RemoveGuestAgentRequest,
+    SwitchArmTranslatorRequest,
+};
 use tonic::transport::Channel;
 
 use crate::lifecycle;
 
 #[derive(Debug, Clone, clap::Subcommand)]
 pub enum GuestAction {
-    /// Install a package in the guest OS.
-    Install,
+    /// List Android instances (no arg) or packages for a specific instance.
+    List {
+        /// Instance ID (omit to list all instances)
+        instance_id: Option<String>,
+    },
+    /// Install a package in the guest OS (e.g., spice-vdagent).
+    ///
+    /// For ARM translators (libndk, libhoudini): use `--translator-dir`
+    /// to supply pre-downloaded translator files instead of auto-download.
+    Install {
+        /// Package name (e.g., libndk, libhoudini, spice-vdagent)
+        package: String,
+        /// Instance ID
+        instance_id: String,
+        /// Path to pre-downloaded translator directory (for libndk/libhoudini)
+        #[arg(long)]
+        translator_dir: Option<std::path::PathBuf>,
+    },
     /// Remove a package from the guest OS.
-    Remove,
-    /// List known packages and their status in the guest OS.
-    List,
+    Remove {
+        /// Package name
+        package: String,
+        /// Instance ID
+        instance_id: String,
+    },
 }
 
 pub async fn handle(
     client: &mut AndlerServiceClient<Channel>,
     action: GuestAction,
-    package: Option<String>,
-    instance_id: String,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let (resolved_id, _name) = lifecycle::resolve_echo(client, &instance_id).await;
-
     match action {
-        GuestAction::Install => {
-            let pkg = package.ok_or("--package is required for install")?;
-            let request = InstallGuestAgentRequest {
-                instance_id: resolved_id,
-                package: pkg.clone(),
-            };
-            client.install_guest_agent(request).await?;
-            println!("Package `{pkg}` installed successfully");
+        GuestAction::List { instance_id: None } => {
+            // List all Android instances — not yet fully implemented via
+            // guest subcommand; falls back to package listing message.
+            println!("Usage: andler guest list <instance-id>");
+            println!("       andler guest install <package> <instance-id>");
+            println!("       andler guest remove <package> <instance-id>");
         }
-        GuestAction::Remove => {
-            let pkg = package.ok_or("--package is required for remove")?;
-            let request = RemoveGuestAgentRequest {
-                instance_id: resolved_id,
-                package: pkg.clone(),
-            };
-            client.remove_guest_agent(request).await?;
-            println!("Package `{pkg}` removed successfully");
-        }
-        GuestAction::List => {
+        GuestAction::List {
+            instance_id: Some(id),
+        } => {
+            let (resolved_id, _name) = lifecycle::resolve_echo(client, &id).await;
             let request = InstanceIdRequest {
                 instance_id: resolved_id,
             };
@@ -53,7 +63,10 @@ pub async fn handle(
             if packages.is_empty() {
                 println!("No known packages.");
             } else {
-                println!("{:<25} {:<45} {}", "Package", "Description", "Status");
+                println!(
+                    "{:<25} {:<45} {}",
+                    "Package", "Description", "Status"
+                );
                 println!("{}", "-".repeat(80));
                 for pkg in &packages {
                     let status_str = match pkg.status.as_str() {
@@ -61,8 +74,76 @@ pub async fn handle(
                         "not_installed" => "\x1b[31mnot installed\x1b[0m",
                         _ => "\x1b[33munknown\x1b[0m",
                     };
-                    println!("{:<25} {:<45} {}", pkg.name, pkg.description, status_str);
+                    println!(
+                        "{:<25} {:<45} {}",
+                        pkg.name, pkg.description, status_str
+                    );
                 }
+            }
+        }
+        GuestAction::Install {
+            package,
+            instance_id,
+            translator_dir,
+        } => {
+            let (resolved_id, _name) = lifecycle::resolve_echo(client, &instance_id).await;
+
+            // ARM translator packages → use SwitchArmTranslator RPC
+            let is_arm_translator = matches!(package.as_str(), "libndk" | "libhoudini");
+            if is_arm_translator {
+                let translator = match package.as_str() {
+                    "libndk" => andler_rpc::proto::ArmTranslator::Libndk,
+                    "libhoudini" => andler_rpc::proto::ArmTranslator::Libhoudini,
+                    _ => unreachable!(),
+                };
+                let dir_str = translator_dir
+                    .as_ref()
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                let request = SwitchArmTranslatorRequest {
+                    instance_ref: resolved_id,
+                    translator: translator.into(),
+                    translator_dir: dir_str,
+                };
+                client.switch_arm_translator(request).await?;
+                match &translator_dir {
+                    Some(dir) => println!(
+                        "Translator `{package}` installed from {}",
+                        dir.display()
+                    ),
+                    None => println!("Translator `{package}` installed (auto-download)"),
+                }
+            } else {
+                // Non-translator packages → use InstallGuestAgent
+                let request = InstallGuestAgentRequest {
+                    instance_id: resolved_id,
+                    package: package.clone(),
+                };
+                client.install_guest_agent(request).await?;
+                println!("Package `{package}` installed successfully");
+            }
+        }
+        GuestAction::Remove {
+            package,
+            instance_id,
+        } => {
+            let (resolved_id, _name) = lifecycle::resolve_echo(client, &instance_id).await;
+            let is_arm_translator = matches!(package.as_str(), "libndk" | "libhoudini");
+            if is_arm_translator {
+                let request = SwitchArmTranslatorRequest {
+                    instance_ref: resolved_id,
+                    translator: andler_rpc::proto::ArmTranslator::None.into(),
+                    translator_dir: String::new(),
+                };
+                client.switch_arm_translator(request).await?;
+                println!("Translator `{package}` removed");
+            } else {
+                let request = RemoveGuestAgentRequest {
+                    instance_id: resolved_id,
+                    package: package.clone(),
+                };
+                client.remove_guest_agent(request).await?;
+                println!("Package `{package}` removed successfully");
             }
         }
     }

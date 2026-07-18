@@ -7,7 +7,7 @@ use tonic::transport::Channel;
 
 use crate::instance_file::{InstanceFile, InstanceFileResult};
 use crate::wizard::{PartialArgs, WizardError, WizardKind};
-use crate::{err_exit, CliAndroidVersion, CliArmTranslator, CliCdromBus, CliKind, CliRootMode};
+use crate::{err_exit, CliAndroidVersion, CliArmTranslator, CliCdromBus, CliKind};
 
 #[allow(clippy::too_many_arguments)]
 pub async fn handle(
@@ -30,10 +30,8 @@ pub async fn handle(
     gapps: bool,
     microg: bool,
     arm_translator: Option<CliArmTranslator>,
-    root: CliRootMode,
     instances_root: String,
     overlay_size_gib: u64,
-    magisk_dir: Option<PathBuf>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let has_file = file.is_some();
     let has_kind = kind.is_some();
@@ -187,18 +185,12 @@ pub async fn handle(
                 err_exit("error: --base-image-path is required for --kind android")
             });
 
-            if root == CliRootMode::Magisk && magisk_dir.is_none() {
-                err_exit("error: --magisk-dir is required when --root magisk");
-            }
-
-            let (bip, canonical_magisk_dir) =
-                match validate_android_paths(&bip, magisk_dir.as_deref()) {
-                    Ok(paths) => paths,
-                    Err(msg) => err_exit(&format!("error: {msg}")),
-                };
-            let magisk_dir = canonical_magisk_dir.map(PathBuf::from);
-
             let arm_translator = arm_translator.unwrap_or(CliArmTranslator::None);
+            let bip = match validate_base_image_path(&bip) {
+                Ok(path) => path,
+                Err(msg) => err_exit(&format!("error: {msg}")),
+            };
+
 
             let req = build_android_request(
                 name,
@@ -208,10 +200,8 @@ pub async fn handle(
                 gapps,
                 microg,
                 arm_translator,
-                root,
                 instances_root,
                 overlay_size_gib,
-                magisk_dir,
             );
             if dry_run {
                 return crate::preview::print_android_preview(&req);
@@ -306,33 +296,17 @@ fn validate_linux_paths(iso_path: &str, disk_path: &str) -> Result<(String, Stri
 /// Pre-flight checks for `andler create --kind android` (direct CLI
 /// flags) — see `validate_linux_paths`'s doc comment for why this is
 /// narrow and why the wizard/`--file` paths aren't covered here too.
-/// Both `base_image_path` and `magisk_dir` (if given) are required to
-/// already exist, so — unlike `disk_path` in `validate_linux_paths` —
-/// both can be canonicalized directly, no "doesn't exist yet" case to
-/// special-case. Returns `(canonical_base_image_path,
-/// canonical_magisk_dir)`.
-fn validate_android_paths(
+/// `base_image_path` is required to already exist, so it can be
+/// canonicalized directly, no "doesn't exist yet" case to special-case.
+fn validate_base_image_path(
     base_image_path: &str,
-    magisk_dir: Option<&std::path::Path>,
-) -> Result<(String, Option<String>), String> {
+) -> Result<String, String> {
     let canonical_base_image = std::fs::canonicalize(base_image_path)
         .map_err(|e| format!("base image not found: {base_image_path} ({e})"))?
         .to_string_lossy()
         .into_owned();
 
-    let canonical_magisk_dir = match magisk_dir {
-        Some(dir) => Some(
-            std::fs::canonicalize(dir)
-                .map_err(|e| {
-                    format!("Magisk directory does not exist: {} ({e})", dir.display())
-                })?
-                .to_string_lossy()
-                .into_owned(),
-        ),
-        None => None,
-    };
-
-    Ok((canonical_base_image, canonical_magisk_dir))
+    Ok(canonical_base_image)
 }
 
 fn build_linux_request(
@@ -394,10 +368,8 @@ fn build_android_request(
     gapps: bool,
     microg: bool,
     arm_translator: CliArmTranslator,
-    root: CliRootMode,
     instances_root: String,
     overlay_size_gib: u64,
-    magisk_dir: Option<PathBuf>,
 ) -> CreateAndroidInstanceRequest {
     let mut profile = ProtoAndroidProfile {
         gapps,
@@ -405,7 +377,6 @@ fn build_android_request(
         ..Default::default()
     };
     profile.set_android_version(android_version.into());
-    profile.set_root(root.into());
     profile.set_arm_translator(arm_translator.into());
 
     CreateAndroidInstanceRequest {
@@ -417,9 +388,6 @@ fn build_android_request(
             .checked_mul(1024 * 1024 * 1024)
             .expect("overlay size overflow"),
         ovmf_vars_template,
-        magisk_dir: magisk_dir
-            .map(|p| p.to_string_lossy().into_owned())
-            .unwrap_or_default(),
     }
 }
 
@@ -478,26 +446,19 @@ mod tests {
     }
 
     #[test]
-    fn validate_android_paths_missing_base_image_is_rejected() {
-        let err = validate_android_paths("/nonexistent/base.qcow2", None).unwrap_err();
+    fn validate_base_image_path_missing_is_rejected() {
+        let err = validate_base_image_path("/nonexistent/base.qcow2").unwrap_err();
         assert!(err.contains("base image not found"));
     }
 
     #[test]
-    fn validate_android_paths_missing_magisk_dir_is_rejected() {
-        let dir = std::path::Path::new("/nonexistent/magisk-dir");
-        let err = validate_android_paths("/tmp", Some(dir)).unwrap_err();
-        assert!(err.contains("Magisk directory does not exist"));
+    fn validate_base_image_path_existing_is_allowed() {
+        assert!(validate_base_image_path("/tmp").is_ok());
     }
 
     #[test]
-    fn validate_android_paths_existing_paths_are_allowed() {
-        assert!(validate_android_paths("/tmp", Some(std::path::Path::new("/tmp"))).is_ok());
-    }
-
-    #[test]
-    fn validate_android_paths_canonicalizes_base_image() {
-        let (base_image, _) = validate_android_paths("/tmp/../tmp", None).unwrap();
+    fn validate_base_image_path_canonicalizes() {
+        let base_image = validate_base_image_path("/tmp/../tmp").unwrap();
         assert!(!base_image.contains(".."));
     }
 }

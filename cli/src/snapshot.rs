@@ -36,7 +36,7 @@ pub async fn handle(
     action: SnapshotAction,
 ) -> Result<(), Box<dyn std::error::Error>> {
     match action {
-        SnapshotAction::Create { tag, description, timeout } => {
+        SnapshotAction::Create { instance_id: _, tag, description, timeout } => {
             let pb = spinner(&format!("Creating snapshot \"{tag}\"..."));
             let result = client
                 .create_snapshot(CreateSnapshotRequest {
@@ -57,7 +57,7 @@ pub async fn handle(
                 response.tag, response.snapshot_id, response.created_at
             );
         }
-        SnapshotAction::Restore { tag, timeout } => {
+        SnapshotAction::Restore { instance_id: _, tag, timeout } => {
             let pb = spinner(&format!("Restoring snapshot \"{tag}\"..."));
             let result = client
                 .restore_snapshot(RestoreSnapshotRequest {
@@ -70,7 +70,7 @@ pub async fn handle(
             result?;
             println!("snapshot {tag} restored");
         }
-        SnapshotAction::Delete { tag, timeout } => {
+        SnapshotAction::Delete { instance_id: _, tag, timeout } => {
             let msg = format!("snapshot {tag} deleted");
             client
                 .delete_snapshot(DeleteSnapshotRequest {
@@ -81,7 +81,7 @@ pub async fn handle(
                 .await?;
             println!("{msg}");
         }
-        SnapshotAction::List => {
+        SnapshotAction::List { instance_id: _ } => {
             let response = client
                 .list_snapshots(InstanceIdRequest { instance_id })
                 .await?

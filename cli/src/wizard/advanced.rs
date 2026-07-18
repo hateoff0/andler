@@ -6,7 +6,7 @@ use andler_core::{
 use andler_firmware::HardwareDefaults;
 use inquire::{Confirm, CustomType, Select, Text};
 
-use crate::{CliArmTranslator, CliRootMode};
+use crate::CliArmTranslator;
 
 use super::basic::{AndroidBasicResult, LinuxBasicResult};
 use super::{map_inquire_err, WizardError};
@@ -36,7 +36,6 @@ pub struct AdvancedConfig {
     pub arm_translator: Option<CliArmTranslator>,
     pub gapps: bool,
     pub microg: bool,
-    pub root_mode: Option<(CliRootMode, String)>,
     pub network_mode: NetworkMode,
     pub bridge_interface: Option<String>,
 }
@@ -85,7 +84,6 @@ pub fn run_linux(
         arm_translator: None,
         gapps: false,
         microg: false,
-        root_mode: None,
         network_mode,
         bridge_interface,
     })
@@ -129,7 +127,6 @@ pub fn run_android(
         )?),
         gapps,
         microg,
-        root_mode: Some(ask_root_mode(pref.and_then(|p| p.root_mode.clone()))?),
         network_mode,
         bridge_interface,
     })
@@ -446,59 +443,6 @@ fn ask_microg(prefilled: Option<bool>) -> Result<bool, WizardError> {
         .with_help_message("Open-source Google Play replacement. No Google account needed.")
         .prompt()
         .map_err(map_inquire_err)
-}
-
-fn ask_root_mode(
-    prefilled: Option<(CliRootMode, String)>,
-) -> Result<(CliRootMode, String), WizardError> {
-    if let Some(mode) = prefilled {
-        if mode.0 == CliRootMode::Magisk {
-            let dir = Text::new("Path to Magisk binaries directory:")
-                .with_default(&mode.1)
-                .with_help_message(
-                    "none — no root; magisk — root via Magisk (requires path to extracted binaries)",
-                )
-                .with_validator(|s: &str| {
-                    if s.trim().is_empty() {
-                        Ok(inquire::validator::Validation::Invalid(
-                            "Path is required when root=magisk".into(),
-                        ))
-                    } else {
-                        Ok(inquire::validator::Validation::Valid)
-                    }
-                })
-                .prompt()
-                .map_err(map_inquire_err)?;
-            return Ok((CliRootMode::Magisk, dir));
-        }
-        return Ok(mode);
-    }
-
-    let choice = Select::new("Root mode:", vec!["none", "magisk"])
-        .with_help_message(
-            "none — no root; magisk — root via Magisk (requires path to extracted Magisk binaries)",
-        )
-        .prompt()
-        .map_err(map_inquire_err)?;
-
-    if choice == "magisk" {
-        let dir = Text::new("Path to Magisk binaries directory:")
-            .with_placeholder("/home/user/magisk-release")
-            .with_validator(|s: &str| {
-                if s.trim().is_empty() {
-                    Ok(inquire::validator::Validation::Invalid(
-                        "Path is required when root=magisk".into(),
-                    ))
-                } else {
-                    Ok(inquire::validator::Validation::Valid)
-                }
-            })
-            .prompt()
-            .map_err(map_inquire_err)?;
-        Ok((CliRootMode::Magisk, dir))
-    } else {
-        Ok((CliRootMode::None, String::new()))
-    }
 }
 
 fn render_label(backend: RenderBackend) -> &'static str {

@@ -19,9 +19,8 @@ mod wizard;
 use andler_rpc::proto::andler_service_client::AndlerServiceClient;
 use andler_rpc::proto::{
     AndroidVersion as ProtoAndroidVersion, ArmTranslator as ProtoArmTranslator,
-    RootMode as ProtoRootMode,
 };
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 
 const DEFAULT_DAEMON_ADDR: &str = "http://127.0.0.1:50051";
@@ -49,232 +48,373 @@ struct Cli {
     command: Option<Command>,
 }
 
+// --- Dual-syntax args structs for simple commands ---
+
+macro_rules! dual_id_args {
+    ($name:ident) => {
+        #[derive(Args)]
+        pub struct $name {
+            /// Instance ID (positional form)
+            pub instance_id: Option<String>,
+            /// Instance ID (flag form)
+            #[arg(long, short)]
+            pub instance: Option<String>,
+        }
+
+        impl $name {
+            pub fn resolve_id(&self) -> Result<&str, clap::Error> {
+                match (&self.instance_id, &self.instance) {
+                    (Some(id), None) | (None, Some(id)) => Ok(id),
+                    (Some(_), Some(_)) => Err(clap::Error::raw(clap::error::ErrorKind::InvalidValue,
+                        "specify instance ID once: positional or --instance",
+                    )),
+                    (None, None) => Err(clap::Error::raw(clap::error::ErrorKind::InvalidValue,
+                        "instance ID required: positional or --instance",
+                    )),
+                }
+            }
+        }
+    };
+}
+
+dual_id_args!(StartArgs);
+dual_id_args!(PauseArgs);
+dual_id_args!(ResumeArgs);
+dual_id_args!(StatusArgs);
+
+#[derive(Args)]
+pub struct StopArgs {
+    /// Instance ID (positional form)
+    pub instance_id: Option<String>,
+    /// Instance ID (flag form)
+    #[arg(long, short)]
+    pub instance: Option<String>,
+    /// Force stop without waiting for graceful shutdown.
+    #[arg(long)]
+    pub graceful: bool,
+}
+
+impl StopArgs {
+    pub fn resolve_id(&self) -> Result<&str, clap::Error> {
+        match (&self.instance_id, &self.instance) {
+            (Some(id), None) | (None, Some(id)) => Ok(id),
+            (Some(_), Some(_)) => Err(clap::Error::raw(clap::error::ErrorKind::InvalidValue,
+                "specify instance ID once: positional or --instance",
+            )),
+            (None, None) => Err(clap::Error::raw(clap::error::ErrorKind::InvalidValue,
+                "instance ID required: positional or --instance",
+            )),
+        }
+    }
+}
+
+#[derive(Args)]
+pub struct RemoveArgs {
+    /// Instance ID (positional form)
+    pub instance_id: Option<String>,
+    /// Instance ID (flag form)
+    #[arg(long, short)]
+    pub instance: Option<String>,
+    /// Also delete instance files from disk.
+    #[arg(long)]
+    pub purge: bool,
+}
+
+impl RemoveArgs {
+    pub fn resolve_id(&self) -> Result<&str, clap::Error> {
+        match (&self.instance_id, &self.instance) {
+            (Some(id), None) | (None, Some(id)) => Ok(id),
+            (Some(_), Some(_)) => Err(clap::Error::raw(clap::error::ErrorKind::InvalidValue,
+                "specify instance ID once: positional or --instance",
+            )),
+            (None, None) => Err(clap::Error::raw(clap::error::ErrorKind::InvalidValue,
+                "instance ID required: positional or --instance",
+            )),
+        }
+    }
+}
+
+#[derive(Args)]
+pub struct LogsArgs {
+    /// Instance ID (positional form)
+    pub instance_id: Option<String>,
+    /// Instance ID (flag form)
+    #[arg(long, short)]
+    pub instance: Option<String>,
+    /// Only show lines from this stream.
+    #[arg(long, value_enum)]
+    pub(crate) source: Option<CliLogSource>,
+    /// Only show lines matching this regular expression.
+    #[arg(long)]
+    pub grep: Option<String>,
+    /// Limit how much backlog is shown before continuing to follow
+    /// live output, instead of the full history.
+    #[arg(long)]
+    pub tail: Option<usize>,
+}
+
+impl LogsArgs {
+    pub fn resolve_id(&self) -> Result<&str, clap::Error> {
+        match (&self.instance_id, &self.instance) {
+            (Some(id), None) | (None, Some(id)) => Ok(id),
+            (Some(_), Some(_)) => Err(clap::Error::raw(clap::error::ErrorKind::InvalidValue,
+                "specify instance ID once: positional or --instance",
+            )),
+            (None, None) => Err(clap::Error::raw(clap::error::ErrorKind::InvalidValue,
+                "instance ID required: positional or --instance",
+            )),
+        }
+    }
+}
+
+#[derive(Args)]
+pub struct MetricsArgs {
+    /// Instance ID (positional form)
+    pub instance_id: Option<String>,
+    /// Instance ID (flag form)
+    #[arg(long, short)]
+    pub instance: Option<String>,
+    /// Print a single sample and exit, instead of streaming
+    /// continuously.
+    #[arg(long)]
+    pub once: bool,
+    /// Machine-readable JSON output (one object per sample).
+    #[arg(long)]
+    pub json: bool,
+}
+
+impl MetricsArgs {
+    pub fn resolve_id(&self) -> Result<&str, clap::Error> {
+        match (&self.instance_id, &self.instance) {
+            (Some(id), None) | (None, Some(id)) => Ok(id),
+            (Some(_), Some(_)) => Err(clap::Error::raw(clap::error::ErrorKind::InvalidValue,
+                "specify instance ID once: positional or --instance",
+            )),
+            (None, None) => Err(clap::Error::raw(clap::error::ErrorKind::InvalidValue,
+                "instance ID required: positional or --instance",
+            )),
+        }
+    }
+}
+
+// --- Config subcommand and flags ---
+
+#[derive(Subcommand)]
+pub enum ConfigCommand {
+    /// Read-only view (default when no subcommand)
+    View {
+        /// Instance ID (positional form)
+        instance_id: Option<String>,
+    },
+    /// Edit in $EDITOR
+    Edit {
+        /// Instance ID (positional form)
+        instance_id: Option<String>,
+    },
+    /// Set a config property (key=value)
+    Set {
+        /// Instance ID
+        instance_id: String,
+        /// Config key
+        key: String,
+        /// Config value
+        value: String,
+    },
+}
+
+#[derive(Args)]
+pub struct ConfigFlags {
+    /// Instance ID (flag form for view/edit without subcommand)
+    #[arg(long, short)]
+    pub instance: Option<String>,
+    /// Edit in $EDITOR (flag form)
+    #[arg(long, short = 'e')]
+    pub edit: bool,
+    /// Apply config from TOML file
+    #[arg(long, short)]
+    pub file: Option<PathBuf>,
+}
+
+// --- Disk flags (flag-form alternative to subcommands) ---
+
+#[derive(Args)]
+pub struct DiskFlags {
+    /// Create a new disk
+    #[arg(long, short = 'c')]
+    pub create: bool,
+    /// Show disk info
+    #[arg(long, short = 'i')]
+    pub info: bool,
+    /// Resize disk
+    #[arg(long, short = 'r')]
+    pub resize: bool,
+    /// Compact disk
+    #[arg(long, short = 'm')]
+    pub compact: bool,
+    /// Disk file path
+    #[arg(long, short = 'p')]
+    pub path: Option<String>,
+    /// Disk size
+    #[arg(long, short = 's')]
+    pub size: Option<String>,
+    /// Confirm shrinking
+    #[arg(long)]
+    pub shrink: bool,
+}
+
+// --- Command enum ---
+
 #[derive(Subcommand)]
 enum Command {
     /// Create a new VM instance.
-    ///
-    /// Two modes:
-    ///
-    /// TOML mode (--file): create from a config file (LinuxVm or AndroidVm,
-    /// auto-detected by content). Example:
-    ///   andler create --file instance.toml
-    ///
-    /// CLI mode (--kind): create via flags. --kind selects the VM type.
-    /// LinuxVm example:
-    ///   andler create --kind linux --name my-vm \
-    ///     --iso-path /path/to/installer.iso \
-    ///     --disk-path /path/to/disk.qcow2 \
-    ///     --ovmf-vars-template /path/to/VARS.fd
-    ///
-    /// AndroidVm example:
-    ///   andler create --kind android --name my-android \
-    ///     --android-version 13 \
-    ///     --base-image-path /path/to/base.qcow2 \
-    ///     --ovmf-vars-template /path/to/VARS.fd
     Create {
         /// Path to TOML config file (TOML mode). Mutually exclusive with --kind.
         #[arg(long)]
         file: Option<PathBuf>,
-
         // --- CLI mode ---
-
-        /// VM type selector: "linux" or "android". Enables CLI mode
-        /// where you specify all parameters as flags instead of TOML.
+        /// VM type selector: "linux" or "android".
         #[arg(long)]
         kind: Option<CliKind>,
-
         /// Instance name (required in CLI mode).
         #[arg(long)]
         name: Option<String>,
-
         /// OVMF VARS template path (required in CLI mode).
         #[arg(long)]
         ovmf_vars_template: Option<String>,
-
-        // --- Linux-specific (required when --kind linux) ---
-
+        // --- Linux-specific ---
         /// Path to installer ISO (required for --kind linux).
         #[arg(long)]
         iso_path: Option<String>,
-
         /// Path to disk file (required for --kind linux).
         #[arg(long)]
         disk_path: Option<String>,
-
         /// Disk size in GiB (optional, default: 256). Linux only.
         #[arg(long)]
         disk_size_gib: Option<u64>,
-
-        /// Automatically compact (qemu-img convert) the disk after every
-        /// graceful shutdown. Off by default — see PLAN.md, "Disk
-        /// management": compaction rewrites the whole disk file and can
-        /// take noticeable time on large disks, so it must be an
-        /// explicit opt-in, not silently enabled for every qcow2 disk
-        /// (which is the default format). Has no effect on raw disks.
+        /// Automatically compact the disk after every graceful shutdown.
         #[arg(long)]
         compact_on_shutdown: bool,
-
-        /// Bus for the ISO/CD-ROM drive. Linux only. Default: auto
-        /// (decide by ISO filename — see CliCdromBus / PLAN.md).
+        /// Bus for the ISO/CD-ROM drive. Linux only.
         #[arg(long, value_enum, default_value = "auto")]
         cdrom_bus: CliCdromBus,
-
         /// Disable UEFI/OVMF, use legacy BIOS instead. Linux only.
-        /// Ignored for Android (which requires UEFI).
         #[arg(long)]
         no_uefi: bool,
-
         /// Skip the interactive wizard and create with all defaults.
-        /// Requires `--kind`. Mutually exclusive with `--file`.
         #[arg(long)]
         quick: bool,
-
-        /// Print the resolved config and QEMU command line without
-        /// actually creating the instance — the daemon is never
-        /// contacted. Only works in TOML mode (--file) or CLI mode (all
-        /// required flags given); the interactive wizard already shows a
-        /// full summary before creating, so --dry-run with a bare
-        /// `andler create` isn't supported — pass --file or the required
-        /// flags explicitly instead.
+        /// Print the resolved config without creating.
         #[arg(long)]
         dry_run: bool,
-
-        /// Validate the resolved config (paths exist, OVMF found, disk
-        /// size sane) and print a pass/fail report, without creating
-        /// anything or contacting the daemon. Exits non-zero if any
-        /// check fails. Same scope restriction as --dry-run: TOML/CLI
-        /// mode only, not the interactive wizard.
+        /// Validate the resolved config and print a pass/fail report.
         #[arg(long)]
         verify: bool,
-
-        // --- Android-specific (required when --kind android) ---
-
+        // --- Android-specific ---
         /// Android version (required for --kind android).
         #[arg(long, value_enum)]
         android_version: Option<CliAndroidVersion>,
-
         /// Path to Android base image (required for --kind android).
         #[arg(long)]
         base_image_path: Option<String>,
-
         /// Include Google Apps.
         #[arg(long)]
         gapps: bool,
-
         /// Include microG.
         #[arg(long)]
         microg: bool,
-
-        /// ARM->x86 translation. Omit to auto-detect from host CPU vendor
-        /// (AMD -> libndk, Intel -> libhoudini) when the wizard runs;
-        /// in pure CLI mode (no wizard), omitting this defaults to `none`.
+        /// ARM->x86 translation.
         #[arg(long, value_enum)]
         arm_translator: Option<CliArmTranslator>,
-
-        /// Root mode: none or magisk.
-        #[arg(long, value_enum, default_value_t = CliRootMode::None)]
-        root: CliRootMode,
-
         /// Instance directory root (default: ~/.andler/instances).
         #[arg(long, default_value_t = default_instances_root())]
         instances_root: String,
-
         /// Overlay disk size in GiB (default: 20). Android only.
         #[arg(long, default_value_t = 20)]
         overlay_size_gib: u64,
-
-        /// Path to Magisk binaries directory (required when --root magisk).
-        #[arg(long)]
-        magisk_dir: Option<PathBuf>,
     },
     /// Start a previously created instance.
-    Start { instance_id: String },
+    ///
+    /// Supports both positional and flag forms:
+    ///   andler start my-vm
+    ///   andler start --instance my-vm
+    Start(StartArgs),
     /// Stop a running instance.
-    Stop {
-        instance_id: String,
-        /// Force stop without waiting for graceful shutdown.
-        #[arg(long)]
-        graceful: bool,
-    },
+    ///
+    /// Supports both positional and flag forms:
+    ///   andler stop my-vm
+    ///   andler stop --instance my-vm
+    Stop(StopArgs),
     /// Pause a running instance.
-    Pause { instance_id: String },
+    ///
+    /// Supports both positional and flag forms:
+    ///   andler pause my-vm
+    ///   andler pause --instance my-vm
+    Pause(PauseArgs),
     /// Resume a paused instance.
-    Resume { instance_id: String },
+    ///
+    /// Supports both positional and flag forms:
+    ///   andler resume my-vm
+    ///   andler resume --instance my-vm
+    Resume(ResumeArgs),
     /// Print current instance status.
-    Status { instance_id: String },
+    ///
+    /// Supports both positional and flag forms:
+    ///   andler status my-vm
+    ///   andler status --instance my-vm
+    Status(StatusArgs),
     /// List all registered instances (id / name / state).
     List {
         /// Print the full instance UUID instead of the shortened
-        /// 8-character prefix shown by default (same idea as `docker
-        /// ps -q`/`--no-trunc`, needed for scripts that want an
-        /// unambiguous id to feed back into other commands).
+        /// 8-character prefix.
         #[arg(long = "full-id", short = 'q')]
         full_id: bool,
-        /// Only show instances in this state (case-insensitive, e.g.
-        /// `Running`, `stopped`).
+        /// Only show instances in this state (case-insensitive).
         #[arg(long)]
         state: Option<String>,
-        /// Only show instances whose name matches this regular
-        /// expression.
+        /// Only show instances whose name matches this regex.
         #[arg(long)]
         name: Option<String>,
-        /// Sort order. Instance creation time isn't tracked by andlerd
-        /// today, so "by created date" isn't an available sort key.
+        /// Sort order.
         #[arg(long, value_enum, default_value = "none")]
         sort: ListSortKey,
-        /// Machine-readable JSON array output instead of one line per
-        /// instance.
+        /// Machine-readable JSON array output.
         #[arg(long)]
         json: bool,
     },
     /// Remove an instance record. Instance must be stopped first.
-    /// Without --purge, only removes the record; with --purge, also
-    /// deletes disk and OVMF VARS files.
-    Remove {
-        instance_id: String,
-        /// Also delete instance files from disk.
-        #[arg(long)]
-        purge: bool,
+    ///
+    /// Supports both positional and flag forms:
+    ///   andler remove my-vm --purge
+    ///   andler remove --instance my-vm --purge
+    Remove(RemoveArgs),
+    /// Print full instance configuration or edit it.
+    ///
+    /// Subcommand form:
+    ///   andler config view <id>
+    ///   andler config edit <id>
+    ///   andler config set <id> key=value
+    ///
+    /// Flag form:
+    ///   andler config --instance <id>
+    ///   andler config --instance <id> --edit
+    Config {
+        #[command(subcommand)]
+        action: Option<ConfigCommand>,
+        #[command(flatten)]
+        flags: ConfigFlags,
     },
-    /// Print full instance configuration (all sections).
-    Config { instance_id: String },
-    /// Edit instance configuration in $EDITOR/$VISUAL (falls back to
-    /// `vi`) as TOML, then apply the changes. Does not restart a running
-    /// instance — changes apply the next time it starts.
-    Edit { instance_id: String },
     /// Stream stdout/stderr from the instance's hypervisor process.
-    Logs {
-        instance_id: String,
-        /// Only show lines from this stream.
-        #[arg(long, value_enum)]
-        source: Option<CliLogSource>,
-        /// Only show lines matching this regular expression.
-        #[arg(long)]
-        grep: Option<String>,
-        /// Limit how much backlog is shown before continuing to follow
-        /// live output, instead of the full history. Approximate, not
-        /// exact: andlerd sends history and live lines as a single
-        /// unbroken stream with no marker between them, so the CLI
-        /// guesses where "history" ends by watching for a short pause
-        /// in arriving lines (see `cli/src/status.rs::handle_logs`) —
-        /// if history is still trickling in when that pause happens,
-        /// more than N lines may be shown.
-        #[arg(long)]
-        tail: Option<usize>,
-    },
-    /// Stream resource metrics (CPU%, RAM, disk I/O, net I/O, GPU) in real time.
-    Metrics {
-        instance_id: String,
-        /// Print a single sample and exit, instead of streaming
-        /// continuously.
-        #[arg(long)]
-        once: bool,
-        /// Machine-readable JSON output (one object per sample).
-        /// Combine with --once for a single JSON object; without it,
-        /// prints one JSON object per line as samples arrive.
-        #[arg(long)]
-        json: bool,
-    },
+    ///
+    /// Supports both positional and flag forms:
+    ///   andler logs my-vm --tail 50
+    ///   andler logs --instance my-vm --tail 50
+    Logs(LogsArgs),
+    /// Stream resource metrics (CPU%, RAM, disk I/O, net I/O, GPU).
+    ///
+    /// Supports both positional and flag forms:
+    ///   andler metrics my-vm --once
+    ///   andler metrics --instance my-vm --once
+    Metrics(MetricsArgs),
     /// Clone an instance into a new independent instance.
     Clone {
         source_instance_id: String,
@@ -294,28 +434,39 @@ enum Command {
         dest_path: String,
     },
     /// Manage instance snapshots (create/restore/delete/list).
+    ///
+    /// Instance ID is always positional:
+    ///   andler snapshot create my-vm my-snap
+    ///   andler snapshot list my-vm
     Snapshot {
-        instance_id: String,
         #[command(subcommand)]
         action: SnapshotAction,
     },
     /// Disk management operations (create/info/resize/compact).
+    ///
+    /// Subcommand form:
+    ///   andler disk create disk.qcow2 256G
+    ///   andler disk info disk.qcow2
+    ///
+    /// Flag form:
+    ///   andler disk --create --path disk.qcow2 --size 256G
+    ///   andler disk --info --path disk.qcow2
     Disk {
         #[command(subcommand)]
-        action: DiskAction,
+        action: Option<DiskAction>,
+        #[command(flatten)]
+        flags: DiskFlags,
     },
     /// Guest agent operations (install/remove packages in guest OS).
     ///
-    /// Auto-fallback: if VM is running and guest agent is available → online
-    /// via guest-exec; if VM is stopped → offline via qemu-nbd.
+    /// Instance ID is always positional:
+    ///   andler guest list
+    ///   andler guest list my-android
+    ///   andler guest install libndk my-android
+    ///   andler guest remove spice-vdagent my-android
     Guest {
-        /// Action: install, remove, or list.
         #[command(subcommand)]
         action: guest::GuestAction,
-        /// Package name (e.g., "spice-vdagent"). Required for install/remove.
-        package: Option<String>,
-        /// Instance ID (full UUID or 8-char prefix).
-        instance_id: String,
     },
     /// Launch the interactive wizard to create a new VM.
     /// This is the default when `andler` is invoked without a subcommand.
@@ -382,13 +533,17 @@ enum CliCdromBus {
     Ide,
 }
 
-/// Snapshot subcommands.
+/// Snapshot subcommands. Instance ID is always the first positional arg.
 #[derive(Subcommand)]
 enum SnapshotAction {
     /// Create a snapshot of the current state (requires Running/Paused).
     Create {
+        /// Instance ID
+        instance_id: String,
+        /// Snapshot tag
         #[arg(long)]
         tag: String,
+        /// Snapshot description
         #[arg(long)]
         description: Option<String>,
         /// Per-operation timeout in seconds. Overrides instance default (30s).
@@ -397,6 +552,8 @@ enum SnapshotAction {
     },
     /// Restore from a snapshot (requires Running/Paused).
     Restore {
+        /// Instance ID
+        instance_id: String,
         #[arg(long)]
         tag: String,
         /// Per-operation timeout in seconds. Overrides instance default (30s).
@@ -405,14 +562,19 @@ enum SnapshotAction {
     },
     /// Delete a snapshot (requires Running/Paused).
     Delete {
+        /// Instance ID
+        instance_id: String,
         #[arg(long)]
         tag: String,
         /// Per-operation timeout in seconds. Overrides instance default (30s).
         #[arg(long)]
         timeout: Option<u64>,
     },
-    /// List all snapshots.
-    List,
+    /// List all snapshots for an instance.
+    List {
+        /// Instance ID
+        instance_id: String,
+    },
 }
 
 /// Disk management subcommands.
@@ -492,21 +654,6 @@ impl From<CliAndroidVersion> for ProtoAndroidVersion {
         match value {
             CliAndroidVersion::Android11 => ProtoAndroidVersion::Android11,
             CliAndroidVersion::Android13 => ProtoAndroidVersion::Android13,
-        }
-    }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, ValueEnum, Debug)]
-enum CliRootMode {
-    None,
-    Magisk,
-}
-
-impl From<CliRootMode> for ProtoRootMode {
-    fn from(value: CliRootMode) -> Self {
-        match value {
-            CliRootMode::None => ProtoRootMode::None,
-            CliRootMode::Magisk => ProtoRootMode::Magisk,
         }
     }
 }
@@ -614,11 +761,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
 
     // Handled before connecting to `andlerd` at all: generating a
-    // completion script is a pure, local, offline operation (just
-    // walks `Cli`'s own clap definition) — unlike every other
-    // subcommand, it has no reason to require a running daemon, and
-    // shouldn't fail with a connection error if one isn't running. See
-    // PLAN.md, item 12, "Shell completions".
+    // completion script is a pure, local, offline operation.
     if let Some(Command::Completions { shell }) = &cli.command {
         let mut cmd = <Cli as clap::CommandFactory>::command();
         let bin_name = cmd.get_name().to_string();
@@ -659,54 +802,96 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             gapps,
             microg,
             arm_translator,
-            root,
             instances_root,
             overlay_size_gib,
-            magisk_dir,
         }) => {
             create::handle(
                 &mut client, file, kind, name, ovmf_vars_template,
                 iso_path, disk_path, disk_size_gib, compact_on_shutdown, cdrom_bus,
                 no_uefi, quick, dry_run, verify,
-                android_version, base_image_path, gapps, microg, arm_translator, root,
-                instances_root, overlay_size_gib, magisk_dir,
+                android_version, base_image_path, gapps, microg, arm_translator,
+                instances_root, overlay_size_gib,
             ).await?;
         }
-        Some(Command::Start { instance_id }) => {
-            lifecycle::handle_start(&mut client, instance_id).await?;
+        Some(Command::Start(args)) => {
+            let id = args.resolve_id()?;
+            lifecycle::handle_start(&mut client, id.to_string()).await?;
         }
-        Some(Command::Stop {
-            instance_id,
-            graceful,
-        }) => {
-            lifecycle::handle_stop(&mut client, instance_id, graceful).await?;
+        Some(Command::Stop(args)) => {
+            let id = args.resolve_id()?;
+            lifecycle::handle_stop(&mut client, id.to_string(), args.graceful).await?;
         }
-        Some(Command::Pause { instance_id }) => {
-            lifecycle::handle_pause(&mut client, instance_id).await?;
+        Some(Command::Pause(args)) => {
+            let id = args.resolve_id()?;
+            lifecycle::handle_pause(&mut client, id.to_string()).await?;
         }
-        Some(Command::Resume { instance_id }) => {
-            lifecycle::handle_resume(&mut client, instance_id).await?;
+        Some(Command::Resume(args)) => {
+            let id = args.resolve_id()?;
+            lifecycle::handle_resume(&mut client, id.to_string()).await?;
         }
-        Some(Command::Status { instance_id }) => {
-            status::handle_status(&mut client, instance_id).await?;
+        Some(Command::Status(args)) => {
+            let id = args.resolve_id()?;
+            status::handle_status(&mut client, id.to_string()).await?;
         }
         Some(Command::List { full_id, state, name, sort, json }) => {
             status::handle_list(&mut client, full_id, state, name, sort, json).await?;
         }
-        Some(Command::Remove { instance_id, purge }) => {
-            lifecycle::handle_remove(&mut client, instance_id, purge).await?;
+        Some(Command::Remove(args)) => {
+            let id = args.resolve_id()?;
+            lifecycle::handle_remove(&mut client, id.to_string(), args.purge).await?;
         }
-        Some(Command::Config { instance_id }) => {
-            status::handle_config(&mut client, instance_id).await?;
+        Some(Command::Config { action, flags }) => {
+            match action {
+                Some(ConfigCommand::View { instance_id }) => {
+                    let id = instance_id
+                        .as_deref()
+                        .or(flags.instance.as_deref())
+                        .ok_or("instance ID required")?;
+                    status::handle_config(&mut client, id.to_string()).await?;
+                }
+                Some(ConfigCommand::Edit { instance_id }) => {
+                    let id = instance_id
+                        .as_deref()
+                        .or(flags.instance.as_deref())
+                        .ok_or("instance ID required")?;
+                    edit::handle(&mut client, id.to_string()).await?;
+                }
+                Some(ConfigCommand::Set { instance_id, key, value }) => {
+                    eprintln!(
+                        "config set {instance_id} {key}={value} — not yet implemented"
+                    );
+                }
+                None => {
+                    // Flag form: config --instance <id> [--edit] [--file ...]
+                    let id = flags
+                        .instance
+                        .as_deref()
+                        .ok_or("instance ID required: use --instance or a subcommand")?;
+                    if flags.edit {
+                        edit::handle(&mut client, id.to_string()).await?;
+                    } else if flags.file.is_some() {
+                        eprintln!("config --file not yet implemented");
+                    } else {
+                        status::handle_config(&mut client, id.to_string()).await?;
+                    }
+                }
+            }
         }
-        Some(Command::Edit { instance_id }) => {
-            edit::handle(&mut client, instance_id).await?;
+        Some(Command::Logs(args)) => {
+            let id = args.resolve_id()?;
+            status::handle_logs(
+                &mut client,
+                id.to_string(),
+                args.source,
+                args.grep,
+                args.tail,
+            )
+            .await?;
         }
-        Some(Command::Logs { instance_id, source, grep, tail }) => {
-            status::handle_logs(&mut client, instance_id, source, grep, tail).await?;
-        }
-        Some(Command::Metrics { instance_id, once, json }) => {
-            status::handle_metrics(&mut client, instance_id, once, json).await?;
+        Some(Command::Metrics(args)) => {
+            let id = args.resolve_id()?;
+            status::handle_metrics(&mut client, id.to_string(), args.once, args.json)
+                .await?;
         }
         Some(Command::Clone {
             source_instance_id,
@@ -714,7 +899,14 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             instances_root,
             mode,
         }) => {
-            clone::handle_clone(&mut client, source_instance_id, name, instances_root, mode).await?;
+            clone::handle_clone(
+                &mut client,
+                source_instance_id,
+                name,
+                instances_root,
+                mode,
+            )
+            .await?;
         }
         Some(Command::Export {
             source_instance_id,
@@ -722,17 +914,55 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         }) => {
             clone::handle_export(&mut client, source_instance_id, dest_path).await?;
         }
-        Some(Command::Snapshot {
-            instance_id,
-            action,
-        }) => {
+        Some(Command::Snapshot { action }) => {
+            // Extract instance_id from the action variant for the handler
+            let instance_id = match &action {
+                SnapshotAction::Create { instance_id, .. } => instance_id.clone(),
+                SnapshotAction::Restore { instance_id, .. } => instance_id.clone(),
+                SnapshotAction::Delete { instance_id, .. } => instance_id.clone(),
+                SnapshotAction::List { instance_id } => instance_id.clone(),
+            };
             snapshot::handle(&mut client, instance_id, action).await?;
         }
-        Some(Command::Disk { action }) => {
-            disk::handle(action).await?;
+        Some(Command::Disk { action, flags }) => {
+            let resolved = match action {
+                Some(a) => a,
+                None => {
+                    // Resolve from flags
+                    let path = flags
+                        .path
+                        .ok_or("disk: --path is required in flag form")?;
+                    let path = std::path::PathBuf::from(path);
+                    if flags.create {
+                        let size = flags
+                            .size
+                            .ok_or("disk: --size is required for --create")?;
+                        DiskAction::Create { path, size }
+                    } else if flags.info {
+                        DiskAction::Info { path }
+                    } else if flags.resize {
+                        let size = flags
+                            .size
+                            .ok_or("disk: --size is required for --resize")?;
+                        DiskAction::Resize {
+                            path,
+                            size,
+                            shrink: flags.shrink,
+                        }
+                    } else if flags.compact {
+                        DiskAction::Compact { path }
+                    } else {
+                        return Err(
+                            "disk: specify an action (--create, --info, --resize, --compact)"
+                                .into(),
+                        );
+                    }
+                }
+            };
+            disk::handle(resolved).await?;
         }
-        Some(Command::Guest { action, package, instance_id }) => {
-            guest::handle(&mut client, action, package, instance_id).await?;
+        Some(Command::Guest { action }) => {
+            guest::handle(&mut client, action).await?;
         }
         // Always handled and returned from above, before connecting to
         // the daemon — see the early-return block above `let addr = ...`.

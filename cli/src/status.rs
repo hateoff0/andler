@@ -402,7 +402,6 @@ fn print_instance_config(config: GetInstanceConfigResponse) {
                 println!("  gapps: {}", profile.gapps);
                 println!("  microg: {}", profile.microg);
                 println!("  arm_translator: {:?}", profile.arm_translator());
-                println!("  root: {:?}", profile.root());
             }
         }
         None => println!("kind: <missing>"),

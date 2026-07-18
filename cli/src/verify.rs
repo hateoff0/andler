@@ -151,31 +151,13 @@ pub fn verify_android(
         },
     };
 
-    let is_magisk = matches!(
-        &resolved.cfg.kind,
-        InstanceKind::AndroidVm { android_profile }
-            if android_profile.root == andler_core::RootMode::Magisk
-    );
-    let magisk_check = is_magisk.then(|| Check {
-        name: "Magisk directory",
-        result: if req.magisk_dir.is_empty() {
-            Err("root=magisk but no --magisk-dir given".to_string())
-        } else if std::path::Path::new(&req.magisk_dir).exists() {
-            Ok(req.magisk_dir.clone())
-        } else {
-            Err(format!("directory not found: {}", req.magisk_dir))
-        },
-    });
-
-    let mut checks = vec![
+    let checks = vec![
         base_image_check,
         check_disk(&resolved),
         check_ovmf(&resolved, true),
         check_gpu_memory(&resolved),
         check_cpu_memory(&resolved),
     ];
-    checks.extend(magisk_check);
-
     Ok(run_checks(&resolved, checks))
 }
 

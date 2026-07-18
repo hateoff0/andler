@@ -21,7 +21,7 @@ use andler_rpc::proto::{
 use inquire::{InquireError, Select};
 
 use crate::helpers::ensure_qcow2_extension;
-use crate::{CliAndroidVersion, CliArmTranslator, CliRootMode};
+use crate::{CliAndroidVersion, CliArmTranslator};
 
 pub use basic::{BasicResult, LinuxBasicResult, AndroidBasicResult};
 pub use advanced::AdvancedConfig;
@@ -367,14 +367,10 @@ pub(crate) fn build_android_request(
 ) -> Result<CreateAndroidInstanceRequest, WizardError> {
     let arm_translator = resolve_arm_translator(advanced, detected);
 
-    let (gapps, microg, root_mode, magisk_dir) = if let Some(adv) = advanced {
-        let (root, dir) = adv
-            .root_mode
-            .clone()
-            .unwrap_or((CliRootMode::None, String::new()));
-        (adv.gapps, adv.microg, root, dir)
+    let (gapps, microg) = if let Some(adv) = advanced {
+        (adv.gapps, adv.microg)
     } else {
-        (false, false, CliRootMode::None, String::new())
+        (false, false)
     };
 
     let mut profile = AndroidProfile {
@@ -383,7 +379,6 @@ pub(crate) fn build_android_request(
         ..Default::default()
     };
     profile.set_android_version(basic.android_version.into());
-    profile.set_root(root_mode.into());
     profile.set_arm_translator(arm_translator.into());
 
     Ok(CreateAndroidInstanceRequest {
@@ -396,7 +391,6 @@ pub(crate) fn build_android_request(
             .checked_mul(andler_core::DiskConfig::GIB)
             .ok_or_else(|| WizardError::Inquire("overlay size overflow".into()))?,
         ovmf_vars_template: ovmf_vars_template(detected),
-        magisk_dir,
     })
 }
 
@@ -694,7 +688,6 @@ mod tests {
             arm_translator: None,
             gapps: false,
             microg: false,
-            root_mode: None,
             network_mode: NetworkMode::Nat,
             bridge_interface: None,
         };
@@ -825,7 +818,6 @@ mod tests {
             arm_translator: None,
             gapps: false,
             microg: false,
-            root_mode: None,
             network_mode: NetworkMode::Nat,
             bridge_interface: None,
         };
@@ -848,7 +840,6 @@ mod tests {
             arm_translator: None,
             gapps: false,
             microg: false,
-            root_mode: None,
             network_mode: NetworkMode::Bridge { interface: "br0".to_string() },
             bridge_interface: Some("br0".to_string()),
         };
@@ -871,7 +862,6 @@ mod tests {
             arm_translator: None,
             gapps: false,
             microg: false,
-            root_mode: None,
             network_mode: NetworkMode::Isolated,
             bridge_interface: None,
         };

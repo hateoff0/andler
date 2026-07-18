@@ -38,7 +38,7 @@ pub enum InstanceFileError {
     /// A path field in the TOML doesn't exist or can't be resolved — see
     /// PLAN.md, item 20c, "No path canonicalization". Unlike `Read`/
     /// `Parse` above, `field` names which TOML key was the problem
-    /// (`iso_path`, `disk_path`, `base_image_path`, `magisk_dir`), since
+    /// (`iso_path`, `disk_path`, `base_image_path`), since
     /// there's no single file path to report here — the *instance file*
     /// itself parsed fine, it's a path *inside* it that's the problem.
     #[error("invalid {field} {path:?}: {source}")]
@@ -125,12 +125,6 @@ pub struct InstanceFile {
     /// Overlay disk size in GiB (default: 20).
     #[serde(default)]
     pub overlay_size_gib: Option<u64>,
-    /// Root mode: "none" (default), "magisk".
-    #[serde(default)]
-    pub root: Option<String>,
-    /// Path to Magisk binaries directory. Required when root = "magisk".
-    #[serde(default)]
-    pub magisk_dir: Option<PathBuf>,
     /// Include Google Apps.
     #[serde(default)]
     pub gapps: bool,
@@ -175,7 +169,7 @@ pub struct InstanceFile {
 impl InstanceFile {
     /// Reads and parses a TOML file, then canonicalizes every
     /// user-supplied filesystem path field found in it (`iso_path`,
-    /// `disk_path`'s parent directory, `base_image_path`, `magisk_dir`)
+    /// `disk_path`'s parent directory, `base_image_path`)
     /// — see PLAN.md, item 20c, "No path canonicalization". This is
     /// the actual attack surface that section's own example describes
     /// (`path = "../../etc/shadow"` in a TOML file): unlike CLI flags
@@ -237,16 +231,6 @@ impl InstanceFile {
                 }
             })?;
             self.base_image_path = Some(canonical.to_string_lossy().into_owned());
-        }
-
-        if let Some(magisk_dir) = &self.magisk_dir {
-            self.magisk_dir = Some(std::fs::canonicalize(magisk_dir).map_err(|source| {
-                InstanceFileError::InvalidPath {
-                    field: "magisk_dir",
-                    path: magisk_dir.clone(),
-                    source,
-                }
-            })?);
         }
 
         Ok(())
@@ -351,10 +335,6 @@ impl InstanceFile {
             .instances_root
             .unwrap_or_else(default_instances_root);
 
-        let magisk_dir = self
-            .magisk_dir
-            .map(|p| p.to_string_lossy().into_owned())
-            .unwrap_or_default();
 
         // Build AndroidProfile
         let android_version = self.android_version.unwrap_or(13);
@@ -380,11 +360,6 @@ impl InstanceFile {
         };
         profile.set_arm_translator(arm_translator);
 
-        let root_mode = match self.root.as_deref() {
-            Some("magisk") => andler_rpc::proto::RootMode::Magisk,
-            _ => andler_rpc::proto::RootMode::None,
-        };
-        profile.set_root(root_mode);
 
         CreateAndroidInstanceRequest {
             name: self.name,
@@ -393,7 +368,6 @@ impl InstanceFile {
             instances_root,
             overlay_size_bytes,
             ovmf_vars_template: path_to_string(&self.ovmf_vars_path),
-            magisk_dir,
         }
     }
 }
@@ -566,8 +540,6 @@ mod tests {
         let toml = format!(
             "{MINIMAL_ANDROID_TOML}\n\
              overlay_size_gib = 30\n\
-             root = \"magisk\"\n\
-             magisk_dir = \"/tmp/magisk\"\n\
              gapps = true\n\
              microg = true\n\
              libndk = true\n"
@@ -576,7 +548,6 @@ mod tests {
         match file.into_result() {
             InstanceFileResult::Android(req) => {
                 assert_eq!(req.overlay_size_bytes, 30 * 1024 * 1024 * 1024);
-                assert_eq!(req.magisk_dir, "/tmp/magisk");
                 let profile = req.profile.unwrap();
                 assert!(profile.gapps);
                 assert!(profile.microg);
@@ -585,10 +556,6 @@ mod tests {
                 assert_eq!(
                     profile.arm_translator(),
                     andler_rpc::proto::ArmTranslator::Libndk
-                );
-                assert_eq!(
-                    profile.root(),
-                    andler_rpc::proto::RootMode::Magisk
                 );
             }
             other => panic!("expected Android, got {other:?}"),

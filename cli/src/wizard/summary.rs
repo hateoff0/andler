@@ -7,7 +7,7 @@ use andler_core::{
 use andler_firmware::HardwareDefaults;
 use inquire::Select;
 
-use crate::{CliArmTranslator, CliRootMode};
+use crate::CliArmTranslator;
 
 use super::advanced::AdvancedConfig;
 use super::basic::BasicResult;
@@ -145,16 +145,6 @@ fn print_summary(
                 .unwrap_or(CliArmTranslator::None);
             let gapps = advanced.map(|adv| adv.gapps).unwrap_or(false);
             let microg = advanced.map(|adv| adv.microg).unwrap_or(false);
-            let root = advanced
-                .and_then(|adv| adv.root_mode.as_ref())
-                .map(|(m, d)| {
-                    if *m == CliRootMode::Magisk {
-                        format!("magisk ({d})")
-                    } else {
-                        "none".to_string()
-                    }
-                })
-                .unwrap_or_else(|| "none".to_string());
 
             println!(
                 "│  ARM translator:    {arm:?}{}",
@@ -166,7 +156,6 @@ fn print_summary(
             );
             println!("│  GApps:             {gapps}{}", suffix(advanced.is_some()));
             println!("│  MicroG:            {microg}{}", suffix(advanced.is_some()));
-            println!("│  Root:              {root}{}", suffix(advanced.is_some()));
         }
     }
 

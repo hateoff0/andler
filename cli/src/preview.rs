@@ -199,7 +199,6 @@ fn print_preview(resolved: &Resolved) {
             println!("GApps:           {}", android_profile.gapps);
             println!("MicroG:          {}", android_profile.microg);
             println!("ARM translator:  {:?}", android_profile.arm_translator);
-            println!("Root:            {:?}", android_profile.root);
         }
     }
 

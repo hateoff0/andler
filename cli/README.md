@@ -112,8 +112,6 @@ base_image_path = "/path/to/base.qcow2"
 ovmf_vars_path = "/path/to/VARS.fd"
 
 overlay_size_gib = 20
-root = "magisk"
-magisk_dir = "/path/to/magisk/"
 gapps = false
 microg = false
 arm_translator = "libndk"
