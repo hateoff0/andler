@@ -10,6 +10,7 @@
 
 use std::path::Path;
 
+use andler_core::config::InstanceKind;
 use crate::error::DiskError;
 use crate::nbd;
 
@@ -297,6 +298,27 @@ pub const KNOWN_PACKAGES: &[GuestPackage] = &[
         binary_check: "/usr/bin/spice-webdavd",
     },
 ];
+/// Android-specific packages (ARM translators).
+pub const ANDROID_PACKAGES: &[GuestPackage] = &[
+    GuestPackage {
+        name: "libndk",
+        description: "ARM translation (Google NDK, for AMD CPUs)",
+        binary_check: "var/lib/waydroid/overlay/system/lib/libndk_translation.so",
+    },
+    GuestPackage {
+        name: "libhoudini",
+        description: "ARM translation (Intel Houdini)",
+        binary_check: "var/lib/waydroid/overlay/system/lib/libhoudini.so",
+    },
+];
+
+/// Returns the available packages for the given instance kind.
+pub fn available_packages(kind: &InstanceKind) -> &'static [GuestPackage] {
+    match kind {
+        InstanceKind::AndroidVm { .. } => ANDROID_PACKAGES,
+        InstanceKind::LinuxVm { .. } => KNOWN_PACKAGES,
+    }
+}
 
 /// Статус пакета в гостевой ФС.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -341,6 +363,27 @@ pub fn check_all_packages_offline_with_disk(
     let mount_guard = nbd::mount_partition(&root)?;
 
     let results = check_all_packages_offline(mount_guard.path());
+    Ok(results)
+}
+
+/// Проверяет статусы ANDROID_PACKAGES в дисковом образе (offline).
+///
+/// Подключает образ через qemu-nbd, монтирует, проверяет, отмонтирует.
+pub fn check_android_packages_offline_with_disk(
+    disk_path: &Path,
+) -> Result<Vec<(&'static GuestPackage, PackageStatus)>, DiskError> {
+    let nbd_guard = nbd::connect_nbd(disk_path)?;
+    let partitions = nbd::wait_for_partitions(nbd_guard.path())?;
+    let root = nbd::find_root_partition(&partitions)?;
+    let mount_guard = nbd::mount_partition(&root)?;
+
+    let results = ANDROID_PACKAGES
+        .iter()
+        .map(|pkg| {
+            let status = check_package_status_offline(mount_guard.path(), pkg.binary_check);
+            (pkg, status)
+        })
+        .collect();
     Ok(results)
 }
 

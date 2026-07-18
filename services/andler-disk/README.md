@@ -1,6 +1,6 @@
 # andler-disk
 
-Disk operations for virtual machines: creation, cloning, resizing, compaction — a wrapper around `qemu-img`, plus domain-specific overlay disk logic for Android instances, and offline Magisk provisioning via `qemu-nbd`.
+Disk operations for virtual machines: creation, cloning, resizing, compaction — a wrapper around `qemu-img`, plus domain-specific overlay disk logic for Android instances, and offline guest tools provisioning via `qemu-nbd`.
 
 ## Modules
 
@@ -45,34 +45,6 @@ Three modes for cloning an existing instance's disk into a new disk (not from a 
 
 **`ClonedDisk`**: `disk_path` + `backing_file: Option<PathBuf>` (`None` for full standalone, `Some(source)` for linked, `Some(shared_base)` for shared base).
 
-### `magisk` — Offline Magisk Provisioning
-
-Installs Magisk root access into an Android overlay disk offline using `qemu-nbd` for NBD-based disk access. No running QEMU required.
-
-**Public API**:
-
-| Function | Signature | Description |
-|----------|-----------|-------------|
-| `provision_magisk` | `(overlay_path: &Path, magisk_dir: &Path) -> Result<(), DiskError>` | Full offline provisioning pipeline |
-
-**Pipeline**:
-1. Validate magisk directory (must contain `magisk` and `magiskinit` binaries)
-2. Find free NBD device (`/sys/class/block/nbd*/size` == 0)
-3. Connect overlay via `qemu-nbd --connect`
-4. Wait for partition devices to appear (2s timeout)
-5. Find root partition (first partition)
-6. Mount partition rw
-7. Copy Magisk files to `/data/adb/magisk/`
-8. Create modules directory structure
-9. Patch boot image via `magiskboot` (best-effort, skips if tool missing)
-10. Unmount + disconnect (RAII cleanup on all error paths)
-
-**RAII Guards** (private):
-- **`NbdGuard`**: Runs `qemu-nbd --disconnect` on drop. Ensures NBD device is released even on panic.
-- **`MountGuard`**: Runs `umount -l` + removes mount point on drop. Ensures clean unmount.
-
-**Requires**: `nbd` kernel module loaded (`sudo modprobe nbd`), `qemu-nbd` binary.
-
 ### `guest_tools` — Offline Guest Package Management
 
 Checks and manages packages in guest OS filesystems via `qemu-nbd` + mount + chroot.
@@ -110,7 +82,6 @@ Uses `f_bavail` (blocks available to an unprivileged user), not `f_bfree` (which
 | `BackingFileNotFound` | `PathBuf` | Backing file doesn't exist (checked before spawning) |
 | `ParseError` | `String` | Failed to parse `qemu-img info --output=json` |
 | `Io` | `path`, `source` | Filesystem error at path |
-| `MagiskDirInvalid` | `String` | Magisk directory invalid or missing required files |
 | `NbdSetupFailed` | `String` | NBD device error (module not loaded, no free device, mount/umount failure) |
 | `ShrinkRequiresConfirmation` | `path`, `current_size_bytes`, `requested_size_bytes` | Refusing to shrink without `--shrink` flag |
 | `CompactNotApplicable` | `path`, `format` | Compact only works on qcow2 disks |
@@ -127,7 +98,6 @@ Uses `f_bavail` (blocks available to an unprivileged user), not `f_bfree` (which
 - **`qcow2`** (21 tests): JSON field parsing from `qemu-img info` output, create/resize/compact operations, `ShrinkRequiresConfirmation` error path.
 - **`clone`** (4 tests): `shared_base_clone_reports_missing_source_as_io_error`, `linked_clone_points_at_source`, `full_standalone_clone_has_no_backing`, `shared_base_clone_survives_source_deletion`.
 - **`overlay`** (3 tests): `create_overlay_points_at_base_image`, `create_overlay_fails_when_base_image_missing`, `factory_reset_recreates_overlay`.
-- **`magisk`** (6 tests): `validate_magisk_dir_*` (3 tests), `find_free_nbd_device_*` (1 test), `copy_dir_recursive_*` (1 test), `unique_mount_name_*` (1 test).
 - **`guest_tools`** (3 tests): `detect_package_manager_*` (2 tests), `package_manager_install_args` (1 test), `check_package_status_offline_*` (2 tests), `known_packages_has_entries` (1 test).
 
 ### With `qemu-img` (integration tests, `#[ignore]`)
@@ -145,6 +115,5 @@ All marked `#[ignore]` — run in `integration-test` Docker target.
 
 ## What Is NOT Here
 
-- Provisioning root/Magisk **before first guest boot** (online provisioning via guest agent) — this is offline-only. `create_overlay` creates an overlay ready only for `RootMode::None` without calling `provision_magisk`.
 - Network configuration — that's `andler-net`.
 - Instance lifecycle management — that's `andler-daemon`.

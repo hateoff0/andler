@@ -7,7 +7,7 @@
 //! новый диск (не от общего `base_image`, как `overlay` — см. модульную
 //! документацию `clone` за тем, почему это разные операции).
 //! `nbd` — общие утилиты для работы с NBD-устройствами и монтированием
-//! разделов (переиспользуются `magisk` и `guest_tools`).
+//! разделов (переиспользуются `guest_tools`).
 //! `guest_tools` — offline установка/удаление пакетов в гостевую ФС.
 //! `diskspace` — pre-check свободного места перед операциями, которые
 //! могут упасть посередине при нехватке места (снапшоты и т.п.).
@@ -16,14 +16,16 @@
 //! См. README.md этой папки для границ ответственности относительно
 //! `andler-qemu`/`andler-core`.
 
+pub mod arm_translator;
 pub mod clone;
 pub mod diskspace;
 pub mod error;
 pub mod guest_tools;
-pub mod magisk;
 pub mod nbd;
 pub mod overlay;
 pub mod qcow2;
+pub mod translator;
+pub mod translator_download;
 
 pub use clone::{full_standalone_clone, linked_clone, shared_base_clone, ClonedDisk};
 pub use diskspace::check_available_space;

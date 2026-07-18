@@ -7,12 +7,8 @@
 //! `andler_core::config::DiskConfig::overlay()` лишь описывает, каким
 //! overlay должен быть (декларативные данные), не создавая ничего.
 //!
-//! Provisioning root/Magisk (offline-монтирование overlay и копирование
-//! модулей перед первым запуском, см. README этого крейта) — TODO,
-//! требует работы с loop-устройствами/доступа внутрь файловой системы
-//! образа и заведомо выходит за рамки этого шага; см. `create_overlay`
-//! ниже — она создаёт пустой (в смысле "без root-модификаций") overlay,
-//! готовый для `RootMode::None`.
+//! `create_overlay` создаёт overlay qcow2 с backing chain на base image.
+//! Overlay пуст (без модификаций guest ФС).
 
 use std::path::{Path, PathBuf};
 

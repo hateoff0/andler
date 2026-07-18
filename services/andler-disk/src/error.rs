@@ -46,10 +46,10 @@ pub enum DiskError {
         source: std::io::Error,
     },
 
-    /// Каталог Magisk невалиден: не существует, не является каталогом,
-    /// или не содержит обязательных файлов (`magisk`, `magiskinit`).
-    #[error("invalid magisk-dir: {0}")]
-    MagiskDirInvalid(String),
+    /// Ошибка файловой системы при копировании/удалении файлов ARM-транслятора
+    /// или других операциях с файлами (не связана с NBD).
+    #[error("filesystem operation failed: {0}")]
+    FileSystem(String),
 
     /// Ошибка при работе с NBD-устройством (qemu-nbd/mount/umount):
     /// модуль ядра не загружен, нет свободного nbd-девайса,
