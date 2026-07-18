@@ -37,7 +37,6 @@ andler create \
   --android-version 13 \
   --base-image-path /path/to/base.qcow2 \
   --ovmf-vars-template /path/to/VARS.fd \
-  [--root magisk --magisk-dir /path/to/magisk/] \
   [--gapps] [--microg] [--arm-translator libndk] \
   [--overlay-size-gib 20] \
   [--instances-root /path/to/instances/]
@@ -62,8 +61,6 @@ andler create \
 | `--gapps` | No | Include Google Apps |
 | `--microg` | No | Include microG |
 | `--arm-translator <mode>` | No | ARM→x86 translation: `none` (default), `libndk`, `libhoudini` |
-| `--root <mode>` | No | Root mode: `none` (default), `magisk` |
-| `--magisk-dir <path>` | No | Path to Magisk binaries (required when `--root magisk`) |
 | `--overlay-size-gib <size>` | No | Overlay disk size in GiB (default: 20, Android only) |
 | `--instances-root <path>` | No | Instance directory root (default: `~/.andler/instances`) |
 
@@ -349,8 +346,6 @@ ovmf_vars_path = "/path/to/VARS.fd"
 
 # Optional
 overlay_size_gib = 20
-root = "magisk"
-magisk_dir = "/path/to/magisk/"
 gapps = false
 microg = false
 libndk = false

@@ -9,7 +9,6 @@
 - [x] AMD GPU metrics from sysfs (VRAM, GPU load)
 - [x] NVIDIA GPU metrics via NVML + `nvidia-smi` fallback
 - [x] Intel GPU metrics via sysfs `i915` (GPU load delta)
-- [x] Offline Magisk provisioning via `qemu-nbd`
 - [x] SQLite state persistence with cascade delete (`andler-store`)
 - [x] gRPC protocol with 20 RPCs and bidirectional conversions
 - [x] Factory reset with file cleanup (`remove --purge`)
@@ -125,7 +124,6 @@
 
 ### Medium-term
 
-- [ ] Online Magisk provisioning via guest agent (without `qemu-nbd`)
 - [ ] QEMU backend: add hot-plug support for disk/network devices
 - [ ] Core: add VM resource limits (CPU pinning, memory overcommit)
 - [ ] CLI: add `--export` flag to export VM as OCI container

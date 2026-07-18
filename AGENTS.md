@@ -56,7 +56,7 @@ Any active state can transition to `Error` via `Fail(msg)`. `Stopped`/`Error` ac
 | `core/andler-core/` | Domain types, `HypervisorBackend` trait, config structs, FSM, error types. **No workspace dependencies** |
 | `backends/andler-qemu/` | QEMU backend: process management, QMP protocol, cmdline builder, `/proc`-based metrics |
 | `backends/andler-vmm/` | Cloud Hypervisor stub (all methods return `NotImplemented`) |
-| `services/andler-disk/` | `qemu-img` wrapper: disk creation/cloning/resizing, Magisk provisioning |
+| `services/andler-disk/` | `qemu-img` wrapper: disk creation/cloning/resizing, guest tools offline provisioning |
 | `services/andler-net/` | Bridge/isolated network modes via `iproute2` |
 | `services/andler-firmware/` | Hardware auto-detection, GPU metrics (NVIDIA/AMD/Intel), firmware discovery |
 | `services/andler-store/` | SQLite persistence (two tables: `instances`, `snapshots`) |

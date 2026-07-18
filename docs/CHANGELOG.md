@@ -12,7 +12,7 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 - **Unified `create` command**: Single `create` command with `--kind linux`/`--kind android` flag to select VM type. TOML mode auto-detects type from content.
 - **`--kind` flag**: `--kind linux` creates LinuxVm via CLI flags (`--iso-path`, `--disk-path`, `--ovmf-vars-template`). `--kind android` creates AndroidVm via CLI flags. Mutually exclusive with `--file`.
-- **AndroidVm from TOML**: `InstanceFile` supports `android_version`, `base_image_path`, `overlay_size_gib`, `root`, `magisk_dir`, `gapps`, `microg`, `libndk`, `instances_root`. Auto-detected: presence of `android_version` or `base_image_path` → AndroidVm; otherwise LinuxVm.
+- **AndroidVm from TOML**: `InstanceFile` supports `android_version`, `base_image_path`, `overlay_size_gib`, `gapps`, `microg`, `libndk`, `instances_root`. Auto-detected: presence of `android_version` or `base_image_path` → AndroidVm; otherwise LinuxVm.
 - **Snapshot timeout**: Configurable per-instance (`DiskConfig::snapshot_timeout_secs`, default 30s) and per-operation (`--timeout` flag on `create`/`restore`/`delete`).
 - **LinuxVm clone/export**: `CloneMode::Linked` and `CloneMode::FullStandalone` supported. `SharedBase` rejected with `SharedBaseNotSupportedForLinuxVm`.
 - **Path utilities**: `runtime_dir()` (XDG_RUNTIME_DIR fallback), `current_uid()` (getuid FFI), `ensure_private_dir()` / `ensure_private_dir_sync()` (0700 permissions).
@@ -32,12 +32,10 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 #### Services
 
-- **Offline Magisk provisioning** (`andler-disk`): `provision_magisk()` installs Magisk root access into an Android overlay disk offline via `qemu-nbd`. RAII guards ensure cleanup on all error paths.
 - **Disk error variants**: `ShrinkRequiresConfirmation` (requires `--shrink` flag), `CompactNotApplicable` (non-qcow2 disk), `InsufficientDiskSpace` (pre-checked before snapshot creation via `statvfs(2)`, using guest RAM size as a conservative upper bound for vmstate size — maps to `Status::resource_exhausted`).
 - **Snapshot metadata persistence** (`andler-store`): `snapshots` table with `ON DELETE CASCADE` from `instances`. Full CRUD for snapshot metadata.
 - **gRPC snapshot operations** (`andler-rpc`): `CreateSnapshot`, `RestoreSnapshot`, `DeleteSnapshot`, `ListSnapshots` RPCs with per-operation timeout support.
 - **gRPC metrics streaming** (`andler-rpc`): `StreamResourceMetrics` server-streaming RPC with `ResourceMetricsResponse` (all 9 optional fields including GPU).
-- **gRPC Magisk provisioning** (`andler-rpc`): `magisk_dir` field on `CreateAndroidInstanceRequest` for offline root access.
 - **gRPC config editing** (`andler-rpc`): `UpdateInstanceConfig` RPC with `UpdateInstanceConfigRequest` mirroring `GetInstanceConfigResponse` fields.
 - **NVML integration** (`andler-firmware`): `nvml-wrapper` crate for NVIDIA GPU metrics (primary), with `nvidia-smi` CLI fallback.
 - **Hardware auto-detection** (`andler-firmware`): `detect_all()` returns `HardwareDefaults` — GPU render backend, display engine, audio server, ARM translator, OVMF paths, Venus support, passt availability.
@@ -48,7 +46,6 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - **Snapshot orchestration**: `create_snapshot`, `restore_snapshot`, `delete_snapshot`, `list_snapshots` methods with FSM state validation and per-operation timeout override.
 - **Health checks**: periodic background task (`ANDLERD_HEALTH_CHECK_INTERVAL_SECS`, default 30s) polls every `Running` instance's real backend status; a process that died outside `stop_instance` is transitioned to `Error` and persisted instead of going unnoticed. Auto-restart deliberately not included — see `health_ops.rs` module doc for why (the FSM currently has no supported way to restart the *same* instance record once `Stopped`/`Error`, a pre-existing constraint this surfaced, not something this change could safely work around).
 - **Metrics streaming**: `stream_resource_metrics` method returning `BoxStream<'static, ResourceMetrics>`.
-- **Magisk provisioning integration**: `create_android_instance` accepts optional `magisk_dir` parameter.
 - **Factory reset / `remove --purge`**: Full end-to-end with file cleanup (disk + OVMF vars + instance directory). Refuses when live `Linked` clones exist.
 - **Clone for LinuxVm**: `clone_instance` supports `Linked` and `FullStandalone` modes.
 - **Export for LinuxVm**: `export_instance_disk` works for both AndroidVm and LinuxVm.
@@ -69,7 +66,6 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - **Unified `create` command**: Single command with `--kind linux`/`--kind android` discriminator. TOML mode auto-detects type from content.
 - **Linux VM CLI args**: `--kind linux --name --iso-path --disk-path --ovmf-vars-template [--disk-size-gib]` creates LinuxVm without TOML.
 - **Android VM from TOML**: `--file android.toml` with `android_version` field creates AndroidVm — no CLI flags needed.
-- **`--magisk-dir` flag**: For offline Magisk provisioning.
 - **Snapshot `--timeout` flag**: Override per-instance snapshot timeout for a single operation.
 - **`andler disk` commands**: `create`, `info`, `resize`, `compact` for disk management. Flexible size format (`64GB`, `128000MB`, `1T`).
 - **`disk resize --shrink`**: Explicit confirmation required for shrinking disks.
@@ -109,7 +105,6 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - **Environment variables**: Added `ANDLERD_LISTEN_ADDR` (daemon listen), `ANDLERD_OVMF_CODE`/`ANDLERD_OVMF_VARS` (firmware override), `ANDLERD_LOG_FORMAT` (json output). `ANDLERD_ADDR` remains for CLI client.
 - **`stop --graceful` semantics**: Now means "force stop without waiting for graceful ACPI shutdown" (flag name is historical; default behavior is graceful).
 - **`purge_instance_files`**: Uses `remove_dir_all` for UUID-pattern instance directories (was `remove_dir`, silently failed on non-empty).
-- **`provision_magisk`**: Entire pipeline wrapped in `tokio::task::spawn_blocking` (was blocking tokio executor with `std::thread::sleep`).
 - **QemuBackend pause/resume**: Lock extracted before `backend.pause().await` (was held across await, blocking all operations).
 - **Metrics output format**: `key=value` pairs (was columnar table headers).
 - **Venus default on NVIDIA**: Skips Mesa version check for NVIDIA vendor (Venus uses Vulkan, not Mesa's OpenGL).
@@ -161,7 +156,6 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   1-second polling interval. VRAM is now honestly `None` for Intel rather than read from
   nonexistent paths — there is no equivalently simple, stable `sysfs` ABI for it (stolen-memory
   accounting lives in `debugfs`).
-- **`andler-disk` magisk provisioning** (`magisk.rs`): removed a pointless `unsafe` block around
   plain `SystemTime::now().duration_since(...)` (entirely safe Rust; the `unsafe` did nothing and
   the accompanying safety comment justified nothing real). `NbdGuard`/`MountGuard`'s `Drop` impls
   previously discarded the result of `qemu-nbd --disconnect`/`umount -l` entirely (`let _ = ...`)
@@ -170,9 +164,8 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   `tracing::warn!` on failure (added `tracing` as a dependency of `andler-disk`, which it
   previously lacked). Also replaced `.to_str().unwrap()` with `.to_string_lossy()` in both `Drop`
   impls so a non-UTF-8 path can't turn an already-failing cleanup into a panic during unwind.
-  Separately, found and fixed two stray CJK characters embedded in Russian-language doc comments
-  in `magisk.rs` and `metrics.rs` (`分区`, `不同的`, `开场的`) — encoding/generation artifacts, not
-  intentional text.
+  Separately, found and fixed stray CJK characters embedded in Russian-language doc comments
+  in `metrics.rs` — encoding/generation artifacts, not intentional text.
 
 ### Removed
 

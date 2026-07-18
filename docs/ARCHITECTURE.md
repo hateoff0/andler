@@ -68,13 +68,12 @@ Empty stub. Returns `NotImplemented` for all methods. Reserved for future `rust-
 
 ### `services/andler-disk` — Disk Operations
 
-Wrapper around `qemu-img` for disk creation/cloning/resizing, plus offline Magisk provisioning.
+Wrapper around `qemu-img` for disk creation/cloning/resizing, plus guest tools offline provisioning.
 
 **Key components:**
 - `qcow2.rs`: 7 async functions wrapping `qemu-img` CLI
 - `overlay.rs`: Android-specific overlay disk creation + factory reset
 - `clone.rs`: 3 clone modes (linked, full-standalone, shared-base)
-- `magisk.rs`: Offline Magisk provisioning via `qemu-nbd` with RAII guards
 
 **34 unit tests** + 8 integration tests (`#[ignore]`).
 
@@ -238,21 +237,6 @@ All host-side metrics from `/proc` — no QMP communication needed for metrics:
 Polling interval: 1 second. Broadcast via `tokio::sync::broadcast`.
 
 GPU vendor detection priority: AMD → NVIDIA → Intel (first found wins). AMD uses direct sysfs reads. NVIDIA uses NVML (`nvml-wrapper` crate, primary) with `nvidia-smi` CLI fallback. Intel uses `i915` sysfs `power/rc6_residency_ms` (documented idle-time ABI) for GPU load, derived from a real elapsed-time delta; Intel has no VRAM metric (stolen-memory accounting is a `debugfs`, not `sysfs`, interface).
-
-## Magisk Provisioning
-
-Offline root access provisioning via `qemu-nbd`:
-
-1. Find free NBD device (`/sys/class/block/nbd*/size` == 0)
-2. Connect overlay qcow2 via `qemu-nbd --connect`
-3. Wait for partition devices (2s timeout)
-4. Mount root partition rw
-5. Copy Magisk binaries to `/data/adb/magisk/`
-6. Create modules directory structure
-7. Patch boot image via `magiskboot` (best-effort)
-8. Unmount + disconnect (RAII cleanup on all error paths)
-
-**Requires:** `nbd` kernel module, `qemu-nbd` binary.
 
 ## Future Directions
 - **Bridge/Isolated network modes**: Implemented in `andler-net` using `iproute2` for bridge creation and network configuration

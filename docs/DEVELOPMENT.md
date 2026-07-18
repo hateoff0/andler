@@ -10,12 +10,6 @@
 - **QEMU** with UEFI/OVMF support (`qemu-system-x86_64`)
 - **`protobuf-compiler`** (`protoc`) — required for gRPC code generation
 
-### For Magisk Provisioning
-
-- **`qemu-nbd`** (from `qemu-utils` package)
-- **`nbd` kernel module** (`sudo modprobe nbd`)
-- **Magisk release files** (`magisk` + `magiskinit` binaries)
-
 ### For Integration/E2E Tests
 
 - **`qemu-utils`** (`qemu-img` for disk operations)
@@ -191,7 +185,6 @@ andler/
 │   │       ├── qcow2.rs          # qemu-img wrapper (7 functions)
 │   │       ├── overlay.rs        # Android overlay disks
 │   │       ├── clone.rs          # 3 clone modes
-│   │       ├── magisk.rs         # Offline Magisk provisioning
 │   │       └── error.rs          # DiskError
 │   │
 │   ├── andler-net/               # Network configuration (bridge/isolated modes)

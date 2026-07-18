@@ -55,9 +55,8 @@ Venus and VirGL provide **paravirtualized 3D acceleration** — the guest sees a
 
 ### Android Support
 
-- **Android profiles** — Android 11/13, GApps, microG, libndk/libhoudini (ARM→x86 translation), root mode selection
+- **Android profiles** — Android 11/13, GApps, microG, libndk/libhoudini (ARM→x86 translation)
 - **Overlay disks** — cheap per-instance overlays over shared base image
-- **Offline Magisk provisioning** — root access via `qemu-nbd` without booting the VM
 
 ### Hypervisor Abstraction
 
@@ -286,13 +285,6 @@ sudo apt install spice-vdagent
 sudo dnf install spice-vdagent
 ```
 
-### Root Modes
-
-| Mode | Description |
-|------|-------------|
-| `None` | No root access |
-| `Magisk` | Offline Magisk provisioning (requires `--magisk-dir`) |
-
 ## Repository Structure
 
 ```
@@ -330,7 +322,7 @@ andler/
 │   └── andler-vmm/                Stub for future Cloud Hypervisor
 │
 ├── services/                      Infrastructure services
-│   ├── andler-disk/               qemu-img wrapper + Magisk provisioning
+│   ├── andler-disk/               qemu-img wrapper + guest tools offline provisioning
 │   ├── andler-net/                Stub for networking
 │   ├── andler-store/              SQLite state persistence
 │   ├── andler-firmware/           OVMF detect/provision + host hardware
@@ -431,7 +423,7 @@ Each crate has its own README with detailed API reference:
 - [`core/andler-core/README.md`](core/andler-core/README.md) — Domain types, ~30 public types, ~41 tests
 - [`backends/andler-qemu/README.md`](backends/andler-qemu/README.md) — QEMU backend, ~75 tests
 - [`backends/andler-vmm/README.md`](backends/andler-vmm/README.md) — Cloud Hypervisor stub
-- [`services/andler-disk/README.md`](services/andler-disk/README.md) — Disk ops + Magisk provisioning
+- [`services/andler-disk/README.md`](services/andler-disk/README.md) — Disk ops + guest tools provisioning
 - [`services/andler-net/README.md`](services/andler-net/README.md) — Networking stub
 - [`services/andler-store/README.md`](services/andler-store/README.md) — SQLite persistence
 - [`services/andler-rpc/README.md`](services/andler-rpc/README.md) — gRPC protocol + conversions
@@ -463,7 +455,6 @@ Polling interval: 1 second. GPU metrics: AMD → NVIDIA → Intel (first found v
 - QEMU with OVMF/UEFI support
 - Rust stable (via rustup)
 - Docker + Docker Compose (for reproducible builds)
-- `nbd` kernel module + `qemu-nbd` (for Magisk provisioning)
 - `protobuf-compiler` (`protoc`) for gRPC code generation
 
 ## Roadmap
