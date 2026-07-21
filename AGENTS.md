@@ -14,7 +14,7 @@ User → andler-cli (gRPC client) → andler-daemon (gRPC server) → andler-qem
 
 **Key design principles:**
 - **Domain-driven separation**: Pure domain types in `andler-core` — no I/O dependencies
-- **Backend abstraction**: `HypervisorBackend` trait defines hypervisor-agnostic interface (13 methods). New backend = implement this trait
+- **Backend abstraction**: `HypervisorBackend` trait defines hypervisor-agnostic interface (16 methods). New backend = implement this trait
 - **Explicit FSM**: Instance lifecycle governed by strict state machine (7 states, 7 events). No implicit transitions
 - **Persistence optional**: Daemon works with or without SQLite. In-memory is source of truth for current session
 - **No global state**: Each crate has clear responsibilities
@@ -128,13 +128,13 @@ cargo clippy --workspace -- -D warnings
 
 - **`thiserror`** for all domain errors (`BackendError`, `FsmError`, `DaemonError`, `StoreError`, `DiskError`, `ConvertError`)
 - `BackendError::NotImplemented` for unimplemented backend methods (never `todo!()`/`unimplemented!()`)
-- `DaemonError` has 23 variants → maps to gRPC status codes
+- `DaemonError` has 20 variants → maps to gRPC status codes
 - `ConvertError` in `andler-rpc` for proto↔domain conversion failures
 
 ### Async Patterns
 
 - **`tokio`** runtime with `rt-multi-thread`, `macros`, `process`, `fs`, `net`, `sync`, `time`, `io-util`, `signal`
-- **`async_trait`** for `HypervisorBackend` trait (13 async methods)
+- **`async_trait`** for `HypervisorBackend` trait (16 async methods)
 - `rusqlite` calls wrapped in `tokio::task::spawn_blocking` (blocking API)
 - `tokio::sync::RwLock` for `Daemon.instances` (concurrent reads, rare writes)
 - `tokio::sync::broadcast` for metrics streaming
@@ -149,8 +149,18 @@ cargo clippy --workspace -- -D warnings
 ### Naming & Formatting
 
 - **Rust 2021 edition**, stable toolchain
-- Module-level doc comments (`//!`) in Russian (project convention)
-- Function-level docs in Russian or English
+### Code Comments Policy
+
+**Default: No comments in code.** The codebase is currently free of doc comments (`///`, `//!`) and inline comments. Keep it that way.
+
+**Exception: 1–2 line comments** allowed ONLY when:
+- A non-obvious `unsafe` block requires a safety justification
+- A complex algorithm needs a one-line "what this does" note
+- A `#[allow(...)]` lint suppression needs a brief reason
+
+**All detailed documentation belongs in `docs/`** — not in code comments. Every module, trait, struct, and public function is documented in the appropriate `docs/*.md` file or crate-level `README.md`. The implementer writes the code, then writes (or updates) the docs/ file to describe it.
+
+**Why:** Long doc comments in code rot faster than external docs (they're harder to find, harder to search, and split attention between two locations). Centralized docs/ files are easier to maintain, review, and keep accurate.
 - Struct fields: `snake_case`, types: `PascalCase`
 - Proto messages mirror domain types 1:1 by field
 - CLI enums use `clap::ValueEnum` with `#[derive(Clone, Copy, PartialEq, Eq)]`
@@ -178,7 +188,7 @@ cargo clippy --workspace -- -D warnings
 
 ### Core Domain
 
-- `core/andler-core/src/backend.rs` — `HypervisorBackend` trait (13 methods), `ResourceMetrics`, `BackendHandle`
+- `core/andler-core/src/backend.rs` — `HypervisorBackend` trait (16 methods), `ResourceMetrics`, `BackendHandle`
 - `core/andler-core/src/fsm.rs` — `InstanceState` (7 states), `InstanceEvent` (7 events)
 - `core/andler-core/src/config/` — 9 config modules (instance, cpu, memory, disk, display, gpu, network, audio, input)
 - `core/andler-core/src/error.rs` — `BackendError`, `FsmError`
