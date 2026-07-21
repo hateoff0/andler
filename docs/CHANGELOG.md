@@ -2,7 +2,7 @@
 
 All notable changes to ANDLER will be documented in this file.
 
-Format based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
+Format based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
@@ -58,7 +58,7 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - **Signal handling**: SIGINT + SIGTERM graceful shutdown (stops all running instances).
 - **systemd user unit**: `scripts/andlerd.service` with `scripts/install.sh`.
 - **Snapshot limit**: `MAX_SNAPSHOTS_PER_INSTANCE = 20` with `SnapshotLimitExceeded` error.
-- **New error variants**: `SnapshotLimitExceeded`, `MalformedInstanceRef`, `ConfigIdMismatch`, `ConfigKindChanged`, `ConfigDiskPathChanged` (DaemonError: 23 variants total).
+- **New error variants**: `SnapshotLimitExceeded`, `MalformedInstanceRef`, `ConfigIdMismatch`, `ConfigKindChanged`, `ConfigDiskPathChanged` (DaemonError: 20 variants total).
 - **gRPC round-trip tests**: 24 integration tests with real TCP connections.
 
 #### CLI
@@ -101,9 +101,9 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - **Database filename**: `state.db` → **`andlerd.db`**.
 - **Snapshot state requirements**: `restore`/`delete` now require **Running/Paused** instance (not terminal states) — QMP commands need live QEMU process.
 - **`--libndk` → `--arm-translator`**: Boolean flag replaced by enum: `none`, `libndk`, `libhoudini`.
-- **DaemonError expanded**: 14 → **23 variants** (added SnapshotLimitExceeded, MalformedInstanceRef, ConfigIdMismatch, ConfigKindChanged, ConfigDiskPathChanged, EmptyInstanceRef, InstanceRefNotFound, AmbiguousInstanceId).
+- **DaemonError expanded**: 14 → **20 variants** (added SnapshotLimitExceeded, MalformedInstanceRef, ConfigIdMismatch, ConfigKindChanged, ConfigDiskPathChanged, EmptyInstanceRef, InstanceRefNotFound, AmbiguousInstanceId).
 - **Environment variables**: Added `ANDLERD_LISTEN_ADDR` (daemon listen), `ANDLERD_OVMF_CODE`/`ANDLERD_OVMF_VARS` (firmware override), `ANDLERD_LOG_FORMAT` (json output). `ANDLERD_ADDR` remains for CLI client.
-- **`stop --graceful` semantics**: Now means "force stop without waiting for graceful ACPI shutdown" (flag name is historical; default behavior is graceful).
+- **`stop --graceful` semantics**: `--graceful` sends SIGTERM and waits for graceful ACPI shutdown. Default (without flag) is force kill via SIGKILL.
 - **`purge_instance_files`**: Uses `remove_dir_all` for UUID-pattern instance directories (was `remove_dir`, silently failed on non-empty).
 - **QemuBackend pause/resume**: Lock extracted before `backend.pause().await` (was held across await, blocking all operations).
 - **Metrics output format**: `key=value` pairs (was columnar table headers).
@@ -174,9 +174,6 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - `create-android` command (merged into `create`)
 - Russian-language documentation (moved to `docs/archive/`)
 - `--libndk` boolean flag (replaced by `--arm-translator` enum)
-- `KernelSU` root mode (proto value `3` reserved, cleaned from all layers)
-- WIZARD.md (fully implemented, plan document removed)
-- PLAN.md old content (replaced by current UX improvement plan)
 
 ## [0.1.0] — Pre-Release
 

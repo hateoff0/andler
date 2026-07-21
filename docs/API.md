@@ -394,7 +394,7 @@ mode = "Nat"
 device_model = "virtio-net-pci"
 
 [firmware]
-ovmf_code_path = "/usr/share/edk2-ovmf/x64/OVMF_CODE.4m.fd"
+ovmf_code_path = "/usr/share/edk2/x64/OVMF_CODE.4m.fd"
 ovmf_vars_path = "/path/to/VARS.fd"
 
 [audio]
@@ -439,7 +439,7 @@ Any section can be omitted entirely. If present, it must be complete (no partial
 | `display` | 1920x1080, 96 DPI, no limit, SDL, no fullscreen |
 | `gpu` | Venus, 4096 MiB hostmem, blob+gl on |
 | `network` | NAT, virtio-net-pci |
-| `firmware` | OVMF_CODE at `/usr/share/edk2-ovmf/x64/OVMF_CODE.4m.fd` |
+| `firmware` | OVMF_CODE at `/usr/share/edk2/x64/OVMF_CODE.4m.fd` |
 | `audio` | PipeWire, VirtioSound |
 | `input` | Tablet pointer, hide_cursor+clipboard true |
 
@@ -458,7 +458,7 @@ Defined in `services/andler-rpc/proto/andler.proto`. Uses `tonic`/`prost` for Ru
 | `PauseInstance` | `InstanceIdRequest` | `Empty` | Unary |
 | `ResumeInstance` | `InstanceIdRequest` | `Empty` | Unary |
 | `GetInstanceStatus` | `InstanceIdRequest` | `InstanceStatusResponse` | Unary |
-| `ListInstances` | `ListInstancesRequest` | `ListInstancesResponse` | Unary |
+| `ListInstances` | `Empty` | `ListInstancesResponse` | Unary |
 | `RemoveInstance` | `RemoveInstanceRequest` | `Empty` | Unary |
 | `GetInstanceConfig` | `InstanceIdRequest` | `GetInstanceConfigResponse` | Unary |
 | `UpdateInstanceConfig` | `UpdateInstanceConfigRequest` | `Empty` | Unary |

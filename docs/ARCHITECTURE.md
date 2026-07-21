@@ -36,7 +36,7 @@ andler-core          (no workspace dependencies — bottom layer)
 The foundation crate. Defines all public types that other crates depend on.
 
 **Key types:**
-- `HypervisorBackend` trait: The contract for all hypervisor implementations (13 methods)
+- `HypervisorBackend` trait: The contract for all hypervisor implementations (16 methods)
 - `InstanceConfig`: 9-section configuration struct (disk, cpu, memory, display, gpu, network, audio, input, firmware)
 - `InstanceState` / `InstanceEvent`: FSM with 7 states and 7 events
 - `ResourceMetrics`: All-Optional metrics struct (CPU, RAM, disk I/O, net I/O, GPU)
@@ -124,7 +124,7 @@ Orchestrates all operations. Holds backend registry, instance state, optional pe
 - `resolve_instance_id()` — Docker-style partial ID resolution (8-char hex prefix)
 - `update_instance_config()` — Edit config via gRPC, protects id/kind/disk.path
 - `DaemonService` — thin gRPC wrapper, one method per Daemon method
-- Error mapping: `DaemonError` (23 variants) → gRPC status codes
+- Error mapping: `DaemonError` (20 variants) → gRPC status codes
 
 **73+ unit tests** + **24 gRPC round-trip tests** (real TCP).
 
@@ -195,11 +195,11 @@ andler-store (andlerd.db)
 ```
 
 `Stopped`/`Error` both accept `Start` and return to `Starting` — restarting
-the same instance record works the same way a fresh `Created` instance does
-(`Daemon::start_instance` is generic over the source state; this was purely
-an FSM-level restriction that's since been lifted). `is_terminal()` still
-returns `true` for both — that means "this run has ended", not "no
-transitions remain".
+ the same instance record works the same way a fresh `Created` instance does
+ (`Daemon::start_instance` is generic over the source state; this was purely
+ an FSM-level restriction that's since been lifted). `is_terminal()` still
+ returns `true` for both — that means "this run has ended", not "no
+ transitions remain".
 
 Any active state (Created/Starting/Running/Paused/Stopping) can transition to `Error` via `Fail(msg)`.
 
@@ -245,3 +245,79 @@ GPU vendor detection priority: AMD → NVIDIA → Intel (first found wins). AMD 
 - **Cloud Hypervisor backend**: `andler-vmm` with `rust-vmm` crates
 - **GUI**: Tauri-based client (planned, not started)
 - **Guest image pipelines**: Automated Android image builds with Waydroid
+
+## gRPC Protocol
+
+The daemon (`andlerd`) exposes a gRPC API for instance management. Protocol schema: `services/andler-rpc/proto/andler.proto`.
+
+### Design Philosophy
+
+The RPC layer mirrors `Daemon` trait methods — each RPC method corresponds to a real `Daemon` implementation. Adding an RPC method without a matching `Daemon` method would design the protocol "in the blind", which was explicitly avoided.
+
+### Key RPC Methods
+
+| RPC | Domain Method | Description |
+|-----|---------------|-------------|
+| CreateInstance | Daemon::create_instance | Creates LinuxVm from explicit InstanceConfig |
+| CreateAndroidInstance | Daemon::create_android_instance | Resolves profile, creates overlay, registers instance |
+| CloneInstance | Daemon::clone_instance | Clone AndroidVm only (requires managed instances_root) |
+| ExportInstanceDisk | Daemon::export_instance_disk | Export disk without creating instance |
+| StreamResourceMetrics | metrics stream | CPU, RAM, disk I/O, network I/O, VRAM, GPU load |
+| StreamInstanceLogs | log stream | Streams stdout/stderr of hypervisor process |
+
+### Type Mapping
+
+Proto messages mirror `andler_core` domain types:
+
+- **Enums**: CpuPriority, DiskFormat, DisplayEngine, CdromBus, InstanceState
+- **oneof**: RenderBackend (carries gpu_pci_id), NetworkMode (carries interface)
+- **Configuration**: Proto types correspond 1:1 to `andler-core/src/config/` types
+
+Conversion logic: `services/andler-rpc/src/convert.rs`.
+
+### Design Notes
+
+- CloneInstance/ExportInstanceDisk support both AndroidVm and LinuxVm
+- CreateInstance is limited to LinuxVm (field iso_path, no oneof kind) — AndroidVm path is served by separate CreateAndroidInstance to avoid two ways to create Android instances
+- CreateInstance intentionally doesn't accept id/backend — daemon generates instance_id, backend is always QEMU
+
+## Configuration Types
+
+Configuration is organized into 9 sections in `InstanceConfig`:
+
+1. **disk**: Disk path, format (qcow2), size, CD-ROM
+2. **cpu**: vCPU count, affinity, priority class
+3. **memory**: RAM in MiB
+4. **display**: Display engine (Virtio, std VGA, QXL, Gop), clipboard
+5. **gpu**: Render backend (Passthrough, Venus, VirtioGpu)
+6. **network**: Mode (NAT/Bridge/Isolated), NAT backend (slirp), interface
+7. **audio**: Backend (spice, hda), device (virtio-sound)
+8. **input**: Pointer mode (tablet/absolute), keyboard layout
+9. **firmware**: OVMF code/vars paths, ARM translator
+
+Each section has reasonable defaults from hardware auto-detection (see `services/andler-firmware`).
+
+Disk defaults: 256 GiB thin-provisioned qcow2.
+
+## Daemon Methods
+
+The `Daemon` struct orchestrates all operations. Key methods:
+
+| Method | Description |
+|--------|-------------|
+| `resolve_instance_id` | Resolves user-supplied instance reference to concrete `InstanceId` |
+| `create_instance` | Registers new instance with `Created` state |
+| `create_android_instance` | Resolves `AndroidProfile` to full instance and registers it |
+| `create_linux_instance` | Creates Linux instance with disk and OVMF VARS |
+| `start_instance` | Starts instance (Created/Stopped/Error → Starting → Running) |
+| `stop_instance` | Stops instance (graceful/force) |
+| `pause_instance` | Pauses running instance |
+| `resume_instance` | Resumes paused instance |
+| `remove_instance` | Removes instance record (with optional disk purge) |
+| `install_guest_agent` | Installs package in guest OS |
+| `remove_guest_agent` | Removes package from guest OS |
+| `list_guest_packages` | Lists installed packages in guest OS |
+| `switch_arm_translator` | Switches ARM translator in offline mode |
+| `set_instance_config` | Partial config update |
+
+Each method corresponds to a real `Daemon` implementation and follows the FSM transitions.

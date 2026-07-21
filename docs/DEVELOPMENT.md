@@ -213,7 +213,7 @@ andler/
 │       ├── main.rs               # Entry point, tonic server setup
 │       ├── daemon/
 │       │   ├── mod.rs            # Daemon struct, constructors, persist helpers (~250 lines)
-│       │   ├── error.rs          # DaemonError enum (23 variants)
+│       │   ├── error.rs          # DaemonError enum (20 variants)
 │       │   ├── types.rs          # InstanceRecord, SnapshotRecord, InstanceDirGuard
 │       │   ├── instance_ops.rs   # create/start/stop/pause/resume/remove + create_linux_instance + resolve_instance_id
 │       │   ├── clone_ops.rs      # clone_instance, export, find_live_clones
