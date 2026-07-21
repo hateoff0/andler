@@ -25,6 +25,11 @@ gRPC protocol definition (`proto/andler.proto`) and generated server/client code
 | `DeleteSnapshot` | `DeleteSnapshotRequest` | `Empty` | Unary | Requires Running/Paused instance |
 | `ListSnapshots` | `InstanceIdRequest` | `ListSnapshotsResponse` | Unary | |
 | `UpdateInstanceConfig` | `UpdateInstanceConfigRequest` | `Empty` | Unary | Replace instance config (andler edit) |
+| `InstallGuestAgent` | `InstallGuestAgentRequest` | `Empty` | Unary | Install package in guest (auto-fallback: online/offline) |
+| `RemoveGuestAgent` | `RemoveGuestAgentRequest` | `Empty` | Unary | Remove package from guest (auto-fallback) |
+| `ListGuestPackages` | `InstanceIdRequest` | `ListGuestPackagesResponse` | Unary | List known packages with status |
+| `SwitchArmTranslator` | `SwitchArmTranslatorRequest` | `Empty` | Unary | Switch ARM translation backend for AndroidVm |
+| `SetInstanceConfig` | `SetInstanceConfigRequest` | `Empty` | Unary | Set a single config key-value pair on an instance |
 
 ## Key Proto Messages
 
@@ -64,6 +69,15 @@ gRPC protocol definition (`proto/andler.proto`) and generated server/client code
 ### Config Editing
 
 - **`UpdateInstanceConfigRequest`**: Mirrors `GetInstanceConfigResponse` field-for-field (`instance_ref`, `name`, `kind`, `backend`, `cpu`, `memory`, `disk`, `display`, `gpu`, `network`, `firmware`, `audio`, `input`). Protects `id`, `kind`, and `disk.path` from modification.
+
+### Guest Agent & Config
+
+- **`InstallGuestAgentRequest`**: `instance_id`, `package`.
+- **`RemoveGuestAgentRequest`**: `instance_id`, `package`.
+- **`ListGuestPackagesResponse`**: `packages` (repeated `GuestPackageEntry`).
+- **`GuestPackageEntry`**: `name`, `description`, `status`.
+- **`SwitchArmTranslatorRequest`**: `instance_ref`, `translator` (ArmTranslator enum), `translator_dir`.
+- **`SetInstanceConfigRequest`**: `instance_ref`, `key`, `value`.
 
 ### Enums
 

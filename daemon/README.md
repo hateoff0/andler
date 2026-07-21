@@ -13,12 +13,13 @@ firmware.rs →  OVMF auto-detection
                ↓
 daemon/
 ├── mod.rs          →  Daemon (backend registry + instance state + optional persistence)
-├── error.rs        →  DaemonError enum (23 variants)
+├── error.rs        →  DaemonError enum (27 variants)
 ├── types.rs        →  InstanceRecord, SnapshotRecord, InstanceDirGuard, InstanceSummary
 ├── instance_ops.rs →  create, create_linux_instance, start, stop, pause, resume, remove, resolve_instance_id
 ├── clone_ops.rs    →  clone_instance, export_instance_disk, find_live_clones
 ├── snapshot_ops.rs →  create/restore/delete/list snapshots (requires Running/Paused for QMP commands)
 ├── health_ops.rs   →  periodic crash detection for Running instances (Error transition, no auto-restart)
+├── tests/          →  unit test modules (11 files, no network)
 └── query_ops.rs    →  status, list_instances, get_instance_config, update_instance_config, stream logs/metrics
                ↓
            HypervisorBackend trait → QemuBackend / VmmBackend
@@ -51,6 +52,8 @@ Overridable via:
 | `backends` | `HashMap<BackendKind, Arc<dyn HypervisorBackend>>` | Registered backends |
 | `instances` | `RwLock<HashMap<InstanceId, InstanceRecord>>` | Current instance state |
 | `store` | `Option<Store>` | Optional SQLite persistence |
+- **RwLock vs Mutex**: `instances` uses `tokio::sync::RwLock`, not `Mutex`, because `status()` (frequent call, e.g., GUI polling) only reads — no reason to block concurrent status reads during a single status check.
+- **`Option<Store>` rationale**: `None` is not a temporary omission but a deliberate "in-memory only" mode. `Daemon::new()` (no persistence) is used by all existing tests — they test FSM/backend behavior and forcing them to carry sqlite adds unnecessary coupling.
 
 **Construction**:
 - `Daemon::new()`: No persistence. For testing.
@@ -63,7 +66,7 @@ Overridable via:
 |--------|-----------|----------------|
 | `create_instance` | `async fn(InstanceConfig) -> Result<InstanceId, DaemonError>` | → Created |
 | `create_linux_instance` | `async fn(InstanceConfig, PathBuf, PathBuf) -> Result<InstanceId, DaemonError>` | Creates dir + disk + registers |
-| `create_android_instance` | `async fn(AndroidProfile, String, PathBuf, PathBuf, u64, PathBuf, Option<PathBuf>) -> Result<InstanceId, DaemonError>` | Creates overlay + registers |
+| `create_android_instance` | `async fn(AndroidProfile, String, PathBuf, PathBuf, u64, PathBuf) -> Result<InstanceId, DaemonError>` | Creates overlay + registers |
 | `start_instance` | `async fn(InstanceId) -> Result<(), DaemonError>` | Created → Starting → Running |
 | `stop_instance` | `async fn(InstanceId, bool) -> Result<(), DaemonError>` | Running/Paused → Stopping → Stopped |
 | `pause_instance` | `async fn(InstanceId) -> Result<(), DaemonError>` | Running → Paused |
@@ -76,6 +79,14 @@ Overridable via:
 | `list_instances` | `async fn() -> Vec<InstanceSummary>` | Read-only |
 | `stream_instance_logs` | `async fn(InstanceId) -> Result<BoxStream<'static, LogLine>, DaemonError>` | Empty stream if no backend |
 | `stream_resource_metrics` | `async fn(InstanceId) -> Result<BoxStream<'static, ResourceMetrics>, DaemonError>` | Empty stream if not found |
+| `switch_arm_translator` | `async fn(InstanceId, ArmTranslator) -> Result<(), DaemonError>` | Switch ARM translator for Android, requires `is_disk_idle` |
+| `set_instance_config` | `async fn(InstanceId, InstanceConfig) -> Result<(), DaemonError>` | Partial config update with persistence, requires `is_disk_idle` |
+
+**Instance Configuration**:
+
+**`compact_on_shutdown`**: When enabled in `InstanceConfig`, triggers background disk compaction after `stop_instance` completes. The instance transitions to `Stopped` immediately while compaction runs asynchronously. Subsequent `start_instance` calls wait for any pending compaction to complete. This reduces disk image size for instances with frequent write activity, at the cost of post-shutdown I/O latency.
+
+**`is_disk_idle` Gating**: Operations that modify the instance's disk or configuration (`switch_arm_translator`, `set_instance_config`) require the disk to be idle — meaning no other process is holding the disk open (no running instance, no active NBD server, no in-flight compaction). This prevents data corruption from concurrent access. The daemon checks for competing processes by attempting to acquire an exclusive lock on the disk image before proceeding.
 
 **Snapshot Methods**:
 
@@ -86,6 +97,11 @@ Overridable via:
 | `delete_snapshot` | `async fn(InstanceId, String, Option<u64>) -> Result<(), DaemonError>` | Running/Paused |
 | `list_snapshots` | `async fn(InstanceId) -> Result<Vec<SnapshotRecord>, DaemonError>` | Any |
 
+**Snapshot Merge Semantics**: When restoring or deleting a snapshot, the system performs a merge operation that reconciles the snapshot's state with the current disk state:
+- **Restore**: The current state is discarded and replaced with the snapshot's state. The previous state is automatically saved as a new snapshot with an auto-generated tag (`pre-restore-<timestamp>`) to prevent data loss.
+- **Delete**: When deleting a snapshot that has children (subsequent snapshots depend on it), the merge recursively applies all descendant snapshots to the base, collapsing the chain into a single state. This is equivalent to repeatedly restoring the youngest descendant.
+- **Chain Optimization**: After a merge operation, the daemon attempts to optimize the snapshot chain by coalescing adjacent snapshots where possible, reducing storage overhead.
+
 **Guest Agent Methods**:
 
 | Method | Signature | Description |
@@ -93,6 +109,11 @@ Overridable via:
 | `install_guest_agent` | `async fn(InstanceId, String) -> Result<(), DaemonError>` | Install package in guest (auto-fallback: online/offline) |
 | `remove_guest_agent` | `async fn(InstanceId, String) -> Result<(), DaemonError>` | Remove package from guest (auto-fallback) |
 | `list_guest_packages` | `async fn(InstanceId) -> Result<Vec<(String, String, String)>, DaemonError>` | List known packages with status |
+
+**Guest Agent Dual-Path**: The guest agent methods use a two-tier fallback strategy:
+- **Online path (QMP)**: If the instance is `Running` and QMP socket is accessible, the agent communicates directly with the guest via QMP (`guest.exec`). This requires the guest to be running with QEMU's guest agent (`qemu-ga`) active.
+- **Offline path (qemu-nbd)**: If QMP fails (instance not running or QEMU guest agent unavailable), the operation falls back to mounting the instance's disk image via `qemu-nbd` and performing the operation directly on the filesystem. This requires the disk to not be in use by another process.
+
 
 **Clone/Export Methods**:
 
@@ -117,9 +138,7 @@ Overridable via:
 
 **`InstanceDirGuard`** (RAII): Deletes `instance_dir` on drop if the creation sequence didn't complete. Used by `create_linux_instance`, `create_android_instance`, and `clone_instance` for cleanup on partial failure.
 
-### `daemon/error.rs` — Error Types
-
-23 error variants mapping domain failures to gRPC status codes:
+24 error variants mapping domain failures to gRPC status codes:
 - `InstanceNotFound`, `NoBackendRegistered`, `InvalidTransition`
 - `Backend`, `Disk`, `Firmware`, `Io`, `Restore`
 - `InstanceNotRemovable`, `InstanceNotClonable`
@@ -129,13 +148,39 @@ Overridable via:
 - `EmptyInstanceRef`, `InstanceRefNotFound`, `AmbiguousInstanceId`
 - `MalformedInstanceRef`
 - `ConfigIdMismatch`, `ConfigKindChanged`, `ConfigDiskPathChanged`
+- `GuestAgentUnavailable`, `InvalidConfigKey`, `NotAndroid`, `InstanceMustBeStopped`
 
-### `daemon/types.rs` — Internal Types
+**Detailed Error Semantics** (27 variants):
 
-- **`InstanceRecord`**: Config + state + backend handle (filesystem paths are inside `InstanceConfig`)
-- **`SnapshotRecord`**: id, instance_id, tag, description, creation timestamp
-- **`InstanceDirGuard`**: RAII cleanup — deletes instance directory on drop if creation sequence didn't complete
-- **`InstanceSummary`**: Compact view for list operations
+| Variant | gRPC Code | Rationale |
+|---------|-----------|-----------|
+| `InstanceNotFound` | `NOT_FOUND` | Instance not registered with this Daemon (different from `BackendError::HandleNotFound` which is about a specific backend handle) |
+| `NoBackendRegistered` | `UNIMPLEMENTED` | Requested `BackendKind` not in registry (default registry has only `Qemu`) |
+| `InvalidTransition` | `FAILED_PRECONDITION` | FSM transition not allowed from current state (see `andler_core::fsm`) |
+| `Backend` | `INTERNAL` | Backend returned error during operation |
+| `Disk` | `INTERNAL` | `andler-disk` error creating overlay for Android instance |
+| `Firmware` | `INTERNAL` | `andler-firmware` error detecting OVMF or provisioning personal `OVMF_VARS` copy |
+| `Io` | `INTERNAL` | Filesystem error outside `andler-disk` — instance dir creation, etc. |
+| `Restore` | `INTERNAL` | `andler-store` error restoring instances from DB at startup |
+| `InstanceNotRemovable` | `FAILED_PRECONDITION` | `remove_instance` called for non-terminal state — deleting a running instance is forbidden, not silently stopped first |
+| `InstanceNotClonable` | `FAILED_PRECONDITION` | `clone`/`export` called for non-terminal state — copying/linking disk of live QEMU process is unsafe |
+| `SharedBaseNotSupportedForLinuxVm` | `FAILED_PRECONDITION` | `CloneMode::SharedBase` for `LinuxVm` — Linux VMs have standalone disks, no shared base image |
+| `InstanceHasLiveClones` | `FAILED_PRECONDITION` | `remove_instance(purge: true)` called while live `Linked` clones exist — purge would delete the backing file those clones depend on |
+| `SnapshotNotFound` | `NOT_FOUND` | Snapshot with given tag not found for instance |
+| `SnapshotAlreadyExists` | `ALREADY_EXISTS` | Snapshot with given tag already exists for instance |
+| `SnapshotOperationRequiresRunningInstance` | `FAILED_PRECONDITION` | Create/restore/delete requires `Running`/`Paused` (performed via QMP) |
+| `SnapshotLimitExceeded` | `FAILED_PRECONDITION` | Instance already has `MAX_SNAPSHOTS_PER_INSTANCE` — prevents unbounded internal snapshot growth |
+| `EmptyInstanceRef` | `INVALID_ARGUMENT` | Empty string passed as instance reference (distinct from `InstanceRefNotFound`) |
+| `MalformedInstanceRef` | `INVALID_ARGUMENT` | Reference string is neither valid UUID nor valid hex prefix |
+| `InstanceRefNotFound` | `NOT_FOUND` | Prefix matched zero instances |
+| `AmbiguousInstanceId` | `INVALID_ARGUMENT` | Prefix matched multiple instances — candidates listed in message |
+| `ConfigIdMismatch` | `INVALID_ARGUMENT` | Config has different `InstanceId` than the one resolved from request |
+| `ConfigKindChanged` | `INVALID_ARGUMENT` | Config changes guest kind (`LinuxVm` ↔ `AndroidVm`) — not supported, requires recreation |
+| `ConfigDiskPathChanged` | `INVALID_ARGUMENT` | Config changes `disk.path` — must use `andler disk` commands to safely move/relink |
+| `GuestAgentUnavailable` | `INTERNAL` | Guest agent binary unavailable or failed to start |
+| `InvalidConfigKey` | `INVALID_ARGUMENT` | Invalid or unknown configuration key for `update_instance_config` |
+| `NotAndroid` | `FAILED_PRECONDITION` | Operation requires Android instance (`switch_arm_translator`) |
+| `InstanceMustBeStopped` | `FAILED_PRECONDITION` | Operation requires stopped instance (`set_instance_config`, `switch_arm_translator`) |
 
 ### `daemon/instance_ops.rs` — Instance Lifecycle
 
@@ -175,6 +220,10 @@ Handles: `status`, `stream_instance_logs`, `stream_resource_metrics`, `list_inst
 - `EmptyInstanceRef` / `AmbiguousInstanceId` / `MalformedInstanceRef` → `INVALID_ARGUMENT`
 - `ConfigIdMismatch` / `ConfigKindChanged` / `ConfigDiskPathChanged` → `INVALID_ARGUMENT`
 - `InstanceRefNotFound` → `NOT_FOUND`
+- `GuestAgentUnavailable` → `INTERNAL`
+- `InvalidConfigKey` → `INVALID_ARGUMENT`
+- `NotAndroid` → `FAILED_PRECONDITION`
+- `InstanceMustBeStopped` → `FAILED_PRECONDITION`
 - Other (`Backend(other)`, `Disk`, `Io`, `Restore`, `Firmware`) → `INTERNAL`
 
 ### `grpc_roundtrip_test.rs` — Integration Tests
@@ -195,7 +244,7 @@ Real TCP gRPC round-trip tests (no `qemu-img`/`/dev/kvm` required). Uses ephemer
 
 ### `daemon::tests` (unit tests, no network)
 
-73 tests across 9 modules:
+73 tests across 10 modules:
 
 | Module | Focus | Tests |
 |--------|-------|-------|
@@ -208,6 +257,7 @@ Real TCP gRPC round-trip tests (no `qemu-img`/`/dev/kvm` required). Uses ephemer
 | `list_config.rs` | list_instances, get_instance_config | 7 |
 | `status.rs` | Status queries, log/metrics streaming | 3 |
 | `resolve_instance_id.rs` | Partial ID resolution, ambiguity detection | 5 |
+| `health.rs`             | Health check unit tests | — |
 
 - **Instance lifecycle**: create, start (with Passthrough validation), pause/resume before start, stop before start, double create overwrite
 - **Android instance creation**: Profile resolution, overlay creation (`#[ignore]`), missing base image (verifies `InstanceDirGuard` cleanup), missing OVMF template (verifies cleanup)
@@ -216,13 +266,11 @@ Real TCP gRPC round-trip tests (no `qemu-img`/`/dev/kvm` required). Uses ephemer
 - **Remove instance**: from Created/Error/Stopped, rejects all non-terminal states, removes from store, disappears from list, `purge: false` leaves files, `purge: true` deletes disk+OVMF+dir, keeps non-empty parent dir, never deletes base_image/ovmf_code, tolerates already-missing files, rejects when live linked clones exist, allows purge when clone is FullStandalone
 - **Get instance config**: unknown → NotFound, returns full config, reflects overwrites
 - **Clone/Export**: unknown → NotFound, LinuxVm + SharedBase → error, non-terminal source → error, Linked/FullStandalone/SharedBase modes (`#[ignore]`), clone of clone allowed, export creates standalone file without registering
-- **find_live_clones**: empty when no references, finds linked clone, ignores shared base_image, rejects purge when live clone exists
+
 
 ### `grpc_roundtrip_test.rs` (integration, real TCP)
 
 24 tests covering the full gRPC round-trip for all major operations.
-
-## DaemonError Variants
 
 | Variant | Fields | Description |
 |---------|--------|-------------|
@@ -249,6 +297,10 @@ Real TCP gRPC round-trip tests (no `qemu-img`/`/dev/kvm` required). Uses ephemer
 | `ConfigIdMismatch` | `expected`, `actual` | Config has a different id |
 | `ConfigKindChanged` | `InstanceId` | Cannot change instance kind via edit |
 | `ConfigDiskPathChanged` | `InstanceId` | Cannot change disk path via edit |
+| `GuestAgentUnavailable` | `InstanceId` | Guest agent binary unavailable or failed to start |
+| `InvalidConfigKey` | `String` | Invalid or unknown configuration key |
+| `NotAndroid` | `InstanceId` | Operation requires Android instance |
+| `InstanceMustBeStopped` | `InstanceId`, `InstanceState` | Operation requires stopped instance |
 
 ## Requirements
 

@@ -12,16 +12,22 @@ Pure function `build_args(&InstanceConfig, &Path) -> Vec<String>` that translate
 |-------|----------|-------------------|
 | Name | `name_args` | `-name <instance_name>,process=<instance_name>` |
 | Machine & CPU | `machine_and_cpu_args` | `-machine`, `-cpu`, `-smp`, `-enable-kvm` |
-| Memory | `memory_args` | `-m`, `-mem-path`, `-mem-prealloc`, `-object memory-backend-memfd` |
+| Memory | `memory_args` | `-m <size>`, `-object memory-backend-memfd,...`, `-machine memory-backend=mem1` |
 | Firmware | `firmware_args` | `-drive if=pflash` for OVMF_CODE and OVMF_VARS |
 | GPU & Display | `gpu_display_args` | `-device virtio-gpu-pci`, `-display`, `-vga` depending on `RenderBackend` and `DisplayEngine` |
 | Disk | `disk_args` | `-drive file=...,format=qcow2,id=drive-disk0`, `-device virtio-blk-pci` |
-| Input | `input_args` | `-device virtio-tablet-pci` (or `virtio-mouse-pci`), `-device virtio-serial-pci`, `-chardev qemu-vdagent` (when clipboard enabled) |
-| Network | `network_args` | `-nic user,model=virtio-net-pci` (Slirp/NAT), `-netdev passt` + `-device` (Passt), or Bridge/Isolated modes via `andler-net` |
+| Input | `input_args` | `-device virtio-tablet-pci` (or `virtio-mouse-pci`), `-device virtio-serial-pci`, `-device virtserialport,chardev=ch1,id=ch1,name=com.redhat.spice.0`, `-chardev qemu-vdagent` (when clipboard enabled) |
+| Network | `network_args` | `-nic user,model=virtio-net-pci` (Slirp/NAT), `-netdev passt` + `-device` (Passt), or Bridge/Isolated modes |
 | Audio | `audio_args` | `-audiodev`, `-device` for PipeWire/PulseAudio |
 | QMP | `qmp_args` | `-qmp unix:<path>,server,nowait` |
 
 Always ends with `-boot menu=on`.
+**QEMU flag rationale**:
+- `-machine q35,accel=kvm,usb=on` — q35 chipset with USB support
+- `-cpu host,kvm=on,+topoext,migratable=no` — `+topoext` enables topology extension for multi-core reporting; `migratable=no` prevents live migration (not supported)
+- `dies=1` hardcoded — `CpuConfig` doesn't have a `dies` field; neither the architecture plan nor the original reference config envisioned multiple dies
+- `-drive ... discard=on,detect-zeroes=on,aio=threads` — `discard=on` issues TRIM to QEMU for reclaimed blocks; `detect-zeroes=on` detects zero-filled regions; `aio=threads` uses thread-based async I/O (not native AIO, which has kernel version issues)
+- `virtio-blk-pci,num-queues=4` — 4 virtio queues for better multi-core I/O parallelism
 
 **RenderBackend mapping:**
 - `Venus` → `-device virtio-gpu-gl,hostmem=...,blob=...,venus=true`
@@ -41,11 +47,11 @@ Always ends with `-boot menu=on`.
 
 Low-level management of a real `qemu-system-x86_64` process via `tokio::process::Command`.
 
-**`QemuProcess`**:
+**`QemuProcess`:**
 
 | Method | Signature | Description |
 |--------|-----------|-------------|
-| `spawn` | `async fn(args: &[String], qmp_socket_path: PathBuf) -> Result<Self, ProcessError>` | Spawn QEMU process, start log + metrics background tasks |
+| `spawn` | `async fn(args: &[String], qmp_socket_path: PathBuf, log_file_path: Option<PathBuf>) -> Result<Self, ProcessError>` | Spawn QEMU process, start log + metrics background tasks |
 | `subscribe_logs` | `fn(&self) -> broadcast::Receiver<LogLine>` | Subscribe to stdout/stderr lines |
 | `subscribe_metrics` | `fn(&self) -> broadcast::Receiver<ResourceMetrics>` | Subscribe to resource metrics |
 | `pid` | `fn(&self) -> u32` | Process ID |
@@ -53,8 +59,9 @@ Low-level management of a real `qemu-system-x86_64` process via `tokio::process:
 | `is_alive` | `async fn(&mut self) -> Result<bool, ProcessError>` | Check if process is still running |
 | `terminate` | `async fn(&mut self) -> Result<(), ProcessError>` | SIGTERM + 30s timeout (temporary until proper ACPI) |
 | `force_kill` | `async fn(&mut self) -> Result<(), ProcessError>` | SIGKILL |
+| `log_file_path` | `fn(&self) -> Option<&Path>` | Path to the log file, if configured |
 
-stdout/stderr are drained line-by-line in background tasks (`drain_to_tracing`): each line is simultaneously logged via `tracing::warn!` and published to a `broadcast` channel (`subscribe_logs`).
+stdout/stderr are drained line-by-line in background tasks (`drain_to_tracing`): each line is simultaneously logged via `tracing::warn!` and published to a `broadcast` channel (`subscribe_logs`). Log lines use `[stdout]`/`[stderr]` prefixes (e.g. `[stdout] QEMU 8.2.0 starting`). `read_log_history()` parses these prefixes from the log file, and `log_stream` replays history from this file.
 
 **`ProcessError`**: `SpawnFailed(io::Error)`, `Io(io::Error)`, `GracefulShutdownTimedOut(Duration)`.
 
@@ -64,7 +71,7 @@ stdout/stderr are drained line-by-line in background tasks (`drain_to_tracing`):
 
 QMP client over a unix socket. Handles handshake, command execution, and async job polling.
 
-**`QmpClient`**:
+**`QmpClient`:**
 
 | Method | Signature | Description |
 |--------|-----------|-------------|
@@ -76,15 +83,19 @@ QMP client over a unix socket. Handles handshake, command execution, and async j
 | `snapshot_load` | `async fn(&mut self, device, tag) -> Result<String, QmpError>` | Async `snapshot-load` job |
 | `snapshot_delete` | `async fn(&mut self, device, tag) -> Result<String, QmpError>` | Async `snapshot-delete` job |
 | `wait_job_completion` | `async fn(&mut self, job_id, timeout) -> Result<(), QmpError>` | Polls `query-jobs` until `"concluded"`, then `job-dismiss` |
+| `guest_ping` | `async fn(&mut self) -> Result<(), QmpError>` | Check if guest agent is reachable |
+| `guest_exec` | `async fn(&mut self, path: &str, args: &[String]) -> Result<u64, QmpError>` | Execute command in guest via QMP `guest-exec` |
+| `guest_exec_status` | `async fn(&mut self, pid: u64) -> Result<GuestExecStatus, QmpError>` | Poll `guest-exec-status` for a previously-started guest command |
+| `is_guest_agent_available` | `async fn(&mut self) -> bool` | Returns `true` if guest agent responds to `guest-ping` |
 | `query_block_snapshots` | `async fn(&mut self, device) -> Result<Vec<SnapshotInfo>, QmpError>` | Lists snapshots for a block device |
 
 **`VmStatus`**: `Running` | `Paused` | `Shutdown` | `Other`.
 
-**`QmpError`**: `ConnectFailed`, `Io`, `ConnectionClosed`, `ParseError`, `CommandFailed { command, class, desc }`.
+**`QmpError`**: `ConnectFailed { path: String, source: std::io::Error }`, `Io`, `ConnectionClosed`, `ParseError`, `CommandFailed { command, class, desc }`.
 
-**QMP wire schema for `snapshot-save`/`-load`/`-delete` (job-based API, QEMU 6.0+)** — this is
-the part that's easy to get wrong and previously *was* wrong in this crate, so it's documented
-here explicitly:
+**`GuestExecStatus`**: `exitcode: i64`, `exited: bool`, `out_data: String`, `err_data: String`.
+
+**QMP wire schema for `snapshot-save`/`-load`/`-delete` (job-based API, QEMU 6.0+)** — this is the part that's easy to get wrong and previously *was* wrong in this crate, so it's documented here explicitly:
 
 ```text
 snapshot-save:   {"job-id": ..., "tag": ..., "vmstate": <node-name>, "devices": [<node-name>, ...]}
@@ -92,26 +103,12 @@ snapshot-load:   {"job-id": ..., "tag": ..., "vmstate": <node-name>, "devices": 
 snapshot-delete: {"job-id": ..., "tag": ..., "devices": [<node-name>, ...]}               (no vmstate)
 ```
 
-`devices` is a **list**, not a singular `device` field — QEMU rejects the command outright
-(`{"error": ...}`, job never starts) if you send `device` instead. `snapshot-save`/`-load` also
-require `vmstate` (the node where CPU/RAM state is stored); `snapshot-delete` does not. This
-crate's `device: &str` parameter on `snapshot_save`/`snapshot_load`/`snapshot_delete` is used to
-build both `vmstate` and the single-element `devices` array internally — the public method
-signatures didn't need to change, only the JSON they construct.
+`devices` is a **list**, not a singular `device` field — QEMU rejects the command outright (`{"error": ...}`, job never starts) if you send `device` instead. `snapshot-save`/`-load` also require `vmstate` (the node where CPU/RAM state is stored); `snapshot-delete` does not. This crate's `device: &str` parameter on `snapshot_save`/`snapshot_load`/`snapshot_delete` is used to build both `vmstate` and the single-element `devices` array internally — the public method signatures didn't need to change, only the JSON they construct.
 
-**Job status polling** — QEMU's job state machine has exactly one terminal status,
-`"concluded"` (`created`/`running`/`paused`/`ready`/`standby`/`waiting`/`pending`/`aborting` are
-all non-terminal). There is no `"completed"`/`"failed"`/`"aborted"` status string in the real
-protocol — an earlier version of `wait_job_completion` checked for those, which meant it always
-fell through to the timeout branch even on a successful snapshot. Success vs. failure of a
-`"concluded"` job is distinguished by the presence of an `error` field, not by a different status
-value. After a job reaches `"concluded"` (either outcome), `job-dismiss` must be called
-explicitly — otherwise it stays visible in `query-jobs` forever.
+**Job status polling** — QEMU's job state machine has exactly one terminal status, `"concluded"` (`created`/`running`/`paused`/`ready`/`standby`/`waiting`/`pending`/`aborting` are all non-terminal). There is no `"completed"`/`"failed"`/`"aborted"` status string in the real protocol — an earlier version of `wait_job_completion` checked for those, which meant it always fell through to the timeout branch even on a successful snapshot. Success vs. failure of a `"concluded"` job is distinguished by the presence of an `error` field, not by a different status value. After a job reaches `"concluded"` (either outcome), `job-dismiss` must be called explicitly — otherwise it stays visible in `query-jobs` forever.
 
-**Event skipping** — `JOB_STATUS_CHANGE` (and other) events can arrive on the same socket
-between sending a command and receiving its reply, especially during the `query-jobs` polling
-loop. `execute_raw` reads through any message lacking `return`/`error` (i.e. an event) via
-`read_reply_skipping_events` instead of treating it as a parse error.
+**Package manager auto-detection**: `guest_exec_package` (used by guest package installation/removal) runs `which apt-get || which dnf || which pacman` via QMP guest-exec to auto-detect the package manager, then dispatches to the detected one. Falls back to `apt-get` if detection fails.
+**Event skipping** — `JOB_STATUS_CHANGE` (and other) events can arrive on the same socket between sending a command and receiving its reply, especially during the `query-jobs` polling loop. `execute_raw` reads through any message lacking `return`/`error` (i.e. an event) via `read_reply_skipping_events` instead of treating it as a parse error.
 
 ### `backend` — QemuBackend Implementation
 
@@ -120,15 +117,30 @@ loop. `execute_raw` reads through any message lacking `return`/`error` (i.e. an 
 - `instances: Mutex<HashMap<BackendHandle, RunningInstance>>` — registry of live instances.
 - Each `RunningInstance` holds: `process: QemuProcess`, `qmp_client: Option<QmpClient>` (lazy-connected on first QMP operation), `snapshot_timeout: Duration` (from `DiskConfig::snapshot_timeout_secs`, default 30s).
 
+
+**QMP socket directory**: Uses `andler_core::paths::runtime_dir()` → `$XDG_RUNTIME_DIR` on most Linux hosts. This is `$XDG_RUNTIME_DIR` (typically `/run/user/<uid>`), not `/tmp`. On multi-user systems, `/tmp` is world-writable and vulnerable to symlink attacks on IPC sockets. The directory is created with 0700 permissions via `ensure_private_dir` in `spawn`. Previously this was a hardcoded constant `/tmp/andler/qmp` — the single source of truth in `andler-core` eliminated the need for a separate constant here.
 **`QmpClient` lazy connection**: QMP socket isn't ready immediately after `spawn`. The client connects on first `pause`/`resume`/`status`/`snapshot` call via `ensure_qmp_connected`.
 
+
+**QMP error handling and recovery**: The `diagnose_and_reset_qmp` function handles connection-level failures (`Io`/`ConnectionClosed`/`ConnectFailed`). Before this fix, a dropped QMP connection stayed cached forever — `ensure_qmp_connected` only checked `is_some()`, not whether the connection actually works. The fix distinguishes:
+- **QEMU process exited** → clears stale client, returns `ProcessNotRunning` error
+- **Process alive, connection dropped** (transient) → clears stale client, returns `None` to signal retry
+
+Only connection-level errors trigger this; `CommandFailed`/`ParseError` mean QEMU answered (just with an error), so retry wouldn't help.
+
+**`BackendHandle` format**: Currently `"qemu:{instance_id}"` — this is an implementation detail. Callers should treat it as opaque, obtained from `spawn()` and passed back as-is.
 **Snapshot device name**: Hardcoded as `drive-disk0` (matches `cmdline.rs`). If multi-disk support is added in the future, this must become a parameter. This same name is used both as the `vmstate` node and as the sole entry of `devices` — there's only one disk, so there's nowhere else to put the VM state.
+**QMP reconnection on transient failures**: `pause()` and `resume()` (and similar QMP operations) handle connection-level errors (`Io` / `ConnectionClosed`) gracefully: on error, the backend calls `diagnose_and_reset_qmp()`, checks process liveness, reconnects to the QMP socket, and retries the operation once. This provides transparent retry-on-transient-failure behavior.
+- **Network cleanup on spawn failure**: If `QemuProcess::spawn()` fails after network setup (bridge/tap/veth already created), the code tears down those network resources before propagating the error. Guarantees no leaked network interfaces on spawn failure.
+- **`try_lock` for log_stream/metrics_stream**: Both `log_stream` and `metrics_stream` use `try_lock()` on the instances Mutex instead of `.await lock()`. If the lock would block, they return an empty stream. Rationale: `try_lock()` is the only synchronous way to get `RunningInstance` without converting the method to async (which would break trait signature consistency). In practice it never fails because other methods hold the lock only for short synchronous sections. Empty stream = subscribe on next call.
+- **`kill_on_drop(true)`**: `tokio::process::Child` is configured with `kill_on_drop(true)`. If the Rust handle is dropped (e.g., panic), the QEMU process is killed — prevents orphaned QEMU processes.
+- **Log file failure is non-fatal**: If the log file cannot be opened (no permissions, bad path), it's not fatal — a warning is logged and `log_file_path` is set to `None`. The daemon still gets log lines via `tracing`/`subscribe_logs` independently.
 
 ### `metrics` — Host Metrics Collection
 
 Collects resource metrics from `/proc` for the QEMU process. No QMP needed.
 
-**Public API**:
+**Public API:**
 
 | Function | Signature | Description |
 |----------|-----------|-------------|
@@ -136,7 +148,7 @@ Collects resource metrics from `/proc` for the QEMU process. No QMP needed.
 | `spawn_metrics_poller` | `fn(pid, ticks_per_sec, interval, sender) -> JoinHandle<()>` | Background task that reads metrics every `interval` and sends via `broadcast::Sender` |
 | `ticks_per_second` | `fn() -> u64` | Reads `sysconf(_SC_CLK_TCK)` for CPU% calculation |
 
-**Data sources**:
+**Data sources:**
 - **CPU%**: `/proc/<pid>/stat` fields utime (index 11) + stime (index 12), delta-based: `delta(utime+stime) / delta(uptime) / num_cpus * 100`
 - **RAM**: `/proc/<pid>/status` VmRSS field
 - **Disk I/O**: `/proc/<pid>/io` read_bytes/write_bytes
@@ -146,30 +158,15 @@ Collects resource metrics from `/proc` for the QEMU process. No QMP needed.
 
 ### GPU metrics — moved to `andler-firmware`
 
-GPU metrics (AMD/NVIDIA/Intel sysfs + NVML) used to live in this
-crate as `gpu_metrics.rs`. They now live in
-`services/andler-firmware/src/metrics/` (`gpu_amd.rs`/`gpu_nvidia.rs`/
-`gpu_intel.rs`), alongside GPU vendor *detection* (`detect/gpu.rs`) —
-both read the same sysfs paths/vendor tools, so detection and monitoring
-belong in one crate. See that crate's README/doc comments for the vendor
-details (sysfs paths, NVML/nvidia-smi output format, the Intel
-`rc6_residency_ms` load-delta calculation, etc.) — unchanged, just moved.
+GPU metrics (AMD/NVIDIA/Intel sysfs + NVML) used to live in this crate as `gpu_metrics.rs`. They now live in `services/andler-firmware/src/metrics/` (`gpu_amd.rs`/`gpu_nvidia.rs`/`gpu_intel.rs`), alongside GPU vendor *detection* (`detect/gpu.rs`) — both read the same sysfs paths/vendor tools, so detection and monitoring belong in one crate. See that crate's README/doc comments for the vendor details (sysfs paths, NVML/nvidia-smi output format, the Intel `rc6_residency_ms` load-delta calculation, etc.) — unchanged, just moved.
 
-**Integration**: `spawn_metrics_poller` in `metrics.rs` calls
-`andler_firmware::metrics::read_gpu_metrics()` and merges the result into
-the base metrics sample every tick via
-`andler_firmware::metrics::merge_gpu_metrics()`. Single merged
-`ResourceMetrics` message per tick — no separate GPU channel.
+**Integration**: `spawn_metrics_poller` in `metrics.rs` calls `andler_firmware::metrics::read_gpu_metrics()` and merges the result into the base metrics sample every tick via `andler_firmware::metrics::merge_gpu_metrics()`. Single merged `ResourceMetrics` message per tick — no separate GPU channel.
 
 ## Tests
 
-### Without `/dev/kvm` or QEMU binary
-
-    - **`cmdline`** (27 tests): All argument blocks tested independently against
-      исходной референсной конфигурации. Includes edge cases: `Passthrough` panic,
-      `None` display engine, clipboard disabled, size suffixes.
+ - **`cmdline`** (32 tests): All argument blocks tested independently against reference configuration. Includes edge cases: `Passthrough` panic, `None` display engine, clipboard disabled, size suffixes.
 - **`qmp`**: JSON parsing of QMP responses (`QmpReply`, `VmStatus`, `QueryStatusReturn`, `SnapshotInfo`, `QueryJobInfo`), plus `UnixStream::pair`-based fake-QMP-peer tests covering the real `snapshot-save`/`-load`/`-delete` wire schema (`devices`+`vmstate`, not the previously-buggy singular `device`), `wait_job_completion`'s `"concluded"`+`error` semantics (not the nonexistent `"completed"`/`"failed"`/`"aborted"` strings an earlier version checked), `job-dismiss`, and async-event skipping during polling.
-- **`backend`** (16 tests): `name_returns_qemu`, `Passthrough` validation, unknown handle handling, `VmStatus → InstanceState` mapping, empty `metrics_stream`/`log_stream`.
+- **`backend`** (17 tests): `name_returns_qemu`, `Passthrough` validation, unknown handle handling, `VmStatus → InstanceState` mapping, empty `metrics_stream`/`log_stream`.
 - **`process`** (6 tests): `SpawnFailed` via missing binary, `drain_to_tracing` line publishing, subscriber tolerance, multiple subscribers fan-out.
 - **`metrics`** (7 tests): CPU stat parsing, CPU% computation, I/O rates, RSS parsing, net_dev parsing.
 - GPU metrics tests (AMD/NVIDIA/Intel detection, NVIDIA output parsing, the Intel `rc6_residency_ms` ABI regression test, `intel_gpu_load_from_delta`/`compute_intel_gpu_load`, merge behavior) now live in `services/andler-firmware` — see that crate's tests, not this one.

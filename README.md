@@ -161,12 +161,10 @@ gl = true
 | `wizard` | Launch interactive wizard (default when `andler` is invoked without a subcommand) |
 | `edit` | Edit instance config in `$VISUAL`/`$EDITOR` (does not restart running instance) |
 | `start` | Start instance |
-| `stop` | Stop instance (default: graceful ACPI shutdown; `--graceful`: force without waiting) |
+| `stop` | Stop instance (default: force kill (SIGKILL); `--graceful`: graceful ACPI shutdown (SIGTERM)) |
 | `pause` | Pause running instance |
 | `resume` | Resume paused instance |
-- **`cmdline`** (27 tests): All argument blocks tested independently against reference configuration. Includes edge cases: `Passthrough` panic, `None` display engine, clipboard disabled, size suffixes.
 | `list` | List all instances (`--state`, `--name` regex, `--sort`, `--json`) |
-| `config` | Print full instance configuration |
 | `remove` | Remove instance (`--purge` to delete files) |
 | `clone` | Clone instance (linked/full-standalone/shared-base) |
 | `export` | Export disk as standalone file |
@@ -323,7 +321,7 @@ andler/
 │
 ├── services/                      Infrastructure services
 │   ├── andler-disk/               qemu-img wrapper + guest tools offline provisioning
-│   ├── andler-net/                Stub for networking
+│   ├── andler-net/                Bridge/Isolated/NAT networking via iproute2/nftables
 │   ├── andler-store/              SQLite state persistence
 │   ├── andler-firmware/           OVMF detect/provision + host hardware
 │   │                              auto-detect (GPU/ARM/audio/passt) +
@@ -338,12 +336,13 @@ andler/
 │       ├── grpc_roundtrip_test.rs  Integration tests
 │       └── daemon/
 │           ├── mod.rs              Core orchestration logic (~268 lines)
-│           ├── error.rs            DaemonError enum (23 variants)
+│           ├── error.rs            DaemonError enum (20 variants)
 │           ├── types.rs            InstanceRecord, SnapshotRecord, InstanceDirGuard
 │           ├── instance_ops.rs     create/start/stop/pause/resume/remove, resolve_instance_id
 │           ├── clone_ops.rs        clone_instance, export, find_live_clones
 │           ├── snapshot_ops.rs     create/restore/delete/list snapshots
 │           ├── query_ops.rs        status, list, get_config, update_instance_config, stream
+│           ├── health_ops.rs       health check, mark_instance_crashed
 │           └── tests/              ~73 unit tests across 10 modules
 │
 ├── cli/                           Command-line client
@@ -357,6 +356,10 @@ andler/
 │       ├── lifecycle.rs           Start, Stop, Pause, Resume, Remove
 │       ├── clone.rs               Clone, Export
 │       ├── helpers.rs             parse_size, format_size, ensure_qcow2_extension
+│       ├── guest.rs               Guest subcommand (package management via QMP)
+│       ├── edit.rs                Edit command ($VISUAL/$EDITOR config open)
+│       ├── verify.rs              --verify flag (pre-flight checks)
+│       ├── preview.rs             --dry-run flag (resolve QEMU command line)
 │       └── wizard/                Interactive setup wizard
 │           ├── mod.rs             Entry point, orchestration, build_create_request()
 │           ├── basic.rs           Basic mode (6 questions)
@@ -424,9 +427,8 @@ Each crate has its own README with detailed API reference:
 - [`backends/andler-qemu/README.md`](backends/andler-qemu/README.md) — QEMU backend, ~75 tests
 - [`backends/andler-vmm/README.md`](backends/andler-vmm/README.md) — Cloud Hypervisor stub
 - [`services/andler-disk/README.md`](services/andler-disk/README.md) — Disk ops + guest tools provisioning
-- [`services/andler-net/README.md`](services/andler-net/README.md) — Networking stub
 - [`services/andler-store/README.md`](services/andler-store/README.md) — SQLite persistence
-- [`services/andler-rpc/README.md`](services/andler-rpc/README.md) — gRPC protocol + conversions
+- [`services/andler-net/README.md`](services/andler-net/README.md) — Bridge/Isolated/NAT networking via iproute2/nftables
 - [`daemon/README.md`](daemon/README.md) — Daemon orchestration, ~73 unit tests + 24 integration tests
 - [`cli/README.md`](cli/README.md) — CLI commands + TOML parser + wizard, 91 tests
 

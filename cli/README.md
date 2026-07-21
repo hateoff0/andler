@@ -11,8 +11,39 @@ The `andler` binary — a thin gRPC client to `andlerd` via `andler-rpc`. No bus
 | `andler create --file instance.toml` | Create LinuxVm or AndroidVm from TOML (auto-detected) |
 | `andler create --kind linux --name <name> --iso-path <path> --disk-path <path> --ovmf-vars-template <path>` | Create LinuxVm with CLI flags |
 | `andler create --kind android --name <name> --android-version <ver> --base-image-path <path> --ovmf-vars-template <path>` | Create AndroidVm with CLI flags |
+| `andler create --instance <path>` | Create from TOML file via `--instance` flag |
+
+### Create Flags (mutual exclusivity)
+
+The following flags define how instance configuration is provided — they are **mutually exclusive**:
+
+| Flags | Description |
+|-------|-------------|
+| `--file <path>` | Path to TOML instance file (shorthand for `--instance`) |
+| `--instance <path>` | Path to TOML instance file |
+| `--kind linux --name …` | All required LinuxVm fields (`--kind linux --name --iso-path --disk-path --ovmf-vars-template`) |
+| `--kind android --name …` | All required AndroidVm fields (`--kind android --name --android-version --base-image-path --ovmf-vars-template`) |
+| `--wizard` | Interactive wizard mode |
+
+**TOML-only flags** (require `--file`/`--instance`):
+- `--quick`: Skip wizard prompts, use defaults for optional fields
+- `--dry-run`: Validate and preview without creating
+- `--verify`: Run pre-flight checks (ISO/disk/OVMF existence, GPU memory, CPU/memory allocation)
+Exit code: 0 if all checks passed, 1 if any failed — scriptable (`andler create --verify ... && andler create ...`).
+
+**CLI-only flags** (require `--kind`):
+- `--disk-size-gib <n>`: Initial disk size in GiB
+- `--compact-on-shutdown`: Enable automatic disk compaction on graceful shutdown
+- `--cdrom-bus <auto|virtio|ide>`: CD-ROM bus type
+- `--no-uefi`: Disable UEFI, use BIOS/CSM boot
+- `--overlay-size-gib <n>`: Overlay size in GiB (Android only)
+- `--gapps <true|false>`: Include Google Apps (Android only)
+- `--microg <true|false>`: Include microG (Android only)
+- `--arm-translator <libndk|hibridge>`: ARM translation mode (Android only)
+- `--instances-root <path>`: Custom instances root directory (Android only)
+
 | `andler start <instance-id>` | Start an instance |
-| `andler stop <instance-id> [--graceful]` | Stop an instance (default: graceful ACPI shutdown; `--graceful`: force without waiting) |
+| `andler stop <instance-id> [--graceful]` | Stop an instance (default: force kill (SIGKILL); `--graceful`: graceful ACPI shutdown (SIGTERM)) |
 | `andler pause <instance-id>` | Pause a running instance |
 | `andler resume <instance-id>` | Resume a paused instance |
 | `andler status <instance-id>` | Print current status |
@@ -21,7 +52,8 @@ The `andler` binary — a thin gRPC client to `andlerd` via `andler-rpc`. No bus
 
 | Command | Description |
 |---------|-------------|
-| `andler list [--full-id] [--state <state>] [--name <regex>] [--sort <key>] [--json]` | List instances. `--full-id`/`-q`: full UUID. `--state`: filter by state. `--name`: regex filter. `--sort`: `name`/`state`. `--json`: machine-readable. |
+| `andler list [--full-id] [--state <state>] [--name <regex>] [--sort <key>] [--json]` | List instances. `--full-id`/`-q`: full UUID. `--state`: filter by state. `--name`: regex filter. `--sort`: `name`/`state`/`none` (default: `none`). `--json`: machine-readable. |
+Default: UUIDs truncated to 8 characters (matching `docker ps`). Use `--full-id` / `-q` for full UUID.
 | `andler config <instance-id>` | Print full instance configuration (all 9 sections) |
 
 ### Lifecycle Management
@@ -37,6 +69,7 @@ The `andler` binary — a thin gRPC client to `andlerd` via `andler-rpc`. No bus
 | Command | Description |
 |---------|-------------|
 | `andler logs <instance-id> [--source stdout|stderr] [--grep <regex>] [--tail <n>]` | Live-tail QEMU stdout/stderr. `--source`: filter stream. `--grep`: regex filter. `--tail`: backlog lines. |
+`--tail <n>`: Shows last `n` lines. Uses a 300ms idle gap as a heuristic to detect the boundary between historical and live lines (andlerd sends both as one unbroken stream). A ring buffer holds `n` filtered lines while waiting for the gap; once observed, the buffer is flushed and switches to plain streaming.
 | `andler metrics <instance-id> [--once] [--json]` | Stream resource metrics. `--once`: single sample and exit. `--json`: machine-readable output. |
 
 ### Snapshots
@@ -80,6 +113,8 @@ Known packages: `spice-vdagent` (shared folders), `qemu-guest-agent` (host-guest
 ## Daemon Address
 
 Override with `--daemon-addr <url>` before the subcommand, or `ANDLERD_ADDR` env var. Default: `http://127.0.0.1:50051`.
+**Environment variables**:
+- `ANDLER_WIZARD_NOT_TTY`: When set, forces `is_tty()` to return false (test override for wizard).
 
 ## TOML Instance File Format
 
@@ -129,8 +164,7 @@ ovmf_vars_path = "/home/user/.andler/my-linux-vm/VARS.fd"
 disk_size_gib = 100
 snapshot_timeout_secs = 60
 # Off by default. Rewrites the whole disk file via qemu-img convert after
-# every graceful shutdown to reclaim freed-up space — see PLAN.md, "Disk
-# management". Only takes effect for qcow2 disks.
+# every graceful shutdown to reclaim freed-up space — see API.md, "Disk management". Only takes effect for qcow2 disks.
 compact_on_shutdown = false
 # "auto" (default) picks virtio-scsi for known Linux distros (by ISO
 # filename) and ide otherwise; can be forced to "virtio" or "ide".
@@ -167,7 +201,7 @@ mode = "Nat"
 device_model = "virtio-net-pci"
 
 [firmware]
-ovmf_code_path = "/usr/share/edk2-ovmf/x64/OVMF_CODE.4m.fd"
+ovmf_code_path = "/usr/share/edk2/x64/OVMF_CODE.4m.fd"
 ovmf_vars_path = "/path/to/VARS.fd"
 
 [audio]
@@ -214,7 +248,11 @@ backend = "None"
 
 **`InstanceFileResult`**: `Linux(CreateInstanceRequest)` | `Android(CreateAndroidInstanceRequest)`.
 
-**`InstanceFileError`**: `Read { path, source }` | `Parse { path, source }`.
+**`InstanceFileError`**: `Read { path, source }` | `Parse { path, source }` | `InvalidPath { path, reason }`.
+
+**Path canonicalization**: `InstanceFile::load()` canonicalizes all path fields (relative paths become absolute from the TOML file's directory). Paths are validated and must exist (for required files) or be creatable (for disk paths).
+
+**Legacy field precedence**: For Android VMs with `arm_translator`, the field accepts `libndk` as a legacy alias for the newer `hibridge` implementation. When both `arm_translator = "libndk"` and `arm_translator = "hibridge"` are present, `hibridge` takes precedence.
 
 ### Tests
 
@@ -273,3 +311,5 @@ GPU fields (vram, gpu) appear when AMD, NVIDIA, or Intel GPU data is available.
 | `wizard/basic.rs` | 303 lines | Basic mode: kind, name, ISO, disk questions |
 | `wizard/advanced.rs` | 604 lines | Advanced mode: 16 hardware questions with auto-detection defaults |
 | `wizard/summary.rs` | 282 lines | Summary display, Create/Modify/Cancel actions |
+| `verify.rs` | 11.0KB | `--verify` flag on create — pre-flight checks (ISO, disk, OVMF, GPU memory, CPU/memory) |
+| `preview.rs` | 6.5KB | `--dry-run` flag — resolves and prints what would be created including QEMU command line |

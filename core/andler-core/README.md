@@ -6,21 +6,28 @@ Domain model for ANDLER: instance configuration, finite state machine, and hyper
 
 ### `paths` — Unified Path Resolution
 
-Single source of truth for all filesystem paths. Reads `ANDLER_HOME` env var, falls back to `~/.andler/`.
+**Rationale**: Before this module existed, each consumer resolved paths independently — `cli/src/main.rs`, `cli/src/instance_file.rs`, and `daemon/src/main.rs` all had copies of the same `dirs::data_local_dir().join("andler/...")` logic. Changing the default root path required edits in N places, risking divergence. This module provides a single source of truth.
+
+**`ANDLER_HOME` resolution priority:**
+1. `$ANDLER_HOME` environment variable (if set and non-empty) — used as-is
+2. `$HOME/.andler` via `dirs::home_dir()`
+3. `~/.andler` fallback if `home_dir()` returns `None` (unusual environments)
+
+**No migration**: `ANDLER_HOME` (and any derived paths) affects only *new* instances. Each instance's path is fixed at creation time and stored in `InstanceConfig`. Changing `ANDLER_HOME` after instances exist does NOT automatically move or find files at the old path. This is intentional — migration is a separate operational concern.
 
 | Function | Returns |
 |----------|---------|
-| `andler_home()` | Root data directory |
+| `andler_home()` | Root data directory (`$ANDLER_HOME` or `~/.andler`) |
 | `instances_root()` | `<home>/instances/` |
-| `base_images_dir()` | `<home>/base-images` |
-| `ovmf_cache_dir()` | `<home>/ovmf/` |
-| `venus_cache_dir()` | `<home>/venus-cache` |
+| `base_images_dir()` | `<home>/cache/base-images` |
+| `arm_translators_dir()` | `<home>/cache/arm-translators` |
 | `db_path()` | `<home>/andlerd.db` |
-| `runtime_dir()` | `$XDG_RUNTIME_DIR` or `/run/user/<uid>` or `std::env/temp_dir()` |
+| `runtime_dir()` | `$XDG_RUNTIME_DIR` or `/run/user/<uid>` or `std::env::temp_dir()` |
 | `current_uid()` | Raw `getuid(2)` FFI call |
 | `ensure_private_dir(dir)` | Create dir with 0700 permissions (async) |
 | `ensure_private_dir_sync(dir)` | Create dir with 0700 permissions (sync) |
 
+**Security note**: `runtime_dir()` uses `$XDG_RUNTIME_DIR` instead of `/tmp` because `/tmp` is world-writable on multi-user systems and vulnerable to symlink attacks on IPC sockets. QMP sockets and NBD mount points are created here with 0700 permissions.
 ### `backend` — Hypervisor Backend Abstraction
 
 Defines the `HypervisorBackend` trait — the contract that all hypervisor implementations (QEMU, future Cloud Hypervisor) must fulfill.
@@ -42,6 +49,10 @@ Defines the `HypervisorBackend` trait — the contract that all hypervisor imple
 | `snapshot_list` | `async fn(&self, handle: &BackendHandle) -> Result<Vec<SnapshotInfo>, BackendError>` | List snapshots (default: `NotImplemented`) |
 | `metrics_stream` | `fn(&self, handle: &BackendHandle) -> BoxStream<'_, ResourceMetrics>` | Real-time resource metrics (CPU%, RAM, disk, net, GPU) |
 | `log_stream` | `fn(&self, handle: &BackendHandle) -> BoxStream<'_, LogLine>` | Live-tail stdout/stderr of the hypervisor process |
+| `is_guest_agent_available` | `async fn(&self, handle: &BackendHandle) -> Result<bool, BackendError>` | Check if guest agent is reachable |
+| `guest_exec_install` | `async fn(&self, handle: &BackendHandle, package: &str) -> Result<(), BackendError>` | Install package in guest via QMP guest-exec |
+| `guest_exec_remove` | `async fn(&self, handle: &BackendHandle, package: &str) -> Result<(), BackendError>` | Remove package from guest via QMP guest-exec |
+| `guest_check_binary_installed` | `async fn(&self, handle: &BackendHandle, binary: &str) -> Result<bool, BackendError>` | Check if binary exists in guest filesystem |
 
 Any method not implemented by a specific backend must return `BackendError::NotImplemented` — never panic. Exception: `metrics_stream`/`log_stream` have signatures (`fn`, not `async fn`, no `Result`) that don't allow returning errors; "not implemented" or "no active stream" is expressed as an immediately-empty stream.
 
@@ -94,6 +105,7 @@ Created → Starting → Running ⇄ Paused → Stopping → Stopped → Created
 
 **`InstanceState::is_terminal(&self) -> bool`**: `true` for `Stopped` and `Error` — means "this run has ended", not "no outgoing transitions exist"; both accept `Start` and return to `Starting`.
 
+ **`InstanceState::is_disk_idle(&self) -> bool`**: Returns `true` for `Created`, `Stopped`, and `Error` states — used by the daemon to guard disk operations (cloning, resizing, ARM translator switching) that require the disk to not be in use by a running VM.
 ### `config/` — Instance Configuration
 
 Nine configuration sections, each in its own file:
@@ -137,10 +149,9 @@ Each sub-config has a `reference_default()` method that produces sensible defaul
 
 #### `config::disk`
 
-- `DiskConfig`: `path`, `size_bytes`, `format` (`Qcow2` | `Raw` | `Vdi`), `base_image: Option<PathBuf>` (backing file for overlays), `thin_provisioning`, `trim_on_shutdown`, `snapshot_timeout_secs: Option<u64>` (per-instance snapshot job timeout, default 30s), `compact_on_shutdown: bool` (auto-compact after stop, default false).
-- `reference_default(path)`: 256 GiB qcow2, no backing, thin, discard.
+ - `DiskConfig`: `path`, `size_bytes`, `format` (`Qcow2` | `Raw` | `Vdi`), `base_image: Option<PathBuf>` (backing file for overlays), `thin_provisioning`, `trim_on_shutdown`, `snapshot_timeout_secs: Option<u64>` (per-instance snapshot job timeout, default: `None` — no timeout), `compact_on_shutdown: bool` (auto-compact after stop, default false).
+- `reference_default(path)`: **256 GiB** qcow2, no backing, thin, discard. This is not 40 GiB from the original reference script — 40 GiB was the lower bound for a typical Linux/Android installation at the time, but 256 GiB was chosen as the nominal upper limit. With thin-provisioned qcow2, this doesn't mean immediately-allocated space on the host, only the virtual ceiling.
 - `overlay(path, base_image, size_bytes)`: Creates an overlay config with backing file.
-
 #### `config::gpu`
 
 - `RenderBackend`: `Venus` | `VirtioGpu` | `VirGl` | `Cpu` | `Passthrough { gpu_pci_id }`. Only `Passthrough` is not implemented (`is_implemented()` returns false).
@@ -152,17 +163,18 @@ Each sub-config has a `reference_default()` method that produces sensible defaul
 - `DisplayEngine`: `Sdl` | `Gtk` | `Spice` | `Dbus` | `None` (headless, `-display none`).
 - `DisplayConfig`: `resolution` (width/height), `dpi`, `fps_limit` (0 = unlimited), `display_engine`, `fullscreen`.
 - Default: 1920x1080, 96 DPI, no limit, SDL, no fullscreen.
+**NVIDIA GTK issue**: GTK (`gtk,gl=on`) produces a black screen on some NVIDIA configurations. SDL works reliably on those same machines. The actual default (Sdl vs Gtk) is determined at runtime based on the host's GPU vendor, not a static default.
 
 #### `config::network`
 
 - `NetworkMode`: `Nat` | `Bridge { interface }` | `Isolated`.
 - `NetworkConfig`: `mode`, `device_model` (virtio-net-pci), `nat_backend: NatBackend` (`Slirp` | `Passt`).
-- Default: NAT, virtio-net-pci, Slirp.
 
+- Default: NAT, virtio-net-pci, **Slirp** (not Passt by default). Passt requires the `passt` binary on the host — if not found, ANDLER falls back to Slirp rather than failing. Slirp is the original reference configuration and works everywhere without dependencies.
 #### `config::firmware`
 
-- `FirmwareConfig`: `ovmf_code_path` (shared read-only OVMF_CODE), `ovmf_vars_path` (per-instance copy).
-- Default: OVMF_CODE at `/usr/share/edk2/x64/OVMF_CODE.4m.fd`.
+ - `FirmwareConfig`: `ovmf_code_path` (shared read-only OVMF_CODE), `ovmf_vars_path` (per-instance copy), `enable_uefi: bool` (whether to use UEFI boot, defaults to `true`).
+ - Default: OVMF_CODE at `/usr/share/edk2/x64/OVMF_CODE.4m.fd`, enable_uefi=true.
 
 #### `config::audio`
 
@@ -182,6 +194,7 @@ Each sub-config has a `reference_default()` method that produces sensible defaul
 - `CdromBus`: `VirtioScsi` | `Ide`.
 - `recommended_for_iso_filename(path)`: Auto-selects VirtioScsi for known Linux distros, Ide for Windows/unknown.
 - Default: Ide (safe fallback).
+**CdromBus is pre-resolved**: `cdrom_bus` is stored as an already-resolved decision, not "auto". The choice is made by the calling side (`CdromBus::recommended_for_iso_filename` + explicit CLI/wizard choice) BEFORE `InstanceConfig` is assembled — the struct stores the decision, not the "auto" intent.
 
 ### `android_profile` — Android Instance Profiles
 
@@ -190,6 +203,7 @@ Each sub-config has a `reference_default()` method that produces sensible defaul
 - **`AndroidProfile`**: `android_version`, `gapps`, `microg`, `arm_translator`.
   - `cache_key()`: Version/cache key string for base image lookup.
   - `resolve(...)`: Pure function — resolves profile into a full `InstanceConfig` with overlay disk. Does not download or create files.
+**Waydroid note**: AndroidVm is not a separate hypervisor — it's LinuxVm with a Waydroid guest image and an overlay disk on top of it. The difference is entirely in the `DiskConfig` used (overlay vs. standalone).
 
 ### `clone` — Clone Modes
 
@@ -200,7 +214,7 @@ Each sub-config has a `reference_default()` method that produces sensible defaul
 
 ### `error` — Error Types
 
-- **`BackendError`**: `NotImplemented { backend, operation }`, `HandleNotFound(String)`, `Io(String)`, `InvalidConfig { backend, reason }`.
+ - **`BackendError`**: `NotImplemented { backend, operation }`, `HandleNotFound(String)`, `Io(String)`, `InvalidConfig { backend, reason }`, `ProcessNotRunning`.
 - **`FsmError`**: `InvalidTransition { from, event }`.
 
 ## Tests

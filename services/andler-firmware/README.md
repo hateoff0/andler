@@ -8,6 +8,8 @@ Host hardware auto-detection and GPU metrics collection for ANDLER.
 
 The `detect_all()` entry point returns a `HardwareDefaults` struct with auto-detected values for all hardware components.
 
+**Note:** `detect_all()` is NOT cached — each call re-detects from scratch. Call it once at startup or when hardware changes (e.g., hot-plug GPU).
+
 | Module | What It Detects | How |
 |--------|----------------|-----|
 | `ovmf.rs` | UEFI/OVMF firmware paths | Scans distro-specific paths for CODE+VARS pairs |
@@ -22,8 +24,8 @@ The `detect_all()` entry point returns a `HardwareDefaults` struct with auto-det
 |---|---|
 | `detect_matched_pair()` | Primary entrypoint. Finds CODE+VARS from the same distro package. Falls back to independent `detect()`. |
 | `detect()` | Independent search — CODE and VARS found separately. |
-| `provision_vars(template, dest)` | Copy OVMF_VARS template into instance directory. |
-| `reset_vars(template, dest)` | Delete + re-copy VARS (equivalent to `--reset-boot`). |
+| `provision_vars(template, dest)` | Copy OVMF_VARS template into instance directory. Called once at instance creation. |
+| `reset_vars(template, dest)` | Delete + re-copy VARS (equivalent to `--reset-boot`). Destructive — destroys all boot entries. |
 
 **Supported distros:**
 
@@ -34,6 +36,8 @@ The `detect_all()` entry point returns a `HardwareDefaults` struct with auto-det
 | openSUSE | `/usr/share/qemu/ovmf-x86_64-code.bin` | `/usr/share/qemu/ovmf-x86_64-vars.bin` |
 | Fedora / RHEL | `/usr/share/edk2/ovmf/OVMF_CODE.fd` | `/usr/share/edk2/ovmf/OVMF_VARS.fd` |
 | Fallback | `/usr/share/edk2-ovmf/x64/OVMF_CODE.4m.fd` | `/usr/share/edk2-ovmf/x64/OVMF_VARS.4m.fd` |
+
+**OVMF 4M variant:** The 4 MiB variant (`OVMF_CODE.4m.fd`) supports Secure Boot and provides more NVRAM space for variable stores. Naming varies across distros — some use `.4m.fd`, others use `_4M.fd`.
 
 **Environment variable overrides (`andlerd`):**
 ```
@@ -52,10 +56,14 @@ Detects GPU vendor via sysfs (primary) and lspci (fallback), then selects approp
 | Intel | Venus (if requirements met) | GTK |
 | Unknown | Venus (if requirements met) | SDL |
 
+**NVIDIA GPU preference:** GTK display crashes to black on some NVIDIA GPUs with `gl=on`. SDL is safe and consistent across all vendors.
+
 **Venus requirement checks:**
 - Kernel >= 6.13
 - QEMU >= 9.2
-- Mesa >= 24.2
+- Mesa >= 24.2 (AMD and Intel only)
+
+**Mesa skip for NVIDIA:** When Venus is enabled on NVIDIA, it runs through the NVIDIA Vulkan driver, not Mesa's OpenGL stack. Therefore, the Mesa version check is skipped for NVIDIA — only kernel and QEMU version requirements apply.
 
 Falls back to VirGL if requirements not met.
 
@@ -98,6 +106,8 @@ Collects GPU utilization metrics from the host. Called by `andler-qemu/src/metri
 | `gpu_nvidia.rs` | NVML (`nvml-wrapper` crate, primary) + `nvidia-smi` CLI fallback | VRAM used/total, GPU utilization |
 | `gpu_intel.rs` | sysfs (`/sys/class/drm/card*/device/`) | GPU load via rc6_residency_ms delta |
 
+**Intel VRAM gap:** On Intel GPUs, "stolen memory" (VRAM) is exposed via debugfs (`/sys/kernel/debug/dri/*/i915_stolen_to_used_*`), not sysfs. The sysfs path used for AMD (`memory_info_edid_usable_mem`) is not available on Intel. This is not a stable ABI — may change across kernel versions.
+
 **Vendor priority:** AMD → NVIDIA → Intel (first found vendor wins).
 
 | Function | Description |
@@ -125,7 +135,7 @@ Used by the interactive wizard to pre-fill defaults.
 
 ## Tests
 
-48 tests across `detect/` and `metrics/`:
+47 tests across `detect/` and `metrics/`:
 
 | Module | Tests |
 |--------|-------|
@@ -134,7 +144,7 @@ Used by the interactive wizard to pre-fill defaults.
 | `detect/arm.rs` | 5 |
 | `detect/audio.rs` | 5 |
 | `detect/network.rs` | 1 |
-| `metrics/gpu_intel.rs` | 11 |
+| `metrics/gpu_intel.rs` | 10 |
 | `metrics/mod.rs` | 5 |
 | `metrics/gpu_nvidia.rs` | 4 |
 | `metrics/gpu_amd.rs` | 1 |

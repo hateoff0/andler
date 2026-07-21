@@ -29,6 +29,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_snapshots_instance_tag
 `InstanceConfig` and `InstanceState` are stored as JSON blobs, not as individual typed columns. The only access patterns today are "everything by `InstanceId`" and "everything for restore on startup" — there's no filtering by individual config fields.
 
 `ON DELETE CASCADE` ensures snapshots are cleaned up when their parent instance is deleted.
+**Why separate JSON columns?** `state_json` is stored separately from `config_json` because it updates much more frequently (every FSM transition) and independently from configuration. `save_state` should not require re-serializing the entire config.
 
 ## Public API
 
@@ -59,6 +60,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_snapshots_instance_tag
 ## Concurrency
 
 Single `rusqlite::Connection` under `Arc<Mutex<...>>`. Each call goes into `tokio::task::spawn_blocking`. At current operation frequency (FSM transitions per individual instance, not hundreds per second), a dedicated writer thread or WAL mode doesn't justify the complexity.
+
+**Poisoned mutex recovery**: All `.lock()` calls use `.unwrap_or_else(|e| e.into_inner())` to recover the guard even if the mutex is poisoned (previous holder panicked). Safe because the only thing behind the Mutex is a `rusqlite::Connection` — SQLite's own transaction/statement state is safe to continue using after a panic in user code.
 
 ## Important
 
