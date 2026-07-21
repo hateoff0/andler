@@ -1,7 +1,4 @@
-//! Конвертации между сгенерированными `proto`-типами и доменными типами
-//! `andler-core`. Каждое направление явное (`From`/`TryFrom`), без `serde`
-//! на proto-типах — это намеренно ручной, видимый код, а не магия
-//! derive-макроса поверх protobuf-сообщений.
+
 
 use std::path::PathBuf;
 
@@ -14,10 +11,7 @@ use andler_core::{
     NetworkConfig, NetworkMode, PointerMode, RenderBackend, Resolution, ResourceMetrics,
 };
 
-/// Ошибка конвертации proto-сообщения в доменный тип — на практике сейчас
-/// только "пришло значение enum'а, для которого нет соответствия"
-/// (`ANDROID_VERSION_UNSPECIFIED`, либо вообще не
-/// входящее в диапазон известных `prost` значение).
+
 #[derive(Debug, thiserror::Error)]
 pub enum ConvertError {
     #[error("missing or unspecified android_version")]
@@ -80,9 +74,7 @@ impl TryFrom<proto::CloneMode> for CloneMode {
     }
 }
 
-/// `UNSPECIFIED` -> `ArmTranslator::None` — не ошибка: старые клиенты,
-/// которые не знали об этом поле, физически не имели транслятора, так
-/// что это точное, а не приблизительное значение по умолчанию.
+
 impl From<proto::ArmTranslator> for ArmTranslator {
     fn from(value: proto::ArmTranslator) -> Self {
         match value {
@@ -129,18 +121,6 @@ impl From<AndroidProfile> for proto::AndroidProfile {
     }
 }
 
-// --- InstanceConfig (CreateInstanceRequest, LinuxVm) --------------------
-//
-// Каждая пара impl здесь — зеркало одного типа из `andler_core::config`.
-// Направление proto -> domain — `TryFrom` (enum'ы/oneof могут прийти
-// `UNSPECIFIED`/отсутствующими), domain -> proto — всегда `From` (доменные
-// типы по построению полны, конвертация в proto не может провалиться).
-// domain -> proto не используется в `service.rs` сегодня (там только
-// proto -> domain для `CreateInstanceRequest`), но добавлен симметрично
-// остальным типам в этом файле (`AndroidProfile`) — если `andler-cli`
-// когда-нибудь захочет показать уже созданный `InstanceConfig` обратно
-// через proto (например, "показать текущую конфигурацию инстанса"), эта
-// сторона уже на месте, а не специально вырезана.
 
 impl TryFrom<proto::CpuPriority> for CpuPriority {
     type Error = ConvertError;
@@ -169,19 +149,12 @@ impl TryFrom<proto::CpuConfig> for CpuConfig {
     type Error = ConvertError;
 
     fn try_from(value: proto::CpuConfig) -> Result<Self, Self::Error> {
-        // `priority()` — геттер на `&self` (`prost`-сгенерированный, для
-        // удобного доступа к enum-полю без ручного `i32`-каста), но
-        // вызывается после того, как `value.affinity` уже могло быть
-        // перемещено через `into_iter()` ниже — значит, его нужно
-        // прочитать первым, пока `value` ещё не тронут по частям.
         let priority = value.priority().try_into()?;
 
         Ok(CpuConfig {
             cores: value.cores,
             sockets: value.sockets,
             threads: value.threads,
-            // Пустой `repeated` ⇒ `None` — см. комментарий у поля
-            // `affinity` в `andler.proto`.
             affinity: if value.affinity.is_empty() {
                 None
             } else {
@@ -257,9 +230,7 @@ impl From<DiskFormat> for proto::DiskFormat {
 }
 
 impl From<proto::CdromBus> for CdromBus {
-    /// `CDROM_BUS_UNSPECIFIED` → `CdromBus::default()` (`Ide`), не ошибка
-    /// — в отличие от `DiskFormat`. См. doc-комментарий
-    /// `enum CdromBus` в `andler.proto`.
+
     fn from(value: proto::CdromBus) -> Self {
         match value {
             proto::CdromBus::VirtioScsi => CdromBus::VirtioScsi,
@@ -282,17 +253,12 @@ impl TryFrom<proto::DiskConfig> for DiskConfig {
     type Error = ConvertError;
 
     fn try_from(value: proto::DiskConfig) -> Result<Self, Self::Error> {
-        // Тот же порядок, что в `TryFrom<proto::CpuConfig>` выше:
-        // `format()` (геттер на `&self`) читается до того, как
-        // `value.path`/`value.base_image` перемещаются по значению.
         let format = value.format().try_into()?;
 
         Ok(DiskConfig {
             path: PathBuf::from(value.path),
             size_bytes: value.size_bytes,
             format,
-            // Пустая строка ⇒ `None` — см. комментарий у поля
-            // `base_image` в `andler.proto`.
             base_image: if value.base_image.is_empty() {
                 None
             } else {
@@ -349,10 +315,6 @@ impl TryFrom<proto::DisplayEngine> for DisplayEngine {
             proto::DisplayEngine::Sdl => Ok(DisplayEngine::Sdl),
             proto::DisplayEngine::Spice => Ok(DisplayEngine::Spice),
             proto::DisplayEngine::Dbus => Ok(DisplayEngine::Dbus),
-            // `DisplayNone`, не `None` — `DISPLAY_NONE` в proto не делится
-            // префиксом `DISPLAY_ENGINE_` с `DisplayEngineUnspecified`, и
-            // `prost` поэтому не обрезает префикс (тот же эффект, что у
-            // `AudioBackend::AudioNone` для `AUDIO_NONE` ниже).
             proto::DisplayEngine::DisplayNone => Ok(DisplayEngine::None),
             proto::DisplayEngine::Gtk => Ok(DisplayEngine::Gtk),
             proto::DisplayEngine::Unspecified => Err(ConvertError::MissingDisplayEngine),
@@ -376,11 +338,6 @@ impl TryFrom<proto::DisplayConfig> for DisplayConfig {
     type Error = ConvertError;
 
     fn try_from(value: proto::DisplayConfig) -> Result<Self, Self::Error> {
-        // Тот же порядок, что в `CpuConfig`/`DiskConfig` выше:
-        // `display_engine()` — геттер на `&self`, значит читается до
-        // того, как `value.resolution` перемещается по значению через
-        // `.ok_or(...)?` ниже (иначе `value` уже частично moved, и
-        // `&self`-метод на нём не скомпилируется).
         let display_engine = value.display_engine().try_into()?;
         let resolution = value
             .resolution
@@ -506,10 +463,7 @@ impl From<NetworkMode> for proto::NetworkMode {
     }
 }
 
-/// `UNSPECIFIED` -> `Slirp` — не ошибка, а фоллбэк на поведение исходной
-/// референсной конфигурации, т.к. старые сохранённые конфиги (до появления
-/// `nat_backend`) физически не могли заполнить это поле (тот же приём, что для
-/// `CdromBus`).
+
 impl From<proto::NatBackend> for NatBackend {
     fn from(value: proto::NatBackend) -> Self {
         match value {
@@ -601,9 +555,7 @@ impl From<AudioBackend> for proto::AudioBackend {
     }
 }
 
-/// `UNSPECIFIED` -> `VirtioSound` — не ошибка, тот же фоллбэк-приём, что
-/// для `NatBackend`/`CdromBus`: старые сохранённые конфиги физически не
-/// могли заполнить это поле.
+
 impl From<proto::AudioDevice> for AudioDevice {
     fn from(value: proto::AudioDevice) -> Self {
         match value {
@@ -644,11 +596,7 @@ impl From<AudioConfig> for proto::AudioConfig {
     }
 }
 
-/// `UNSPECIFIED` -> фоллбэк на устаревшее поле `tablet_mode` (обратная
-/// совместимость со старыми клиентами) -> `Tablet` по умолчанию, если и
-/// оно отсутствует (proto3 `bool` по умолчанию `false`, что дало бы
-/// `Mouse` — поэтому явный `Unspecified` fallback на `tablet_mode`, а не
-/// слепое чтение bool).
+
 impl From<proto::InputConfig> for InputConfig {
     fn from(value: proto::InputConfig) -> Self {
         let pointer_mode = match value.pointer_mode() {
@@ -673,8 +621,6 @@ impl From<proto::InputConfig> for InputConfig {
 impl From<InputConfig> for proto::InputConfig {
     fn from(value: InputConfig) -> Self {
         let mut msg = proto::InputConfig {
-            // Заполняем и устаревшее поле — старые клиенты, которые ещё
-            // не знают про `pointer_mode`, продолжают работать.
             tablet_mode: value.pointer_mode == PointerMode::Tablet,
             hide_host_cursor: value.hide_host_cursor,
             clipboard_enabled: value.clipboard_enabled,
@@ -694,12 +640,7 @@ impl From<PointerMode> for proto::PointerMode {
     }
 }
 
-/// Собирает полный `InstanceConfig` (`InstanceKind::LinuxVm`) из
-/// `CreateInstanceRequest`. `id` генерируется здесь же
-/// (`InstanceId::new()`), а не получается из запроса — клиент не выбирает
-/// `InstanceId`, как и в `create_android_instance` (см. комментарий у
-/// `rpc CreateInstance` в `andler.proto`). `backend` всегда
-/// `BackendKind::Qemu` — единственный зарегистрированный backend сегодня.
+
 impl TryFrom<proto::CreateInstanceRequest> for InstanceConfig {
     type Error = ConvertError;
 
@@ -754,18 +695,6 @@ impl TryFrom<proto::CreateInstanceRequest> for InstanceConfig {
     }
 }
 
-// --- GetInstanceConfig ---
-//
-// Изначально это была domain -> proto конвертация без обратного
-// направления ("сервер никогда не парсит `GetInstanceConfigResponse`
-// обратно — это чисто исходящий ответ"). С появлением `andler edit`
-// (см. PLAN.md, "18. Instance config editing") это перестало быть верно
-// на стороне **клиента**: CLI получает `GetInstanceConfigResponse`,
-// конвертирует его обратно в `InstanceConfig`, чтобы сериализовать в
-// TOML для редактирования. См. `TryFrom<proto::GetInstanceConfigResponse>
-// for InstanceConfig` ниже — сервер сам по-прежнему не выполняет эту
-// конвертацию (обновления идут через отдельный `UpdateInstanceConfigRequest`,
-// см. `update_request_to_instance_config`), только клиент.
 
 impl From<BackendKind> for proto::BackendKind {
     fn from(value: BackendKind) -> Self {
@@ -802,12 +731,7 @@ impl From<InstanceKind> for proto::InstanceKind {
     }
 }
 
-/// Собирает `GetInstanceConfigResponse` из доменного `InstanceConfig`
-/// целиком. `From`, не `TryFrom` — в отличие от направления
-/// proto -> domain (`CreateInstanceRequest -> InstanceConfig`, которое
-/// может встретить `UNSPECIFIED`/отсутствующий oneof от клиента),
-/// доменный `InstanceConfig` по построению полон, конвертация в proto не
-/// может провалиться.
+
 impl From<InstanceConfig> for proto::GetInstanceConfigResponse {
     fn from(value: InstanceConfig) -> Self {
         proto::GetInstanceConfigResponse {
@@ -828,12 +752,7 @@ impl From<InstanceConfig> for proto::GetInstanceConfigResponse {
     }
 }
 
-/// Обратное направление, используемое только клиентом (`cli/src/edit.rs`)
-/// — см. doc-комментарий раздела выше за тем, почему это не то же самое,
-/// что `update_request_to_instance_config` (тот берёт отдельно
-/// разрешённый `id`, этот — уже содержащийся в самом ответе
-/// `instance_id`, потому что `GetInstanceConfigResponse` его туда кладёт
-/// именно как разрешённый сервером, не пользовательский ввод).
+
 impl TryFrom<proto::GetInstanceConfigResponse> for InstanceConfig {
     type Error = ConvertError;
 
@@ -857,17 +776,7 @@ impl TryFrom<proto::GetInstanceConfigResponse> for InstanceConfig {
     }
 }
 
-/// Обратное направление для `UpdateInstanceConfigRequest` — до его
-/// появления `BackendKind`/`InstanceKind` конвертировались только
-/// domain -> proto (см. doc-комментарий у `From<InstanceConfig> for
-/// proto::GetInstanceConfigResponse` выше): единственный источник этих
-/// значений на входе клиента был либо неявным (`CreateInstanceRequest`
-/// всегда создаёт `Qemu`/`LinuxVm`), либо через отдельные специализированные
-/// сообщения (`CreateAndroidInstanceRequest`), не через сам `InstanceKind`
-/// oneof. `andler edit` — первый путь, где клиент шлёт `InstanceKind`
-/// целиком обратно, поэтому здесь `TryFrom`, не `From`: `UNSPECIFIED`
-/// здесь — это ошибка клиента (испорченный/вручную собранный TOML), а не
-/// осмысленный дефолт, в отличие от `CdromBus`/`NatBackend`.
+
 impl TryFrom<proto::BackendKind> for BackendKind {
     type Error = ConvertError;
 
@@ -904,14 +813,7 @@ impl TryFrom<proto::InstanceKind> for InstanceKind {
     }
 }
 
-/// Inverse of `update_request_to_instance_config` — used by `andler edit`
-/// (`cli/src/edit.rs`) to send the user's edited config back. Goes via
-/// `proto::GetInstanceConfigResponse` (which already has a `From<InstanceConfig>`
-/// impl, see above) rather than duplicating the field-by-field `.into()`
-/// calls a second time — same field set, just re-packaged into the
-/// update-request message shape (see the proto comment on
-/// `UpdateInstanceConfigRequest` for why the two messages mirror each
-/// other field-for-field).
+
 pub fn instance_config_to_update_request(
     cfg: InstanceConfig,
     instance_ref: String,
@@ -934,11 +836,7 @@ pub fn instance_config_to_update_request(
     }
 }
 
-/// Собирает `InstanceConfig` из `UpdateInstanceConfigRequest` — свободная
-/// функция, не `TryFrom`, потому что `id` не является частью самого proto-
-/// сообщения (там только `instance_ref`, строка, разрешаемая в
-/// `InstanceId` сервером до вызова этой функции, тем же путём, что и у
-/// остальных `*Request` с частичным ID — см. `Daemon::resolve_instance_id`).
+
 pub fn update_request_to_instance_config(
     id: andler_core::InstanceId,
     req: proto::UpdateInstanceConfigRequest,
@@ -961,10 +859,7 @@ pub fn update_request_to_instance_config(
     })
 }
 
-/// Парсит `instance_id` из proto-запроса (строка с UUID) в `InstanceId`.
-/// Отдельная функция, а не `impl TryFrom<String> for InstanceId` в
-/// `andler-core` — этот формат (строка из gRPC-запроса) специфичен для
-/// протокола, не часть домена.
+
 pub fn parse_instance_id(raw: &str) -> Result<andler_core::InstanceId, ConvertError> {
     if raw.is_empty() {
         return Err(ConvertError::MissingInstanceId);
@@ -974,10 +869,7 @@ pub fn parse_instance_id(raw: &str) -> Result<andler_core::InstanceId, ConvertEr
         .map_err(|source| ConvertError::InvalidInstanceId(raw.to_string(), source))
 }
 
-/// Заполняет `InstanceStatusResponse` из `InstanceState` — `detail`
-/// (диагностика backend'а, не часть FSM) заполняется отдельно вызывающей
-/// стороной (`andler-daemon::service`), так как `InstanceState` сам по себе
-/// её не несёт (см. `andler_core::backend::BackendStatus`).
+
 pub fn instance_state_to_proto(state: &InstanceState) -> (proto::InstanceStateKind, String) {
     match state {
         InstanceState::Created => (proto::InstanceStateKind::Created, String::new()),
@@ -992,11 +884,7 @@ pub fn instance_state_to_proto(state: &InstanceState) -> (proto::InstanceStateKi
     }
 }
 
-/// `Status` (`tonic`) — чужой тип для `andler-rpc`, но `ConvertError` —
-/// локальный, так что `impl ForeignTrait<LocalType> for ForeignType` здесь
-/// разрешён orphan rule (в отличие от попытки сделать то же самое в
-/// `andler-daemon`, где оба типа чужие). Это и есть причина, по которой
-/// конвертации лежат в `andler-rpc`, а не в крейте, который их использует.
+
 impl From<ConvertError> for tonic::Status {
     fn from(err: ConvertError) -> Self {
         tonic::Status::invalid_argument(err.to_string())
@@ -1012,12 +900,7 @@ impl From<LogStreamSource> for proto::LogStreamSource {
     }
 }
 
-/// Только domain -> proto: `LogLineResponse` — выходное сообщение
-/// `rpc StreamInstanceLogs`, клиент его не присылает обратно, поэтому
-/// `TryFrom<proto::LogLineResponse> for LogLine` сейчас не нужен (в
-/// отличие от большинства других типов в этом файле, у которых есть оба
-/// направления, потому что соответствующие proto-типы — это запросы,
-/// приходящие от клиента).
+
 impl From<LogLine> for proto::LogLineResponse {
     fn from(value: LogLine) -> Self {
         let mut msg = proto::LogLineResponse {
@@ -1045,8 +928,7 @@ impl From<ResourceMetrics> for proto::ResourceMetricsResponse {
     }
 }
 
-/// Command to switch an ARM translator — extracted from
-/// `SwitchArmTranslatorRequest` for use by `Daemon::switch_arm_translator`.
+
 pub struct SwitchArmTranslatorCmd {
     pub instance_ref: String,
     pub translator: ArmTranslator,
@@ -1075,8 +957,7 @@ impl TryFrom<proto::SwitchArmTranslatorRequest> for SwitchArmTranslatorCmd {
     }
 }
 
-/// Command to set a single config key/value — extracted from
-/// `SetInstanceConfigRequest` for use by `Daemon::set_instance_config`.
+
 pub struct SetInstanceConfigCmd {
     pub instance_ref: String,
     pub key: String,
@@ -1115,8 +996,6 @@ mod tests {
 
     #[test]
     fn android_profile_unspecified_arm_translator_falls_back_to_none() {
-        // Старые сохранённые профили не могли заполнить это поле —
-        // должны читаться как ArmTranslator::None, не как ошибка.
         let mut msg = proto::AndroidProfile {
             gapps: false,
             microg: false,
@@ -1170,7 +1049,6 @@ mod tests {
         assert_eq!(message, "boom");
     }
 
-    // --- InstanceConfig (CreateInstanceRequest, LinuxVm) -----------------
 
     fn sample_instance_config() -> InstanceConfig {
         InstanceConfig {
@@ -1193,12 +1071,7 @@ mod tests {
         }
     }
 
-    /// `InstanceConfig` сам по себе не конвертируется обратно в
-    /// `proto::CreateInstanceRequest` (нет смысла — `id`/`backend` не
-    /// часть запроса, см. комментарий у `TryFrom<CreateInstanceRequest>`),
-    /// поэтому round-trip строится через отдельные конвертации каждого
-    /// под-типа в обе стороны, а не через один сквозной `From`/`TryFrom`
-    /// на уровне всего сообщения.
+
     fn instance_config_to_create_request(cfg: &InstanceConfig) -> proto::CreateInstanceRequest {
         let (iso_path, cdrom_bus) = match &cfg.kind {
             InstanceKind::LinuxVm {
@@ -1233,8 +1106,6 @@ mod tests {
 
         let converted = InstanceConfig::try_from(request).unwrap();
 
-        // `id` не часть запроса (генерируется конвертацией), поэтому
-        // сравниваем все поля, кроме `id`, а не весь struct целиком.
         assert_eq!(converted.name, original.name);
         assert_eq!(converted.kind, original.kind);
         assert_eq!(converted.backend, original.backend);
@@ -1251,9 +1122,6 @@ mod tests {
 
     #[test]
     fn create_instance_request_with_passthrough_gpu_round_trips() {
-        // Passthrough — единственный вариант RenderBackend с полем,
-        // отдельный тест проверяет, что oneof-ветка с данными (а не
-        // просто пустой message-маркер) переживает round-trip.
         let mut cfg = sample_instance_config();
         cfg.gpu.render_backend = RenderBackend::Passthrough {
             gpu_pci_id: "0000:01:00.0".to_string(),
@@ -1345,9 +1213,6 @@ mod tests {
 
     #[test]
     fn create_instance_request_unspecified_cdrom_bus_defaults_to_ide() {
-        // В отличие от disk_format, unspecified cdrom_bus — не ошибка
-        // конфигурации, а сигнал "явного выбора не было" — см.
-        // doc-комментарий `enum CdromBus` в `andler.proto`.
         let cfg = sample_instance_config();
         let mut request = instance_config_to_create_request(&cfg);
         request.cdrom_bus = proto::CdromBus::Unspecified as i32;
@@ -1394,7 +1259,6 @@ mod tests {
         assert_eq!(back.affinity, cfg.affinity);
     }
 
-    // --- GetInstanceConfigResponse ---------------------------------------
 
     #[test]
     fn get_instance_config_response_preserves_linux_vm_kind_and_id() {
@@ -1443,9 +1307,6 @@ mod tests {
 
     #[test]
     fn get_instance_config_response_carries_every_sub_config() {
-        // Не точечная проверка одного поля — все 9 секций должны
-        // присутствовать как Some, иначе andler-cli получил бы Option
-        // None там, где ожидает заполненную секцию для печати.
         let cfg = sample_instance_config();
         let response: proto::GetInstanceConfigResponse = cfg.into();
 
@@ -1462,12 +1323,6 @@ mod tests {
 
     #[test]
     fn display_engine_none_round_trips_through_proto() {
-        // DISPLAY_NONE не делит префикс с DisplayEngineUnspecified (в
-        // отличие от Sdl/Spice/Dbus, которые тоже не делят, но это уже
-        // было покрыто реальным успешным прогоном) — добавлен этот тест
-        // в первую очередь чтобы зафиксировать точное сгенерированное
-        // имя `prost` (`DisplayNone`) как контракт, не только проверить
-        // логику round-trip.
         let msg = proto::DisplayEngine::DisplayNone;
         let domain = DisplayEngine::try_from(msg).unwrap();
         assert_eq!(domain, DisplayEngine::None);
@@ -1488,9 +1343,6 @@ mod tests {
 
     #[test]
     fn nat_backend_unspecified_falls_back_to_slirp() {
-        // Старые сохранённые конфиги не могли заполнить это поле —
-        // должны читаться как Slirp (поведение исходной референсной конфигурации),
-        // не как ошибка.
         let domain: NatBackend = proto::NatBackend::Unspecified.into();
         assert_eq!(domain, NatBackend::Slirp);
     }
@@ -1519,8 +1371,6 @@ mod tests {
 
     #[test]
     fn input_config_pointer_mode_unspecified_falls_back_to_legacy_tablet_mode() {
-        // Старый клиент прислал только `tablet_mode = true`, ничего не
-        // зная про `pointer_mode` — должны получить Tablet, не Mouse.
         let msg = proto::InputConfig {
             tablet_mode: true,
             hide_host_cursor: true,
@@ -1533,8 +1383,6 @@ mod tests {
 
     #[test]
     fn input_config_pointer_mode_explicit_wins_over_legacy_tablet_mode() {
-        // pointer_mode=Mouse побеждает, даже если устаревшее поле
-        // tablet_mode=true (рассинхронизированный/старый клиент).
         let msg = proto::InputConfig {
             tablet_mode: true,
             hide_host_cursor: true,
@@ -1547,8 +1395,6 @@ mod tests {
 
     #[test]
     fn input_config_to_proto_fills_legacy_tablet_mode_field() {
-        // Новый код тоже заполняет устаревшее bool-поле — старые клиенты,
-        // которые ещё не знают pointer_mode, продолжают работать.
         let domain = InputConfig {
             pointer_mode: PointerMode::Tablet,
             hide_host_cursor: true,
@@ -1635,8 +1481,6 @@ mod tests {
         assert!(msg.gpu_load_percent.is_none());
     }
 
-    // --- andler edit: GetInstanceConfigResponse <-> InstanceConfig,
-    // UpdateInstanceConfigRequest -> InstanceConfig -----------------------
 
     #[test]
     fn get_instance_config_response_round_trips_back_to_instance_config() {
@@ -1680,10 +1524,7 @@ mod tests {
         assert!(matches!(err, ConvertError::MissingBackendKind));
     }
 
-    /// Builds an `UpdateInstanceConfigRequest` the same way `andler edit`
-    /// does, via the real `instance_config_to_update_request` — not a
-    /// hand-rolled duplicate, so this test exercises the same code path
-    /// production code uses.
+
     #[test]
     fn update_request_round_trips_to_instance_config_with_given_id() {
         let cfg = sample_instance_config();
@@ -1694,10 +1535,6 @@ mod tests {
 
     #[test]
     fn update_request_uses_the_passed_id_not_any_id_in_the_message() {
-        // UpdateInstanceConfigRequest has no id field at all (only
-        // instance_ref, resolved server-side) — this documents that the
-        // resulting InstanceConfig.id always comes from the function's
-        // `id` parameter.
         let cfg = sample_instance_config();
         let req = instance_config_to_update_request(cfg.clone(), "deadbeef".to_string());
         let fresh_id = InstanceId::new();

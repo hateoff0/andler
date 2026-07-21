@@ -1,16 +1,4 @@
-//! Сборка аргументов командной строки QEMU из `InstanceConfig`.
-//!
-//! Источник истины — исходная референсная конфигурация (ранее описанная в
-//! `scripts/start.sh`, который был удалён после миграции всей логики в Rust). Каждая функция здесь
-//! соответствует одному логическому блоку флагов из этой конфигурации и
-//! тестируется отдельно сравнением с ожидаемым результатом для
-//! `reference_default()`-конфигураций — так расхождение в любом отдельном блоке
-//! (CPU, GPU, диск, ...) обнаруживается локализованно, а не "что-то не так со всей
-//! командной строкой".
-//!
-//! Все функции — чистые: `InstanceConfig -> Vec<String>`, без обращения к
-//! файловой системе или запуска процессов. Эта чистота — то, что позволяет
-//! тестировать `cmdline.rs` без `/dev/kvm` (см. README этого крейта).
+
 
 use std::path::Path;
 
@@ -19,22 +7,7 @@ use andler_core::{
     NatBackend, PointerMode, RenderBackend,
 };
 
-    /// Собирает полный список аргументов для `qemu-system-x86_64`, эквивалентный
-    /// исходной референсной конфигурации (ранее описанной в `scripts/start.sh`, который был
-    /// удалён после миграции всей логики в Rust), но из декларативного `InstanceConfig`
-    /// вместо фиксированных переменных скрипта.
-///
-/// `qmp_socket_path` — путь к unix-сокету QMP, на котором `process.rs`
-/// должен поднять `-qmp unix:<path>,server,nowait`. Не часть `InstanceConfig`
-/// — это деталь конкретного запуска, которую решает `andler-qemu`/
-/// `andler-daemon` (обычно на основе `InstanceId`), а не декларативная
-/// конфигурация инстанса; этот флаг отсутствовал в исходной референсной
-/// конфигурации, так как она была написана для интерактивного запуска человеком,
-/// а не для программного управления через `process.rs`/`qmp.rs`.
-///
-/// Порядок блоков аргументов сохранён как в исходной референсной конфигурации,
-/// хотя для самого QEMU порядок большинства флагов не важен — сохранение порядка
-/// облегчает построчное сравнение результата с референсом при отладке.
+
 pub fn build_args(cfg: &InstanceConfig, qmp_socket_path: &Path) -> Vec<String> {
     let mut args = Vec::new();
     args.extend(name_args(cfg));
@@ -52,16 +25,12 @@ pub fn build_args(cfg: &InstanceConfig, qmp_socket_path: &Path) -> Vec<String> {
     args
 }
 
-/// `-name <name>,process=<name>`.
+
 fn name_args(cfg: &InstanceConfig) -> Vec<String> {
     vec!["-name".to_string(), format!("{},process={}", cfg.name, cfg.name)]
 }
 
-/// `-qmp unix:<path>,server,nowait` — QMP-сокет, на котором `andler-qemu`
-/// слушает команды управления (pause/resume/snapshot/`query-*`, см.
-/// `qmp.rs`, следующий шаг реализации). `server,nowait` — QEMU слушает
-/// сокет и не блокирует запуск, ожидая подключения клиента; клиент
-/// (`qmp.rs`) подключается уже после старта процесса.
+
 fn qmp_args(qmp_socket_path: &Path) -> Vec<String> {
     vec![
         "-qmp".to_string(),
@@ -69,14 +38,7 @@ fn qmp_args(qmp_socket_path: &Path) -> Vec<String> {
     ]
 }
 
-/// `-machine q35,accel=kvm,usb=on` + `-cpu host,kvm=on,+topoext,migratable=no`
-/// + `-smp cpus=N,sockets=N,dies=1,cores=N,threads=N`.
-///
-/// `dies=1` зафиксировано как константа: `CpuConfig` (см.
-/// `andler-core::config::cpu`) не заводит поле `dies`, так как ни архитектурный
-    /// план, ни исходная референсная конфигурация не предусматривали множественные
-    /// dies — это деталь топологии QEMU без соответствующего домена в нашей модели
-    /// на этом этапе.
+
 fn machine_and_cpu_args(cfg: &InstanceConfig) -> Vec<String> {
     let cpu = &cfg.cpu;
     vec![
@@ -92,15 +54,7 @@ fn machine_and_cpu_args(cfg: &InstanceConfig) -> Vec<String> {
     ]
 }
 
-/// `-m <size>` + `-object memory-backend-memfd,id=mem1,size=<size>,share=on`
-/// + `-machine memory-backend=mem1`.
-///
-/// `share=on` запрашивается всегда, когда включён `ksm` в `MemoryConfig` —
-/// shared-память — это именно то, что делает страницы доступными для
-/// объединения KSM на хосте (см. docs/architecture/CORE_ARCHITECTURE_PLAN.md,
-/// §6.1.1). Если `ksm = false`, memfd-backend всё равно используется (как в
-/// исходной референсной конфигурации), но без `share=on` — обычная private-память
-/// процесса.
+
 fn memory_args(cfg: &InstanceConfig) -> Vec<String> {
     let size = qemu_size_suffix(cfg.memory.size_bytes);
     let share = if cfg.memory.ksm { "on" } else { "off" };
@@ -114,8 +68,7 @@ fn memory_args(cfg: &InstanceConfig) -> Vec<String> {
     ]
 }
 
-/// `-drive if=pflash,format=raw,readonly=on,file=<OVMF_CODE>` +
-/// `-drive if=pflash,format=raw,file=<OVMF_VARS>`.
+
 fn firmware_args(cfg: &InstanceConfig) -> Vec<String> {
     if !cfg.firmware.enable_uefi {
         return vec![];
@@ -132,23 +85,7 @@ fn firmware_args(cfg: &InstanceConfig) -> Vec<String> {
     ]
 }
 
-/// `-vga none` + GPU-устройство (зависит от `RenderBackend`) + `-display ...`.
-///
-/// Соответствие `RenderBackend` -> флаги устройства:
-/// - `Venus` -> `virtio-gpu-gl,hostmem=...,blob=...,venus=true` (как в исходной
-///   референсной конфигурации)
-/// - `VirGl` -> `virtio-gpu-gl,hostmem=...,blob=...` без `venus=true` —
-///   тот же virtio-gpu-gl device, но без Vulkan-контекста, что в терминах
-///   QEMU и есть обычный VirGL/OpenGL-рендеринг
-/// - `VirtioGpu` -> `virtio-gpu-pci` без gl-контекста — самый совместимый
-///   аппаратно-ускоренный вариант без host GL/Vulkan passthrough
-/// - `Cpu` -> без virtio-gpu устройства вообще; `-vga std` вместо `-vga none`
-/// - `Passthrough` -> не должно достигать этой функции вообще: вызывающая
-///   сторона (`andler-qemu::process` / `andler-daemon`) обязана проверить
-///   `RenderBackend::is_implemented()` и вернуть `BackendError::InvalidConfig`
-///   до вызова `build_args`. Здесь это явный `panic!`, а не молчаливая
-///   подстановка несуществующих флагов — наличие непокрытого варианта на
-///   этом этапе означает ошибку выше по стеку вызовов, а не штатный путь.
+
 fn gpu_display_args(cfg: &InstanceConfig) -> Vec<String> {
     let gpu = &cfg.gpu;
     let mut args = Vec::new();
@@ -187,44 +124,25 @@ fn gpu_display_args(cfg: &InstanceConfig) -> Vec<String> {
         RenderBackend::Passthrough { .. } => {
             panic!(
                 "RenderBackend::Passthrough reached andler-qemu::cmdline::build_args; \
-                 caller must reject it via RenderBackend::is_implemented() before this point \
-                 (see docs/architecture/CORE_ARCHITECTURE_PLAN.md, §2.3)"
+                 caller must reject it via RenderBackend::is_implemented() before this point"
             );
         }
     }
 
     let show_cursor = if cfg.input.hide_host_cursor { "off" } else { "on" };
-    // `cfg.display.resolution` is intentionally not used here: QEMU's
-    // SDL/GTK backends don't accept a resolution parameter in the
-    // `-display ...` string at all (see `DisplayConfig::resolution`'s
-    // doc comment and PLAN.md, item 4). The window/guest resolution is
-    // controlled by the guest OS itself or by EDID injection into
-    // virtio-gpu, neither of which is wired up here yet.
     let display_str = match cfg.display.display_engine {
         DisplayEngine::Sdl => format!(
             "sdl,gl={},show-cursor={}",
             if gpu.gl { "on" } else { "off" },
             show_cursor
         ),
-        // GTK имеет собственный `clipboard=on` — не требует vdagent для
-        // буфера обмена (в отличие от SDL, см. PLAN.md "Настройки
-        // дисплея"). `input_args()` всё равно добавляет vdagent
-        // безусловно на данном этапе (см. docstring там) — избыточно,
-        // но не ломает функциональность.
         DisplayEngine::Gtk => format!(
             "gtk,gl={},show-cursor={},clipboard=on",
             if gpu.gl { "on" } else { "off" },
             show_cursor
         ),
-        // Spice/Dbus — нужны для стриминга в GUI-клиент (frontend/), не
-        // используются текущим CLI-путём. Конкретные флаги (порт, TLS,
-        // и т.п.) — открытый вопрос на момент реализации GUI, не этого шага.
         DisplayEngine::Spice => "spice-app".to_string(),
         DisplayEngine::Dbus => "dbus".to_string(),
-        // `-display none` — без какого-либо визуального вывода, без
-        // обращения к X11/Wayland хоста. См. docstring
-        // `DisplayEngine::None` в andler-core за тем, для чего это нужно
-        // (headless-серверы, CI/Docker без X-сервера).
         DisplayEngine::None => "none".to_string(),
     };
     args.push("-display".to_string());
@@ -233,26 +151,7 @@ fn gpu_display_args(cfg: &InstanceConfig) -> Vec<String> {
     args
 }
 
-/// Аргументы диска(ов) инстанса.
-///
-/// `-drive file=...,format=qcow2,if=none,id=drive-disk0,discard=on,detect-zeroes=on,aio=threads`
-/// + `-device virtio-blk-pci,drive=drive-disk0,id=disk0,bootindex=1,num-queues=4`.
-///
-/// Для `InstanceKind::LinuxVm { iso_path, cdrom_bus }` дополнительно
-/// добавляется CD-ROM: `-drive file=<iso>,media=cdrom,if=none,id=drive-cd0`
-/// + устройство, зависящее от `cdrom_bus` (см. `CdromBus`, PLAN.md, раздел
-/// «Монтирование ISO / CD-ROM»):
-/// - `CdromBus::Ide` — `-device ide-cd,drive=drive-cd0,id=cd0,bootindex=2`,
-///   соответствует установочному ISO из исходной референсной конфигурации;
-/// - `CdromBus::VirtioScsi` — сначала SCSI-контроллер
-///   `-device virtio-scsi-pci,id=scsi0`, затем сам привод на нём:
-///   `-device scsi-cd,drive=drive-cd0,bus=scsi0.0,id=cd0,bootindex=2`
-///   (`scsi-cd`, не `scsi-hd` — тип устройства "CD-ROM", не "диск", тот
-///   же принцип различия, что и у `ide-cd` против `ide-hd`).
-///
-/// Для `InstanceKind::AndroidVm` CD-ROM не добавляется: гостевой образ
-/// уже содержит готовую систему с Waydroid (см. §4.4 архитектурного
-/// плана), установочного носителя не требуется.
+
 fn disk_args(cfg: &InstanceConfig) -> Vec<String> {
     let disk = &cfg.disk;
     let format_str = match disk.format {
@@ -297,10 +196,7 @@ fn disk_args(cfg: &InstanceConfig) -> Vec<String> {
     args
 }
 
-/// `-device virtio-tablet-pci,id=tablet0` (`PointerMode::Tablet`) или
-/// `-device virtio-mouse-pci,id=mouse0` (`PointerMode::Mouse`) +
-/// `-device virtio-serial-pci` + `-device virtserialport,...` +
-/// `-chardev qemu-vdagent,...,clipboard=on,mouse=on` (если `clipboard_enabled`).
+
 fn input_args(cfg: &InstanceConfig) -> Vec<String> {
     let input = &cfg.input;
     let mut args = Vec::new();
@@ -328,15 +224,7 @@ fn input_args(cfg: &InstanceConfig) -> Vec<String> {
     args
 }
 
-/// `-nic user,model=virtio-net-pci` (NAT/SLIRP, дефолт) или
-/// `-netdev passt,id=net0 -device virtio-net-pci,netdev=net0` (NAT/passt) —
-/// см. `NatBackend`. Для других режимов сети — см. ниже.
-///
-/// `Bridge`/`Isolated` реализованы через `andler-net` (см. `services/andler-net`).
-/// Здесь оставлен `panic!` для непокрытых вариантов по той же причине,
-/// что и для `RenderBackend::Passthrough` в `gpu_display_args`: молчаливая
-/// подмена на NAT была бы тихим расхождением между запрошенной и реальной
-/// конфигурацией сети, что хуже явного отказа.
+
 fn network_args(cfg: &InstanceConfig) -> Vec<String> {
     use andler_core::NetworkMode;
 
@@ -374,11 +262,7 @@ fn network_args(cfg: &InstanceConfig) -> Vec<String> {
     }
 }
 
-/// `-audiodev pipewire,id=snd0` + one of:
-/// - `-device virtio-sound-pci,audiodev=snd0` (`AudioDevice::VirtioSound`, дефолт)
-/// - `-device ich9-intel-hda -device hda-output,audiodev=snd0` (`AudioDevice::Ich9Hda`)
-///
-/// (или `pulseaudio` вместо `pipewire`; никаких audio-флагов для `None`).
+
 fn audio_args(cfg: &InstanceConfig) -> Vec<String> {
     match cfg.audio.backend {
         AudioBackend::None => Vec::new(),
@@ -409,17 +293,7 @@ fn audio_args(cfg: &InstanceConfig) -> Vec<String> {
     }
 }
 
-/// Переводит байты в строку вида `"8G"`/`"4096M"`, которую понимает QEMU
-/// в флагах размера памяти (`-m`, `hostmem=...`, `size=...`).
-///
-/// Предпочитает `G`, если число кратно гигабайту, иначе `M` — это
-/// соответствует тому, как параметры заданы в исходной референсной конфигурации
-/// (`8G` для RAM, `4096M` для VRAM, хотя `4096M` тоже кратно гигабайту:
-/// референсная конфигурация просто использовала `M` для VRAM по соглашению
-/// скрипта, а не из необходимости).
-/// Эта функция предпочитает `G` всегда, когда возможно — расхождение в
-/// форме (`4G` вместо `4096M`) не влияет на поведение QEMU, оба варианта
-/// эквивалентны для него.
+
 fn qemu_size_suffix(bytes: u64) -> String {
     const GIB: u64 = 1024 * 1024 * 1024;
     const MIB: u64 = 1024 * 1024;
@@ -440,9 +314,7 @@ mod tests {
     };
     use std::path::PathBuf;
 
-    /// Конфигурация `InstanceKind::LinuxVm`, дословно соответствующая
-    /// исходной референсной конфигурации (имя `linux`, ISO `cachyos-desktop-linux-260426.iso`,
-    /// все остальные `reference_default()`).
+
     fn start_sh_equivalent_config() -> InstanceConfig {
         InstanceConfig {
             id: InstanceId::new(),
@@ -534,10 +406,6 @@ mod tests {
     #[test]
     fn gpu_display_args_match_start_sh_for_venus() {
         let cfg = start_sh_equivalent_config();
-        // hostmem в исходной референсной конфигурации записан как "4096M", но qemu_size_suffix
-        // нормализует кратные гигабайту значения в форму "G" (см. её
-        // документацию) — "4G" и "4096M" эквивалентны для QEMU, отличается
-        // только текстовая форма, не поведение.
         assert_eq!(
             gpu_display_args(&cfg),
             vec![
@@ -571,9 +439,6 @@ mod tests {
 
     #[test]
     fn gpu_display_args_for_none_display_engine_uses_plain_display_none() {
-        // -display none не должен нести суффиксы gl=/show-cursor= — те
-        // специфичны для sdl и не имеют смысла без визуального вывода
-        // вообще.
         let mut cfg = start_sh_equivalent_config();
         cfg.display.display_engine = DisplayEngine::None;
         let args = gpu_display_args(&cfg);
@@ -627,13 +492,6 @@ mod tests {
 
     #[test]
     fn disk_args_use_virtio_scsi_controller_and_scsi_cd_when_selected() {
-        // Regression test: `CdromBus::VirtioScsi` used to be completely
-        // unwired here — `disk_args` matched on `InstanceKind::LinuxVm`
-        // without even binding `cdrom_bus`, so every ISO was mounted as
-        // `ide-cd` regardless of what the wizard/CLI recorded in the
-        // config. This pins the actual virtio-scsi device sequence: the
-        // SCSI controller (`virtio-scsi-pci`) must be added before the
-        // `scsi-cd` drive that attaches to its bus (`bus=scsi0.0`).
         let mut cfg = start_sh_equivalent_config();
         cfg.kind = InstanceKind::LinuxVm {
             iso_path: PathBuf::from("cachyos-desktop-linux-260426.iso"),
@@ -765,10 +623,6 @@ mod tests {
 
     #[test]
     fn audio_args_match_reference_default_virtio_sound() {
-        // ПРИМЕЧАНИЕ: reference_default() теперь умышленно отклоняется от
-        // буквальной исходной референсной конфигурации для audio-устройства (virtio-sound-pci,
-        // не ich9-intel-hda) — см. `AudioConfig::reference_default()`.
-        // Backend хоста (pipewire) по-прежнему как в исходной референсной конфигурации.
         let cfg = start_sh_equivalent_config();
         assert_eq!(
             audio_args(&cfg),
@@ -783,9 +637,6 @@ mod tests {
 
     #[test]
     fn audio_args_ich9_hda_matches_start_sh_literal() {
-        // Буквальная исходная референсная конфигурация: `-device ich9-intel-hda -device
-        // hda-output,audiodev=snd0` — всё ещё доступно как явный выбор
-        // `AudioDevice::Ich9Hda` (fallback-вариант).
         let mut cfg = start_sh_equivalent_config();
         cfg.audio.device = AudioDevice::Ich9Hda;
         assert_eq!(
@@ -815,10 +666,6 @@ mod tests {
 
     #[test]
     fn qemu_size_suffix_falls_back_to_mib_when_not_gib_aligned() {
-        // 4096M (исходная референсная конфигурация hostmem) на самом деле кратно гигабайту и вернёт
-        // "4G" — это проверяется отдельно в gpu_display_args_match_start_sh_for_venus.
-        // Здесь — намеренно не кратное гигабайту значение, чтобы проверить
-        // именно MiB-фоллбэк.
         assert_eq!(qemu_size_suffix(100 * 1024 * 1024), "100M");
     }
 

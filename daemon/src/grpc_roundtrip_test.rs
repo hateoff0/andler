@@ -1,17 +1,4 @@
-//! Сквозной тест gRPC-слоя.
-//!
-//! `andler-rpc::convert` уже проверен unit-тестами (proto<->domain
-//! конвертации), но ни один тест до этого момента не поднимал настоящий
-//! `tonic::transport::Server` и не гонял запрос через реальный TCP-сокет —
-//! то есть весь путь "клиент сериализует запрос -> сервер десериализует,
-//! роутит на нужный метод трейта, зовёт `Daemon`, сериализует ответ
-//! обратно" был проверен только компиляцией, не поведением. Этот файл
-//! закрывает именно это: реальный `AndlerServiceServer` на эфемерном
-//! localhost-порту, реальный `AndlerServiceClient` через `tonic::Channel`.
-//!
-//! Без диска/QEMU (это не интеграционный тест в смысле `docker/README.md`
-//! — ему не нужен `qemu-img`/`/dev/kvm`, только TCP-loopback), поэтому
-//! гоняется как обычный unit-тест, не помечен `#[ignore]`.
+
 
 use std::sync::Arc;
 
@@ -31,12 +18,7 @@ use crate::daemon::Daemon;
 use crate::firmware::OvmfPaths;
 use crate::service::DaemonService;
 
-/// Поднимает `DaemonService` на свежем `Daemon` на эфемерном
-/// `127.0.0.1`-порту (выбранном ОС через `:0`, без гонки за порт между
-/// параллельными тестами) и возвращает подключённый клиент плюс хэндл
-/// сервера (чтобы вызывающий мог его `abort()`-нуть в конце теста — у
-/// `Server::serve_with_incoming` нет естественного способа остановиться,
-/// кроме отмены задачи, в которой он работает).
+
 async fn spawn_server_and_connect() -> (
     AndlerServiceClient<tonic::transport::Channel>,
     tokio::task::JoinHandle<()>,
@@ -63,11 +45,6 @@ async fn spawn_server_and_connect() -> (
             .expect("serve_with_incoming must not fail for a healthy listener");
     });
 
-    // `listener` уже забинден (и его backlog уже принимает соединения на
-    // уровне ОС) до того, как accept-loop внутри `server`-таска реально
-    // начал крутиться — `connect` может блокироваться до первого `accept`,
-    // но не должен фейлиться race condition'ом из-за порядка планирования
-    // задач tokio.
     let client = AndlerServiceClient::connect(format!("http://{addr}"))
         .await
         .expect("client must be able to connect to the just-spawned server");
@@ -80,13 +57,6 @@ async fn unknown_instance_round_trips_as_not_found_over_real_grpc() {
     let (mut client, server) = spawn_server_and_connect().await;
     let unknown_id = uuid::Uuid::new_v4().to_string();
 
-    // Если бы gRPC-слой был сломан (неверный путь метода, поломанная
-    // (де)сериализация protobuf, паника внутри сервиса) — мы получили бы
-    // транспортную ошибку (`tonic::Status` с кодом `Unknown`/`Internal`
-    // от самого tonic, не от `Daemon`) или вообще обрыв соединения, а не
-    // предсказуемый `NOT_FOUND`, который реально возвращает `Daemon`.
-    // Этот тест проверяет именно то, что unit-тесты `convert.rs` не могут:
-    // что весь путь туда и обратно по сети действительно работает.
     let status = client
         .get_instance_status(InstanceIdRequest {
             instance_id: unknown_id.clone(),
@@ -126,11 +96,6 @@ async fn unknown_instance_round_trips_as_not_found_over_real_grpc() {
 async fn malformed_instance_id_round_trips_as_invalid_argument_over_real_grpc() {
     let (mut client, server) = spawn_server_and_connect().await;
 
-    // `parse_instance_id` (andler-rpc::convert) отклоняет всё, что не
-    // парсится как UUID, через `ConvertError -> Status::invalid_argument`
-    // (см. impl в convert.rs, добавленный именно из-за orphan rule).
-    // Этот тест проверяет, что данный путь конвертации действительно
-    // подключён к gRPC-сервису, а не просто существует и компилируется.
     let status = client
         .get_instance_status(InstanceIdRequest {
             instance_id: "not-a-uuid".to_string(),
@@ -150,15 +115,7 @@ async fn malformed_instance_id_round_trips_as_invalid_argument_over_real_grpc() 
     server.abort();
 }
 
-/// Полный набор полей `CreateInstanceRequest`, соответствующий
-/// `andler_core::config::*::reference_default()` — используется как
-/// валидная база для теста ниже и для модификаций в негативных сценариях.
-/// Живёт здесь (а не в `andler-rpc::convert::tests`, где уже есть похожий
-/// `sample_instance_config`), потому что строит именно `proto`-сообщение
-/// напрямую, без прохода через `InstanceConfig` — этот тест проверяет
-/// сериализацию через реальный TCP, а не саму конвертацию (та уже покрыта
-/// `andler-rpc::convert::tests::create_instance_request_round_trips_into_instance_config`
-/// и соседними тестами).
+
 fn sample_create_instance_request() -> CreateInstanceRequest {
     use andler_rpc::proto::{network_mode, render_backend};
 
@@ -213,15 +170,6 @@ fn sample_create_instance_request() -> CreateInstanceRequest {
     let firmware = FirmwareConfig {
         enable_uefi: true,
         ovmf_code_path: "/usr/share/edk2/x64/OVMF_CODE.4m.fd".to_string(),
-        // Empty — falls back to the test daemon's own `test_ovmf.vars_template`
-        // (see `spawn_server_and_connect`). A non-empty path here is now
-        // actually used for a real `provision_vars` file copy (see
-        // `create_instance`'s fix for silently discarding an explicit
-        // `--ovmf-vars-template`) — this fixture doesn't create any such
-        // file, so a hardcoded path would make this test depend on
-        // filesystem state outside its control. See
-        // `create_instance_honors_explicit_ovmf_vars_template` below for
-        // the actual override behavior.
         ovmf_vars_path: String::new(),
     };
 
@@ -260,13 +208,6 @@ fn sample_create_instance_request() -> CreateInstanceRequest {
 
 #[tokio::test]
 async fn create_instance_round_trips_over_real_grpc_and_status_reports_created() {
-    // Самый рискованный путь этой партии изменений: `RenderBackend`/
-    // `NetworkMode` — `oneof`, и единственный способ убедиться, что
-    // `prost` реально (де)сериализует их так, как ожидает `convert.rs`
-    // (а не, например, теряет ветку при кодировании через настоящий
-    // protobuf wire format, в отличие от прямого вызова конвертации в
-    // памяти, как делают unit-тесты `andler-rpc::convert::tests`) — это
-    // прогнать запрос через настоящий TCP-сокет, как здесь.
     let (mut client, server) = spawn_server_and_connect().await;
 
     let response = client
@@ -292,23 +233,8 @@ async fn create_instance_round_trips_over_real_grpc_and_status_reports_created()
 
 #[tokio::test]
 async fn create_instance_honors_explicit_ovmf_vars_template() {
-    // Regression test for a real bug: `create_instance`'s gRPC handler
-    // unconditionally passed the daemon's own auto-detected
-    // `self.ovmf.vars_template` to `create_linux_instance`, silently
-    // discarding whatever the client put in `firmware.ovmf_vars_path`
-    // (i.e. `--ovmf-vars-template`) — the request field was parsed into
-    // `InstanceConfig` and then immediately overwritten.
-    // `create_android_instance` right next to it already got this right
-    // (`if req.ovmf_vars_template.is_empty() { auto-detected } else { the
-    // client's value }`); this test locks the Linux path to the same
-    // behavior.
     let (mut client, server) = spawn_server_and_connect().await;
 
-    // A real file with distinguishable content — the only way to prove
-    // *this* template was copied into the instance's VARS.fd, not the
-    // daemon's own `test_ovmf.vars_template` (which points at a path that
-    // doesn't exist in this sandbox and would make `provision_vars` fail
-    // outright if it were used instead).
     let custom_template = std::env::temp_dir().join(format!(
         "andler-test-custom-ovmf-vars-{}.fd",
         uuid::Uuid::new_v4()
@@ -364,10 +290,6 @@ async fn create_instance_missing_cpu_field_round_trips_as_invalid_argument() {
 
 #[tokio::test]
 async fn create_instance_with_bridge_network_round_trips_over_real_grpc() {
-    // `NetworkMode::Bridge` несёт данные (`interface`), в отличие от
-    // `Nat`/`Isolated` — отдельный тест проверяет, что oneof-ветка с
-    // полем, не только маркерные пустые message'и, переживает настоящую
-    // protobuf-сериализацию по TCP.
     use andler_rpc::proto::network_mode;
 
     let (mut client, server) = spawn_server_and_connect().await;
@@ -409,10 +331,6 @@ async fn list_instances_on_fresh_server_returns_empty() {
 
 #[tokio::test]
 async fn list_instances_over_real_grpc_reflects_created_instance() {
-    // Самое важное здесь не "список не пуст", а то, что он отражает
-    // именно тот instance_id, который вернул CreateInstance — без этого
-    // ListInstances мог бы технически "работать" и при этом указывать на
-    // данные, рассинхронизированные с тем, что реально создал клиент.
     let (mut client, server) = spawn_server_and_connect().await;
 
     let create_response = client
@@ -497,12 +415,6 @@ async fn remove_instance_over_real_grpc_then_status_returns_not_found() {
 
 #[tokio::test]
 async fn remove_instance_on_failed_instance_round_trips_over_real_grpc() {
-    // RenderBackend::Passthrough гарантированно проваливает spawn на
-    // валидации, синхронно и без обращения к реальному
-    // qemu-system-x86_64 (см. тот же приём в других тестах этого файла и
-    // в daemon::tests) — единственный детерминированный способ получить
-    // терминальное Error-состояние через настоящий gRPC-вызов
-    // StartInstance, не гадая, есть ли в среде CI рабочий QEMU/KVM.
     use andler_rpc::proto::render_backend;
 
     let (mut client, server) = spawn_server_and_connect().await;
@@ -534,8 +446,6 @@ async fn remove_instance_on_failed_instance_round_trips_over_real_grpc() {
         .await
         .expect_err("starting an instance with RenderBackend::Passthrough must fail");
 
-    // Инстанс теперь в Error (терминальное) — remove_instance должен
-    // пройти.
     client
         .remove_instance(RemoveInstanceRequest {
             instance_id: id.clone(),
@@ -571,12 +481,6 @@ async fn remove_unknown_instance_round_trips_as_not_found() {
 
 #[tokio::test]
 async fn get_instance_config_over_real_grpc_returns_what_was_created() {
-    // Самое важное здесь — не "ответ не пуст", а то, что конкретные
-    // значения, которые клиент передал в CreateInstanceRequest, реально
-    // дойдут обратно через GetInstanceConfigResponse по настоящему TCP
-    // (включая RenderBackend::Venus, единственный oneof-вариант, который
-    // несёт sample_create_instance_request — round-trip всего oneof
-    // через protobuf, не только in-memory конвертация).
     let (mut client, server) = spawn_server_and_connect().await;
 
     let create_response = client
@@ -630,12 +534,7 @@ async fn get_instance_config_on_unknown_instance_round_trips_as_not_found() {
     server.abort();
 }
 
-/// Инстанс существует (только что создан через `CreateInstance`), но
-/// никогда не запускался — `Daemon::stream_instance_logs` должен отдать
-/// пустой, немедленно завершающийся поток (не gRPC-ошибку, см.
-/// документацию там). Через настоящий `tonic::Streaming<LogLineResponse>`
-/// "немедленно завершающийся" означает, что первый `.message()` уже
-/// возвращает `Ok(None)`, а не зависает в ожидании.
+
 #[tokio::test]
 async fn stream_instance_logs_for_instance_without_backend_completes_immediately() {
     let (mut client, server) = spawn_server_and_connect().await;
@@ -713,9 +612,7 @@ async fn clone_instance_on_unknown_source_round_trips_as_not_found() {
     server.abort();
 }
 
-/// Clone LinuxVm с `Linked` требует `qemu-img`. Если `qemu-img`
-/// доступен — clone создаёт overlay-диск и succeeds; если нет —
-/// возвращает `INTERNAL` (SpawnFailed).
+
 #[tokio::test]
 async fn clone_instance_linux_vm_linked_with_qemu_img() {
     let (mut client, server) = spawn_server_and_connect().await;
@@ -752,14 +649,6 @@ async fn clone_instance_rejects_unspecified_mode_as_invalid_argument() {
         .expect("create_instance must succeed")
         .into_inner();
 
-    // Намеренно не SharedBaseNotSupportedForLinuxVm: mode конвертируется (и может
-    // провалиться) до того, как Daemon::clone_instance успевает увидеть
-    // source_instance_id — см. порядок операций в
-    // DaemonService::clone_instance (service.rs): parse_instance_id ->
-    // CloneMode::try_from -> daemon.clone_instance(...). Здесь источник
-    // существует (LinuxVm, тот же, что и в соседнем тесте) специально,
-    // чтобы убедиться, что ошибка приходит именно от валидации mode, не
-    // от случайного совпадения с "источник не найден"/"LinuxVm + SharedBase".
     let status = client
         .clone_instance(CloneInstanceRequest {
             source_instance_id: create_response.instance_id,
@@ -808,8 +697,7 @@ async fn export_instance_disk_on_unknown_source_round_trips_as_not_found() {
     server.abort();
 }
 
-/// Export LinuxVm требует `qemu-img`. Если `qemu-img` доступен —
-/// export создаёт standalone-файл и succeeds.
+
 #[tokio::test]
 async fn export_instance_disk_linux_vm_with_qemu_img() {
     let (mut client, server) = spawn_server_and_connect().await;
@@ -832,8 +720,7 @@ async fn export_instance_disk_linux_vm_with_qemu_img() {
     server.abort();
 }
 
-/// LinuxVm + FullStandalone — требует `qemu-img` (копирование диска).
-/// Если `qemu-img` доступен — clone создаёт standalone-файл и succeeds.
+
 #[tokio::test]
 async fn clone_instance_linux_vm_full_standalone_with_qemu_img() {
     let (mut client, server) = spawn_server_and_connect().await;
@@ -860,9 +747,7 @@ async fn clone_instance_linux_vm_full_standalone_with_qemu_img() {
     server.abort();
 }
 
-/// LinuxVm + SharedBase — должен вернуть `FAILED_PRECONDITION`
-/// (`SharedBaseNotSupportedForLinuxVm`), потому что у LinuxVm нет
-/// shared `base_image`, к которому можно сделать thin-клон.
+
 #[tokio::test]
 async fn clone_instance_linux_vm_shared_base_rejected_as_failed_precondition() {
     let (mut client, server) = spawn_server_and_connect().await;

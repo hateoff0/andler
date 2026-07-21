@@ -1,152 +1,35 @@
-// gRPC-схема andlerd <-> andler (CLI)/GUI.
-//
-// СОЗНАТЕЛЬНО НЕПОЛНАЯ относительно §5.1 CORE_ARCHITECTURE_PLAN.md: там
-// описан целевой набор методов (StreamResourceMetrics и т.п.) — здесь
-// объявлены только методы, которые реально есть как методы
-// `andler_daemon::Daemon` сегодня (включая `StreamInstanceLogs` и
-// `CloneInstance`/`ExportInstanceDisk` — соответствуют
-// `Daemon::stream_instance_logs`/`Daemon::clone_instance`/
-// `Daemon::export_instance_disk`). Добавлять rpc-метод без
-// соответствующего метода `Daemon` означало бы проектировать протокол
-// вслепую — то, что явно решили не делать (см. README этого крейта и
-// andler-daemon).
-//
-// `CloneInstance`/`ExportInstanceDisk` поддерживают как `AndroidVm`, так и
-// `LinuxVm` (см. их документацию в `daemon.rs` за полным обоснованием).
-//
-// `CreateInstance` — generic-путь создания инстанса через явный
-// `InstanceConfig`, соответствует `Daemon::create_instance` один-к-одному.
-// Сознательно ограничен на `LinuxVm` (поле `iso_path`, без `oneof kind`
-// с веткой Android) — `AndroidVm`-путь уже обслуживается отдельным
-// `CreateAndroidInstance` (резолв профиля + создание overlay-диска на
-// стороне демона перед вызовом того же `Daemon::create_instance`); делать
-// этот метод полностью generic по `InstanceKind` означало бы дать клиенту
-// два разных способа создать Android-инстанс (через профиль и через
-// голый `InstanceConfig` с уже готовым diskconfig), что требовало бы
-// клиенту самому собирать overlay/OVMF_VARS — то, что `CreateAndroidInstance`
-// явно берёт на себя. Если когда-нибудь понадобится создавать `AndroidVm`
-// из уже готового `InstanceConfig` напрямую (например, восстановление из
-// экспортированной конфигурации) — это расширение поля `kind` в
-// `CreateInstanceRequest` на `oneof`, не часть этого шага.
 syntax = "proto3";
 
 package andler;
 
 service AndlerService {
-    // Создаёт LinuxVm-инстанс из явного InstanceConfig — соответствует
-    // Daemon::create_instance. См. комментарий выше про то, почему
-    // ограничено на LinuxVm.
     rpc CreateInstance(CreateInstanceRequest) returns (CreateInstanceResponse);
-
-    // Резолвит AndroidProfile в InstanceConfig и регистрирует инстанс —
-    // соответствует Daemon::create_android_instance.
     rpc CreateAndroidInstance(CreateAndroidInstanceRequest) returns (CreateInstanceResponse);
-
-    // Соответствуют Daemon::start_instance/stop_instance/pause_instance/
-    // resume_instance/status один-к-одному.
     rpc StartInstance(InstanceIdRequest) returns (Empty);
     rpc StopInstance(StopInstanceRequest) returns (Empty);
     rpc PauseInstance(InstanceIdRequest) returns (Empty);
     rpc ResumeInstance(InstanceIdRequest) returns (Empty);
     rpc GetInstanceStatus(InstanceIdRequest) returns (InstanceStatusResponse);
-
-    // Соответствует Daemon::list_instances. Возвращает только
-    // id/name/state каждого инстанса (не полный InstanceConfig) — см.
-    // комментарий у `Daemon::list_instances`/`InstanceSummary` за тем,
-    // почему список не дёргает backend.status() по каждому инстансу.
     rpc ListInstances(Empty) returns (ListInstancesResponse);
-
-    // Соответствует Daemon::remove_instance. Не останавливает запущенный
-    // инстанс сама — см. подробное обоснование в комментарии у
-    // `Daemon::remove_instance`. Файлы инстанса с диска удаляются только
-    // если `RemoveInstanceRequest.purge == true` (см. там же).
     rpc RemoveInstance(RemoveInstanceRequest) returns (Empty);
-
-    // Соответствует Daemon::get_instance_config. Возвращает полный
-    // InstanceConfig одного инстанса — в отличие от ListInstances
-    // (id/name/state на запись), это весь конфиг целиком; см.
-    // комментарий у `Daemon::get_instance_config` за тем, почему это
-    // отдельный метод, не часть ListInstances.
     rpc GetInstanceConfig(InstanceIdRequest) returns (GetInstanceConfigResponse);
-
-    // Соответствует `Daemon::update_instance_config` — см. `andler edit`
-    // в PLAN.md, "18. Instance config editing". Заменяет конфигурацию
-    // целиком (не частичный patch): клиент получает полный конфиг через
-    // `GetInstanceConfig`, редактирует локально, шлёт его обратно
-    // целиком. `id`/тип гостя (`LinuxVm`/`AndroidVm`)/путь к диску должны
-    // совпадать с текущими — см. `DaemonError::Config*` за тем, почему
-    // именно эти три поля защищены от изменения этим методом.
     rpc UpdateInstanceConfig(UpdateInstanceConfigRequest) returns (Empty);
-
-    // Соответствует Daemon::stream_instance_logs. Server-streaming —
-    // соединение остаётся открытым, пока клиент не отключится или сервер
-    // не закроет поток сам (инстанс остановлен/удалён, либо у него
-    // никогда не было запущенного backend'а — в этом случае поток сразу
-    // же завершается пустым, не ошибкой, см. там же).
-    //
-    // Live-tail с момента подключения, без истории строк, написанных до
-    // вызова — расширение до персистентного буфера осталось бы отдельным
-    // шагом (см. обсуждение `StreamInstanceLogs` в истории проекта).
     rpc StreamInstanceLogs(InstanceIdRequest) returns (stream LogLineResponse);
-
-    // Соответствует Daemon::clone_instance — поддерживает как AndroidVm,
-    // так и LinuxVm (см. CloneInstanceRequest.mode/Daemon::clone_instance
-    // за полным обоснованием трёх режимов).
+    rpc StreamResourceMetrics(InstanceIdRequest) returns (stream ResourceMetricsResponse);
     rpc CloneInstance(CloneInstanceRequest) returns (CreateInstanceResponse);
-
-    // Соответствует Daemon::export_instance_disk — экспортирует диск
-    // AndroidVm-инстанса в самостоятельный файл по указанному пути, не
-    // создаёт новый инстанс (в отличие от CloneInstance с
-    // CloneMode::FULL_STANDALONE, который создаёт). См. документацию
-    // Daemon::export_instance_disk за тем, почему это отдельный метод,
-    // не вариант CloneInstance.
     rpc ExportInstanceDisk(ExportInstanceDiskRequest) returns (ExportInstanceDiskResponse);
-
-    // Snapshot-операции — соответствуют Daemon::create_snapshot/
-    // restore_snapshot/delete_snapshot/list_snapshots.
     rpc CreateSnapshot(CreateSnapshotRequest) returns (CreateSnapshotResponse);
     rpc RestoreSnapshot(RestoreSnapshotRequest) returns (Empty);
     rpc DeleteSnapshot(DeleteSnapshotRequest) returns (Empty);
     rpc ListSnapshots(InstanceIdRequest) returns (ListSnapshotsResponse);
-
-    // Соответствует Daemon::stream_resource_metrics. Server-streaming —
-    // соединение остаётся открытым, пока клиент не отключится, процесс
-    // не завершится, или не исчезнут подписчики (аналогично
-    // StreamInstanceLogs). Метрики публикуются каждую секунду из
-    // /proc/<pid>/ (CPU%, RAM, disk I/O, network I/O).
-    rpc StreamResourceMetrics(InstanceIdRequest) returns (stream ResourceMetricsResponse);
-
-    // Установка пакета в гостевую ОС (например, spice-vdagent для
-    // shared clipboard). Auto-fallback: если VM запущена и guest agent
-    // доступен — online через guest-exec; если VM остановлена или
-    // agent недоступен — offline через qemu-nbd + mount.
     rpc InstallGuestAgent(InstallGuestAgentRequest) returns (Empty);
-
-    // Удаление пакета из гостевой ОС. Та же auto-fallback логика.
     rpc RemoveGuestAgent(RemoveGuestAgentRequest) returns (Empty);
-
-    // Список пакетов, которые ANDLER умеет устанавливать, с их статусом
-    // в гостевой ОС (installed/not installed).
     rpc ListGuestPackages(InstanceIdRequest) returns (ListGuestPackagesResponse);
-    // Переключение ARM-транслятора в offline-режиме (через qemu-nbd).
-    // Соответствует Daemon::switch_arm_translator.
     rpc SwitchArmTranslator(SwitchArmTranslatorRequest) returns (Empty);
-
-    // Частичное обновление конфигурации инстанса по ключу/значению.
-    // Соответствует Daemon::set_instance_config.
     rpc SetInstanceConfig(SetInstanceConfigRequest) returns (Empty);
-
 }
 
 message Empty {}
-
-// --- InstanceConfig: типы, общие для CreateInstanceRequest -------------
-//
-// Каждый message/enum здесь соответствует одному типу из
-// `andler_core::config` один-к-одному по полям — см. соответствующий
-// файл в `andler-core/src/config/` для документации смысла каждого поля
-// (proto-схема намеренно не повторяет эти комментарии, чтобы не давать
-// им расходиться).
 
 enum CpuPriority {
     CPU_PRIORITY_UNSPECIFIED = 0;
@@ -159,12 +42,6 @@ message CpuConfig {
     uint32 cores = 1;
     uint32 sockets = 2;
     uint32 threads = 3;
-    // Пустой список — это `andler_core::CpuConfig.affinity == None`
-    // (без привязки к физическим ядрам), не "привязка к нулю ядер" —
-    // конвертация (`convert.rs`) трактует absence/empty одинаково,
-    // так как `repeated` в proto3 не различает "не задано" и "задано
-    // пустым". Это симметрично остальным `repeated`-полям ниже, где их
-    // нет, но решение то же самое: пустой ⇒ None.
     repeated uint64 affinity = 4;
     CpuPriority priority = 5;
 }
@@ -183,19 +60,7 @@ enum DiskFormat {
     VDI = 3;
 }
 
-// Зеркало `andler_core::CdromBus` — bus для ISO/CD-ROM привода, отдельная
-// от `DiskFormat`/основного диска ось конфигурации. См. PLAN.md, раздел
-// «Монтирование ISO / CD-ROM» и doc-комментарии `andler_core::CdromBus`.
 enum CdromBus {
-    // Не "лучший дефолт", а маркер отсутствия явного значения — конвертер
-    // (`andler-rpc::convert`) трактует его как `CdromBus::default()`
-    // (`Ide`, безопасный fallback), а не падает с ошибкой, в отличие от
-    // `DiskFormat`/`*_UNSPECIFIED` в других местах, где unspecified —
-    // ошибка конфигурации. Это сознательная асимметрия: на момент ввода
-    // этого поля уже существующие сериализованные `InstanceConfig` в
-    // `andler-store` физически не могут содержать осознанный выбор этого
-    // поля (его не существовало), и интерпретировать его отсутствие как
-    // ошибку значило бы ломать чтение уже сохранённых конфигов.
     CDROM_BUS_UNSPECIFIED = 0;
     VIRTIO_SCSI = 1;
     IDE = 2;
@@ -205,25 +70,10 @@ message DiskConfig {
     string path = 1;
     uint64 size_bytes = 2;
     DiskFormat format = 3;
-    // Пустая строка ⇒ `base_image: None` (обычный самостоятельный диск
-    // без backing chain) — см. `andler_core::DiskConfig.base_image`.
-    // `CreateInstance` создаёт LinuxVm с диском с нуля (см. комментарий
-    // у `rpc CreateInstance` выше), поэтому на практике это поле для
-    // этого пути почти всегда пустое; оставлено в схеме, а не убрано,
-    // чтобы `DiskConfig` здесь оставался полным отражением домена, а не
-    // урезанным под один сценарий вызова.
     string base_image = 4;
     bool thin_provisioning = 5;
     bool trim_on_shutdown = 6;
-    // Таймаут async job (snapshot-save/load/delete) в секундах.
-    // 0 или отсутствие = 30 секунд по умолчанию.
     optional uint64 snapshot_timeout_secs = 7;
-    // Автоматический `qemu-img convert` (compact) диска сразу после
-    // штатной остановки инстанса. Выключено по умолчанию (`false`) —
-    // см. `andler_core::config::DiskConfig.compact_on_shutdown` за
-    // обоснованием (потенциально долгая операция на каждое выключение,
-    // не должна быть сюрпризом без явного opt-in). Применимо только к
-    // qcow2 — для других форматов диска флаг просто не имеет эффекта.
     bool compact_on_shutdown = 8;
 }
 
@@ -237,13 +87,7 @@ enum DisplayEngine {
     SDL = 1;
     SPICE = 2;
     DBUS = 3;
-    // `DISPLAY_NONE`, не `NONE` — значения proto3 enum делят общее
-    // пространство имён на уровне package (см. тот же приём для
-    // `AUDIO_NONE` в `AudioBackend` ниже); голый `NONE` столкнулся бы с
-    // другими enum'ами в этом файле.
     DISPLAY_NONE = 4;
-    // Дефолт для desktop-хостов, кроме NVIDIA — см.
-    // `andler_core::config::display::DisplayEngine::Gtk`.
     GTK = 5;
 }
 
@@ -255,9 +99,6 @@ message DisplayConfig {
     bool fullscreen = 5;
 }
 
-// `oneof` — `andler_core::RenderBackend` не C-style enum (`Passthrough`
-// несёт `gpu_pci_id: String`), поэтому, в отличие от `CpuPriority`/
-// `DiskFormat`/`DisplayEngine` выше, не выражается обычным proto `enum`.
 message RenderBackend {
     message Venus {}
     message VirtioGpu {}
@@ -283,8 +124,6 @@ message GpuConfig {
     bool gl = 4;
 }
 
-// `oneof` — как `RenderBackend` выше: `andler_core::NetworkMode::Bridge`
-// несёт `interface: String`.
 message NetworkMode {
     message Nat {}
     message Bridge {
@@ -299,8 +138,6 @@ message NetworkMode {
     }
 }
 
-// Реализация NAT — только применимо при `NetworkMode.nat`, игнорируется
-// для `bridge`/`isolated`. См. `andler_core::config::network::NatBackend`.
 enum NatBackend {
     NAT_BACKEND_UNSPECIFIED = 0;
     SLIRP = 1;
@@ -310,10 +147,6 @@ enum NatBackend {
 message NetworkConfig {
     NetworkMode mode = 1;
     string device_model = 2;
-    // `UNSPECIFIED` трактуется как `SLIRP` (поведение исходной референсной
-    // конфигурации) при конвертации proto -> core, аналогично `CdromBus`/`compact_on_shutdown`
-    // — старые клиенты, не знающие об этом поле, получают прежнее
-    // поведение без явной ошибки.
     NatBackend nat_backend = 3;
 }
 
@@ -330,8 +163,6 @@ enum AudioBackend {
     AUDIO_NONE = 3;
 }
 
-// PCI-устройство, которое видит гость — независимая ось от `AudioBackend`
-// (backend хоста). См. `andler_core::config::audio::AudioDevice`.
 enum AudioDevice {
     AUDIO_DEVICE_UNSPECIFIED = 0;
     VIRTIO_SOUND = 1;
@@ -340,13 +171,9 @@ enum AudioDevice {
 
 message AudioConfig {
     AudioBackend backend = 1;
-    // `UNSPECIFIED` трактуется как `VIRTIO_SOUND` (новый дефолт ANDLER,
-    // умышленно отличается от буквальной исходной референсной конфигурации) при конвертации
-    // proto -> core.
     AudioDevice device = 2;
 }
 
-// См. `andler_core::config::input::PointerMode`.
 enum PointerMode {
     POINTER_MODE_UNSPECIFIED = 0;
     TABLET = 1;
@@ -354,25 +181,12 @@ enum PointerMode {
 }
 
 message InputConfig {
-    // Заменено на `pointer_mode` (поле 4) — сохранено зарезервированным,
-    // не переиспользуется, чтобы не столкнуться со старыми клиентами,
-    // которые всё ещё шлют это поле по номеру 1. Конвертация proto -> core:
-    // если `pointer_mode` == UNSPECIFIED, используется значение этого поля
-    // (`true` -> Tablet, `false` -> Mouse) как fallback для обратной
-    // совместимости; если `pointer_mode` задан явно — он побеждает.
     bool tablet_mode = 1;
     bool hide_host_cursor = 2;
     bool clipboard_enabled = 3;
     PointerMode pointer_mode = 4;
 }
 
-// Поля соответствуют `andler_core::InstanceConfig` для
-// `InstanceKind::LinuxVm` один-к-одному: `id`/`backend` здесь не
-// передаются — `id` генерируется демоном (`InstanceId::new()`, как и в
-// `create_android_instance`), `backend` всегда `BackendKind::Qemu`
-// (единственный зарегистрированный backend сегодня, см. `Daemon::new`
-// /`default_backends`) и не имеет смысла как параметр запроса, который
-// клиент мог бы перепутать.
 message CreateInstanceRequest {
     string name = 1;
     string iso_path = 2;
@@ -385,9 +199,6 @@ message CreateInstanceRequest {
     FirmwareConfig firmware = 9;
     AudioConfig audio = 10;
     InputConfig input = 11;
-    // См. `InstanceKind.LinuxVm.cdrom_bus`/`andler_core::CdromBus`.
-    // `CDROM_BUS_UNSPECIFIED` трактуется как `CdromBus::default()` (Ide),
-    // не как ошибка — см. doc-комментарий enum `CdromBus` выше.
     CdromBus cdrom_bus = 12;
 }
 
@@ -397,7 +208,6 @@ enum AndroidVersion {
     ANDROID_13 = 2;
 }
 
-// См. `andler_core::android_profile::ArmTranslator`.
 enum ArmTranslator {
     ARM_TRANSLATOR_UNSPECIFIED = 0;
     ARM_TRANSLATOR_NONE = 1;
@@ -409,19 +219,11 @@ message AndroidProfile {
     AndroidVersion android_version = 1;
     bool gapps = 2;
     bool microg = 3;
-    // Заменено на `arm_translator` (поле 6) — зарезервировано, не
-    // переиспользуется, чтобы не столкнуться со старыми клиентами,
-    // которые всё ещё шлют bool по номеру 4.
     reserved 4;
     reserved "libndk";
-    // `UNSPECIFIED`/отсутствие поля трактуется как `ARM_TRANSLATOR_NONE`
-    // при конвертации proto -> core (безопасный дефолт — старые клиенты
-    // не знали об этом поле и не имели транслятора вовсе).
     ArmTranslator arm_translator = 6;
 }
 
-// Поля соответствуют параметрам Daemon::create_android_instance
-// один-к-одному — см. документацию там про смысл каждого пути.
 message CreateAndroidInstanceRequest {
     string name = 1;
     AndroidProfile profile = 2;
@@ -440,18 +242,8 @@ message InstanceIdRequest {
     string instance_id = 1;
 }
 
-// См. комментарий у `rpc RemoveInstance` и у `Daemon::remove_instance` за
-// полным обоснованием `purge`. Отдельное сообщение, не переиспользование
-// `InstanceIdRequest` — добавлять `purge` туда означало бы тащить это
-// поле во все остальные методы, которые принимают `InstanceIdRequest`
-// (`StartInstance`/`PauseInstance`/`ResumeInstance`/`GetInstanceStatus`/
-// `GetInstanceConfig`), для которых оно не имеет смысла.
 message RemoveInstanceRequest {
     string instance_id = 1;
-    // false (по умолчанию) — файлы инстанса на диске не трогаются. true —
-    // удалить disk.path и firmware.ovmf_vars_path после удаления записи
-    // (никогда не base_image/ovmf_code_path — общие для нескольких
-    // инстансов файлы).
     bool purge = 2;
 }
 
@@ -460,7 +252,6 @@ message StopInstanceRequest {
     bool graceful = 2;
 }
 
-// Соответствует andler_core::InstanceState один-к-одному (см. fsm.rs).
 enum InstanceStateKind {
     INSTANCE_STATE_UNSPECIFIED = 0;
     CREATED = 1;
@@ -474,23 +265,10 @@ enum InstanceStateKind {
 
 message InstanceStatusResponse {
     InstanceStateKind state = 1;
-    // Заполнено только при state == ERROR (соответствует
-    // InstanceState::Error.message).
     string error_message = 2;
-    // Доп. диагностика из BackendStatus::detail, если backend её дал
-    // (например, "instance has no running backend handle").
     string detail = 3;
 }
 
-// Одна строка ListInstancesResponse — зеркало
-// `andler_daemon::daemon::InstanceSummary`. Названо `InstanceListEntry`,
-// не `InstanceSummary`, чтобы избежать одноимённости с доменным типом
-// при чтении кода на стороне Rust (`andler_rpc::proto::InstanceSummary`
-// vs `andler_daemon::InstanceSummary` было бы легко перепутать в одном
-// файле конвертации). `error_message`/`detail` сознательно отсутствуют
-// здесь, в отличие от `InstanceStatusResponse` — `Daemon::list_instances`
-// не обращается к backend'у и не имеет `BackendStatus::detail`; точная
-// причина ошибки конкретного инстанса остаётся за `GetInstanceStatus`.
 message InstanceListEntry {
     string instance_id = 1;
     string name = 2;
@@ -501,19 +279,12 @@ message ListInstancesResponse {
     repeated InstanceListEntry instances = 1;
 }
 
-// Зеркало `andler_core::BackendKind`. Единственный зарегистрированный
-// backend сегодня — QEMU (см. `Daemon::default_backends`) — VMM включён
-// в схему для полноты ответа GetInstanceConfig, не потому что он сейчас
-// достижим на практике.
 enum BackendKind {
     BACKEND_KIND_UNSPECIFIED = 0;
     QEMU = 1;
     VMM = 2;
 }
 
-// Зеркало `andler_core::InstanceKind` — `oneof`, не C-style enum, так
-// как оба варианта несут данные (`LinuxVm.iso_path`,
-// `AndroidVm.android_profile`).
 message InstanceKind {
     message LinuxVm {
         string iso_path = 1;
@@ -529,13 +300,6 @@ message InstanceKind {
     }
 }
 
-// Ответ GetInstanceConfig — полный `InstanceConfig` инстанса, включая
-// `id`/`backend`/`kind`, которые `CreateInstanceRequest` сознательно не
-// принимает на входе (см. комментарий там) — здесь, в ответе на чтение,
-// показывать их естественно: клиент уже знает `instance_id` из запроса,
-// но получает его обратно для самодостаточности ответа (не нужно
-// сопоставлять с исходным запросом вручную), и видит, какой backend
-// реально использует инстанс.
 message GetInstanceConfigResponse {
     string instance_id = 1;
     string name = 2;
@@ -552,12 +316,6 @@ message GetInstanceConfigResponse {
     InputConfig input = 13;
 }
 
-// Вход `rpc UpdateInstanceConfig` — намеренно то же самое поле-в-поле,
-// что `GetInstanceConfigResponse` выше (плюс `instance_ref`, который
-// поддерживает частичный ID, как и остальные запросы, в отличие от уже
-// разрешённого `instance_id` в самом ответе GetInstanceConfig) — клиент
-// (`andler edit`) получает конфиг через Get, редактирует, шлёт обратно
-// через это сообщение без промежуточного переотображения полей.
 message UpdateInstanceConfigRequest {
     string instance_ref = 1;
     string name = 2;
@@ -574,33 +332,17 @@ message UpdateInstanceConfigRequest {
     InputConfig input = 13;
 }
 
-// Источник строки лога — см. `andler_core::LogStreamSource` за полным
-// обоснованием того, почему здесь только stdout/stderr самого процесса
-// гипервизора, не структурированные FSM-события и не гостевые логи.
-//
-// `LOG_STREAM_SOURCE_UNSPECIFIED = 0` недостижим на практике: сервер сам
-// заполняет это поле в каждом `LogLineResponse` (в отличие от
-// `CpuPriority`/`AndroidVersion`, которые парсятся из
-// клиентских запросов и поэтому нуждаются в `TryFrom`-проверке на
-// unspecified) — оставлен здесь только для консистентности со
-// стилем остальных enum'ов этого файла (см. их комментарии), не
-// потому что отсутствие этого варианта было бы поведенческой проблемой.
 enum LogStreamSource {
     LOG_STREAM_SOURCE_UNSPECIFIED = 0;
     STDOUT = 1;
     STDERR = 2;
 }
 
-// Одна строка вывода через `rpc StreamInstanceLogs`. Соответствует
-// `andler_core::LogLine` один-к-одному — см. конвертацию в
-// `andler-rpc/src/convert.rs`.
 message LogLineResponse {
     LogStreamSource source = 1;
     string line = 2;
 }
 
-// Соответствует `andler_core::CloneMode` один-к-одному — см. его
-// документацию за полным обоснованием каждого варианта.
 enum CloneMode {
     CLONE_MODE_UNSPECIFIED = 0;
     LINKED = 1;
@@ -608,10 +350,6 @@ enum CloneMode {
     SHARED_BASE = 3;
 }
 
-// Поля соответствуют параметрам Daemon::clone_instance один-к-одному.
-// Только для AndroidVm — см. документацию там за тем, почему LinuxVm не
-// поддерживается (нет управляемого instances_root, куда можно было бы
-// детерминированно положить файлы клона).
 message CloneInstanceRequest {
     string source_instance_id = 1;
     string new_name = 2;
@@ -619,11 +357,6 @@ message CloneInstanceRequest {
     CloneMode mode = 4;
 }
 
-// Поля соответствуют параметрам Daemon::export_instance_disk
-// один-к-одному. Не создаёт новый инстанс (см. комментарий у
-// `rpc ExportInstanceDisk` за тем, почему это отдельный метод, не
-// вариант CloneInstance) — ответ эхо подтверждает путь, не возвращает
-// instance_id, так как никакого instance_id не существует.
 message ExportInstanceDiskRequest {
     string source_instance_id = 1;
     string dest_path = 2;
@@ -633,14 +366,10 @@ message ExportInstanceDiskResponse {
     string dest_path = 1;
 }
 
-// --- Snapshot-операции ---------------------------------------------------
-
 message CreateSnapshotRequest {
     string instance_id = 1;
     string tag = 2;
     string description = 3;
-    // Per-operation timeout in seconds. If omitted, uses the instance's
-    // disk.snapshot_timeout_secs (default 30s).
     optional uint64 timeout_secs = 4;
 }
 
@@ -653,16 +382,12 @@ message CreateSnapshotResponse {
 message RestoreSnapshotRequest {
     string instance_id = 1;
     string tag = 2;
-    // Per-operation timeout in seconds. If omitted, uses the instance's
-    // disk.snapshot_timeout_secs (default 30s).
     optional uint64 timeout_secs = 3;
 }
 
 message DeleteSnapshotRequest {
     string instance_id = 1;
     string tag = 2;
-    // Per-operation timeout in seconds. If omitted, uses the instance's
-    // disk.snapshot_timeout_secs (default 30s).
     optional uint64 timeout_secs = 3;
 }
 
@@ -677,11 +402,6 @@ message ListSnapshotsResponse {
     repeated SnapshotEntry snapshots = 1;
 }
 
-// --- Resource Metrics ----------------------------------------------------
-
-// Одна выборка метрик ресурсов через `rpc StreamResourceMetrics`.
-// Все поля опциональны — если источник недоступен (процесс завершился,
-// /proc не читается), поле опущено (proto3 optional).
 message ResourceMetricsResponse {
     optional float cpu_percent = 1;
     optional uint64 memory_used_bytes = 2;
@@ -689,63 +409,39 @@ message ResourceMetricsResponse {
     optional uint64 disk_write_bytes_per_sec = 4;
     optional uint64 net_rx_bytes_per_sec = 5;
     optional uint64 net_tx_bytes_per_sec = 6;
-    // GPU metrics — доступны только для AMD GPU (через sysfs DRM).
-    // Для других вендоров или virtio-gpu без passthrough — опущены.
     optional uint64 vram_used_bytes = 7;
     optional uint64 vram_total_bytes = 8;
     optional float gpu_load_percent = 9;
 }
 
-// --- Guest Agent -----------------------------------------------------------
-
-// Запрос на установку пакета в гостевую ОС.
 message InstallGuestAgentRequest {
     string instance_id = 1;
-    // Имя пакета (например, "spice-vdagent").
     string package = 2;
 }
 
-// Запрос на удаление пакета из гостевой ОС.
 message RemoveGuestAgentRequest {
     string instance_id = 1;
-    // Имя пакета (например, "spice-vdagent").
     string package = 2;
 }
 
-// Список пакетов с их статусом в гостевой ОС.
 message ListGuestPackagesResponse {
     repeated GuestPackageEntry packages = 1;
 }
 
-
-// --- ARM Translator Switching -----------------------------------------------
-
-// Запрос на переключение ARM-транслятора в offline-режиме.
 message SwitchArmTranslatorRequest {
-    // Ссылка на инстанс (полный UUID или префикс).
     string instance_ref = 1;
-    // Целевой транслятор (libndk, libhoudini, none для удаления).
     ArmTranslator translator = 2;
-    // Путь к локальной директории с файлами транслятора (опционально).
-    // Если не передан — файлы будут скачаны автоматически.
     string translator_dir = 3;
 }
 
-// --- Config Set -------------------------------------------------------------
-
-// Запрос на частичное обновление конфигурации инстанса.
 message SetInstanceConfigRequest {
-    // Ссылка на инстанс (полный UUID или префикс).
     string instance_ref = 1;
-    // Ключ конфигурации (например, "arm_translator", "name").
     string key = 2;
-    // Значение (например, "libndk", "my-vm").
     string value = 3;
 }
-// Одна запись в списке пакетов.
+
 message GuestPackageEntry {
     string name = 1;
     string description = 2;
-    // "installed", "not_installed", или "unknown" (если VM недоступна).
     string status = 3;
 }

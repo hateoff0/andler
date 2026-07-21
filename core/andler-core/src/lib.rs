@@ -1,9 +1,4 @@
-//! Доменная модель ANDLER: конфигурация инстансов, конечный автомат
-//! состояний и абстракция backend'а гипервизора.
-//!
-//! Этот крейт не должен зависеть ни от одного другого крейта workspace'а —
-//! см. README.md этой папки. Архитектурное обоснование:
-//! docs/architecture/CORE_ARCHITECTURE_PLAN.md.
+
 
 pub mod android_profile;
 pub mod backend;

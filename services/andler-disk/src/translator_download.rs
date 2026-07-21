@@ -1,7 +1,4 @@
-//! Download and cache ARM translator archives.
-//!
-//! Downloads translator archives from GitHub, verifies MD5 checksums,
-//! and extracts them into the local cache directory (`~/.andler/cache/arm-translators/`).
+
 
 use std::path::PathBuf;
 
@@ -10,10 +7,7 @@ use andler_core::android_profile::ArmTranslator;
 use crate::error::DiskError;
 use crate::translator::{dir_name, resolve};
 
-/// Ensures the translator is available locally, downloading if necessary.
-///
-/// Returns the path to the extracted translator directory.
-/// Cache hit: returns immediately if the detect_file already exists.
+
 pub async fn ensure_translator(
     translator: ArmTranslator,
     android_version: &str,
@@ -21,12 +15,10 @@ pub async fn ensure_translator(
     let info = resolve(translator);
     let cache_path = andler_core::paths::arm_translators_dir().join(dir_name(translator));
 
-    // Cache hit: detect_file already present
     if !info.detect_file.is_empty() && cache_path.join(info.detect_file).exists() {
         return Ok(cache_path);
     }
 
-    // Find URL for the requested android_version
     let (url, expected_md5) = info
         .dl_links
         .iter()
@@ -45,7 +37,7 @@ pub async fn ensure_translator(
     Ok(cache_path)
 }
 
-/// Downloads a file from the given URL.
+
 async fn download_file(url: &str) -> Result<Vec<u8>, DiskError> {
     let response = reqwest::get(url)
         .await
@@ -65,7 +57,7 @@ async fn download_file(url: &str) -> Result<Vec<u8>, DiskError> {
         .map(|b| b.to_vec())
 }
 
-/// Verifies MD5 checksum of downloaded bytes.
+
 fn verify_md5(bytes: &[u8], expected: &str) -> Result<(), DiskError> {
     let result = format!("{:x}", md5::compute(bytes));
 
@@ -77,7 +69,7 @@ fn verify_md5(bytes: &[u8], expected: &str) -> Result<(), DiskError> {
     Ok(())
 }
 
-/// Extracts a ZIP archive into the target directory.
+
 fn extract_zip(bytes: &[u8], target: &PathBuf) -> Result<(), DiskError> {
 
     let cursor = std::io::Cursor::new(bytes);

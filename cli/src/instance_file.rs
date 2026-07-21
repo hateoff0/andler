@@ -1,14 +1,4 @@
-//! Configuration file for `andler create` (TOML).
-//!
-//! Supports both LinuxVm and AndroidVm creation from a single TOML format.
-//! The type is auto-detected: if `android_version` (or `base_image_path`)
-//! is present, it's an AndroidVm; otherwise LinuxVm.
-//!
-//! LinuxVm required fields: `name`, `iso_path`, `disk_path`, `ovmf_vars_path`.
-//! AndroidVm required fields: `name`, `android_version`, `base_image_path`, `ovmf_vars_path`.
-//!
-//! Each section (`cpu`/`memory`/`display`/`gpu`/`network`/`audio`/`input`)
-//! is optional — absence means `reference_default()`.
+
 
 use std::path::{Path, PathBuf};
 
@@ -35,12 +25,7 @@ pub enum InstanceFileError {
         #[source]
         source: toml::de::Error,
     },
-    /// A path field in the TOML doesn't exist or can't be resolved — see
-    /// PLAN.md, item 20c, "No path canonicalization". Unlike `Read`/
-    /// `Parse` above, `field` names which TOML key was the problem
-    /// (`iso_path`, `disk_path`, `base_image_path`), since
-    /// there's no single file path to report here — the *instance file*
-    /// itself parsed fine, it's a path *inside* it that's the problem.
+
     #[error("invalid {field} {path:?}: {source}")]
     InvalidPath {
         field: &'static str,
@@ -50,21 +35,16 @@ pub enum InstanceFileError {
     },
 }
 
-/// Result of parsing an instance TOML file — either a LinuxVm or AndroidVm request.
+
 #[derive(Debug)]
 pub enum InstanceFileResult {
-    /// LinuxVm — calls `CreateInstance` RPC.
+
     Linux(CreateInstanceRequest),
-    /// AndroidVm — calls `CreateAndroidInstance` RPC.
+
     Android(CreateAndroidInstanceRequest),
 }
 
-/// TOML-представление выбора `cdrom_bus` — отдельный тип от
-/// `andler_core::CdromBus`, потому что у него есть третье состояние
-/// (`Auto`), которого нет (и не должно быть) в домене: домен всегда несёт
-/// уже принятое решение, а "auto" — это просьба к этому модулю принять
-/// решение за пользователя на основе `recommended_for_iso_filename`, не
-/// валидный домена сам по себе.
+
 #[derive(Debug, Clone, Copy, Default, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum InstanceFileCdromBus {
@@ -74,79 +54,58 @@ pub enum InstanceFileCdromBus {
     Ide,
 }
 
-/// TOML instance file. Shared fields for both LinuxVm and AndroidVm.
-/// Android-specific fields are `Option` — if present, the file is treated
-/// as an AndroidVm config.
+
 #[derive(Debug, Deserialize)]
 pub struct InstanceFile {
     pub name: String,
 
-    // --- Linux-specific (required for LinuxVm) ---
-    /// Path to installer ISO. Required for LinuxVm, ignored for AndroidVm.
+
     #[serde(default)]
     pub iso_path: Option<PathBuf>,
-    /// Path to disk file. Required for LinuxVm, ignored for AndroidVm.
+
     #[serde(default)]
     pub disk_path: Option<PathBuf>,
-    /// Disk size in GiB. Optional (default: 256 GiB — see
-    /// `DiskConfig::reference_default`; thin-provisioned qcow2, so this
-    /// is a nominal upper bound, not space used immediately on the host).
+
     #[serde(default)]
     pub disk_size_gib: Option<u64>,
-    /// Automatically compact the disk after every graceful shutdown.
-    /// Optional (default: `false` — see
-    /// `DiskConfig::compact_on_shutdown`; off unless explicitly enabled,
-    /// has no effect on non-qcow2 disks).
+
     #[serde(default)]
     pub compact_on_shutdown: bool,
-    /// Bus for the ISO/CD-ROM drive. Optional — absent or `"auto"` means
-    /// decide based on the ISO filename (see
-    /// `CdromBus::recommended_for_iso_filename`); `"virtio"` or `"ide"`
-    /// force an explicit choice. See PLAN.md, "Монтирование ISO /
-    /// CD-ROM".
+
     #[serde(default)]
     pub cdrom_bus: InstanceFileCdromBus,
 
-    // --- Common ---
-    /// Path to OVMF_VARS template. Required for both types.
+
     pub ovmf_vars_path: PathBuf,
-    /// Enable UEFI/OVMF firmware. If `false`, legacy BIOS is used.
-    /// Optional (default: `true`). Linux only — ignored for Android.
+
     #[serde(default = "default_true")]
     pub enable_uefi: bool,
 
-    // --- Android-specific (presence = AndroidVm) ---
-    /// Android version. If present, this is an AndroidVm config.
+
     #[serde(default)]
     pub android_version: Option<u32>,
-    /// Path to Android base image. Required for AndroidVm.
+
     #[serde(default)]
     pub base_image_path: Option<String>,
-    /// Overlay disk size in GiB (default: 20).
+
     #[serde(default)]
     pub overlay_size_gib: Option<u64>,
-    /// Include Google Apps.
+
     #[serde(default)]
     pub gapps: bool,
-    /// Include microG.
+
     #[serde(default)]
     pub microg: bool,
-    /// Include ARM→x86 translation (libhoudini/libndk). **Deprecated** —
-    /// use `arm_translator = "libndk"` instead. Kept only for backward
-    /// compatibility with TOML files written before `arm_translator`
-    /// existed: `libndk = true` -> `ArmTranslator::Libndk` when
-    /// `arm_translator` is absent. If both are present, `arm_translator`
-    /// wins.
+
     #[serde(default)]
     pub libndk: bool,
-    /// ARM→x86 translator: `"none"` (default), `"libndk"`, `"libhoudini"`.
+
     #[serde(default)]
     pub arm_translator: Option<String>,
-    /// Instance directory root for Android instances.
+
     #[serde(default)]
     pub instances_root: Option<String>,
 
-    // --- Optional config sections ---
     #[serde(default)]
     pub cpu: Option<CpuConfig>,
     #[serde(default)]
@@ -161,23 +120,13 @@ pub struct InstanceFile {
     pub audio: Option<AudioConfig>,
     #[serde(default)]
     pub input: Option<InputConfig>,
-    /// Snapshot timeout in seconds (default: 30).
+
     #[serde(default)]
     pub snapshot_timeout_secs: Option<u64>,
 }
 
 impl InstanceFile {
-    /// Reads and parses a TOML file, then canonicalizes every
-    /// user-supplied filesystem path field found in it (`iso_path`,
-    /// `disk_path`'s parent directory, `base_image_path`)
-    /// — see PLAN.md, item 20c, "No path canonicalization". This is
-    /// the actual attack surface that section's own example describes
-    /// (`path = "../../etc/shadow"` in a TOML file): unlike CLI flags
-    /// (see `create.rs::validate_linux_paths`/`validate_android_paths`,
-    /// the same idea applied to `--iso-path`/`--disk-path`/etc.), a
-    /// `--file` TOML's paths previously went completely unexamined by
-    /// the CLI, straight through to whatever `into_request`/
-    /// `into_android_request` built from them.
+
     pub fn load(path: &Path) -> Result<Self, InstanceFileError> {
         let text = std::fs::read_to_string(path).map_err(|source| InstanceFileError::Read {
             path: path.to_path_buf(),
@@ -191,12 +140,7 @@ impl InstanceFile {
         Ok(parsed)
     }
 
-    /// See `load`'s doc comment. `disk_path` is special-cased the same
-    /// way `create.rs::validate_linux_paths` special-cases `--disk-path`
-    /// — it usually doesn't exist yet (the common "create a new disk"
-    /// case), so only its parent directory is canonicalized and the
-    /// (not-yet-existing) file name is reattached, rather than trying
-    /// and failing to canonicalize the whole path.
+
     fn canonicalize_paths(&mut self) -> Result<(), InstanceFileError> {
         if let Some(iso_path) = &self.iso_path {
             self.iso_path = Some(std::fs::canonicalize(iso_path).map_err(|source| {
@@ -236,7 +180,7 @@ impl InstanceFile {
         Ok(())
     }
 
-    /// Determines the instance type and returns the appropriate request.
+
     pub fn into_result(self) -> InstanceFileResult {
         if self.android_version.is_some() || self.base_image_path.is_some() {
             InstanceFileResult::Android(self.into_android_request())
@@ -245,7 +189,7 @@ impl InstanceFile {
         }
     }
 
-    /// Builds a `CreateInstanceRequest` for LinuxVm.
+
     fn into_request(self) -> CreateInstanceRequest {
         let disk_path = self.disk_path.expect("disk_path required for LinuxVm");
         let mut disk = DiskConfig::reference_default(disk_path);
@@ -289,13 +233,6 @@ impl InstanceFile {
                     .into(),
             ),
             firmware: Some(
-                // `ovmf_code_path` намеренно пустой — daemon (service.rs)
-                // подставит авто-определённый или явный путь из своей
-                // конфигурации. CLI знает только путь к VARS (персональный
-                // per-instance файл), но не путь к CODE (системный,
-                // зависящий от дистрибутива). Пустая строка = "используй
-                // авто-детект daemon'а" — это соглашение между CLI и
-                // service.rs, задокументированное в обоих местах.
                 andler_core::FirmwareConfig {
                     enable_uefi: self.enable_uefi,
                     ovmf_code_path: std::path::PathBuf::new(),
@@ -319,7 +256,7 @@ impl InstanceFile {
         req
     }
 
-    /// Builds a `CreateAndroidInstanceRequest` for AndroidVm.
+
     fn into_android_request(self) -> CreateAndroidInstanceRequest {
         let base_image_path = self
             .base_image_path
@@ -336,7 +273,6 @@ impl InstanceFile {
             .unwrap_or_else(default_instances_root);
 
 
-        // Build AndroidProfile
         let android_version = self.android_version.unwrap_or(13);
         let mut profile = ProtoAndroidProfile {
             gapps: self.gapps,
@@ -348,9 +284,6 @@ impl InstanceFile {
             _ => andler_rpc::proto::AndroidVersion::Android13,
         });
 
-        // `arm_translator` побеждает, если задан явно; иначе — обратная
-        // совместимость со старым `libndk = true/false` (см. doc-
-        // комментарий на поле `libndk`).
         let arm_translator = match self.arm_translator.as_deref() {
             Some("libndk") => andler_rpc::proto::ArmTranslator::Libndk,
             Some("libhoudini") => andler_rpc::proto::ArmTranslator::Libhoudini,
@@ -404,7 +337,6 @@ mod tests {
         ovmf_vars_path = "/tmp/test_VARS.fd"
     "#;
 
-    // --- LinuxVm tests ---
 
     #[test]
     fn minimal_linux_file_parses_and_fills_every_section() {
@@ -473,8 +405,6 @@ mod tests {
 
     #[test]
     fn linux_cdrom_bus_defaults_to_auto_detect_by_iso_filename() {
-        // MINIMAL_LINUX_TOML's iso_path is "/tmp/test.iso" — not a known
-        // distro name, so auto-detect should fall back to Ide.
         let file: InstanceFile =
             toml::from_str(MINIMAL_LINUX_TOML).expect("minimal Linux TOML must parse");
         match file.into_result() {
@@ -499,8 +429,6 @@ mod tests {
 
     #[test]
     fn linux_cdrom_bus_explicit_choice_overrides_auto_detect() {
-        // Explicit "ide" must win even though the filename would
-        // auto-detect to virtio.
         let toml = MINIMAL_LINUX_TOML
             .replace("/tmp/test.iso", "/tmp/ubuntu-24.04.iso")
             + "\ncdrom_bus = \"ide\"\n";
@@ -513,7 +441,6 @@ mod tests {
         }
     }
 
-    // --- AndroidVm tests ---
 
     #[test]
     fn minimal_android_file_parses() {
@@ -551,8 +478,6 @@ mod tests {
                 let profile = req.profile.unwrap();
                 assert!(profile.gapps);
                 assert!(profile.microg);
-                // Backward compat: старый `libndk = true` (без
-                // `arm_translator`) резолвится в Libndk.
                 assert_eq!(
                     profile.arm_translator(),
                     andler_rpc::proto::ArmTranslator::Libndk
@@ -580,8 +505,6 @@ mod tests {
 
     #[test]
     fn android_arm_translator_field_wins_over_legacy_libndk() {
-        // Явный arm_translator побеждает над устаревшим libndk, даже
-        // если они противоречат друг другу (рассинхронизированный файл).
         let toml = format!(
             "{MINIMAL_ANDROID_TOML}\nlibndk = true\narm_translator = \"none\"\n"
         );
@@ -630,7 +553,6 @@ mod tests {
         }
     }
 
-    // --- Auto-detect tests ---
 
     #[test]
     fn android_version_field_triggers_android_mode() {
@@ -662,7 +584,6 @@ mod tests {
         assert!(matches!(file.into_result(), InstanceFileResult::Linux(_)));
     }
 
-    // --- Error tests ---
 
     #[test]
     fn missing_required_linux_field_fails() {
@@ -700,11 +621,6 @@ mod tests {
 
     #[test]
     fn load_rejects_nonexistent_iso_path() {
-        // Regression test for PLAN.md item 20c: previously, paths
-        // referenced *inside* a successfully-parsed TOML went completely
-        // unexamined by `load()` — a nonexistent (or, per the plan's own
-        // example, maliciously traversal-ish) path would sail straight
-        // through.
         let dir = std::env::temp_dir().join(format!(
             "andler-cli-test-badpath-{}",
             std::process::id()
@@ -745,9 +661,6 @@ mod tests {
         let iso_path = dir.join("test.iso");
         std::fs::write(&iso_path, b"fake iso contents").unwrap();
         let toml_path = dir.join("instance.toml");
-        // `..`-containing but still resolvable paths — the whole point
-        // is that `load()` resolves these before anything downstream
-        // sees them.
         let messy_iso = dir.join("..").join(dir.file_name().unwrap()).join("test.iso");
         std::fs::write(
             &toml_path,
@@ -768,8 +681,6 @@ mod tests {
         assert!(!resolved_iso.to_string_lossy().contains(".."));
         assert_eq!(resolved_iso, std::fs::canonicalize(&iso_path).unwrap());
 
-        // disk_path doesn't exist yet (fresh-disk case) — only its
-        // parent gets canonicalized, the file name is preserved as-is.
         let resolved_disk = file.disk_path.expect("disk_path must be set");
         assert_eq!(resolved_disk.file_name().unwrap(), "new-disk.qcow2");
         assert!(!resolved_disk.to_string_lossy().contains(".."));

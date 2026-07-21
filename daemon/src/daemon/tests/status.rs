@@ -9,10 +9,7 @@ async fn status_on_unknown_instance_returns_instance_not_found() {
     assert!(matches!(err, DaemonError::InstanceNotFound(_)));
 }
 
-/// В отличие от `pause_before_start_returns_handle_not_found` —
-/// `stream_instance_logs` без запущенного backend'а не должен быть
-/// ошибкой вообще (см. документацию метода за обоснованием): просто
-/// немедленно завершающийся пустой поток.
+
 #[tokio::test]
 async fn stream_logs_before_start_returns_empty_stream_not_error() {
     let daemon = Daemon::new();

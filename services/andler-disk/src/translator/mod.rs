@@ -1,16 +1,11 @@
-//! Per-translator data modules and central dispatch.
-//!
-//! Following waydroid_script's `Houdini`/`Ndk` separation: each translator
-//! gets its own module with constants (download links, file lists, build.prop
-//! patches, detection paths). The `resolve()` function provides a unified
-//! interface for switching logic.
+
 
 pub mod houdini;
 pub mod ndk;
 
 use andler_core::android_profile::ArmTranslator;
 
-/// Unified view of translator-specific data, returned by `resolve()`.
+
 pub struct TranslatorInfo {
     pub dl_links: &'static [(&'static str, &'static str, &'static str)],
     pub files: &'static [&'static str],
@@ -19,10 +14,7 @@ pub struct TranslatorInfo {
     pub detect_file: &'static str,
 }
 
-/// Returns the data for the given translator variant.
-///
-/// `ArmTranslator::None` returns empty file/link lists and x86-only
-/// build.prop values — used when stripping an existing translator.
+
 pub fn resolve(translator: ArmTranslator) -> TranslatorInfo {
     match translator {
         ArmTranslator::Libndk => TranslatorInfo {
@@ -55,7 +47,7 @@ pub fn resolve(translator: ArmTranslator) -> TranslatorInfo {
     }
 }
 
-/// Returns a cache directory name for the given translator.
+
 pub fn dir_name(translator: ArmTranslator) -> &'static str {
     match translator {
         ArmTranslator::Libndk => "ndk",

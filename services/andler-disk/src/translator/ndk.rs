@@ -1,11 +1,6 @@
-//! Constants for Google NDK translation (libndk).
-//!
-//! Per-translator data module following waydroid_script's separation.
-//! Each translator gets its own module with download links, file lists,
-//! build.prop patches, and detection paths.
 
-/// Download links for NDK translation archives, keyed by Android version.
-/// Format: (android_version, url, expected_md5).
+
+
 pub const DL_LINKS: &[(&str, &str, &str)] = &[
     (
         "11",
@@ -19,7 +14,7 @@ pub const DL_LINKS: &[(&str, &str, &str)] = &[
     ),
 ];
 
-/// Files to install from the extracted archive into the guest system partition.
+
 pub const FILES: &[&str] = &[
     "bin/arm",
     "bin/arm64",
@@ -31,7 +26,7 @@ pub const FILES: &[&str] = &[
     "lib64/libndk*",
 ];
 
-/// build.prop keys to set/update when this translator is active.
+
 pub const PROPS: &[(&str, &str)] = &[
     (
         "ro.product.cpu.abilist",
@@ -51,8 +46,8 @@ pub const PROPS: &[(&str, &str)] = &[
     ("ro.dalvik.vm.isa.arm64", "x86_64"),
 ];
 
-/// Extra init.rc content for this translator (None if not needed).
+
 pub const INIT_RC: Option<&str> = None;
 
-/// File whose presence indicates this translator is installed.
+
 pub const DETECT_FILE: &str = "lib/libndk_translation.so";

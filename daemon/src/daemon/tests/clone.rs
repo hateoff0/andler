@@ -3,7 +3,6 @@ use super::*;
 use std::path::PathBuf;
 use andler_core::{AndroidProfile, ArmTranslator, CloneMode};
 
-// --- clone_instance / find_live_clones (non-ignore) ---------------------
 
 #[tokio::test]
 async fn clone_on_unknown_instance_returns_instance_not_found() {
@@ -72,7 +71,6 @@ async fn clone_rejects_non_terminal_source_state() {
     ));
 }
 
-// --- find_live_clones ---------------------------------------------------
 
 #[tokio::test]
 async fn find_live_clones_on_unknown_instance_returns_instance_not_found() {
@@ -203,7 +201,6 @@ async fn remove_instance_with_purge_succeeds_when_clone_is_full_standalone() {
     assert!(!vars_path.exists());
 }
 
-// --- LinuxVm clone/export -----------------------------------------------
 
 #[tokio::test]
 async fn clone_linux_vm_linked_mode_is_allowed() {
@@ -354,7 +351,6 @@ async fn clone_linux_vm_rejects_non_terminal_source_state() {
     ));
 }
 
-// --- #[ignore] tests (require qemu-img) ---------------------------------
 
 #[tokio::test]
 #[ignore = "requires qemu-img binary, see docker/README.md integration-test target"]

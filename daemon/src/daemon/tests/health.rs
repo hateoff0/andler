@@ -2,10 +2,7 @@ use super::common::*;
 use super::*;
 use andler_core::BackendHandle;
 
-/// `run_health_check_once` must not touch instances that aren't
-/// `Running` — this is a pure bookkeeping check, doesn't need a real
-/// backend/process, just confirms the filter in the first step of the
-/// function does the right thing for every other state.
+
 #[tokio::test]
 async fn health_check_ignores_non_running_instances() {
     let daemon = Daemon::new();
@@ -20,9 +17,7 @@ async fn health_check_ignores_non_running_instances() {
     assert_eq!(record.state, InstanceState::Created);
 }
 
-/// A `Running` record with no handle at all (shouldn't normally happen,
-/// but the health check must not panic on it) is silently skipped rather
-/// than crashing the whole check loop.
+
 #[tokio::test]
 async fn health_check_skips_running_instance_without_handle() {
     let daemon = Daemon::new();
@@ -41,7 +36,6 @@ async fn health_check_skips_running_instance_without_handle() {
 
     let instances = daemon.instances.read().await;
     let record = instances.get(&id).expect("instance must still be registered");
-    // Unchanged — no handle means nothing to query, not "crashed".
     assert_eq!(record.state, InstanceState::Running);
 }
 

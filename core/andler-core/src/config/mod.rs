@@ -1,13 +1,4 @@
-//! Конфигурация инстанса: `InstanceConfig` и все составляющие его типы.
-//!
-//! Разнесено по файлам так же, как описано в
-//! docs/architecture/CORE_ARCHITECTURE_PLAN.md, §4.3:
-//! `cpu.rs`, `memory.rs`, `gpu.rs`, `disk.rs`, `network.rs`, `display.rs` —
-//! по одному файлу на каждый блок ресурсов. `firmware.rs`, `audio.rs`,
-//! `input.rs` добавлены дополнительно при реализации `andler-qemu::cmdline`
-//! — `исходная референсная конфигурация` содержит OVMF/audio/clipboard-параметры,
-//! для которых план не выделял отдельный тип в §4.3. `instance.rs` собирает всё в единый
-//! `InstanceConfig` вместе с `InstanceId`/`InstanceKind`.
+
 
 mod audio;
 mod cdrom;

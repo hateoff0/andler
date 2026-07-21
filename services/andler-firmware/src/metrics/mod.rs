@@ -1,26 +1,4 @@
-//! Collection of GPU metrics from host-side sysfs and vendor tools.
-//!
-//! Lives in `andler-firmware`, not `backends/andler-qemu`, because GPU
-//! metrics are host-level (not tied to any VM's QEMU PID) and read the
-//! same sysfs paths/vendor tools as `detect::gpu` — detection and
-//! monitoring belong in one place. Per-VM metrics (CPU%, RAM, disk I/O,
-//! network I/O — all of which *do* need a PID) stay in
-//! `backends/andler-qemu::metrics`, which calls into this module only for
-//! the GPU fields.
-//!
-//! QEMU QMP does not provide GPU metrics (no `query-gpus`), so data is
-//! read directly from sysfs or vendor CLI tools — same level as `/proc`
-//! for CPU/RAM. Supported vendors:
-//!
-//! | Vendor | Source | Metrics |
-//! |--------|--------|---------|
-//! | AMD | sysfs (`mem_info_vram_*`, `gpu_busy_percent`) | VRAM used/total, GPU load % |
-//! | NVIDIA | `nvidia-smi` CLI | VRAM used/total, GPU load % |
-//! | Intel | sysfs `i915` (`power/rc6_residency_ms`) | GPU load % (idle-time-based), no VRAM |
-//!
-//! Vendor detection priority: AMD → NVIDIA → Intel (first found wins).
-//! Multi-GPU per-process binding is left for a future iteration. See
-//! `gpu_amd`/`gpu_nvidia`/`gpu_intel` for the vendor-specific details.
+
 
 mod gpu_amd;
 mod gpu_intel;
@@ -30,28 +8,28 @@ use std::path::{Path, PathBuf};
 
 use andler_core::ResourceMetrics;
 
-/// Base DRM sysfs directory.
+
 const DRM_SYSFS_BASE: &str = "/sys/class/drm";
 
-/// Reads a `u64` from a sysfs file. Returns `None` on any error.
+
 fn read_sysfs_u64(base: &Path, relative: &str) -> Option<u64> {
     let content = std::fs::read_to_string(base.join(relative)).ok()?;
     content.trim().parse::<u64>().ok()
 }
 
-/// Reads an `f32` from a sysfs file. Returns `None` on any error.
+
 fn read_sysfs_f32(base: &Path, relative: &str) -> Option<f32> {
     let content = std::fs::read_to_string(base.join(relative)).ok()?;
     content.trim().parse::<f32>().ok()
 }
 
-/// Reads a `u64` from a sysfs file (single integer, no unit suffix).
+
 fn read_sysfs_u64_plain(path: &Path) -> Option<u64> {
     let content = std::fs::read_to_string(path).ok()?;
     content.trim().parse::<u64>().ok()
 }
 
-/// Scans `/sys/class/drm/card*` entries, sorted by name.
+
 fn sorted_drm_cards() -> Vec<PathBuf> {
     let drm_base = Path::new(DRM_SYSFS_BASE);
 
@@ -76,24 +54,18 @@ fn sorted_drm_cards() -> Vec<PathBuf> {
         .collect()
 }
 
-/// Detects GPU vendor (AMD → NVIDIA → Intel priority) and returns metrics.
-///
-/// Returns `ResourceMetrics` with GPU fields populated if a compatible GPU
-/// is found. All GPU fields will be `None` if no supported GPU is detected.
+
 pub fn read_gpu_metrics() -> ResourceMetrics {
-    // AMD (highest priority)
     if let Some(card_path) = gpu_amd::find_amd_gpu_card() {
         return gpu_amd::read_amd_metrics(&card_path);
     }
 
-    // NVIDIA
     if gpu_nvidia::is_nvidia_available() {
         if let Some(metrics) = gpu_nvidia::read_nvidia_metrics() {
             return metrics;
         }
     }
 
-    // Intel
     if let Some(card_path) = gpu_intel::find_intel_gpu_card() {
         return gpu_intel::read_intel_metrics(&card_path);
     }
@@ -101,10 +73,7 @@ pub fn read_gpu_metrics() -> ResourceMetrics {
     ResourceMetrics::default()
 }
 
-/// Merges GPU metrics into host metrics.
-///
-/// GPU fields from `gpu` fill `None` fields in `base`.
-/// Existing `Some` fields in `base` are not overwritten.
+
 pub fn merge_gpu_metrics(base: &mut ResourceMetrics, gpu: &ResourceMetrics) {
     if base.vram_used_bytes.is_none() {
         base.vram_used_bytes = gpu.vram_used_bytes;
@@ -124,7 +93,6 @@ mod tests {
     #[test]
     fn read_gpu_metrics_does_not_panic() {
         let metrics = read_gpu_metrics();
-        // Should not panic regardless of hardware
         assert!(metrics.cpu_percent.is_none());
         assert!(metrics.memory_used_bytes.is_none());
     }

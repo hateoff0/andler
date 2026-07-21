@@ -1,13 +1,4 @@
-//! Реализация `HypervisorBackend` (из `andler-core`) поверх процесса QEMU.
-//!
-//! - `cmdline` — чистая сборка аргументов командной строки из `InstanceConfig`.
-//! - `process` — низкоуровневый spawn/is_alive/terminate/force_kill процесса
-//!   QEMU, без знания про `InstanceConfig`/`HypervisorBackend`.
-//! - `qmp` — клиент QEMU Machine Protocol: handshake, `pause`/`resume`/
-//!   `query_status`. Snapshot — за пределами текущего скоупа, см. README.md
-//!   этой папки.
-//! - `backend` — `QemuBackend`, связывающий `cmdline`+`process`+`qmp` с
-//!   `HypervisorBackend`.
+
 
 pub mod backend;
 pub mod cmdline;

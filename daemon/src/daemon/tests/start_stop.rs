@@ -22,16 +22,7 @@ async fn start_instance_rejects_passthrough_via_backend_validation() {
     assert!(matches!(status.state, InstanceState::Error { .. }));
 }
 
-/// Regression test for restart support (`Stopped`/`Error -> Starting`,
-/// see `andler_core::fsm` module doc comment): before this change,
-/// calling `start_instance` on anything but a freshly-`Created` record
-/// failed immediately with `DaemonError::InvalidTransition` — the FSM
-/// itself refused `Start` from `Stopped`/`Error`, before `start_instance`
-/// ever got to call `backend.spawn`. This asserts that specific
-/// FSM-level rejection no longer happens; it deliberately does *not*
-/// assert the overall call succeeds (spawning a real QEMU process isn't
-/// guaranteed in every environment this test runs in) — only that if it
-/// still fails, it fails for some other, backend-specific reason.
+
 #[tokio::test]
 async fn start_instance_no_longer_rejected_by_fsm_when_stopped_or_errored() {
     for initial_state in [
@@ -54,8 +45,6 @@ async fn start_instance_no_longer_rejected_by_fsm_when_stopped_or_errored() {
 
         match daemon.start_instance(id).await {
             Ok(()) => {
-                // A real backend was available and it actually started —
-                // don't leak the process past this test.
                 let _ = daemon.stop_instance(id, false).await;
             }
             Err(DaemonError::InvalidTransition(_)) => panic!(

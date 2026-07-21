@@ -1,4 +1,4 @@
-//! Basic wizard questions (VM type, name, ISO/base image, disk size).
+
 
 use std::path::Path;
 
@@ -35,7 +35,7 @@ pub enum BasicResult {
     Android(AndroidBasicResult),
 }
 
-#[allow(dead_code)]
+#[allow(dead_code)] // kind(), disk_size_gib(), instances_root() only used in tests; name() used in summary
 impl BasicResult {
     pub fn name(&self) -> &str {
         match self {
@@ -237,15 +237,7 @@ fn validate_name(
     }
 }
 
-/// Unlike [`validate_base_image_path`], an empty ISO path is valid —
-/// it means "boot from an existing disk, no install media" (see the
-/// prompt's own help text in `ask_iso_path`). Only a *non-empty* path
-/// that doesn't actually exist is rejected — this was previously not
-/// checked at all here (see PLAN.md, item 15, "Config validation before
-/// creation": found while adding the CLI-mode equivalent in
-/// `cli/src/create.rs::validate_linux_paths`), so a typo'd `--iso-path`
-/// only ever surfaced as an opaque daemon-side error well after the
-/// wizard had already finished.
+
 fn validate_iso_path(path: &str) -> Result<(), WizardError> {
     let trimmed = path.trim();
     if trimmed.is_empty() {
@@ -309,8 +301,6 @@ mod tests {
 
     #[test]
     fn validate_iso_path_existing_path_is_valid() {
-        // /tmp always exists in the test environment; existence is all
-        // this function checks, not that it's specifically a file.
         assert!(validate_iso_path("/tmp").is_ok());
     }
 }

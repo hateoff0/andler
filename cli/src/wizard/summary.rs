@@ -1,4 +1,4 @@
-//! Summary screen and confirmation before VM creation.
+
 
 use andler_core::{
     AudioBackend, CdromBus, DisplayEngine, NetworkMode, NatBackend, PointerMode, RenderBackend,
@@ -226,14 +226,6 @@ fn print_summary(
     println!("└───────────────────────────────────────────────────────────────┘");
     println!();
 
-    // qcow2 is thin-provisioned/sparse — a freshly created disk actually
-    // takes up only a small fraction of its configured maximum size on
-    // the host, growing as the guest writes data. Not a specific real
-    // number (e.g. the plan's own "~2 GiB" mockup) — that depends on
-    // qcow2 cluster size/version and isn't something worth pretending to
-    // predict precisely; the point is just that the configured size is
-    // a ceiling, not the actual disk usage. See PLAN.md, item 19,
-    // "19c. Show estimated disk usage".
     println!(
         "Note: the {} GiB disk is thin-provisioned (qcow2) — it starts out small \
          (well under 1 GiB) and grows on demand as data is written, up to that size.",
@@ -241,14 +233,6 @@ fn print_summary(
     );
     println!();
 
-    // Clipboard sharing needs `spice-vdagentd` running *inside the
-    // guest* — the host-side QEMU config above (`qemu-vdagent` chardev)
-    // is correct on its own and does nothing without it. This is a
-    // guest-side package the wizard/daemon has no way to install or
-    // detect from the host, so the best we can do is tell the person
-    // up front rather than let them discover a "broken" clipboard later
-    // with no indication of why. See PLAN.md, item 3, "Clipboard
-    // sharing does not work".
     if clipboard {
         println!("Note: clipboard sharing requires spice-vdagent running inside the guest OS.");
         println!("Install it after first boot:");
@@ -259,7 +243,7 @@ fn print_summary(
     }
 }
 
-#[allow(dead_code)]
+#[allow(dead_code)] // reserved for future audio backend display in summary
 pub(crate) fn format_audio(backend: AudioBackend) -> &'static str {
     match backend {
         AudioBackend::Pipewire => "PipeWire",

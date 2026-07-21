@@ -1,29 +1,4 @@
-//! Репозиторий `InstanceConfig`/`InstanceState` на sqlite.
-//!
-//! Схема — одна таблица `instances` с двумя JSON-колонками
-//! (`config_json`, `state_json`), а не нормализованный набор колонок на
-//! каждое поле `InstanceConfig`: `InstanceConfig` уже `Serialize`/
-//! `Deserialize` целиком (см. `andler_core::config::instance`), схема
-//! активно меняется на этом этапе проекта, и ничего в `andler-store` не
-//! фильтрует/не сортирует по отдельным полям конфигурации — единственный
-//! паттерн доступа — "дай мне всё по этому `InstanceId`" или "дай мне все
-//! записи на старте демона". `state_json` хранится отдельно от
-//! `config_json`, а не как часть одного блоба, потому что обновляется
-//! значительно чаще (каждый переход FSM) и независимо от конфигурации —
-//! `save_state` не должен требовать пере-сериализации всего конфига.
-//!
-//! Конкурентный доступ: `rusqlite::Connection` не `Sync`, поэтому делимся
-//! одним соединением между вызовами через `Arc<Mutex<Connection>>` —
-//! sqlite сам по себе не обслуживает параллельные записи лучше одного
-//! соединения с сериализованным доступом (busy_timeout/WAL дали бы
-//! параллелизм read/write, но при текущем объёме операций — несколько
-//! изменений FSM в секунду на инстанс — отдельный writer-поток или WAL не
-//! окупают добавленной сложности; см. README, "Куда дальше").
-//!
-//! Каждый публичный метод — `async fn`, который уходит в
-//! `tokio::task::spawn_blocking`: rusqlite — блокирующий API, и держать
-//! tokio-воркер занятым на время диска было бы неправильно даже при
-//! низкой частоте вызовов.
+
 
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -34,29 +9,20 @@ use uuid::Uuid;
 
 use crate::error::StoreError;
 
-/// Персистентный репозиторий инстансов поверх sqlite.
-///
-/// `Clone` — дешёвый (это просто клон `Arc`), что позволяет передавать
-/// `Store` в несколько мест `andler-daemon` (например, и в `Daemon`, и в
-/// фоновую задачу восстановления при старте) без дополнительной обёртки в
-/// `Arc` на стороне вызывающего.
+
 #[derive(Clone)]
 pub struct Store {
     conn: Arc<Mutex<Connection>>,
 }
 
-/// Одна строка из таблицы `instances` целиком — то, что нужно
-/// `andler-daemon`, чтобы восстановить `InstanceRecord` при старте: и
-/// конфигурация, и последнее известное состояние FSM.
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoredInstance {
     pub config: InstanceConfig,
     pub state: InstanceState,
 }
 
-/// Метаданные снапшота, хранящиеся в таблице `snapshots`.
-/// Сам снапшот (данные диска + состояние CPU/памяти) хранится внутри
-/// qcow2-файла — здесь только метаданные для быстрого доступа.
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoredSnapshot {
     pub id: uuid::Uuid,
@@ -67,13 +33,7 @@ pub struct StoredSnapshot {
 }
 
 impl Store {
-    /// Открывает (или создаёт, если файла ещё нет) sqlite-базу по
-    /// указанному пути и применяет схему. Путь, а не строка подключения —
-    /// `andler-daemon` всегда работает с конкретным файлом на диске
-    /// (`/var/lib/andler/state.db` в проде), и `Path` явно отражает это в
-    /// сигнатуре, в отличие от произвольной sqlite connection-строки,
-    /// которая могла бы случайно указать на `:memory:` или сетевую базу,
-    /// которые `andler-store` не поддерживает и не тестирует.
+
     pub async fn open(path: impl AsRef<Path>) -> Result<Self, StoreError> {
         let path = path.as_ref().to_path_buf();
         let conn = tokio::task::spawn_blocking(move || -> Result<Connection, StoreError> {
@@ -88,12 +48,7 @@ impl Store {
         })
     }
 
-    /// Открывает временную in-memory базу. Только для тестов — см.
-    /// `docs/architecture/CORE_ARCHITECTURE_PLAN.md` §7.1
-    /// ("Миграции и CRUD на временной/in-memory sqlite"): in-memory база
-    /// существует ровно столько, сколько живёт `Connection`, и закрытие
-    /// последнего владельца `Store` уничтожает данные — ожидаемо и
-    /// нужно только здесь, не в `open`.
+
     pub async fn open_in_memory() -> Result<Self, StoreError> {
         let conn = tokio::task::spawn_blocking(|| -> Result<Connection, StoreError> {
             let conn = Connection::open_in_memory()?;
@@ -107,19 +62,7 @@ impl Store {
         })
     }
 
-    /// Сохраняет новую запись или полностью перезаписывает существующую с
-    /// тем же `InstanceId` (`INSERT OR REPLACE`). Соответствует семантике
-    /// `Daemon::create_instance`, которая тоже безусловно перезаписывает
-    /// запись с уже существующим `id` (см. комментарий к
-    /// `double_create_with_same_id_overwrites_record` в `daemon.rs`) —
-    /// `andler-store` не вводит здесь более строгую инвариантность, чем
-    /// уже принята слоем выше.
-    ///
-    /// Записывает `InstanceState::Created` неявно как часть `cfg`? Нет —
-    /// состояние передаётся отдельным параметром, а не выводится из
-    /// конфигурации, потому что `Store` не имеет (и не должен иметь)
-    /// мнения о том, какое состояние корректно для только что
-    /// сконструированного `InstanceConfig`; это решение FSM/`Daemon`.
+
     pub async fn save_instance(
         &self,
         cfg: &InstanceConfig,
@@ -131,18 +74,6 @@ impl Store {
         let conn = self.conn.clone();
 
         tokio::task::spawn_blocking(move || -> Result<(), StoreError> {
-            // `.unwrap_or_else(|e| e.into_inner())` recovers the guard
-            // even if the mutex is poisoned (a previous holder panicked
-            // while holding it) instead of panicking here too and
-            // taking down the whole task -- see PLAN.md, item 20d,
-            // "`unwrap()` in production code". This is safe specifically
-            // *because* the only thing behind this `Mutex` is a
-            // `rusqlite::Connection`: SQLite's own transaction/statement
-            // handling means a panic mid-query doesn't leave the
-            // connection itself in a torn, half-written Rust-level
-            // state the way a panic mid-mutation of a plain struct
-            // behind a `Mutex` might -- recovering and continuing to use
-            // the same connection is safe, not just convenient.
             let conn = conn.lock().unwrap_or_else(|e| e.into_inner());
             conn.execute(
                 "INSERT OR REPLACE INTO instances (id, config_json, state_json) \
@@ -156,18 +87,7 @@ impl Store {
         Ok(())
     }
 
-    /// Обновляет только `state_json` существующей записи — не трогает
-    /// `config_json`. Основной путь вызова: после каждого перехода FSM в
-    /// `Daemon` (`start_instance`/`stop_instance`/...), где конфигурация
-    /// инстанса не меняется, а меняться (часто) должно только состояние.
-    /// Использовать `save_instance` для этого случая означало бы каждый
-    /// раз пере-сериализовывать весь `InstanceConfig` без необходимости.
-    ///
-    /// Возвращает `StoreError::NotFound`, если строки с этим `id` нет —
-    /// в отличие от `save_instance`, здесь нет осознанного решения "create
-    /// or replace": обновление состояния несуществующей записи означает
-    /// рассинхрон между `Daemon` (in-memory) и `Store`, который не должен
-    /// маскироваться тихим no-op.
+
     pub async fn save_state(
         &self,
         id: InstanceId,
@@ -193,8 +113,7 @@ impl Store {
         Ok(())
     }
 
-    /// Возвращает конфигурацию и последнее сохранённое состояние одного
-    /// инстанса.
+
     pub async fn load_instance(&self, id: InstanceId) -> Result<StoredInstance, StoreError> {
         let conn = self.conn.clone();
 
@@ -220,12 +139,7 @@ impl Store {
         .await?
     }
 
-    /// Возвращает все сохранённые инстансы — то, что `andler-daemon`
-    /// вызывает один раз при старте, чтобы восстановить
-    /// `RwLock<HashMap<InstanceId, InstanceRecord>>` после перезапуска
-    /// процесса (см. README `andler-daemon`, раздел "Персистентность").
-    /// Порядок строк не гарантируется (нет `ORDER BY`) — вызывающая
-    /// сторона кладёт их в `HashMap`, где порядка и так нет.
+
     pub async fn load_all(&self) -> Result<Vec<StoredInstance>, StoreError> {
         let conn = self.conn.clone();
 
@@ -247,11 +161,7 @@ impl Store {
         .await?
     }
 
-    /// Удаляет запись инстанса. Идемпотентно — удаление уже отсутствующей
-    /// записи не ошибка (в отличие от `save_state`): вызывающая сторона
-    /// (например, Factory Reset/удаление инстанса через `Daemon`, см. TODO
-    /// в `daemon.rs`) хочет гарантировать "записи нет после вызова", а не
-    /// "записи не было до вызова".
+
     pub async fn delete_instance(&self, id: InstanceId) -> Result<(), StoreError> {
         let conn = self.conn.clone();
 
@@ -265,11 +175,8 @@ impl Store {
         Ok(())
     }
 
-    // --- Snapshots CRUD ---------------------------------------------------
 
-    /// Сохраняет метаданные снапшота. Вызывается после успешного
-    /// `snapshot-save` через QMP — сам снапшот уже записан в qcow2-файл,
-    /// здесь только регистрируем метаданные.
+
     pub async fn save_snapshot(&self, snapshot: &StoredSnapshot) -> Result<(), StoreError> {
         let id = snapshot.id.to_string();
         let instance_id = snapshot.instance_id.0.to_string();
@@ -292,7 +199,7 @@ impl Store {
         Ok(())
     }
 
-    /// Возвращает все снапшоты инстанса, отсортированные по дате создания.
+
     pub async fn load_snapshots(
         &self,
         instance_id: InstanceId,
@@ -329,7 +236,7 @@ impl Store {
         .await?
     }
 
-    /// Возвращает один снапшот по тегу.
+
     pub async fn get_snapshot(
         &self,
         instance_id: InstanceId,
@@ -369,8 +276,7 @@ impl Store {
         .await?
     }
 
-    /// Удаляет снапшот по тегу. Идемпотентно — удаление несуществующего
-    /// снапшота не ошибка.
+
     pub async fn delete_snapshot(
         &self,
         instance_id: InstanceId,
@@ -394,12 +300,7 @@ impl Store {
     }
 }
 
-/// Превращает строку `(config_json, state_json)` в `StoredInstance`,
-/// разворачивая обе сериализационные ошибки в `StoreError::Serde`.
-/// Вынесено в свободную функцию, а не метод — нужно из трёх разных мест
-/// (`load_instance`, `load_all` через `query_map`-замыкание, и могло бы
-/// понадобиться в будущих методах фильтрации), и не имеет смысла
-/// привязывать к `&self`.
+
 fn row_to_stored_instance(
     (config_json, state_json): (String, String),
 ) -> Result<StoredInstance, StoreError> {
@@ -408,16 +309,7 @@ fn row_to_stored_instance(
     Ok(StoredInstance { config, state })
 }
 
-/// Создаёт таблицу `instances`, если её ещё нет.
-///
-/// Один `CREATE TABLE IF NOT EXISTS` без отдельного миграционного
-/// фреймворка (например, `refinery`/`sqlx::migrate`) — на этом этапе
-/// проекта схема — это одна таблица с двумя независимыми от структуры
-/// JSON-колонками; добавление нового поля в `InstanceConfig` не требует
-/// миграции схемы `andler-store` вообще (это плюс выбранного JSON-блоба).
-/// Настоящая миграция понадобится, только если появится колонка с
-/// типизированным значением для индексации/фильтрации — тогда это
-/// осознанный следующий шаг, не предвосхищаем его сейчас.
+
 fn apply_schema(conn: &Connection) -> Result<(), StoreError> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS instances (
@@ -441,14 +333,8 @@ fn apply_schema(conn: &Connection) -> Result<(), StoreError> {
     Ok(())
 }
 
-/// Парсит текстовое представление `InstanceId` (UUID), как оно хранится в
-/// колонке `id`. Сейчас не используется напрямую внутри `store.rs`
-/// (фильтрация по `id` в SQL всегда идёт через `id.0.to_string()` в
-/// обратном направлении), но является естественной парной операцией и
-/// тестируется явно — будущий метод, принимающий `id: &str` из внешнего
-/// источника (например, CLI-аргумент при ручной инспекции базы), найдёт
-/// её здесь, а не будет заново парсить UUID на месте использования.
-#[allow(dead_code)]
+
+#[allow(dead_code)] // test utility; production code uses daemon's resolve_instance_id
 fn parse_instance_id(raw: &str) -> Result<InstanceId, uuid::Error> {
     Uuid::parse_str(raw).map(InstanceId)
 }
@@ -615,11 +501,6 @@ mod tests {
 
     #[tokio::test]
     async fn error_state_with_message_round_trips() {
-        // Отдельный тест на InstanceState::Error { message } — единственный
-        // вариант InstanceState с полем, проверяет, что JSON-сериализация
-        // serde для enum с struct-вариантом действительно переживает
-        // round-trip через sqlite, а не только через serde_json напрямую
-        // (как уже проверено в andler-core::config::instance тестах).
         let store = Store::open_in_memory().await.unwrap();
         let cfg = sample_config();
         let id = cfg.id;
@@ -644,7 +525,6 @@ mod tests {
         assert!(parse_instance_id("not-a-uuid").is_err());
     }
 
-    // --- Snapshot CRUD tests -----------------------------------------------
 
     #[tokio::test]
     async fn save_and_load_snapshot_round_trips() {
@@ -693,7 +573,6 @@ mod tests {
         };
         store.save_snapshot(&s1).await.unwrap();
 
-        // Same tag, different id — should overwrite (INSERT OR REPLACE)
         let s2 = StoredSnapshot {
             id: uuid::Uuid::new_v4(),
             instance_id,
@@ -789,7 +668,6 @@ mod tests {
         };
         store.save_snapshot(&snapshot).await.unwrap();
 
-        // Delete instance — snapshots should be cascade-deleted
         store.delete_instance(instance_id).await.unwrap();
 
         let loaded = store.load_snapshots(instance_id).await.unwrap();

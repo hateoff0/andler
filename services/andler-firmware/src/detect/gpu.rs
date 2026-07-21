@@ -1,19 +1,10 @@
-//! Auto-detection of GPU vendor, render backend and display engine defaults.
-//!
-//! See WIZARD.md, "Auto-detection for GPU vendor" for the full spec this
-//! module implements. Everything here is best-effort: on any I/O failure
-//! (missing sysfs, no `lspci`/`uname`/`qemu-system-x86_64`/`glxinfo`) we
-//! fall back to the safest default (`RenderBackend::Cpu`,
-//! `DisplayEngine::None`, `venus_supported = false`) rather than erroring —
-//! the wizard must always be able to proceed, even inside a container with
-//! no GPU at all.
+
 
 use std::process::Command;
 
 use andler_core::{DisplayEngine, RenderBackend};
 
-/// GPU vendor as seen by the host — internal to this module, only used to
-/// pick the (RenderBackend, DisplayEngine) pair below.
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum GpuVendor {
     Amd,
@@ -23,17 +14,11 @@ enum GpuVendor {
     None,
 }
 
-/// Detects GPU vendor + host capability and returns the recommended
-/// (render backend, display engine, venus_supported) triple.
-///
-/// Called once by [`super::detect_all`].
+
 pub(crate) fn detect_gpu_defaults() -> (RenderBackend, DisplayEngine, bool) {
     let vendor = detect_gpu_vendor();
 
     let (base_render, display_engine) = match vendor {
-        // GTK's own display window crashes to black on some NVIDIA
-        // configurations with `gl=on` (confirmed in practice, see
-        // PLAN.md "Настройки дисплея") — SDL is the safe choice there.
         GpuVendor::Nvidia => (RenderBackend::Venus, DisplayEngine::Sdl),
         GpuVendor::Amd | GpuVendor::Intel => (RenderBackend::Venus, DisplayEngine::Gtk),
         GpuVendor::Unknown => (RenderBackend::Venus, DisplayEngine::Sdl),
@@ -48,17 +33,13 @@ pub(crate) fn detect_gpu_defaults() -> (RenderBackend, DisplayEngine, bool) {
     let render_backend = if venus_supported {
         base_render
     } else {
-        // Venus needs kernel/QEMU/Mesa versions this host doesn't meet —
-        // fall back to VirGL rather than silently picking Venus anyway.
         RenderBackend::VirGl
     };
 
     (render_backend, display_engine, venus_supported)
 }
 
-/// Prefers `/sys/class/drm/card*/device/vendor` (fast, no subprocess); if
-/// sysfs is empty/unavailable falls back to `lspci`. If both are
-/// unavailable, returns `GpuVendor::None` (safe CPU-rendering fallback).
+
 fn detect_gpu_vendor() -> GpuVendor {
     if let Some(vendor) = detect_gpu_vendor_via_sysfs() {
         return vendor;
@@ -66,7 +47,7 @@ fn detect_gpu_vendor() -> GpuVendor {
     detect_gpu_vendor_via_lspci().unwrap_or(GpuVendor::None)
 }
 
-/// PCI vendor IDs, from the Linux kernel's `pci.ids` database.
+
 const PCI_VENDOR_AMD: &str = "0x1002";
 const PCI_VENDOR_NVIDIA: &str = "0x10de";
 const PCI_VENDOR_INTEL: &str = "0x8086";
@@ -74,15 +55,11 @@ const PCI_VENDOR_INTEL: &str = "0x8086";
 fn detect_gpu_vendor_via_sysfs() -> Option<GpuVendor> {
     let drm_dir = std::fs::read_dir("/sys/class/drm").ok()?;
 
-    // If multiple GPUs are present, prefer a discrete one (AMD/NVIDIA)
-    // over an integrated one (Intel) — a discrete GPU is almost always
-    // what the user wants for a VM, per WIZARD.md.
     let mut found_intel = false;
 
     for entry in drm_dir.flatten() {
         let name = entry.file_name();
         let name = name.to_string_lossy();
-        // Only look at `cardN` (not `cardN-*` connector nodes).
         if !name.starts_with("card") || name.contains('-') {
             continue;
         }
@@ -131,18 +108,7 @@ fn detect_gpu_vendor_via_lspci() -> Option<GpuVendor> {
     }
 }
 
-/// Venus requires kernel ≥6.13, QEMU ≥9.2 always, plus Mesa ≥24.2 on
-/// AMD/Intel (see WIZARD.md, "Auto-detection for GPU vendor"). On
-/// NVIDIA, the Mesa check is skipped entirely: Venus is a Vulkan-based
-/// protocol, and on NVIDIA it runs through the proprietary NVIDIA Vulkan
-/// driver, not Mesa's OpenGL stack — `glxinfo`'s `OpenGL version string`
-/// on NVIDIA reports the NVIDIA driver version instead of a `Mesa `
-/// marker (e.g. `4.6.0 NVIDIA 610.43.02`), so `mesa_version()` always
-/// returns `None` there and unconditionally requiring it previously made
-/// Venus never selectable as a default on NVIDIA hosts even when kernel
-/// and QEMU were new enough (see PLAN.md, item 1, "Venus not default on
-/// NVIDIA"). Any missing tool or unparsable version output is treated as
-/// "requirement not met", never as a panic.
+
 fn check_venus_requirements() -> bool {
     let Some(kernel) = kernel_version() else {
         return false;
@@ -156,14 +122,7 @@ fn check_venus_requirements() -> bool {
     venus_requirements_met(vendor, kernel, qemu, mesa)
 }
 
-/// Pure decision logic behind [`check_venus_requirements`], separated
-/// out so it's testable without shelling out to `uname`/
-/// `qemu-system-x86_64`/`glxinfo` — same pattern as [`parse_version`] in
-/// this module. `mesa` is `None` both when `glxinfo` is missing/
-/// unparsable *and*, on NVIDIA, always (see the doc comment on
-/// [`check_venus_requirements`]) — this function is what decides that
-/// the NVIDIA case still passes despite that `None`, while every other
-/// vendor with `mesa = None` fails the check.
+
 fn venus_requirements_met(
     vendor: GpuVendor,
     kernel: (u32, u32, u32),
@@ -210,9 +169,7 @@ fn mesa_version() -> Option<(u32, u32, u32)> {
     parse_version(&line[mesa_marker + "Mesa ".len()..])
 }
 
-/// Extracts the first `MAJOR.MINOR[.PATCH]` version-looking token from
-/// `text` and parses it into `(major, minor, patch)` (patch defaults to 0
-/// if absent, e.g. `"9.2"` -> `(9, 2, 0)`).
+
 fn parse_version(text: &str) -> Option<(u32, u32, u32)> {
     let token = text
         .split(|c: char| c.is_whitespace())
@@ -272,10 +229,6 @@ mod tests {
 
     #[test]
     fn venus_requirements_met_nvidia_ignores_missing_mesa() {
-        // Regression test for PLAN.md item 1: NVIDIA hosts always report
-        // `mesa = None` (glxinfo's OpenGL version string has no "Mesa "
-        // marker on NVIDIA), and that must not fail the check for
-        // NVIDIA specifically, unlike every other vendor.
         assert!(venus_requirements_met(
             GpuVendor::Nvidia,
             (6, 13, 0),
@@ -322,9 +275,6 @@ mod tests {
 
     #[test]
     fn vendor_none_short_circuits_to_cpu_rendering() {
-        // Documents the contract without needing real sysfs/lspci: a
-        // host with no detectable GPU must get the safe fallback, not
-        // attempt Venus.
         let (render, display, venus) = match GpuVendor::None {
             GpuVendor::None => (RenderBackend::Cpu, DisplayEngine::None, false),
             _ => unreachable!(),

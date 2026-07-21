@@ -2,7 +2,6 @@ use super::common::*;
 use super::*;
 use andler_core::RenderBackend;
 
-// --- list_instances ------------------------------------------------------
 
 #[tokio::test]
 async fn list_instances_on_empty_daemon_returns_empty_vec() {
@@ -64,7 +63,6 @@ async fn list_instances_after_restore_includes_restored_instances() {
     assert_eq!(summaries[0].name, cfg.name);
 }
 
-// --- get_instance_config -------------------------------------------------
 
 #[tokio::test]
 async fn get_instance_config_on_unknown_instance_returns_instance_not_found() {

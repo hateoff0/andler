@@ -3,11 +3,6 @@ use super::*;
 
 #[tokio::test]
 async fn full_uuid_resolves_without_needing_registration() {
-    // A syntactically valid, full UUID is accepted even if no instance
-    // with that id has been registered yet — see the doc comment on
-    // `resolve_instance_id` for why this is intentional (callers decide
-    // whether "well-formed but unregistered" is itself an error, at the
-    // point they actually use the id, e.g. `Daemon::status`).
     let daemon = Daemon::new();
     let random_id = InstanceId::new();
 
@@ -49,7 +44,6 @@ async fn unique_prefix_resolves_to_the_matching_instance() {
     daemon.create_instance(cfg).await.expect("create instance");
 
     let full = id.0.to_string();
-    // Docker-style short id: first 8 hex chars of the hyphenated string.
     let prefix = &full[..8];
 
     let resolved = daemon
@@ -58,7 +52,6 @@ async fn unique_prefix_resolves_to_the_matching_instance() {
         .expect("unique prefix must resolve");
     assert_eq!(resolved, id);
 
-    // Case-insensitive, since users may paste an upper-cased id.
     let resolved_upper = daemon
         .resolve_instance_id(&prefix.to_ascii_uppercase())
         .await
@@ -70,9 +63,6 @@ async fn unique_prefix_resolves_to_the_matching_instance() {
 async fn ambiguous_prefix_lists_every_candidate() {
     let daemon = Daemon::new();
 
-    // Force a shared prefix by constructing two ids that start with the
-    // same fixed byte pattern (rather than looping on real UUIDs and
-    // hoping for a collision).
     let shared_prefix_hex = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
     let id_a = InstanceId(uuid::Uuid::parse_str(shared_prefix_hex).unwrap());
     let shared_prefix_hex_b = "aaaaaaaa-aaaa-4aaa-8aaa-bbbbbbbbbbbb";

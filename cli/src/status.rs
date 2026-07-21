@@ -32,11 +32,7 @@ pub async fn handle_status(
     Ok(())
 }
 
-/// Parses `--state` case-insensitively against the same display names
-/// `state_kind_name` produces (`Running`, `Stopped`, ...) — not
-/// prost's raw `InstanceStateKind::from_str_name` (`RUNNING`,
-/// `INSTANCE_STATE_UNSPECIFIED`, ...), which is the wire/proto spelling,
-/// not something a person would type on a command line.
+
 fn parse_state_filter(s: &str) -> Option<InstanceStateKind> {
     [
         InstanceStateKind::Created,
@@ -51,13 +47,7 @@ fn parse_state_filter(s: &str) -> Option<InstanceStateKind> {
     .find(|&kind| state_kind_name(kind).eq_ignore_ascii_case(s))
 }
 
-/// JSON shape for `andler list --json` — see `MetricsJson`'s doc comment
-/// for why this is a local struct rather than deriving `Serialize` on
-/// the generated `InstanceListEntry` directly. `state` is the same
-/// display name shown in the human-readable output (`"Running"`, not
-/// the proto's `"RUNNING"`) — a scripting consumer piping `--json`
-/// output would otherwise see a different spelling than someone reading
-/// the default output right next to it.
+
 #[derive(serde::Serialize)]
 struct InstanceListJson<'a> {
     id: &'a str,
@@ -132,11 +122,6 @@ pub async fn handle_list(
         println!("no instances");
     } else {
         for entry in instances {
-            // Shortened, Docker-`ps`-style prefix by default; any prefix
-            // of this (down to a single hex char) is accepted by every
-            // command that takes an `<instance_id>` — see
-            // `Daemon::resolve_instance_id`. `--full-id`/`-q` prints the
-            // full UUID for scripts.
             let id = if full_id {
                 entry.instance_id.as_str()
             } else {
@@ -153,10 +138,7 @@ pub async fn handle_list(
     Ok(())
 }
 
-/// First 8 characters of a full instance UUID string, matching `docker
-/// ps`'s default short-id length. Falls back to the full string if it's
-/// somehow already shorter (defensive only — `instance_id` is always a
-/// full UUID coming from the daemon).
+
 fn short_id(full: &str) -> &str {
     full.get(..8).unwrap_or(full)
 }
@@ -173,9 +155,7 @@ pub async fn handle_config(
     Ok(())
 }
 
-/// Pure filter logic behind `--source`/`--grep` on `andler logs` —
-/// extracted so it's unit-testable without a real gRPC stream. See
-/// PLAN.md, item 17, "Logs filtering and tail".
+
 fn log_line_matches_filters(
     line: &andler_rpc::proto::LogLineResponse,
     source: &Option<CliLogSource>,
@@ -224,16 +204,6 @@ pub async fn handle_logs(
     let mut got_any_line = false;
 
     if let Some(n) = tail {
-        // See the `--tail` doc comment on `Command::Logs` in main.rs:
-        // andlerd sends history and live lines as one unbroken stream
-        // with no marker between them, so a short idle gap is used as a
-        // heuristic for "history looks done". A ring buffer holds at
-        // most `n` filtered lines while waiting for that gap (or the
-        // stream ending); once observed, the buffer is flushed and this
-        // switches to the exact same plain streaming loop used without
-        // `--tail`, reusing the same `stream` (nothing is lost or
-        // re-read at the switch — it's still one single stream, this
-        // just stops timing individual `.message()` calls).
         let mut ring: std::collections::VecDeque<andler_rpc::proto::LogLineResponse> =
             std::collections::VecDeque::with_capacity(n.min(10_000));
         const IDLE_GAP: std::time::Duration = std::time::Duration::from_millis(300);
@@ -277,17 +247,7 @@ pub async fn handle_logs(
     Ok(())
 }
 
-/// JSON shape for a single metrics sample (`--json`). A local struct
-/// rather than deriving `Serialize` on the proto-generated
-/// `ResourceMetricsResponse` directly — prost doesn't derive `Serialize`
-/// for generated messages in this project (see `services/andler-rpc`),
-/// so this mirrors its fields instead of adding a serde dependency to
-/// the wire format itself. Field names match the plan's own example
-/// output (`cpu_percent`, `rss_bytes`, ...) for the CLI's `--json`
-/// consumers, not the internal proto field names verbatim (e.g.
-/// `memory_used_bytes` becomes `rss_bytes` here, matching what a
-/// scripting consumer of `andler metrics --json` would expect to see
-/// after already reading `--once`'s human-readable `rss=` column).
+
 #[derive(serde::Serialize)]
 struct MetricsJson {
     cpu_percent: Option<f32>,
@@ -547,8 +507,6 @@ fn print_instance_config(config: GetInstanceConfigResponse) {
             "  pointer_mode: {}",
             match input.pointer_mode() {
                 andler_rpc::proto::PointerMode::Mouse => "mouse",
-                // UNSPECIFIED falls back to the legacy tablet_mode bool —
-                // see convert.rs — old daemons may still only send that.
                 andler_rpc::proto::PointerMode::Unspecified if !input.tablet_mode => "mouse",
                 _ => "tablet",
             }
@@ -610,13 +568,10 @@ mod tests {
     fn log_filter_source_and_grep_combine_with_and() {
         let re = Some(regex::Regex::new("error").unwrap());
         let filter = Some(CliLogSource::Stderr);
-        // Right source, wrong content.
         let l1 = line(LogStreamSource::Stderr, "all fine");
         assert!(!log_line_matches_filters(&l1, &filter, &re));
-        // Right content, wrong source.
         let l2 = line(LogStreamSource::Stdout, "an error happened");
         assert!(!log_line_matches_filters(&l2, &filter, &re));
-        // Both right.
         let l3 = line(LogStreamSource::Stderr, "an error happened");
         assert!(log_line_matches_filters(&l3, &filter, &re));
     }

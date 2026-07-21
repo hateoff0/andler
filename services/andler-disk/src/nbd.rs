@@ -1,34 +1,16 @@
-//! Общие утилиты для работы с NBD-устройствами и монтированием разделов.
-//!
-//! Переиспользуется модулем `guest_tools` (offline установка/удаление
-//! пакетов в гостевую ФС).
-//!
-//! ## Требования к хосту
-//!
-//! - Бинарник `qemu-nbd` (из `qemu-utils`) должен быть в `$PATH`.
-//! - Модуль ядра `nbd` должен быть загружен (`modprobe nbd`).
-//! - Процесс `andlerd` должен иметь права на:
-//!   - чтение/запись к свободному `/dev/nbd*` (обычно группа `disk` или root)
-//!   - `mount`/`umount` (обычно root или `CAP_SYS_ADMIN`)
+
 
 use std::path::{Path, PathBuf};
 
 use crate::error::DiskError;
 
-/// Базовая директория для точек монтирования — подкаталог
-/// `andler-mounts` под `andler_core::paths::runtime_dir()`, не голый
-/// `/tmp` (world-writable на многопользовательской системе, уязвим к
-/// symlink-атаке — см. PLAN.md, item 20a).
+
 fn mount_dir_base() -> PathBuf {
     andler_core::paths::runtime_dir().join("andler-mounts")
 }
 
-// ---------------------------------------------------------------------------
-// RAII- guard'ы
-// ---------------------------------------------------------------------------
 
-/// RAII-обёртка для NBD-устройства: при `drop` выполняет
-/// `qemu-nbd --disconnect`.
+
 pub struct NbdGuard {
     device_path: PathBuf,
 }
@@ -73,7 +55,7 @@ impl Drop for NbdGuard {
     }
 }
 
-/// RAII-обёртка для точки монтирования: при `drop` выполняет `umount -l`.
+
 pub struct MountGuard {
     mount_point: PathBuf,
 }
@@ -124,14 +106,8 @@ impl Drop for MountGuard {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Поиск свободного NBD-устройства
-// ---------------------------------------------------------------------------
 
-/// Ищет свободное NBD-устройство, сканируя `/sys/class/block/nbd*/size`.
-/// Свободное — это то, у которого `size == 0` (не подключено ни одного образа).
-///
-/// Возвращает путь типа `/dev/nbd0`.
+
 pub fn find_free_nbd_device() -> Result<PathBuf, DiskError> {
     let sys_block = Path::new("/sys/class/block");
 
@@ -183,14 +159,8 @@ pub fn find_free_nbd_device() -> Result<PathBuf, DiskError> {
     ))
 }
 
-// ---------------------------------------------------------------------------
-// Подключение образа через qemu-nbd
-// ---------------------------------------------------------------------------
 
-/// Подключает qcow2-образ к NBD-устройству и возвращает guard.
-///
-/// После вызова `/dev/nbdN` доступен как блочное устройство с
-/// разделами — `/dev/nbdNp1`, `/dev/nbdNp2` и т.д.
+
 pub fn connect_nbd(overlay_path: &Path) -> Result<NbdGuard, DiskError> {
     let device = find_free_nbd_device()?;
 
@@ -221,14 +191,7 @@ pub fn connect_nbd(overlay_path: &Path) -> Result<NbdGuard, DiskError> {
     Ok(NbdGuard::new(device))
 }
 
-/// Ждёт появления partition-устройств для NBD-девайса.
-///
-/// После `qemu-nbd --connect` ядру может потребоваться время, чтобы
-/// просканировать таблицу разделов и создать `/dev/nbdNp1`. Функция
-/// опрашивает `/sys/block/<dev>/` до появления первого `nbdNp*` entry
-/// или таймаута (2 секунды).
-///
-/// Возвращает список найденных partition-устройств.
+
 pub fn wait_for_partitions(nbd_dev: &Path) -> Result<Vec<PathBuf>, DiskError> {
     let dev_name = nbd_dev
         .file_name()
@@ -268,10 +231,7 @@ pub fn wait_for_partitions(nbd_dev: &Path) -> Result<Vec<PathBuf>, DiskError> {
     )))
 }
 
-/// Определяет раздел с rootfs из списка разделов.
-///
-/// Для простоты берём первый раздел (typical image layout: single partition
-/// с rootfs).
+
 pub fn find_root_partition(partitions: &[PathBuf]) -> Result<PathBuf, DiskError> {
     if partitions.is_empty() {
         return Err(DiskError::NbdSetupFailed(
@@ -282,11 +242,8 @@ pub fn find_root_partition(partitions: &[PathBuf]) -> Result<PathBuf, DiskError>
     Ok(partitions[0].clone())
 }
 
-// ---------------------------------------------------------------------------
-// Монтирование
-// ---------------------------------------------------------------------------
 
-/// Генерирует уникальное имя для точки монтирования.
+
 pub fn unique_mount_name() -> String {
     use std::sync::atomic::{AtomicU64, Ordering};
     static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -298,7 +255,7 @@ pub fn unique_mount_name() -> String {
     format!("{}-{}-{}", std::process::id(), id, ts)
 }
 
-/// Монтирует раздел в точку монтирования и возвращает guard.
+
 pub fn mount_partition(partition: &Path) -> Result<MountGuard, DiskError> {
     let mount_point = mount_dir_base().join(unique_mount_name());
 

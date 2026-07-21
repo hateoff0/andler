@@ -1,14 +1,4 @@
-//! `QemuBackend` — реализация `HypervisorBackend` (из `andler-core`) поверх
-//! `cmdline::build_args`, `process::QemuProcess` и `qmp::QmpClient`.
-//!
-//! Связывает чистую сборку аргументов, низкоуровневое управление процессом
-//! и QMP-протокол с единым интерфейсом, через который `andler-daemon`
-//! управляет инстансами (см. docs/architecture/CORE_ARCHITECTURE_PLAN.md,
-//! §2.1).
-//!
-//! `spawn`/`stop`/`pause`/`resume`/`status`/`snapshot`/`snapshot_restore`/
-//! `snapshot_delete`/`snapshot_list`/`log_stream`/`metrics_stream`
-//! реализованы полноценно.
+
 
 use std::sync::Arc;
 use std::collections::HashMap;
@@ -28,40 +18,18 @@ use crate::cmdline;
 use crate::process::{ProcessError, QemuProcess};
 use crate::qmp::{QmpClient, QmpError, VmStatus};
 
-/// Каталог, в котором создаются QMP-сокеты запущенных инстансов —
-/// подкаталог `andler/qmp` под `andler_core::paths::runtime_dir()`
-/// (`$XDG_RUNTIME_DIR` на большинстве современных Linux-хостов, а не
-/// голый `/tmp`, который на многопользовательской системе
-/// world-writable и уязвим к symlink-атаке на сокет — см. PLAN.md, item
-/// 20a, "Hardcoded `/tmp` paths for IPC sockets"; каталог создаётся с
-/// правами `0700` через `ensure_private_dir` в `spawn` ниже, не просто
-/// `create_dir_all`). Раньше это была голая константа `/tmp/andler/qmp`
-/// именно потому, что `QemuBackend` не получал информацию о путях
-/// откуда-либо ещё — с появлением единой точки резолва путей в
-/// `andler-core` (см. её собственный doc-комментарий) необходимость в
-/// отдельной константе здесь отпала.
+
 fn qmp_socket_dir() -> PathBuf {
     andler_core::paths::runtime_dir().join("andler/qmp")
 }
 
-/// Запущенный инстанс с точки зрения `QemuBackend`: процесс плюс,
-/// опционально, уже установленное QMP-соединение.
-///
-/// `qmp_client` — `Option`, не безусловное соединение сразу при `spawn`:
-/// `-qmp ...,server,nowait` означает, что QEMU поднимает сокет и не
-/// блокируется, ожидая подключения — но клиенту всё равно может
-/// потребоваться несколько попыток подключиться сразу после `spawn`, пока
-/// QEMU полностью не инициализировался. Подключение делается лениво, при
-/// первом вызове `pause`/`resume`/`status`, а не сразу в `spawn`, чтобы не
-/// удлинять и не усложнять сам `spawn` обработкой retry-логики, которая
-/// нужна только тем операциям, что реально используют QMP.
+
 struct RunningInstance {
     process: QemuProcess,
     qmp_client: Option<QmpClient>,
-    /// Таймаут ожидания завершения async job (snapshot), считанный из
-    /// `InstanceConfig.disk.snapshot_timeout_secs` при `spawn`.
+
     snapshot_timeout: std::time::Duration,
-    /// Информация о сети для последующего teardown.
+
     network_info: NetworkInfo,
 }
 
@@ -72,13 +40,7 @@ enum NetworkInfo {
     Nat,
 }
 
-/// Backend гипервизора поверх процесса QEMU.
-///
-/// Хранит реестр живых процессов под `Mutex` — `HypervisorBackend::spawn`
-/// и остальные методы принимают `&self`, не `&mut self` (это диктует сам
-/// trait, так как один `QemuBackend` используется конкурентно из нескольких
-/// gRPC-запросов в `andler-daemon`), поэтому внутренняя мутабельность
-/// обязательна.
+
 pub struct QemuBackend {
     instances: Mutex<HashMap<BackendHandle, RunningInstance>>,
     network_service: Arc<DefaultNetworkService>,
@@ -92,11 +54,7 @@ impl QemuBackend {
         }
     }
 
-    /// Строит `BackendHandle` для инстанса. Формат (`"qemu:{instance_id}"`)
-    /// — деталь реализации, не часть публичного контракта: вызывающая
-    /// сторона (`andler-daemon`) должна получать `BackendHandle` только как
-    /// результат `spawn()` и передавать его обратно как есть, не
-    /// разбирая/конструируя самостоятельно.
+
     fn handle_for(cfg: &InstanceConfig) -> BackendHandle {
         BackendHandle(format!("qemu:{}", cfg.id.0))
     }
@@ -105,14 +63,7 @@ impl QemuBackend {
         qmp_socket_dir().join(format!("{}.sock", cfg.id.0))
     }
 
-    /// Возвращает рабочее QMP-соединение для инстанса, устанавливая его
-    /// при необходимости (см. документацию `RunningInstance::qmp_client`).
-    ///
-    /// Принимает `&mut RunningInstance` напрямую (не `&BackendHandle` +
-    /// повторный поиск в реестре) — вызывающая сторона уже держит
-    /// блокировку реестра и нашла нужный инстанс, повторный поиск был бы
-    /// избыточен и потенциально рассинхронизировался бы с конкурентными
-    /// изменениями реестра между поисками.
+
     async fn ensure_qmp_connected(instance: &mut RunningInstance) -> Result<(), QmpError> {
         if instance.qmp_client.is_some() {
             return Ok(());
@@ -123,33 +74,7 @@ impl QemuBackend {
         Ok(())
     }
 
-    /// Called after a QMP command fails on an *already-established*
-    /// connection (not the initial `ensure_qmp_connected` — that has its
-    /// own error path and nothing cached to reset). See ROADMAP.md,
-    /// "QEMU backend: improve QMP error handling and recovery".
-    ///
-    /// Before this fix, a dropped/broken QMP connection stayed cached in
-    /// `instance.qmp_client` forever — `ensure_qmp_connected` only checks
-    /// `is_some()`, not whether the connection actually still works, so
-    /// every subsequent `pause`/`resume`/`status` call would hit the same
-    /// dead connection and fail identically, even after QEMU (or the QMP
-    /// listener) recovered.
-    ///
-    /// Distinguishes two cases a bare `QmpError` conflates:
-    /// - **QEMU process itself has exited** -> clears the stale client and
-    ///   returns `Some(BackendError::ProcessNotRunning)` — there's no
-    ///   point reconnecting to a dead process's socket, and the caller
-    ///   gets a specific error instead of a generic I/O one.
-    /// - **Process still alive, connection just dropped** (transient QMP
-    ///   hiccup) -> clears the stale client and returns `None`, signaling
-    ///   the caller should reconnect (via `ensure_qmp_connected`) and
-    ///   retry the command once.
-    ///
-    /// Only meant to be called for connection-level errors
-    /// (`Io`/`ConnectionClosed`/`ConnectFailed`) — `CommandFailed`/
-    /// `ParseError` mean QEMU answered just fine (just with an error or
-    /// unexpected shape), so callers check for those separately and skip
-    /// this entirely; retrying wouldn't change anything about them.
+
     async fn diagnose_and_reset_qmp(instance: &mut RunningInstance) -> Option<BackendError> {
         instance.qmp_client = None;
         let alive = instance.process.is_alive().await.unwrap_or(false);
@@ -160,10 +85,7 @@ impl QemuBackend {
         }
     }
 
-    /// Проверяет доступность QEMU Guest Agent для инстанса.
-    ///
-    /// Используется daemon'ом для auto-fallback: если agent недоступен,
-    /// установка/удаление пакетов делается offline через qemu-nbd.
+
     pub async fn is_guest_agent_available(
         &self,
         handle: &BackendHandle,
@@ -187,11 +109,7 @@ impl QemuBackend {
         Ok(available)
     }
 
-    /// Устанавливает пакет в гостевую ОС online через QEMU Guest Agent.
-    ///
-    /// Выполняет `guest-exec` с командой包管理器 (apt/dnf/pacman) для
-    /// установки пакета. Ожидает завершения через `guest-exec-status`
-    /// с таймаутом 60 секунд.
+
     pub async fn guest_exec_install(
         &self,
         handle: &BackendHandle,
@@ -200,7 +118,7 @@ impl QemuBackend {
         self.guest_exec_package(handle, package, true).await
     }
 
-    /// Удаляет пакет из гостевой ОС online через QEMU Guest Agent.
+
     pub async fn guest_exec_remove(
         &self,
         handle: &BackendHandle,
@@ -209,7 +127,7 @@ impl QemuBackend {
         self.guest_exec_package(handle, package, false).await
     }
 
-    /// Общая реализация: install (install=true) или remove (install=false).
+
     async fn guest_exec_package(
         &self,
         handle: &BackendHandle,
@@ -227,7 +145,6 @@ impl QemuBackend {
 
         let qmp = instance.qmp_client.as_mut().unwrap();
 
-        // Сначала определяем пакетный менеджер через which
         let detect_cmd = "/bin/sh";
         let detect_args = vec!["-c", "which apt-get || which dnf || which pacman"];
         let pid = qmp
@@ -288,27 +205,17 @@ impl Default for QemuBackend {
     }
 }
 
-/// Переводит `ProcessError` в `BackendError`, сохраняя сообщение.
-/// Отдельная функция, а не `impl From`, чтобы не создавать зависимость
-/// `andler-qemu::process::ProcessError -> andler-core` (она и не нужна:
-/// `process.rs` не зависит от `andler-core`, см. его документацию) —
-/// конвертация делается в этом модуле, на границе с trait'ом.
+
 fn process_error_to_backend_error(err: ProcessError) -> BackendError {
     BackendError::Io(err.to_string())
 }
 
-/// Переводит `QmpError` в `BackendError` той же логикой, что и
-/// `process_error_to_backend_error` — `qmp.rs` тоже не зависит от
-/// `andler-core` (нет причины: протокол QMP не знает про `InstanceConfig`),
-/// конвертация делается на границе с trait'ом, не внутри `qmp.rs`.
+
 fn qmp_error_to_backend_error(err: QmpError) -> BackendError {
     BackendError::Io(err.to_string())
 }
 
-/// Ожидает завершения команды, запущенной через `guest-exec`, poll-я
-/// `guest-exec-status` до тех пор, пока `exited` не станет `true`.
-///
-/// Возвращает stdout процесса (String) при успехе, или ошибку при провале.
+
 async fn wait_for_guest_exec(
     qmp: &mut QmpClient,
     pid: u64,
@@ -351,44 +258,10 @@ async fn wait_for_guest_exec(
     }
 }
 
-/// Имя устройства для snapshot-команд QEMU.
-/// Соответствует `id=drive-disk0` в cmdline (см. `cmdline.rs`).
+
 const DISK_DEVICE: &str = "drive-disk0";
 
-/// Таймаут ожидания завершения async job (snapshot-save/load/delete)
-/// `VmStatus` (наблюдение QMP) -> `InstanceState` (домен `andler-core`).
-///
-/// `VmStatus::Shutdown`/`Other` намеренно не маппятся на `InstanceState`
-/// напрямую здесь — `shutdown` с точки зрения QMP означает "гостевая ОС
-/// попросила выключение", но процесс QEMU может ещё быть жив несколько
-/// мгновений после этого; различать это от `Stopped` в смысле FSM
-/// (`andler_core::fsm`) — забота `andler-daemon`, который видит и
-/// `BackendStatus`, и факт того, жив ли сам процесс. Здесь возвращается
-/// `None` для статусов, которые не однозначно соответствуют
-/// `Running`/`Paused`, а вызывающая сторона (`status()` ниже) решает, что
-/// с этим делать.
-/// Читает `qemu.log` целиком и парсит его обратно в `LogLine`, чтобы
-/// `log_stream` мог отдать историю до момента подписки клиента — сам
-/// файл пишется `QemuProcess::drain_to_tracing` построчно как
-/// `[stdout] <line>`/`[stderr] <line>` (см. её документацию), формат
-/// здесь — просто обратный разбор того же самого.
-///
-/// Отсутствие файла, ошибка чтения или строка без ожидаемого префикса
-/// (испорченный файл, отредактированный вручную) — не паника и не
-/// ошибка наружу, просто эта конкретная строка (или всё содержимое, если
-/// файла вообще нет) выпадает из истории. Клиент вызывает `log_stream`
-/// ради live-хвоста в первую очередь; отсутствие истории не должно ему
-/// в этом мешать.
-///
-/// Единственный пограничный случай, о котором стоит знать: строка, чья
-/// запись в файл завершилась непосредственно перед этим чтением, но чья
-/// публикация в broadcast-канал (см. `QemuProcess::log_sender`) —
-/// технически уже после того, как `log_stream` успел подписаться,
-/// теоретически может оказаться и здесь, в истории, и затем ещё раз в
-/// live-хвосте. Файловая запись и broadcast-отправка в
-/// `drain_to_tracing` всегда идут в этом порядке (сначала файл, потом
-/// broadcast) — поэтому на этой границе возможен только редкий дубль
-/// одной строки, никогда не потеря.
+
 async fn read_log_history(path: &std::path::Path) -> Vec<LogLine> {
     let content = match tokio::fs::read_to_string(path).await {
         Ok(content) => content,
@@ -430,11 +303,6 @@ impl HypervisorBackend for QemuBackend {
     }
 
     fn supported_render_backends(&self) -> &[RenderBackend] {
-        // Passthrough намеренно не входит в этот список — см. §2.3
-        // архитектурного плана и документацию RenderBackend::is_implemented.
-        // Используется &'static, чтобы не аллоцировать новый Vec на каждый
-        // вызов; конкретные варианты не несут данных (кроме Passthrough,
-        // которого здесь нет), так что статический срез безопасен.
         &[
             RenderBackend::Venus,
             RenderBackend::VirtioGpu,
@@ -448,7 +316,7 @@ impl HypervisorBackend for QemuBackend {
             return Err(BackendError::InvalidConfig {
                 backend: "qemu",
                 reason: format!(
-                    "render backend {:?} is not implemented, see docs/architecture/CORE_ARCHITECTURE_PLAN.md §2.3",
+                    "render backend {:?} is not implemented",
                     cfg.gpu.render_backend
                 ),
             });
@@ -458,46 +326,21 @@ impl HypervisorBackend for QemuBackend {
         let qmp_socket_path = Self::qmp_socket_path_for(cfg);
 
         if let Some(parent) = qmp_socket_path.parent() {
-            // `ensure_private_dir` sets `0700` on the directory, not
-            // just the default umask — see PLAN.md, item 20b, "No file
-            // permission controls". A world-readable QMP socket
-            // directory would let another local user merely *see* which
-            // instance IDs have sockets, even though connecting to the
-            // socket itself still requires knowing the exact filename.
             andler_core::paths::ensure_private_dir(parent)
                 .await
                 .map_err(|e| BackendError::Io(e.to_string()))?;
         }
 
-        // `qmp_socket_path_for` is deterministic per instance id — a
-        // previous run of the *same* instance (now reachable via restart:
-        // `Stopped`/`Error -> Starting`, see `andler_core::fsm`) can leave
-        // a stale socket file behind if the process died without cleanly
-        // unlinking it. QEMU's own `-qmp unix:PATH,server=on` does not
-        // remove a pre-existing file at that path itself — left alone,
-        // the next QEMU would fail to bind with "address already in use"
-        // even though nothing is actually listening there anymore.
-        // Best-effort: if this fails (e.g. permission issue, or the file
-        // genuinely doesn't exist), the bind attempt below will surface
-        // whatever the real problem is instead.
         let _ = tokio::fs::remove_file(&qmp_socket_path).await;
 
         let args = cmdline::build_args(cfg, &qmp_socket_path);
 
-        // `cfg.disk.path`'s parent is the instance's own directory
-        // (`<instances_root>/<id>/`, see PLAN.md "Структура хранения") —
-        // reused here rather than introducing a separate "instance dir"
-        // concept just for this file. `None` (no parent, e.g. a bare
-        // relative filename) means no file log for this run rather than
-        // a hard error — matches `open_log_file`'s own tolerance for a
-        // missing/unwritable path.
         let log_file_path = cfg
             .disk
             .path
             .parent()
             .map(|dir| dir.join("qemu.log"));
 
-        // Perform network setup for Bridge/Isolated modes before spawning QEMU
         let network_info = match &cfg.network.mode {
             NetworkMode::Bridge { interface: bridge } => {
                 let tap_iface = format!("tap{}", cfg.id.0);
@@ -519,7 +362,6 @@ impl HypervisorBackend for QemuBackend {
         };
         let process = QemuProcess::spawn(&args, qmp_socket_path, log_file_path).await;
         if let Err(err) = process {
-            // Cleanup network resources before propagating error
             match &network_info {
                 NetworkInfo::Bridge { bridge, tap_iface } => {
                     let _ = self.network_service.teardown_bridge(bridge, tap_iface).await;
@@ -568,9 +410,6 @@ impl HypervisorBackend for QemuBackend {
 
         match first_attempt {
             Ok(()) => Ok(()),
-            // QEMU answered, just with an error — not a connection
-            // problem, retrying changes nothing. See
-            // `diagnose_and_reset_qmp` doc comment.
             Err(err) if matches!(err, QmpError::CommandFailed { .. } | QmpError::ParseError(_)) => {
                 Err(qmp_error_to_backend_error(err))
             }
@@ -652,11 +491,9 @@ impl HypervisorBackend for QemuBackend {
                 .map_err(process_error_to_backend_error)?;
         }
 
-        // Clone network info before removing instance to allow cleanup even if teardown fails
         let network_info = instance.network_info.clone();
         instances.remove(handle);
 
-        // Network teardown
         match network_info {
             NetworkInfo::Bridge { bridge, tap_iface } => {
                 self.network_service
@@ -695,13 +532,6 @@ impl HypervisorBackend for QemuBackend {
             });
         }
 
-        // Процесс жив — пробуем получить точный статус через QMP
-        // query-status. Если QMP недоступен (например, сокет ещё не готов
-        // сразу после spawn, либо соединение разорвалось) — не считаем это
-        // фатальной ошибкой всего запроса статуса: с точки зрения
-        // HypervisorBackend мы всё равно знаем, что процесс жив, просто не
-        // знаем точного состояния гостя. Это явно отражается в `detail`,
-        // а не маскируется молчаливым выбором Running по умолчанию.
         match Self::ensure_qmp_connected(instance).await {
             Ok(()) => {
                 let qmp_status = instance
@@ -723,11 +553,6 @@ impl HypervisorBackend for QemuBackend {
                         }),
                     },
                     Err(qmp_err) => {
-                        // Don't leave a known-broken connection cached —
-                        // see `diagnose_and_reset_qmp` doc comment on
-                        // `pause`/`resume` for why this matters: without
-                        // it, every future call would keep hitting this
-                        // same dead connection instead of reconnecting.
                         instance.qmp_client = None;
                         Ok(BackendStatus {
                             state: InstanceState::Running,
@@ -864,10 +689,6 @@ impl HypervisorBackend for QemuBackend {
     }
 
     fn metrics_stream(&self, handle: &BackendHandle) -> BoxStream<'_, ResourceMetrics> {
-        // Полная реализация: подписывается на broadcast-канал метрик,
-        // который публикуется фоновой задачей metrics::spawn_metrics_poller
-        // (запущена при spawn в process.rs). Паттерн идентичен log_stream
-        // (см. там за обоснованием try_lock / обработки Lagged).
         let receiver = match self.instances.try_lock() {
             Ok(mut instances) => {
                 instances.get_mut(handle).map(|i| i.process.subscribe_metrics())
@@ -891,35 +712,6 @@ impl HypervisorBackend for QemuBackend {
     }
 
     fn log_stream(&self, handle: &BackendHandle) -> BoxStream<'_, LogLine> {
-        // `log_stream` — не `async fn` (см. andler_core::backend за тем,
-        // почему сигнатура трейта такая же, как у metrics_stream), а
-        // `self.instances` — `tokio::sync::Mutex`, требующий `.await` для
-        // обычного `lock()`. `try_lock()` — единственный способ
-        // синхронно достать `RunningInstance` здесь без переделки всего
-        // метода в `async fn` (что сломало бы единообразие с
-        // metrics_stream и сигнатуру трейта).
-        //
-        // Все остальные методы (`pause`/`resume`/`stop`/`status`) держат
-        // этот `Mutex` только на короткие, без внутренних `.await` на
-        // самом локе, синхронные секции (взять `&mut RunningInstance`,
-        // отдать обратно) — она не остаётся захваченной во время
-        // QMP-обмена с самим QEMU (`ensure_qmp_connected` и операции QMP
-        // вызываются на уже полученной ссылке, не повторно лочат
-        // `instances`). Поэтому `try_lock()` здесь практически никогда не
-        // провалится из-за конкуренции; в редком случае гонки с другим
-        // вызовом `log_stream`/`pause`/`stop` в тот же момент — отдаём
-        // пустой поток, тот же контракт, что и для "хэндл не найден" (см.
-        // документацию `HypervisorBackend::log_stream`): подписка на
-        // следующий вызов клиента отработает штатно, потерянных данных
-        // нет (broadcast не накапливает историю для ещё не подключённого
-        // подписчика в любом случае).
-        //
-        // Подписка на `subscribe_logs()` берётся здесь же, синхронно,
-        // до какого-либо чтения `qemu.log` ниже — это важно для порядка
-        // "история, потом live", а не только для самого списка полей.
-        // См. документацию `read_log_history` за разбором единственного
-        // возможного пограничного случая (редкий дубль одной строки, не
-        // потеря).
         let subscription = match self.instances.try_lock() {
             Ok(mut instances) => instances
                 .get_mut(handle)
@@ -933,16 +725,6 @@ impl HypervisorBackend for QemuBackend {
                     |item| async {
                         match item {
                             Ok(line) => Some(line),
-                            // `Lagged(n)` — подписчик отстал больше, чем
-                            // вмещает `LOG_CHANNEL_CAPACITY` (см.
-                            // process::LOG_CHANNEL_CAPACITY), и пропустил `n`
-                            // строк. Пропускаем сам факт пропуска молча и
-                            // продолжаем поток со следующей доступной строки
-                            // — закрывать стрим здесь было бы хуже для
-                            // живого хвоста логов, чем потерять уведомление о
-                            // разрыве; в логах andlerd (`tracing`) эти же
-                            // строки в любом случае не потеряны — лагает
-                            // только данный gRPC-подписчик, не сам канал.
                             Err(tokio_stream::wrappers::errors::BroadcastStreamRecvError::Lagged(
                                 _,
                             )) => None,
@@ -950,15 +732,6 @@ impl HypervisorBackend for QemuBackend {
                     },
                 );
 
-                // История из `qemu.log` идёт первой, живой хвост — сразу
-                // за ней, одним непрерывным потоком для клиента (тот же
-                // `stream_instance_logs`, что и раньше — этот метод не
-                // видит разницы между "старой" и "новой" строкой).
-                // `stream::once` + `flatten` вместо `async fn`, потому что
-                // сигнатура трейта требует именно синхронный `log_stream`
-                // (см. комментарий выше) — само чтение файла остаётся
-                // асинхронным, просто отложенным до момента, когда поток
-                // начнут поллить, а не выполненным прямо здесь.
                 let history = futures_util::stream::once(async move {
                     match log_file_path {
                         Some(path) => read_log_history(&path).await,
@@ -1025,14 +798,12 @@ impl HypervisorBackend for QemuBackend {
 
         let qmp = instance.qmp_client.as_mut().unwrap();
 
-        // Run `test -x <binary_path>` via guest-exec
         let cmd = format!("test -x {binary_path}");
         let pid = qmp
             .guest_exec("/bin/sh", &["-c", &cmd])
             .await
             .map_err(qmp_error_to_backend_error)?;
 
-        // Poll until exited, but treat non-zero exit as "not installed" (not error)
         use std::time::Instant;
         let start = Instant::now();
         let timeout = std::time::Duration::from_secs(5);
@@ -1044,7 +815,6 @@ impl HypervisorBackend for QemuBackend {
                 .map_err(qmp_error_to_backend_error)?;
 
             if status.exited {
-                // exit code 0 = binary exists, non-zero = doesn't exist
                 return Ok(status.exitcode == 0);
             }
 
@@ -1160,11 +930,7 @@ mod tests {
         assert!(stream.next().await.is_none());
     }
 
-    /// Неизвестный хэндл — пустой поток сразу же, не ошибка (см.
-    /// документацию `HypervisorBackend::log_stream` за тем, почему это
-    /// сознательно отличается от `pause`/`resume`/`status` с тем же
-    /// неизвестным хэндлом). Не требует реального процесса QEMU —
-    /// `instances` пуст с самого начала.
+
     #[tokio::test]
     async fn log_stream_on_unknown_handle_is_immediately_empty() {
         use futures_util::StreamExt;
@@ -1234,16 +1000,12 @@ mod tests {
     #[tokio::test]
     async fn read_log_history_returns_empty_for_missing_file() {
         let dir = TestTempDir::new();
-        // Never written to — exercises the "file doesn't exist" branch,
-        // not just "empty file".
         let missing_path = dir.path().join("never-created-qemu.log");
         assert_eq!(read_log_history(&missing_path).await, Vec::new());
     }
 
     #[tokio::test]
     async fn read_log_history_skips_lines_without_a_known_prefix() {
-        // Defensive case: a manually edited/corrupted file shouldn't
-        // panic `log_stream`, just silently drop what it can't parse.
         let dir = TestTempDir::new();
         let log_path = dir.path().join("qemu.log");
         tokio::fs::write(&log_path, "garbage line\n[stdout] real line\n")
@@ -1279,9 +1041,6 @@ mod tests {
         assert_eq!(vm_status_to_instance_state(VmStatus::Other), None);
     }
 
-    // spawn/stop/status/pause/resume на реальном живом процессе требуют
-    // бинарника qemu-system-x86_64 и рабочего QMP-сокета — см.
-    // process.rs/qmp.rs про конвенцию #[ignore] в этом крейте.
     #[tokio::test]
     #[ignore = "requires qemu-system-x86_64 binary, see docker/README.md integration-test target"]
     async fn spawn_then_status_then_stop_round_trip() {
@@ -1318,13 +1077,7 @@ mod tests {
         backend.stop(&handle, false).await.unwrap();
     }
 
-    /// Regression test for the QMP reconnect/recovery fix (see
-    /// `diagnose_and_reset_qmp` doc comment, ROADMAP.md "QEMU backend:
-    /// improve QMP error handling and recovery"): kills the real QEMU
-    /// process out-of-band (bypassing `backend.stop()`, which would clean
-    /// up the registry entry) and verifies `pause()` reports the specific
-    /// `BackendError::ProcessNotRunning` — not a generic `Io` error, and
-    /// not a hang waiting on a dead socket.
+
     #[tokio::test]
     async fn pause_after_external_process_kill_returns_process_not_running() {
         let backend = QemuBackend::new();
@@ -1333,11 +1086,6 @@ mod tests {
 
         let handle = backend.spawn(&cfg).await.unwrap();
 
-        // Establish a QMP connection first (round-trips one command) so
-        // `instance.qmp_client` is `Some` — otherwise this would only
-        // exercise the *initial*-connect error path, not the
-        // reconnect-after-a-cached-connection-goes-stale path this test
-        // is actually about.
         backend.pause(&handle).await.unwrap();
         backend.resume(&handle).await.unwrap();
 
@@ -1350,19 +1098,10 @@ mod tests {
                 .pid()
         };
 
-        // SAFETY: `kill(2)` with a valid pid and a signal number is not
-        // memory-unsafe — the only way this could go wrong is signaling
-        // the wrong process, which can't happen here since `pid` was just
-        // read from the process we ourselves spawned above.
+        // SAFETY: PID is from a just-spawned QEMU process we own; used to simulate crash.
         unsafe {
             libc::kill(pid as i32, libc::SIGKILL);
         }
-        // Give the kernel a moment to actually finalize the process exit
-        // so `is_alive()` (a non-blocking `try_wait()` — see
-        // `process.rs`) reliably observes it as gone, not just "signal
-        // sent". `try_wait()` itself doesn't block, so without this the
-        // check could theoretically race the kernel's own SIGKILL
-        // handling on a loaded machine.
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
         let err = backend.pause(&handle).await.unwrap_err();
@@ -1372,15 +1111,7 @@ mod tests {
         );
     }
 
-    /// Сквозная проверка `log_stream` через весь стек `QemuBackend`
-    /// (в отличие от `drain_to_tracing_publishes_lines_to_subscriber` в
-    /// `process.rs`, которая проверяет только саму механику чтения
-    /// строк — здесь важно, что `BackendHandle` → `RunningInstance` →
-    /// `subscribe_logs` → `BroadcastStream` действительно соединены друг
-    /// с другом). QEMU обычно пишет в stderr хотя бы строку лицензии или
-    /// предупреждения при запуске с `-nographic`/неполным набором
-    /// устройств — этого достаточно, чтобы получить хотя бы одну строку
-    /// без необходимости провоцировать конкретную ошибку.
+
     #[tokio::test]
     #[ignore = "requires qemu-system-x86_64 binary, see docker/README.md integration-test target"]
     async fn log_stream_receives_real_process_output() {
@@ -1394,11 +1125,6 @@ mod tests {
         let handle = backend.spawn(&cfg).await.unwrap();
         let mut stream = backend.log_stream(&handle);
 
-        // Не любой запуск QEMU гарантированно что-то пишет в stdout/stderr
-        // в первые секунды — таймаут здесь означает "не успели получить
-        // строку", не "механика не работает"; smoke-проверка того, что
-        // стрим хотя бы подключён к реальному процессу, не строгая
-        // гарантия конкретного вывода.
         let _ = timeout(Duration::from_secs(5), stream.next()).await;
 
         backend.stop(&handle, false).await.unwrap();

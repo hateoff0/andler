@@ -1,4 +1,4 @@
-//! Обработка команд `andler guest install/remove/list <package> <instance-id>`.
+
 
 use andler_rpc::proto::andler_service_client::AndlerServiceClient;
 use andler_rpc::proto::{
@@ -11,29 +11,26 @@ use crate::lifecycle;
 
 #[derive(Debug, Clone, clap::Subcommand)]
 pub enum GuestAction {
-    /// List Android instances (no arg) or packages for a specific instance.
+
     List {
-        /// Instance ID (omit to list all instances)
+
         instance_id: Option<String>,
     },
-    /// Install a package in the guest OS (e.g., spice-vdagent).
-    ///
-    /// For ARM translators (libndk, libhoudini): use `--translator-dir`
-    /// to supply pre-downloaded translator files instead of auto-download.
+
     Install {
-        /// Package name (e.g., libndk, libhoudini, spice-vdagent)
+
         package: String,
-        /// Instance ID
+
         instance_id: String,
-        /// Path to pre-downloaded translator directory (for libndk/libhoudini)
+
         #[arg(long)]
         translator_dir: Option<std::path::PathBuf>,
     },
-    /// Remove a package from the guest OS.
+
     Remove {
-        /// Package name
+
         package: String,
-        /// Instance ID
+
         instance_id: String,
     },
 }
@@ -44,8 +41,6 @@ pub async fn handle(
 ) -> Result<(), Box<dyn std::error::Error>> {
     match action {
         GuestAction::List { instance_id: None } => {
-            // List all Android instances — not yet fully implemented via
-            // guest subcommand; falls back to package listing message.
             println!("Usage: andler guest list <instance-id>");
             println!("       andler guest install <package> <instance-id>");
             println!("       andler guest remove <package> <instance-id>");
@@ -88,7 +83,6 @@ pub async fn handle(
         } => {
             let (resolved_id, _name) = lifecycle::resolve_echo(client, &instance_id).await;
 
-            // ARM translator packages → use SwitchArmTranslator RPC
             let is_arm_translator = matches!(package.as_str(), "libndk" | "libhoudini");
             if is_arm_translator {
                 let translator = match package.as_str() {
@@ -114,7 +108,6 @@ pub async fn handle(
                     None => println!("Translator `{package}` installed (auto-download)"),
                 }
             } else {
-                // Non-translator packages → use InstallGuestAgent
                 let request = InstallGuestAgentRequest {
                     instance_id: resolved_id,
                     package: package.clone(),

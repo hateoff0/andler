@@ -1,12 +1,4 @@
-//! Offline установка и удаление пакетов в гостевую ФС через `qemu-nbd`.
-//!
-//! Модуль монтирует disk image (через общий `nbd`-модуль), определяет
-//! пакетный менеджер гостя (`apt`/`dnf`/`pacman`), и выполняет
-//! установку или удаление пакета без запуска VM.
-//!
-//! Используется для автоматической установки `spice-vdagent` (共享
-//! clipboard) в гостевую ОС — пользователь не должен SSH-ться в VM
-//! вручную.
+
 
 use std::path::Path;
 
@@ -14,19 +6,19 @@ use andler_core::config::InstanceKind;
 use crate::error::DiskError;
 use crate::nbd;
 
-/// Пакетный менеджер, обнаруженный в смонтированной ФС гостя.
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PackageManager {
-    /// Debian/Ubuntu: `apt-get`
+
     Apt,
-    /// Fedora/RHEL: `dnf` (или `yum`)
+
     Dnf,
-    /// Arch Linux: `pacman`
+
     Pacman,
 }
 
 impl PackageManager {
-    /// Возвращает имя бинарника для包管理器.
+
     pub fn binary_name(&self) -> &'static str {
         match self {
             PackageManager::Apt => "apt-get",
@@ -35,7 +27,7 @@ impl PackageManager {
         }
     }
 
-    /// Возвращает аргументы для установки пакета.
+
     pub fn install_args<'a>(&self, package: &'a str) -> Vec<&'a str> {
         match self {
             PackageManager::Apt => vec!["install", "-y", package],
@@ -44,7 +36,7 @@ impl PackageManager {
         }
     }
 
-    /// Возвращает аргументы для удаления пакета.
+
     pub fn remove_args<'a>(&self, package: &'a str) -> Vec<&'a str> {
         match self {
             PackageManager::Apt => vec!["remove", "-y", package],
@@ -53,7 +45,7 @@ impl PackageManager {
         }
     }
 
-    /// Возвращает аргументы для проверки установлен ли пакет.
+
     pub fn check_installed_args<'a>(&self, package: &'a str) -> Vec<&'a str> {
         match self {
             PackageManager::Apt => vec!["dpkg", "-l", package],
@@ -63,12 +55,7 @@ impl PackageManager {
     }
 }
 
-/// Определяет пакетный менеджер в смонтированной ФС гостя.
-///
-/// Проверяет наличие бинарников в типичных путях:
-/// - `/usr/bin/apt-get` (Debian/Ubuntu)
-/// - `/usr/bin/dnf` или `/usr/bin/yum` (Fedora/RHEL)
-/// - `/usr/bin/pacman` (Arch Linux)
+
 pub fn detect_package_manager(mount_point: &Path) -> Option<PackageManager> {
     if mount_point.join("usr/bin/apt-get").exists() {
         return Some(PackageManager::Apt);
@@ -85,10 +72,7 @@ pub fn detect_package_manager(mount_point: &Path) -> Option<PackageManager> {
     None
 }
 
-/// Проверяет, установлен ли пакет в гостевой ФС.
-///
-/// Выполняет команду проверки через `chroot` в смонтированный rootfs.
-/// Возвращает `true`, если пакет найден.
+
 pub fn is_agent_installed(
     mount_point: &Path,
     pkg_manager: PackageManager,
@@ -112,18 +96,7 @@ pub fn is_agent_installed(
     }
 }
 
-/// Устанавливает пакет в гостевую ФС offline (через chroot).
-///
-/// # Arguments
-/// * `disk_path` — путь к qcow2-диску инстанса
-/// * `package` — имя пакета (например, `spice-vdagent`)
-///
-/// # Process
-/// 1. Подключает диск через `qemu-nbd`
-/// 2. Монтирует корневой раздел
-/// 3. Определяет пакетный менеджер
-/// 4. Устанавливает пакет через `chroot`
-/// 5. Отмонтировывает и отключает NBD
+
 pub async fn install_agent_offline(
     disk_path: &Path,
     package: &str,
@@ -161,7 +134,6 @@ fn install_agent_offline_blocking(disk_path: &Path, package: &str) -> Result<(),
         });
     }
 
-    // Обновляем список пакетов перед установкой
     let update_args = match pkg_manager {
         PackageManager::Apt => vec!["update"],
         PackageManager::Dnf => vec!["makecache"],
@@ -202,9 +174,7 @@ fn install_agent_offline_blocking(disk_path: &Path, package: &str) -> Result<(),
     Ok(())
 }
 
-/// Удаляет пакет из гостевой ФС offline (через chroot).
-///
-/// Аналогичен `install_agent_offline`, но выполняет удаление вместо установки.
+
 pub async fn remove_agent_offline(
     disk_path: &Path,
     package: &str,
@@ -268,19 +238,16 @@ fn remove_agent_offline_blocking(disk_path: &Path, package: &str) -> Result<(), 
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// Справочник пакетов
-// ---------------------------------------------------------------------------
 
-/// Описание пакета, который ANDLER умеет устанавливать в гостевую ОС.
+
 pub struct GuestPackage {
     pub name: &'static str,
     pub description: &'static str,
-    /// Путь к бинарнику для проверки установлен ли пакет.
+
     pub binary_check: &'static str,
 }
 
-/// Известные пакеты, которые ANDLER может установить/удалить в гостевой ОС.
+
 pub const KNOWN_PACKAGES: &[GuestPackage] = &[
     GuestPackage {
         name: "spice-vdagent",
@@ -298,7 +265,7 @@ pub const KNOWN_PACKAGES: &[GuestPackage] = &[
         binary_check: "/usr/bin/spice-webdavd",
     },
 ];
-/// Android-specific packages (ARM translators).
+
 pub const ANDROID_PACKAGES: &[GuestPackage] = &[
     GuestPackage {
         name: "libndk",
@@ -312,7 +279,7 @@ pub const ANDROID_PACKAGES: &[GuestPackage] = &[
     },
 ];
 
-/// Returns the available packages for the given instance kind.
+
 pub fn available_packages(kind: &InstanceKind) -> &'static [GuestPackage] {
     match kind {
         InstanceKind::AndroidVm { .. } => ANDROID_PACKAGES,
@@ -320,7 +287,7 @@ pub fn available_packages(kind: &InstanceKind) -> &'static [GuestPackage] {
     }
 }
 
-/// Статус пакета в гостевой ФС.
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PackageStatus {
     Installed,
@@ -328,9 +295,7 @@ pub enum PackageStatus {
     Unknown,
 }
 
-/// Проверяет установлен ли пакет в смонтированной ФС (offline).
-///
-/// Проверяет наличие бинарника по `binary_check` пути.
+
 pub fn check_package_status_offline(mount_point: &Path, binary_check: &str) -> PackageStatus {
     let full_path = mount_point.join(binary_check.strip_prefix('/').unwrap_or(binary_check));
     if full_path.exists() {
@@ -340,7 +305,7 @@ pub fn check_package_status_offline(mount_point: &Path, binary_check: &str) -> P
     }
 }
 
-/// Проверяет статусы всехKNOWN_PACKAGES в смонтированной ФС.
+
 pub fn check_all_packages_offline(mount_point: &Path) -> Vec<(&'static GuestPackage, PackageStatus)> {
     KNOWN_PACKAGES
         .iter()
@@ -351,9 +316,7 @@ pub fn check_all_packages_offline(mount_point: &Path) -> Vec<(&'static GuestPack
         .collect()
 }
 
-/// Проверяет статусы всехKNOWN_PACKAGES в дисковом образе (offline).
-///
-/// Подключает образ через qemu-nbd, монтирует, проверяет, отмонтирует.
+
 pub fn check_all_packages_offline_with_disk(
     disk_path: &Path,
 ) -> Result<Vec<(&'static GuestPackage, PackageStatus)>, DiskError> {
@@ -366,9 +329,7 @@ pub fn check_all_packages_offline_with_disk(
     Ok(results)
 }
 
-/// Проверяет статусы ANDROID_PACKAGES в дисковом образе (offline).
-///
-/// Подключает образ через qemu-nbd, монтирует, проверяет, отмонтирует.
+
 pub fn check_android_packages_offline_with_disk(
     disk_path: &Path,
 ) -> Result<Vec<(&'static GuestPackage, PackageStatus)>, DiskError> {

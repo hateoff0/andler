@@ -1,15 +1,8 @@
-//! Auto-detection of the recommended ARM->x86 translator, based on host
-//! CPU vendor. See WIZARD.md, "Auto-detection for ARM translator".
+
 
 use andler_core::ArmTranslator;
 
-/// Reads `/proc/cpuinfo` for the `vendor_id` field and maps it to the
-/// recommended translator. Returns `None` (not an error) when the file is
-/// missing or the vendor is unrecognized — e.g. inside a container without
-/// `/proc/cpuinfo`, or on a non-x86 host. The wizard treats `None` as "no
-/// translator recommended", not as a detection failure to report.
-///
-/// Called once by [`super::detect_all`].
+
 pub(crate) fn detect_arm_translator() -> Option<ArmTranslator> {
     let cpuinfo = std::fs::read_to_string("/proc/cpuinfo").ok()?;
     detect_arm_translator_from_cpuinfo(&cpuinfo)

@@ -1,7 +1,6 @@
 use super::common::*;
 use super::*;
 
-// --- remove_instance -----------------------------------------------------
 
 #[tokio::test]
 async fn remove_instance_on_unknown_instance_returns_instance_not_found() {
@@ -131,7 +130,6 @@ async fn remove_instance_disappears_from_list_instances() {
     assert!(summaries.is_empty());
 }
 
-// --- purge tests --------------------------------------------------------
 
 #[tokio::test]
 async fn remove_instance_without_purge_leaves_disk_and_firmware_files() {
@@ -200,14 +198,6 @@ async fn remove_instance_with_purge_keeps_non_empty_parent_directory() {
 
 #[tokio::test]
 async fn remove_instance_with_purge_recursively_deletes_own_instance_directory() {
-    // Regression test for PLAN.md item 2: the instance's own directory
-    // (named after its InstanceId — unlike an arbitrary user-chosen
-    // parent, which is what the other purge tests above use via
-    // `TestTempDir`) must be removed recursively on purge, even when it
-    // contains files purge doesn't delete by name (e.g. `qemu.log`,
-    // see `andler_qemu::process::QemuProcess::spawn`). The old
-    // non-recursive `remove_dir` silently left the whole directory
-    // behind whenever it held more than just the disk + VARS files.
     let root = TestTempDir::new();
     let id = InstanceId::new();
     let instance_dir = root.path().join(id.0.to_string());

@@ -13,19 +13,7 @@ pub fn state_kind_name(kind: InstanceStateKind) -> &'static str {
     }
 }
 
-/// Wraps `state`'s display name in ANSI color codes for `andler list`/
-/// `andler status` — see PLAN.md, item 11, "Colored status output".
-/// `is_tty` must be checked by the caller (`std::io::IsTerminal`, not
-/// here) and passed in explicitly rather than checked internally: this
-/// keeps the function itself pure and unit-testable without needing to
-/// fake stdout's terminal-ness, and matches how `is_tty` is already
-/// threaded through explicitly elsewhere in the CLI (e.g.
-/// `cli/src/wizard/mod.rs`) rather than queried ad hoc in the middle of
-/// formatting code.
-///
-/// No external crate (`colored`/`termcolor`/etc.) — this is exactly the
-/// same handful of raw ANSI SGR codes the plan itself proposes, and it's
-/// the only place in the CLI that needs color at all so far.
+
 pub fn colorize_status(kind: InstanceStateKind, is_tty: bool) -> String {
     let name = state_kind_name(kind);
     if !is_tty {
@@ -114,12 +102,7 @@ pub fn parse_size(input: &str) -> Result<u64, String> {
     Ok(bytes)
 }
 
-/// Если у пути нет расширения — добавляет `.qcow2`. Если расширение уже
-/// есть (`.img`, `.raw`, что угодно) — путь используется как есть, без
-/// изменений. См. PLAN.md, раздел «Disk management» → «Авто-добавление
-/// .qcow2»: пользователь, передавший `--disk-path ~/my-disk`, не должен
-/// думать о расширении сам, но явно указанное расширение — это явный
-/// выбор, который ANDLER не переопределяет.
+
 pub fn ensure_qcow2_extension(path: &std::path::Path) -> std::path::PathBuf {
     if path.extension().is_some() {
         path.to_path_buf()
@@ -155,7 +138,6 @@ pub fn format_size(bytes: u64) -> String {
 mod tests {
     use super::*;
 
-    // --- colorize_status tests ---
 
     #[test]
     fn colorize_status_returns_plain_text_when_not_a_tty() {
@@ -209,7 +191,6 @@ mod tests {
         );
     }
 
-    // --- ensure_qcow2_extension tests ---
 
     #[test]
     fn ensure_qcow2_extension_adds_when_missing() {
@@ -235,7 +216,6 @@ mod tests {
         );
     }
 
-    // --- parse_size tests ---
 
     #[test]
     fn parse_size_plain_bytes() {
@@ -322,7 +302,6 @@ mod tests {
         assert_eq!(parse_size(" 64GB ").unwrap(), 64 * 1024 * 1024 * 1024);
     }
 
-    // --- format_size tests ---
 
     #[test]
     fn format_size_bytes() {

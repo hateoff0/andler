@@ -9,14 +9,7 @@ use tonic::transport::Channel;
 
 use crate::SnapshotAction;
 
-/// A spinner for a single blocking gRPC call with no server-side
-/// progress data to report (snapshot create/restore go through QMP
-/// synchronously — see PLAN.md, item 13, "Snapshot progress
-/// indicators" — there's genuinely nothing more granular than "still
-/// running" to show). Explicitly hidden when stderr isn't a terminal
-/// (piped/redirected output, CI logs) rather than relying on
-/// `indicatif`'s own default target — matches how `colorize_status`
-/// checks `IsTerminal` itself instead of assuming a library default.
+
 fn spinner(message: &str) -> ProgressBar {
     if !std::io::stderr().is_terminal() {
         return ProgressBar::hidden();
@@ -46,10 +39,6 @@ pub async fn handle(
                     timeout_secs: timeout,
                 })
                 .await;
-            // Finish (clearing the spinner line) before printing the
-            // real result/error — an error propagated via `?` after
-            // this still leaves a dangling spinner line otherwise,
-            // since nothing else would ever call finish()/clear() on it.
             pb.finish_and_clear();
             let response = result?.into_inner();
             println!(

@@ -1,14 +1,4 @@
-//! `andler create --verify` — validates a resolved instance config
-//! (paths exist, OVMF found, disk format sane, no conflicting flags)
-//! without creating anything or contacting the daemon. Complements
-//! `--dry-run`: that shows *what* will run, this confirms it's *valid*.
-//! See ROADMAP.md, "CLI: add --verify flag to validate instance config
-//! before start".
-//!
-//! Built on the same client-side resolution as `--dry-run`
-//! (`preview::resolve_linux`/`resolve_android`) — a config that fails to
-//! *resolve* at all (e.g. malformed request) is itself a verify failure,
-//! reported the same way as any other check here.
+
 
 use andler_core::InstanceKind;
 use andler_rpc::proto::{CreateAndroidInstanceRequest, CreateInstanceRequest};
@@ -20,8 +10,7 @@ struct Check {
     result: Result<String, String>,
 }
 
-/// Runs every check, prints a ✓/✗ report, and returns whether all of them
-/// passed. The caller decides what to do with that (CLI exit code).
+
 fn run_checks(resolved: &Resolved, checks: Vec<Check>) -> bool {
     println!("─── Verifying instance config ─────────────────────────────────");
     println!("Name: {}", resolved.cfg.name);
@@ -48,11 +37,6 @@ fn run_checks(resolved: &Resolved, checks: Vec<Check>) -> bool {
 }
 
 fn check_disk(resolved: &Resolved) -> Check {
-    // `disk.format` is a Rust enum (Qcow2/Raw/Vdi) resolved from a typed
-    // proto oneof — there's no "invalid" value it could hold by the time
-    // it gets here, so nothing to check about the format itself beyond
-    // what the type system already guarantees. Size and the target
-    // directory are the parts that can actually be wrong.
     let disk = &resolved.cfg.disk;
     let result = if disk.size_bytes == 0 {
         Err("disk size is 0 bytes".to_string())
@@ -170,10 +154,7 @@ mod tests {
     };
     use std::path::PathBuf;
 
-    /// A fully `reference_default()`-backed `InstanceConfig` wrapped in
-    /// `Resolved` — everything each `check_*` function under test cares
-    /// about is overridden per-test via `resolved.cfg.<field> = ...`, the
-    /// rest just needs to exist and be internally consistent.
+
     fn fixture_resolved(disk_path: PathBuf) -> Resolved {
         let cfg = InstanceConfig {
             id: InstanceId::new(),
@@ -202,7 +183,6 @@ mod tests {
 
     #[test]
     fn check_disk_passes_for_existing_directory_and_nonzero_size() {
-        // std::env::temp_dir() always exists.
         let resolved = fixture_resolved(std::env::temp_dir().join("disk.qcow2"));
         let check = check_disk(&resolved);
         assert!(check.result.is_ok());
@@ -252,9 +232,6 @@ mod tests {
     #[test]
     fn check_ovmf_passes_when_template_exists() {
         let mut resolved = fixture_resolved(std::env::temp_dir().join("disk.qcow2"));
-        // temp_dir() itself always exists — reused as a stand-in file
-        // path check target isn't meaningful (it's a dir, not a file),
-        // so this test only needs *some* existing path.
         resolved.ovmf_vars_template = Some(std::env::temp_dir());
         let check = check_ovmf(&resolved, true);
         assert!(check.result.is_ok());

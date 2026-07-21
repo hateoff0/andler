@@ -1,9 +1,4 @@
-//! Interactive VM creation wizard (`inquire` prompts).
-//!
-//! Three creation paths (all coexist):
-//! - TOML: `andler create --file vm.toml`
-//! - CLI flags: `andler create --kind linux --name ...`
-//! - Wizard: `andler create` (this module)
+
 
 mod advanced;
 mod basic;
@@ -27,15 +22,15 @@ pub use basic::{BasicResult, LinuxBasicResult, AndroidBasicResult};
 pub use advanced::AdvancedConfig;
 pub use summary::SummaryAction;
 
-/// Result passed back to `create.rs`.
+
 #[derive(Debug)]
-#[allow(dead_code)]
+#[allow(dead_code)] // variants consumed by caller; Rust can't see cross-module call sites
 pub enum WizardResult {
     Linux(CreateInstanceRequest, String /* instances_root */),
     Android(CreateAndroidInstanceRequest),
 }
 
-/// CLI flags already provided before the wizard starts.
+
 #[derive(Default)]
 pub struct PartialArgs {
     pub kind: Option<WizardKind>,
@@ -58,7 +53,7 @@ enum WizardMode {
     Advanced,
 }
 
-/// Main wizard entry point.
+
 pub async fn run(partial: PartialArgs) -> Result<WizardResult, WizardError> {
     let detected = andler_firmware::detect_all();
 
@@ -138,16 +133,7 @@ pub async fn run(partial: PartialArgs) -> Result<WizardResult, WizardError> {
     }
 }
 
-/// Prints what `HardwareDefaults::detect_all()` actually found, before
-/// the first question — see PLAN.md, item 19, "19a. Show hardware
-/// detection results before questions". Only shows fields the detector
-/// genuinely produces (render backend, display engine, audio server,
-/// OVMF path, ARM translator for Android) — no invented GPU model name
-/// like the mockup in that section shows, since `HardwareDefaults`
-/// doesn't carry one (`detect_gpu_vendor` only classifies
-/// AMD/Intel/NVIDIA/None internally, it doesn't read back a marketing
-/// name); overclaiming detection detail here would be worse than not
-/// showing it.
+
 fn print_hardware_summary(detected: &HardwareDefaults, kind: Option<WizardKind>) {
     println!("Hardware detected:");
 
@@ -176,11 +162,6 @@ fn print_hardware_summary(detected: &HardwareDefaults, kind: Option<WizardKind>)
     };
     println!("  Audio:      {audio}");
 
-    // Only relevant for Android — `partial.kind` may still be `None`
-    // here (resolved by `basic::ask_kind` right after this prints), so
-    // this shows the ARM translator line whenever it *could* end up
-    // being an Android instance, not only when the user already
-    // guaranteed it via `--kind android`.
     if kind != Some(WizardKind::Linux) {
         let arm = match detected.arm_translator {
             Some(ArmTranslator::Libndk) => "libndk (AMD CPU)",
@@ -519,9 +500,7 @@ fn default_instances_root() -> String {
         .into_owned()
 }
 
-/// Entry point for `andler wizard` and bare `andler` (no subcommand).
-/// Runs the interactive wizard with empty PartialArgs, then sends the
-/// result to andlerd via gRPC.
+
 pub async fn handle_wizard(
     client: &mut andler_rpc::proto::andler_service_client::AndlerServiceClient<
         tonic::transport::Channel,
@@ -547,8 +526,7 @@ pub async fn handle_wizard(
     }
 }
 
-/// Send wizard result to andlerd via gRPC. Shared between `create::handle()`
-/// and `handle_wizard()` to avoid duplicating the gRPC-sending logic.
+
 pub async fn send_result(
     client: &mut andler_rpc::proto::andler_service_client::AndlerServiceClient<
         tonic::transport::Channel,
@@ -575,7 +553,6 @@ pub async fn send_result(
 }
 
 pub(crate) fn is_tty() -> bool {
-    // Allow test override via environment variable
     if std::env::var("ANDLER_WIZARD_NOT_TTY").is_ok() {
         return false;
     }
@@ -588,6 +565,7 @@ fn libc_isatty(fd: i32) -> bool {
     extern "C" {
         fn isatty(fd: i32) -> i32;
     }
+    // SAFETY: isatty(2) is a pure POSIX call — takes an fd, returns int, no mutable state.
     unsafe { isatty(fd) != 0 }
 }
 
@@ -720,15 +698,9 @@ mod tests {
         }
     }
 
-    // --- --quick (build_quick is private, so these live inside this module
-    // rather than as separate integration tests; see WIZARD.md test plan
-    // note on inquire's prompt_with_backend being pub(crate)-only, which
-    // rules out simulating the interactive Select/Text prompts below). ---
 
     #[test]
     fn test_quick_linux_ovmf_not_found() {
-        // Linux + --quick + no OVMF -> Legacy BIOS warning on stderr, but
-        // the request still succeeds (Linux never requires UEFI).
         let partial = PartialArgs {
             kind: Some(WizardKind::Linux),
             name: Some("quick-linux-test".into()),
@@ -746,8 +718,6 @@ mod tests {
 
     #[test]
     fn test_quick_android_ovmf_not_found() {
-        // Android + --quick + no OVMF -> hard error (Android requires UEFI,
-        // no Legacy BIOS fallback).
         let partial = PartialArgs {
             kind: Some(WizardKind::Android),
             name: Some("quick-android-test".into()),
@@ -765,8 +735,6 @@ mod tests {
 
     #[test]
     fn test_quick_android_base_image_not_found() {
-        // Android + --quick + base image path that doesn't exist on disk
-        // -> error, even though OVMF is fine.
         let partial = PartialArgs {
             kind: Some(WizardKind::Android),
             name: Some("quick-android-test".into()),
@@ -784,10 +752,6 @@ mod tests {
     #[tokio::test]
     async fn test_wizard_not_tty() {
         std::env::set_var("ANDLER_WIZARD_NOT_TTY", "1");
-        // Calls the real public `run()` entry point (not a fake/mock): the
-        // cargo test harness does not attach a TTY to stdin, so `is_tty()`
-        // is false here for real, and this exercises the actual NotTty
-        // early-return path without any --quick/--file shortcut.
         let partial = PartialArgs {
             kind: Some(WizardKind::Linux),
             name: Some("interactive-test".into()),
@@ -802,7 +766,6 @@ mod tests {
     fn test_build_network_config() {
         let detected = sample_detected();
         
-        // NAT mode (default)
         let advanced = AdvancedConfig {
             cdrom_bus: None,
             compact_on_shutdown: false,
@@ -824,7 +787,6 @@ mod tests {
         let network = build_network_config(Some(&advanced), &detected).unwrap();
         assert!(matches!(network.mode, NetworkMode::Nat));
         
-        // Bridge mode
         let advanced_bridge = AdvancedConfig {
             cdrom_bus: None,
             compact_on_shutdown: false,
@@ -846,7 +808,6 @@ mod tests {
         let network = build_network_config(Some(&advanced_bridge), &detected).unwrap();
         assert!(matches!(network.mode, NetworkMode::Bridge { .. }));
         
-        // Isolated mode
         let advanced_isolated = AdvancedConfig {
             cdrom_bus: None,
             compact_on_shutdown: false,

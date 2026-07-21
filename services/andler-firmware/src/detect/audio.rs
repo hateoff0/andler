@@ -1,26 +1,11 @@
-//! Auto-detection of the running host audio server. See WIZARD.md,
-//! "Auto-detection of audio server".
+
 
 use andler_core::AudioBackend;
 
-/// Alias, not a new type: `AudioServer` and [`andler_core::AudioBackend`]
-/// have exactly the same three variants (PipeWire/PulseAudio/None) — this
-/// module just picks one of them based on which socket is present, so a
-/// distinct enum would only add a pointless conversion step at the call
-/// site (`HardwareDefaults.audio_server` is consumed directly as the
-/// wizard's `AudioBackend` default).
+
 pub type AudioServer = AudioBackend;
 
-/// Checks for a running PipeWire or PulseAudio session, in that order
-/// (PipeWire is the modern default on most current distros and usually
-/// also emulates the PulseAudio socket, so checking it first avoids a
-/// false PulseAudio positive on PipeWire-only systems).
-///
-/// Returns `AudioServer::None` — not an error — when `$XDG_RUNTIME_DIR`
-/// isn't set and `/run/user/{uid}` doesn't exist either (headless
-/// container, no active session), or when neither socket is present.
-///
-/// Called once by [`super::detect_all`].
+
 pub(crate) fn detect_audio_server() -> AudioServer {
     match runtime_dir() {
         Some(dir) => detect_from_runtime_dir(&dir),
@@ -38,7 +23,7 @@ fn detect_from_runtime_dir(runtime_dir: &str) -> AudioServer {
     AudioServer::None
 }
 
-/// `$XDG_RUNTIME_DIR` if set, otherwise `/run/user/{uid}` if it exists.
+
 fn runtime_dir() -> Option<String> {
     if let Ok(dir) = std::env::var("XDG_RUNTIME_DIR") {
         if !dir.is_empty() {
@@ -55,9 +40,7 @@ fn runtime_dir() -> Option<String> {
     }
 }
 
-/// Raw `getuid(2)` FFI call, shared with `andler_core::paths::runtime_dir`
-/// (which needed the exact same call — see its doc comment for why this
-/// isn't duplicated anymore).
+
 fn current_uid() -> u32 {
     andler_core::paths::current_uid()
 }

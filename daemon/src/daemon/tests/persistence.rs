@@ -2,7 +2,6 @@ use super::common::*;
 use super::*;
 use andler_core::RenderBackend;
 
-// --- with_store ----------------------------------------------------------
 
 #[tokio::test]
 async fn with_store_persists_created_instance() {
@@ -50,7 +49,6 @@ async fn daemon_without_store_does_not_panic_on_state_transitions() {
     assert!(matches!(status.state, InstanceState::Error { .. }));
 }
 
-// --- restore -------------------------------------------------------------
 
 #[tokio::test]
 async fn restore_recreates_daemon_from_store_contents() {

@@ -1,9 +1,4 @@
-//! `andler edit <id>` — see PLAN.md, "18. Instance config editing".
-//!
-//! Fetches the instance's full config, serializes it to TOML, opens it in
-//! an editor, parses what comes back, and sends it to the daemon via
-//! `UpdateInstanceConfig`. No partial patching — the whole config is
-//! replaced, same as a TOML `andler create --file` round-trip.
+
 
 use andler_core::InstanceConfig;
 use andler_rpc::convert;
@@ -22,10 +17,6 @@ pub async fn handle(
         .await?
         .into_inner();
 
-    // The response carries the fully-resolved id (partial refs like
-    // `instance_id` above are only for the *request*) — this is what we
-    // must send back on `UpdateInstanceConfigRequest.instance_ref`, not
-    // whatever partial string the user originally typed.
     let resolved_ref = response.instance_id.clone();
     let original: InstanceConfig = response.try_into()?;
     let original_toml = toml::to_string_pretty(&original)
@@ -63,19 +54,12 @@ pub async fn handle(
     Ok(())
 }
 
-/// Picks an editor the same way `crontab -e`/`git commit` do: `$VISUAL`
-/// takes priority over `$EDITOR` (it's meant for full-screen editors,
-/// `$EDITOR` historically for line editors — checking `$VISUAL` first is
-/// the long-standing convention those tools follow), falling back to
-/// `vi` if neither is set.
+
 fn run_editor(path: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
     let editor = std::env::var("VISUAL")
         .or_else(|_| std::env::var("EDITOR"))
         .unwrap_or_else(|_| "vi".to_string());
 
-    // $EDITOR/$VISUAL can legitimately contain arguments (e.g. `code --wait`,
-    // `emacs -nw`) — split on whitespace rather than treating the whole
-    // value as a single binary name.
     let mut parts = editor.split_whitespace();
     let program = parts.next().ok_or("$VISUAL/$EDITOR is set but empty")?;
     let args: Vec<&str> = parts.collect();

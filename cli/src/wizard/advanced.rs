@@ -1,4 +1,4 @@
-//! Advanced wizard questions (GPU, display, audio, input, CPU, Android extras).
+
 
 use andler_core::{
     AudioBackend, CdromBus, NetworkMode, PointerMode, RenderBackend, Resolution,
@@ -261,7 +261,8 @@ fn ask_display_resolution(prefilled: Option<Resolution>) -> Result<Resolution, W
             "Initial screen resolution. Format: WIDTHxHEIGHT (e.g. 1920x1080, 2560x1440). \
              Note: not yet applied to the actual display output (QEMU's SDL/GTK backends \
              don't take a resolution parameter) -- set it in the guest OS after boot for now. \
-             See PLAN.md, item 4.",
+             Note: not yet applied to the actual display output (QEMU's SDL/GTK backends \
+             don't take a resolution parameter) -- set it in the guest OS after boot for now."
         )
         .with_validator(|s: &str| match parse_resolution(s) {
             Ok(_) => Ok(inquire::validator::Validation::Valid),
@@ -509,7 +510,7 @@ pub fn parse_resolution(s: &str) -> Result<Resolution, String> {
     Ok(Resolution::new(width, height))
 }
 
-#[allow(dead_code)]
+#[allow(dead_code)] // reserved for future GPU memory configuration in the wizard
 pub fn parse_gpu_memory(s: &str) -> Result<u64, String> {
     let v: u64 = s.trim().parse().map_err(|_| "Invalid number".to_string())?;
     if (MIN_GPU_MEMORY_MIB..=MAX_GPU_MEMORY_MIB).contains(&v) {
@@ -521,7 +522,7 @@ pub fn parse_gpu_memory(s: &str) -> Result<u64, String> {
     }
 }
 
-/// Ask user to select network mode.
+
 fn ask_network_mode(_prefilled: Option<NetworkMode>) -> Result<NetworkMode, WizardError> {
     let options = vec!["NAT (default)", "Bridge", "Isolated"];
     let selection = Select::new("Network mode:", options)
@@ -536,7 +537,7 @@ fn ask_network_mode(_prefilled: Option<NetworkMode>) -> Result<NetworkMode, Wiza
     })
 }
 
-/// Ask user to provide bridge interface name.
+
 fn ask_bridge_interface(prefilled: Option<String>) -> Result<Option<String>, WizardError> {
     let prompt = Text::new("Bridge interface name (e.g., br0):")
         .with_placeholder("br0")

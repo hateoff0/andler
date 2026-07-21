@@ -9,7 +9,7 @@ use crate::instance_file::{InstanceFile, InstanceFileResult};
 use crate::wizard::{PartialArgs, WizardError, WizardKind};
 use crate::{err_exit, CliAndroidVersion, CliArmTranslator, CliCdromBus, CliKind};
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)] // mirrors all create CLI flags; splitting adds indirection for no benefit
 pub async fn handle(
     client: &mut AndlerServiceClient<Channel>,
     file: Option<PathBuf>,
@@ -60,7 +60,6 @@ pub async fn handle(
         err_exit("error: --dry-run and --verify are mutually exclusive — pass one or the other");
     }
 
-    // --- TOML mode ---
     if has_file {
         let file = file.unwrap();
         let instance_file = InstanceFile::load(&file)?;
@@ -89,7 +88,6 @@ pub async fn handle(
         return Ok(());
     }
 
-    // --- Wizard mode: when required CLI parameters are missing, or --quick ---
     let linux_required = kind == Some(CliKind::Linux)
         && (name.is_none() || iso_path.is_none() || disk_path.is_none());
     let android_required = kind == Some(CliKind::Android)
@@ -141,7 +139,6 @@ pub async fn handle(
         };
     }
 
-    // --- CLI mode (all required parameters provided) ---
     let kind = kind.unwrap();
     let name = name.unwrap();
     let ovmf = ovmf_vars_template.unwrap_or_default();
@@ -217,11 +214,7 @@ pub async fn handle(
     Ok(())
 }
 
-/// `--verify`'s exit-code contract: 0 if every check passed, 1 if any
-/// failed — scriptable (`andler create --verify ... && andler create
-/// ...`), not just human-readable output. The report itself is already
-/// printed by `verify::verify_linux`/`verify_android` before this runs;
-/// this only decides the process exit code.
+
 fn exit_on_verify_result(all_passed: bool) -> Result<(), Box<dyn std::error::Error>> {
     if all_passed {
         Ok(())
@@ -230,34 +223,7 @@ fn exit_on_verify_result(all_passed: bool) -> Result<(), Box<dyn std::error::Err
     }
 }
 
-/// Pre-flight checks for `andler create --kind linux` (direct CLI
-/// flags, not the wizard or `--file` paths — the wizard already
-/// validates interactively as the person types, see
-/// `wizard::basic::ask_iso_path`/`ask_base_image`, and `--file` is the
-/// user's own hand-written TOML, validated by `InstanceFile::load`).
-/// Catches obviously-wrong paths before spending a round-trip to
-/// `andlerd` on a request that's guaranteed to fail once the backend
-/// actually tries to use them — see PLAN.md, item 15, "Config
-/// validation before creation".
-///
-/// Also canonicalizes both paths (resolves `..`/`.`/symlinks to an
-/// absolute path) and returns the canonical forms — see PLAN.md, item
-/// 20c, "No path canonicalization": a relative or symlink-containing
-/// path would otherwise be sent to `andlerd` as-is and only resolved
-/// there, at whatever point it's actually opened, which is later and
-/// further from where the person's input was accepted. `disk_path`
-/// itself usually doesn't exist yet (this is the common "create a new
-/// disk" case, not "point at an existing one") — `canonicalize` requires
-/// the full path to exist, so only its *parent* is canonicalized and
-/// the (not-yet-existing) file name is reattached, rather than trying
-/// and failing to canonicalize the whole thing.
-///
-/// Deliberately narrow: only existence + canonicalization on paths the
-/// CLI itself already has in hand, not a re-implementation of every
-/// validation the daemon/backend will do anyway (disk size limits,
-/// resolution format, etc.) — duplicating those here would just be two
-/// places to keep in sync for no real benefit, since the daemon has to
-/// validate them regardless of what the CLI checked first.
+
 fn validate_linux_paths(iso_path: &str, disk_path: &str) -> Result<(String, String), String> {
     let canonical_iso = if iso_path.is_empty() {
         String::new()
@@ -269,12 +235,6 @@ fn validate_linux_paths(iso_path: &str, disk_path: &str) -> Result<(String, Stri
 
     let disk = std::path::Path::new(disk_path);
     let canonical_disk = match disk.parent() {
-        // An empty parent (e.g. a bare relative filename like
-        // "disk.qcow2") means "current directory" — nothing to
-        // canonicalize against, and always "exists" in the relevant
-        // sense (`Path::new("").exists()` would actually return `false`
-        // since `""` isn't a valid path to stat, so this must be
-        // checked explicitly).
         Some(parent) if !parent.as_os_str().is_empty() => {
             let canonical_parent = std::fs::canonicalize(parent).map_err(|e| {
                 format!("disk directory does not exist: {} ({e})", parent.display())
@@ -293,11 +253,7 @@ fn validate_linux_paths(iso_path: &str, disk_path: &str) -> Result<(String, Stri
     Ok((canonical_iso, canonical_disk))
 }
 
-/// Pre-flight checks for `andler create --kind android` (direct CLI
-/// flags) — see `validate_linux_paths`'s doc comment for why this is
-/// narrow and why the wizard/`--file` paths aren't covered here too.
-/// `base_image_path` is required to already exist, so it can be
-/// canonicalized directly, no "doesn't exist yet" case to special-case.
+
 fn validate_base_image_path(
     base_image_path: &str,
 ) -> Result<String, String> {
@@ -397,7 +353,6 @@ mod tests {
 
     #[test]
     fn validate_linux_paths_empty_iso_is_allowed() {
-        // Empty ISO path means "boot from existing disk" — not an error.
         assert!(validate_linux_paths("", "/tmp").is_ok());
     }
 
@@ -416,8 +371,6 @@ mod tests {
 
     #[test]
     fn validate_linux_paths_bare_relative_disk_filename_is_allowed() {
-        // No parent component at all (current directory) — must not be
-        // treated as "parent doesn't exist".
         assert!(validate_linux_paths("", "disk.qcow2").is_ok());
     }
 
@@ -428,9 +381,6 @@ mod tests {
 
     #[test]
     fn validate_linux_paths_canonicalizes_disk_directory() {
-        // "/tmp/../tmp/disk.qcow2" and "/tmp/disk.qcow2" must resolve to
-        // the same canonical path — the whole point of item 20c is that
-        // a `..`-containing path doesn't reach `andlerd` as-is.
         let (_, disk) = validate_linux_paths("", "/tmp/../tmp/my-disk.qcow2").unwrap();
         assert!(!disk.contains(".."));
         assert!(disk.ends_with("my-disk.qcow2"));
@@ -438,9 +388,6 @@ mod tests {
 
     #[test]
     fn validate_linux_paths_canonicalizes_iso_path() {
-        // Reuse /tmp itself as a stand-in "ISO" — canonicalize only
-        // cares that the path exists and resolves it, doesn't care
-        // whether it's actually an ISO file.
         let (iso, _) = validate_linux_paths("/tmp/../tmp", "disk.qcow2").unwrap();
         assert!(!iso.contains(".."));
     }
