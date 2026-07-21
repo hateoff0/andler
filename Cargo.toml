@@ -16,13 +16,10 @@ members = [
 [workspace.package]
 version = "0.1.0"
 license = "GPL-3.0"
-edition = "2021"
-license = "GPL-3.0"
-repository = "https://github.com/andler-project/andler"
 
 [workspace.dependencies]
-# Общие зависимости версионируются в одном месте, чтобы избежать
-# расхождений между крейтами workspace'а.
+# Common dependencies versioned in one place to avoid
+# version drift across workspace crates.
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "fs", "net", "sync", "time", "io-util", "signal"] }
 async-trait = "0.1"
 serde = { version = "1", features = ["derive"] }
@@ -35,8 +32,8 @@ clap = { version = "4", features = ["derive"] }
 dirs = "5"
 
 [profile.dev]
-# Полные debug-сборки QEMU-обёртки часто требуют живых процессов —
-# держим панику читаемой без потери производительности тестов.
+# Full debug builds of QEMU wrapper often require live processes —
+# keep panic readable without sacrificing test performance.
 opt-level = 0
 
 [profile.release]

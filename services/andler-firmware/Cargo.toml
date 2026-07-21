@@ -11,10 +11,10 @@ thiserror = { workspace = true }
 serde = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
-# NVIDIA Management Library — динамически подгружается через `libloading`
-# в рантайме (не линкуется на этапе сборки), поэтому безопасно как
-# обычная (не opt-in/feature-gated) зависимость: на хостах без
-# NVIDIA-драйвера `Nvml::init()` просто возвращает `Err`, ничего не падает
-# и не требует наличия `libnvidia-ml.so` для самой сборки крейта. См.
-# `metrics/gpu_nvidia.rs`, PLAN.md, раздел "NVIDIA metrics".
+# NVIDIA Management Library — dynamically loaded via `libloading`
+# at runtime (not linked at build time), so safe as a regular
+# dependency: on hosts without NVIDIA driver, `Nvml::init()`
+# simply returns `Err`, nothing crashes
+# and `libnvidia-ml.so` is not required for building. See
+# `metrics/gpu_nvidia.rs`, docs/ARCHITECTURE.md section "GPU Metrics".
 nvml-wrapper = "0.12"

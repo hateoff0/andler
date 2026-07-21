@@ -6,9 +6,9 @@ license.workspace = true
 
 [dependencies]
 andler-core = { path = "../../core/andler-core" }
-# bundled — линкуем собственную копию libsqlite3, а не ищем системную:
-# среда сборки (Docker dev-образ, CI) не обязана иметь libsqlite3-dev,
-# и версия sqlite не должна расходиться между машинами разработчиков.
+# bundled — we link our own copy of libsqlite3, not system-wide:
+# build environment (Docker dev-image, CI) does not require libsqlite3-dev,
+# and sqlite version should not diverge between developer machines.
 rusqlite = { version = "0.31", features = ["bundled"] }
 serde_json = "1"
 thiserror = { workspace = true }
