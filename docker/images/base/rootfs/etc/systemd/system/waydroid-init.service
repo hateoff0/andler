@@ -1,0 +1,11 @@
+[Unit]
+Description=ANDLER: one-time waydroid init (from preinstalled images)
+Documentation=https://docs.waydro.id/faq/using-custom-waydroid-images
+ConditionPathExists=!/var/lib/waydroid/waydroid.cfg
+Before=waydroid-container.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/waydroid init -f
+TimeoutStartSec=300

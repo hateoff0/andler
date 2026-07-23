@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+# andler-build-uki — builds Unified Kernel Image and places it at EFI fallback path.
+
+set -euo pipefail
+
+KERNEL_PKGBASE="${ANDLER_KERNEL_PKGBASE:-linux-cachyos}"
+VMLINUZ="/boot/vmlinuz-${KERNEL_PKGBASE}"
+INITRAMFS="/boot/initramfs-${KERNEL_PKGBASE}.img"
+CMDLINE_FILE="/etc/kernel/cmdline"
+OS_RELEASE="/etc/os-release"
+ESP_MOUNT="/efi"
+OUTPUT="${ESP_MOUNT}/EFI/BOOT/BOOTX64.EFI"
+
+for required in "$VMLINUZ" "$INITRAMFS" "$CMDLINE_FILE" "$OS_RELEASE"; do
+    if [[ ! -f "$required" ]]; then
+        echo "andler-build-uki: missing required file: $required" >&2
+        exit 1
+    fi
+done
+
+# ukify may live at /usr/lib/systemd/ukify on older systemd installations
+UKIFY_BIN="$(command -v ukify || true)"
+if [[ -z "$UKIFY_BIN" && -x /usr/lib/systemd/ukify ]]; then
+    UKIFY_BIN="/usr/lib/systemd/ukify"
+fi
+if [[ -z "$UKIFY_BIN" ]]; then
+    echo "andler-build-uki: ukify not found (package systemd-ukify?)" >&2
+    exit 1
+fi
+
+mkdir -p "$(dirname "$OUTPUT")"
+
+TMP_OUTPUT="$(mktemp "${OUTPUT}.XXXXXX")"
+trap 'rm -f "$TMP_OUTPUT"' EXIT
+
+"$UKIFY_BIN" build \
+    --linux="$VMLINUZ" \
+    --initrd="$INITRAMFS" \
+    --cmdline="@${CMDLINE_FILE}" \
+    --os-release="@${OS_RELEASE}" \
+    --output="$TMP_OUTPUT"
+
+# Atomic replace: firmware sees old or new file, never partially written
+mv -f "$TMP_OUTPUT" "$OUTPUT"
+trap - EXIT
+
+echo "andler-build-uki: built $OUTPUT (kernel: $KERNEL_PKGBASE)"

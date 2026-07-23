@@ -1,0 +1,1 @@
+root=LABEL=andler-root rw quiet loglevel=3 systemd.show_status=auto console=tty0 console=ttyS0,115200n8

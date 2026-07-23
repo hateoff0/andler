@@ -1,0 +1,10 @@
+[Unit]
+Description=ANDLER Android instance target (gamescope + Waydroid)
+Documentation=https://github.com/andler-project/andler
+Requires=multi-user.target
+After=multi-user.target
+AllowIsolate=yes
+Conflicts=rescue.target
+
+[Install]
+Alias=default.target

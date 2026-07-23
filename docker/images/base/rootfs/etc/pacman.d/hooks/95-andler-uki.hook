@@ -1,0 +1,14 @@
+# After mkinitcpio hook (90-) so UKI gets fresh initramfs.
+[Trigger]
+Type = Path
+Operation = Install
+Operation = Upgrade
+Target = boot/vmlinuz-linux-cachyos
+Target = boot/initramfs-linux-cachyos.img
+Target = usr/lib/systemd/systemd
+
+[Action]
+Description = Rebuilding Unified Kernel Image (andler-build-uki)...
+When = PostTransaction
+Exec = /usr/local/bin/andler-build-uki
+NeedsTargets

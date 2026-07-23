@@ -985,6 +985,7 @@ mod tests {
             microg: false,
             network_mode: NetworkMode::Isolated,
             bridge_interface: None,
+            linked_overlay: false,
         };
         let network = build_network_config(Some(&advanced_isolated), &detected).unwrap();
         assert!(matches!(network.mode, NetworkMode::Isolated));

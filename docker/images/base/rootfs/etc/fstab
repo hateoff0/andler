@@ -1,0 +1,3 @@
+# LABELs match build-disk.sh partitioning; UUID unknown at docker build time
+LABEL=andler-root   /      ext4  rw,relatime                       0 1
+LABEL=ANDLER-ESP    /efi   vfat  rw,relatime,fmask=0077,dmask=0077 0 2

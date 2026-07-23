@@ -1,16 +1,4 @@
 #!/usr/bin/env bash
-# Сквозная (end-to-end) проверка andlerd + andler: то, что не может
-# показать ни один юнит-тест — реальный процесс andlerd, реальный TCP
-# между ним и CLI-клиентом, реальный sqlite-файл на диске, реальный
-# qemu-system-x86_64 под /dev/kvm, и реальный перезапуск процесса демона
-# (не Daemon::restore() в памяти теста, а буквально kill + новый процесс).
-#
-# Запуск: docker compose -f docker/docker-compose.yml run --rm e2e
-# (через target `e2e` в Dockerfile.dev — собирает workspace, ставит
-# qemu-system-x86/qemu-utils, и гонит этот скрипт с --device=/dev/kvm).
-#
-# Падает (set -e) на первом несовпадении ожидания — где именно упало,
-# видно по последней напечатанной секции "==> ...".
 
 set -euo pipefail
 
@@ -39,10 +27,7 @@ start_daemon() {
         /usr/local/bin/andlerd &
     ANDLERD_PID=$!
 
-    # Поллинг готовности вместо фиксированного sleep — andlerd печатает
-    # "andlerd: listening on ..." в stdout сразу после успешного bind,
-    # но захватывать stdout фонового процесса в bash менее надёжно, чем
-    # просто попробовать первый gRPC-вызов несколько раз подряд.
+    # Poll readiness instead of fixed sleep
     for _ in $(seq 1 50); do
         if andler list >/dev/null 2>&1; then
             return 0
@@ -63,13 +48,7 @@ stop_daemon() {
 echo "==> preparing fixture files (disk, iso, ovmf vars template)"
 qemu-img create -f qcow2 "$WORKDIR/disk.qcow2" 2G
 touch "$WORKDIR/empty.iso"
-# Шаблон OVMF_VARS не нужен для generic CreateInstance (только для
-# Android-режима create) — firmware.ovmf_vars_path в TOML просто должен
-# существовать как путь, который start_instance передаст в qemu
-# аргументом -drive if=pflash; реальное содержимое не валидируется на
-# этом уровне, но пустой файл небезопасен для настоящей UEFI-загрузки.
-# Для целей этого smoke-теста (проверка протокола/жизненного цикла, не
-# настоящей загрузки гостя) достаточно файла нужного размера.
+# OVMF VARS template: file must exist but content doesn't matter for protocol test
 qemu-img create -f raw "$WORKDIR/VARS.fd" 4M
 
 cat > "$WORKDIR/instance.toml" <<EOF
@@ -78,13 +57,8 @@ iso_path = "$WORKDIR/empty.iso"
 disk_path = "$WORKDIR/disk.qcow2"
 ovmf_vars_path = "$WORKDIR/VARS.fd"
 
-# Дефолты GpuConfig/AudioConfig/DisplayConfig (reference_default(), см.
-# README этого крейта) — Venus+gl=on, PipeWire, и SDL — рассчитаны на
-# десктоп с реальным GPU/звуковым сервером/X-сервером хоста, которых в
-# этом контейнере нет. DisplayEngine::None ("-display none") — настоящий
-# headless-режим без какого-либо X11/Wayland-сервера хоста (раньше здесь
-# был нужен виртуальный Xvfb только чтобы у SDL было куда присоединиться
-# — с DisplayEngine::None эта зависимость не нужна вообще).
+# Defaults (reference_default()) target a desktop with real GPU/sound/X server.
+# DisplayEngine::None is true headless — no X11/Wayland dependency needed.
 [gpu]
 render_backend = "Cpu"
 hostmem_bytes = 67108864
@@ -139,11 +113,7 @@ if ! grep -q "Running" <<<"$STATUS_OUTPUT"; then
     exit 1
 fi
 
-# --- andler metrics: проверка StreamResourceMetrics на живом процессе ---
-#
-# Метрики обновляются раз в секунду — timeout 3s достаточен, чтобы
-# получить хотя бы одну выборку. Если инстанс жив, /proc/<pid>/ должен
-# быть доступен, и poller вернёт хотя бы memory_used_bytes.
+# Metrics poller updates once/sec; 3s timeout gets at least one sample
 METRICS_FILE="$WORKDIR/metrics_output.txt"
 timeout 3 andler metrics "$INSTANCE_ID" >"$METRICS_FILE" 2>&1 || true
 if grep -q "cpu=" "$METRICS_FILE" 2>/dev/null; then
@@ -154,35 +124,11 @@ else
     cat "$METRICS_FILE" || true
 fi
 
-# --- andler logs: проверка StreamInstanceLogs на живом процессе ---
-#
-# Раньше здесь команда `andler logs` запускалась с окном в 8с СРАЗУ ПОСЛЕ
-# start и проверяла, что за это время появится хоть одна строка — расчёт
-# был на то, что qemu-system-x86_64 что-то пишет в первые секунды штатной
-# работы. Это оказалось неверным предположением для именно этой
-# конфигурации (headless `-display none`, `audio.backend = "None"`,
-# `empty.iso` без загрузочного содержимого) — QEMU в таком режиме может
-# быть полностью тихим всё время работы; "что-то печатает" — наблюдалось
-# раньше только в момент остановки (см. ниже), не во время работы.
-#
-# Вместо ожидания случайного вывода — провоцируем гарантированную строку
-# детерминированно: QEMU всегда логирует получение `SIGTERM` в stderr,
-# независимо от ISO/display/audio конфигурации (это поведение самого
-# QEMU при получении сигнала завершения процесса, не гостевой системы).
-# Подписываемся на `andler logs` *до* `stop`, в фоне (сам стрим не
-# закрывается, пока жив backend — блокирующий вызов, нельзя просто
-# вызвать его перед stop синхронно), затем останавливаем инстанс — это и
-# вызывает гарантированную строку — затем ждём, что фоновый процесс её
-# получит и сам завершится (сервер закрывает стрим, когда backend
-# исчезает, см. документацию `Daemon::stream_instance_logs`).
+# Subscribe to logs before stop to catch guaranteed SIGTERM line from QEMU
 LOGS_DURING_RUN_FILE="$WORKDIR/logs_during_run.txt"
 timeout 15 andler logs "$INSTANCE_ID" >"$LOGS_DURING_RUN_FILE" 2>&1 &
 LOGS_BG_PID=$!
-# Без сна здесь подписка могла бы не успеть дойти до сервера раньше, чем
-# приходит stop — тогда строка от SIGTERM ушла бы в канал до подписки и
-# была бы пропущена (нет истории, см. документацию `log_stream`). Не
-# изящно, но просто и достаточно для smoke-теста; 1с — большой запас для
-# локального gRPC-соединения на localhost.
+# Brief sleep so gRPC subscription reaches server before stop signal
 sleep 1
 
 echo "==> andler stop $INSTANCE_ID --graceful"
@@ -194,10 +140,7 @@ echo "$STATUS_OUTPUT"
 grep -q "Stopped" <<<"$STATUS_OUTPUT" || { echo "FAIL: status is not Stopped after stop"; exit 1; }
 
 echo "==> andler logs $INSTANCE_ID (subscribed before stop, expect the SIGTERM line and a clean stream close)"
-# `wait` без таймаута здесь не нужен — фоновый процесс сам ограничен
-# `timeout 15` выше; если он зависнет дольше этого (то есть стрим не
-# закрылся сам, когда backend исчез), `wait` всё равно вернётся через
-# оставшееся время `timeout`, не навечно.
+# Background process self-limited by timeout 15 above
 wait "$LOGS_BG_PID" || true
 LOGS_OUTPUT="$(cat "$LOGS_DURING_RUN_FILE")"
 echo "$LOGS_OUTPUT"
@@ -206,13 +149,7 @@ if ! grep -qE '^\[stderr\].*terminating on signal' <<<"$LOGS_OUTPUT"; then
     exit 1
 fi
 
-# Симметричная проверка для остановленного инстанса: команда должна сразу
-# же завершиться (не блокировать ожидая строк, которых уже не будет — нет
-# живого backend'а) и предупредить через stderr, не упасть с ошибкой —
-# см. документацию Daemon::stream_instance_logs за тем, почему отсутствие
-# backend'а не InvalidArgument/NotFound. Без `timeout` — если это
-# регрессирует в зависание, сам e2e зависнет здесь, что уже само по себе
-# сигнал (предпочтительнее, чем маскировать это через timeout).
+# Logs after stop: must complete immediately (no live backend) with stderr warning
 echo "==> andler logs $INSTANCE_ID after stop (expect immediate empty stream + stderr warning)"
 LOGS_AFTER_STOP="$(andler logs "$INSTANCE_ID" 2>&1)"
 echo "$LOGS_AFTER_STOP"
@@ -221,9 +158,7 @@ grep -qE '^\[(stdout|stderr)\]' <<<"$LOGS_AFTER_STOP" && {
     exit 1
 }
 
-# --- Реальный перезапуск процесса andlerd: проверка персистентности ---
-# не Daemon::restore() внутри одного процесса теста, а буквально новый
-# процесс, читающий тот же sqlite-файл с диска.
+# Real process restart: verify persistence across daemon restart
 stop_daemon
 echo "==> restarting andlerd against the same store file"
 start_daemon
@@ -254,10 +189,7 @@ if [[ -e "$WORKDIR/VARS.fd" ]]; then
     echo "FAIL: VARS.fd still present after remove --purge"
     exit 1
 fi
-# instance.toml/empty.iso/sqlite-файл лежат в том же $WORKDIR — purge не
-# должен задеть посторонние файлы, поэтому каталог не должен опустеть и
-# исчезнуть (см. `Daemon::remove_instance`: `remove_dir`, не
-# `remove_dir_all`, и только если каталог реально пуст).
+# purge only removes empty instance dirs, not sibling files in WORKDIR
 if [[ ! -d "$WORKDIR" ]]; then
     echo "FAIL: \$WORKDIR itself was removed — purge must not touch directories containing unrelated files"
     exit 1
@@ -267,13 +199,7 @@ if [[ ! -e "$WORKDIR/empty.iso" ]]; then
     exit 1
 fi
 
-# --- AndroidVm: CloneInstance (все три режима) + ExportInstanceDisk ---
-#
-# Отдельный, независимый от LinuxVm-сценария выше блок — CloneInstance/
-# ExportInstanceDisk поддерживают только AndroidVm (см. документацию
-# Daemon::clone_instance за тем, почему LinuxVm вне рамок текущего шага),
-# так что нужен отдельный AndroidVm-инстанс, не переиспользование
-# $INSTANCE_ID выше (тот уже и удалён).
+# CloneInstance/ExportInstanceDisk: AndroidVm only (separate from LinuxVm above)
 echo "==> preparing AndroidVm fixtures (base image, ovmf vars template)"
 ANDROID_BASE_IMAGE="$WORKDIR/android-base.qcow2"
 ANDROID_OVMF_TEMPLATE="$WORKDIR/OVMF_VARS.template.fd"
@@ -281,7 +207,7 @@ ANDROID_INSTANCES_ROOT="$WORKDIR/android-instances"
 qemu-img create -f qcow2 "$ANDROID_BASE_IMAGE" 4G
 qemu-img create -f raw "$ANDROID_OVMF_TEMPLATE" 4M
 
-echo "==> andler create (Android-режим, source for cloning)"
+echo "==> andler create (Android mode, source for cloning)"
 SOURCE_ANDROID_ID="$(andler create \
     --name source-android \
     --android-version 13 \
