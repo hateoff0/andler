@@ -77,7 +77,7 @@ pub async fn run(partial: PartialArgs) -> Result<WizardResult, WizardError> {
     let kind = basic::ask_kind(partial.kind)?;
     let name = basic::ask_name(partial.name)?;
 
-    let basic_result = match kind {
+    let mut basic_result = match kind {
         WizardKind::Linux => BasicResult::Linux(basic::run_linux(
             name,
             partial.iso_path,
@@ -97,6 +97,7 @@ pub async fn run(partial: PartialArgs) -> Result<WizardResult, WizardError> {
         }),
         WizardMode::Basic => None,
     };
+    reresolve_android_base_image(&mut basic_result, advanced_config.as_ref(), &detected);
 
     loop {
         match summary::run(&basic_result, advanced_config.as_ref(), &detected)? {
@@ -110,6 +111,7 @@ pub async fn run(partial: PartialArgs) -> Result<WizardResult, WizardError> {
                         advanced::run_android(a, &detected, advanced_config.as_ref())?
                     }
                 });
+                reresolve_android_base_image(&mut basic_result, advanced_config.as_ref(), &detected);
             }
             SummaryAction::Cancel => return Err(WizardError::Cancelled),
         }
@@ -133,6 +135,36 @@ pub async fn run(partial: PartialArgs) -> Result<WizardResult, WizardError> {
     }
 }
 
+
+fn reresolve_android_base_image(
+    basic_result: &mut BasicResult,
+    advanced: Option<&AdvancedConfig>,
+    detected: &HardwareDefaults,
+) {
+    let BasicResult::Android(a) = basic_result else {
+        return;
+    };
+    let Some(adv) = advanced else {
+        return;
+    };
+    if !a.base_image_auto_resolved {
+        return;
+    }
+
+    let profile = andler_core::AndroidProfile {
+        android_version: a.android_version.into(),
+        gapps: adv.gapps,
+        microg: adv.microg,
+        arm_translator: resolve_arm_translator(Some(adv), detected).into(),
+    };
+    match andler_core::base_image::resolve(&profile) {
+        Ok(path) => a.base_image = path.to_string_lossy().into_owned(),
+        Err(e) => eprintln!(
+            "⚠  No base image matches the current Android settings ({e}). \
+             Keeping the previous one — pick a different one manually if needed."
+        ),
+    }
+}
 
 fn print_hardware_summary(detected: &HardwareDefaults, kind: Option<WizardKind>) {
     println!("Hardware detected:");
@@ -247,17 +279,29 @@ fn build_quick(
             let name = partial
                 .name
                 .unwrap_or_else(|| "quick-android".to_string());
-            let base_image = partial.base_image_path.ok_or_else(|| {
-                WizardError::Inquire(
-                    "Base image not found: (not specified). Android requires a valid base image."
-                        .into(),
-                )
-            })?;
-            if !std::path::Path::new(&base_image).exists() {
-                return Err(WizardError::Inquire(format!(
-                    "Base image not found: {base_image}. Android requires a valid base image."
-                )));
-            }
+            let base_image_auto_resolved = partial.base_image_path.is_none();
+            let base_image = match partial.base_image_path {
+                Some(path) => {
+                    if !std::path::Path::new(&path).exists() {
+                        return Err(WizardError::Inquire(format!(
+                            "Base image not found: {path}. Android requires a valid base image."
+                        )));
+                    }
+                    path
+                }
+                None => {
+                    let quick_profile = andler_core::AndroidProfile {
+                        android_version: andler_core::AndroidVersion::Android13,
+                        gapps: false,
+                        microg: false,
+                        arm_translator: ArmTranslator::None,
+                    };
+                    andler_core::base_image::resolve(&quick_profile)
+                        .map_err(|e| WizardError::Inquire(e.to_string()))?
+                        .to_string_lossy()
+                        .into_owned()
+                }
+            };
 
             let instances_root = partial
                 .instances_root
@@ -266,6 +310,7 @@ fn build_quick(
             let basic = AndroidBasicResult {
                 name,
                 base_image,
+                base_image_auto_resolved,
                 android_version: CliAndroidVersion::Android13,
                 disk_size_gib: 256,
                 instances_root,
@@ -679,6 +724,7 @@ mod tests {
         let basic = AndroidBasicResult {
             name: "android".into(),
             base_image: "/tmp/base.qcow2".into(),
+            base_image_auto_resolved: false,
             android_version: CliAndroidVersion::Android13,
             disk_size_gib: 256,
             instances_root: "/tmp/instances".into(),

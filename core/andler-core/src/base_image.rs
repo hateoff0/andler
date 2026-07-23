@@ -1,0 +1,232 @@
+use std::fs;
+use std::path::PathBuf;
+
+use serde::Deserialize;
+use thiserror::Error;
+
+use crate::android_profile::AndroidProfile;
+use crate::paths::base_images_dir;
+
+#[derive(Debug, Deserialize)]
+struct Manifest {
+    android_major: String,
+    android_variant: String,
+    built_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BaseImageInfo {
+    pub qcow2_path: PathBuf,
+    pub manifest_path: PathBuf,
+    pub android_major: String,
+    pub android_variant: String,
+    pub built_at: String,
+}
+
+#[derive(Debug, Error)]
+pub enum BaseImageError {
+    #[error(
+        "no base image found for Android {android_major} ({variant}) in {searched:?}. \
+         Build one first: docker/images/build.sh {android_major} {variant}"
+    )]
+    NotFound {
+        android_major: String,
+        variant: String,
+        searched: PathBuf,
+    },
+
+    #[error("cannot read base image directory {path:?}: {source}")]
+    ReadDir {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+}
+
+impl AndroidProfile {
+    pub fn variant_label(&self) -> &'static str {
+        if self.gapps { "GAPPS" } else { "VANILLA" }
+    }
+}
+
+pub fn list_matching(profile: &AndroidProfile) -> Result<Vec<BaseImageInfo>, BaseImageError> {
+    let dir = base_images_dir();
+    let entries = match fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(source) => return Err(BaseImageError::ReadDir { path: dir, source }),
+    };
+
+    let wanted_major = profile.android_version.to_string();
+    let wanted_variant = profile.variant_label();
+
+    let mut found = Vec::new();
+    for entry in entries.flatten() {
+        let manifest_path = entry.path();
+        let Some(file_name) = manifest_path.file_name().and_then(|f| f.to_str()) else {
+            continue;
+        };
+        let Some(stem) = file_name.strip_suffix(".manifest.json") else {
+            continue;
+        };
+
+        let raw = match fs::read_to_string(&manifest_path) {
+            Ok(raw) => raw,
+            Err(_) => continue,
+        };
+        let manifest: Manifest = match serde_json::from_str(&raw) {
+            Ok(manifest) => manifest,
+            Err(_) => continue,
+        };
+
+        if manifest.android_major != wanted_major || manifest.android_variant != wanted_variant {
+            continue;
+        }
+
+        let qcow2_path = manifest_path.with_file_name(format!("{stem}.qcow2"));
+        if !qcow2_path.exists() {
+            continue;
+        }
+
+        found.push(BaseImageInfo {
+            qcow2_path,
+            manifest_path,
+            android_major: manifest.android_major,
+            android_variant: manifest.android_variant,
+            built_at: manifest.built_at,
+        });
+    }
+
+    // ISO-8601 UTC timestamps sort lexicographically in chronological order.
+    found.sort_by(|a, b| b.built_at.cmp(&a.built_at));
+    Ok(found)
+}
+
+pub fn resolve(profile: &AndroidProfile) -> Result<PathBuf, BaseImageError> {
+    list_matching(profile)?
+        .into_iter()
+        .next()
+        .map(|info| info.qcow2_path)
+        .ok_or_else(|| BaseImageError::NotFound {
+            android_major: profile.android_version.to_string(),
+            variant: profile.variant_label().to_string(),
+            searched: base_images_dir(),
+        })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::android_profile::{AndroidVersion, ArmTranslator};
+    use crate::paths::ANDLER_HOME_ENV;
+    use std::sync::Mutex;
+
+    // andler_home() reads a process-wide env var; serialize tests touching it.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn profile(version: AndroidVersion, gapps: bool) -> AndroidProfile {
+        AndroidProfile {
+            android_version: version,
+            gapps,
+            microg: false,
+            arm_translator: ArmTranslator::None,
+        }
+    }
+
+    fn write_manifest(dir: &std::path::Path, name: &str, major: &str, variant: &str, built_at: &str) {
+        fs::write(dir.join(format!("{name}.qcow2")), b"placeholder").unwrap();
+        fs::write(
+            dir.join(format!("{name}.manifest.json")),
+            format!(
+                r#"{{"schema_version":1,"android_major":"{major}","android_variant":"{variant}","built_at":"{built_at}"}}"#
+            ),
+        )
+        .unwrap();
+    }
+
+    struct EnvGuard {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        base: PathBuf,
+    }
+
+    impl EnvGuard {
+        fn new() -> (Self, PathBuf) {
+            let lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let base = std::env::temp_dir()
+                .join(format!("andler-base-image-test-{}", uuid::Uuid::new_v4()));
+            let cache_dir = base.join("cache").join("base-images");
+            fs::create_dir_all(&cache_dir).unwrap();
+            std::env::set_var(ANDLER_HOME_ENV, &base);
+            (Self { _lock: lock, base }, cache_dir)
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            std::env::remove_var(ANDLER_HOME_ENV);
+            let _ = fs::remove_dir_all(&self.base);
+        }
+    }
+
+    #[test]
+    fn resolve_finds_no_match_when_directory_missing() {
+        let lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var(ANDLER_HOME_ENV, "/tmp/andler-base-image-test-nonexistent-home");
+        let err = resolve(&profile(AndroidVersion::Android13, false)).unwrap_err();
+        assert!(matches!(err, BaseImageError::NotFound { .. }));
+        std::env::remove_var(ANDLER_HOME_ENV);
+        drop(lock);
+    }
+
+    #[test]
+    fn resolve_picks_freshest_matching_manifest() {
+        let (_guard, dir) = EnvGuard::new();
+        write_manifest(&dir, "old", "13", "VANILLA", "2026-01-01T00:00:00Z");
+        write_manifest(&dir, "new", "13", "VANILLA", "2026-06-01T00:00:00Z");
+        write_manifest(&dir, "other-major", "11", "VANILLA", "2026-12-01T00:00:00Z");
+        write_manifest(&dir, "other-variant", "13", "GAPPS", "2026-12-01T00:00:00Z");
+
+        let resolved = resolve(&profile(AndroidVersion::Android13, false)).unwrap();
+        assert_eq!(resolved, dir.join("new.qcow2"));
+    }
+
+    #[test]
+    fn resolve_distinguishes_gapps_from_vanilla() {
+        let (_guard, dir) = EnvGuard::new();
+        write_manifest(&dir, "vanilla", "13", "VANILLA", "2026-01-01T00:00:00Z");
+        write_manifest(&dir, "gapps", "13", "GAPPS", "2026-01-01T00:00:00Z");
+
+        let resolved = resolve(&profile(AndroidVersion::Android13, true)).unwrap();
+        assert_eq!(resolved, dir.join("gapps.qcow2"));
+    }
+
+    #[test]
+    fn manifest_without_matching_qcow2_is_skipped() {
+        let (_guard, dir) = EnvGuard::new();
+        fs::write(
+            dir.join("orphan.manifest.json"),
+            r#"{"schema_version":1,"android_major":"13","android_variant":"VANILLA","built_at":"2026-01-01T00:00:00Z"}"#,
+        )
+        .unwrap();
+
+        let err = resolve(&profile(AndroidVersion::Android13, false)).unwrap_err();
+        assert!(matches!(err, BaseImageError::NotFound { .. }));
+    }
+
+    #[test]
+    fn malformed_manifest_is_skipped_not_fatal() {
+        let (_guard, dir) = EnvGuard::new();
+        fs::write(dir.join("broken.qcow2"), b"x").unwrap();
+        fs::write(dir.join("broken.manifest.json"), b"{ not json").unwrap();
+        write_manifest(&dir, "good", "13", "VANILLA", "2026-01-01T00:00:00Z");
+
+        let resolved = resolve(&profile(AndroidVersion::Android13, false)).unwrap();
+        assert_eq!(resolved, dir.join("good.qcow2"));
+    }
+
+    #[test]
+    fn variant_label_matches_docker_build_arg_values() {
+        assert_eq!(profile(AndroidVersion::Android13, true).variant_label(), "GAPPS");
+        assert_eq!(profile(AndroidVersion::Android13, false).variant_label(), "VANILLA");
+    }
+}

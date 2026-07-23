@@ -2,13 +2,14 @@
 
 pub mod android_profile;
 pub mod backend;
+pub mod base_image;
 pub mod clone;
 pub mod config;
 pub mod error;
 pub mod fsm;
 pub mod paths;
 
-pub use android_profile::{AndroidProfile, AndroidVersion, ArmTranslator};
+pub use android_profile::{AndroidBootMode, AndroidProfile, AndroidVersion, ArmTranslator};
 pub use backend::{
     BackendHandle, BackendStatus, HypervisorBackend, LogLine, LogStreamSource, ResourceMetrics,
     SnapshotInfo,

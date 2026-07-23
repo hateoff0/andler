@@ -24,6 +24,7 @@ pub struct LinuxBasicResult {
 pub struct AndroidBasicResult {
     pub name: String,
     pub base_image: String,
+    pub base_image_auto_resolved: bool,
     pub android_version: CliAndroidVersion,
     pub disk_size_gib: u64,
     pub instances_root: String,
@@ -89,13 +90,14 @@ pub fn run_android(
     base_image_path: Option<String>,
     instances_root: Option<String>,
 ) -> Result<AndroidBasicResult, WizardError> {
-    let base_image = ask_base_image(base_image_path)?;
     let android_version = ask_android_version()?;
+    let (base_image, base_image_auto_resolved) = ask_base_image(base_image_path, android_version)?;
     let disk_size_gib = ask_disk_size(DEFAULT_DISK_GIB)?;
     let instances_root = instances_root.unwrap_or_else(default_instances_root);
     Ok(AndroidBasicResult {
         name,
         base_image,
+        base_image_auto_resolved,
         android_version,
         disk_size_gib,
         instances_root,
@@ -152,14 +154,27 @@ pub fn ask_iso_path(prefilled: Option<String>) -> Result<String, WizardError> {
     Ok(path)
 }
 
-pub fn ask_base_image(prefilled: Option<String>) -> Result<String, WizardError> {
+pub fn ask_base_image(
+    prefilled: Option<String>,
+    android_version: CliAndroidVersion,
+) -> Result<(String, bool), WizardError> {
     if let Some(p) = prefilled {
         validate_base_image_path(&p)?;
-        return Ok(p);
+        return Ok((p, false));
     }
-    let path = Text::new("Path to Android base image:")
+
+    let quick_profile = andler_core::AndroidProfile {
+        android_version: android_version.into(),
+        gapps: false,
+        microg: false,
+        arm_translator: andler_core::ArmTranslator::None,
+    };
+    let suggested = andler_core::base_image::resolve(&quick_profile)
+        .ok()
+        .map(|p| p.to_string_lossy().into_owned());
+
+    let mut prompt = Text::new("Path to Android base image:")
         .with_placeholder("/path/to/android-base.qcow2")
-        .with_help_message("Path to pre-built Android base image (.qcow2)")
         .with_validator(|s: &str| {
             if s.trim().is_empty() {
                 Ok(inquire::validator::Validation::Invalid(
@@ -168,11 +183,22 @@ pub fn ask_base_image(prefilled: Option<String>) -> Result<String, WizardError> 
             } else {
                 Ok(inquire::validator::Validation::Valid)
             }
-        })
-        .prompt()
-        .map_err(map_inquire_err)?;
+        });
+    prompt = match &suggested {
+        Some(found) => prompt.with_default(found).with_help_message(
+            "Found in ~/.andler/cache/base-images/ — press Enter to use it, \
+             or type a different path",
+        ),
+        None => prompt.with_help_message(
+            "No matching image in ~/.andler/cache/base-images/ — build one with \
+             docker/images/build.sh, or point to one manually",
+        ),
+    };
+
+    let path = prompt.prompt().map_err(map_inquire_err)?;
     validate_base_image_path(&path)?;
-    Ok(path)
+    let auto_resolved = suggested.as_deref() == Some(path.as_str());
+    Ok((path, auto_resolved))
 }
 
 pub fn ask_android_version() -> Result<CliAndroidVersion, WizardError> {
