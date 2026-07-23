@@ -46,7 +46,23 @@
 - [x] `ShrinkRequiresConfirmation` error for disk shrink without `--shrink`
 - [x] Log history from `qemu.log` before streaming live tail
 - [x] Guest package management — `andler guest install/remove/list` with auto-fallback (online via QMP guest-exec, offline via qemu-nbd)
-
+- [x] Guest image pipelines — automated Android/Linux base image builds with Waydroid (`docker/images/`). Rootfs Dockerfile (Arch + CachyOS kernel + Mesa + waydroid + gamescope), `build.sh` orchestrator, `build-disk.sh` (rootfs → GPT-partitioned bootable qcow2 with UKI), `fetch-waydroid-images.py` (SourceForge RSS + MD5 verify). Base image auto-discovery via `base_image::resolve()` in `andler-core`. Daemon uses it automatically when client omits `base_image_path`.
+- [x] Network modes (Bridge/Isolated) in `andler-net`
+- [x] Host-side bridge creation (via iproute2)
+- [x] `--dry-run` flag on `andler create` — prints the resolved config and QEMU command line without contacting the daemon at all (client-side resolution mirroring the daemon's own logic: OVMF auto-detect, disk relocation, `andler_qemu::cmdline::build_args`). Covers TOML mode and CLI mode; the interactive wizard already has its own summary screen before creating, so `--dry-run` with a bare `andler create` isn't supported — see `cli/src/preview.rs`.
+- [x] `--verify` flag — validates a resolved instance config (paths exist, OVMF found/required-for-Android, disk size sane, GPU memory/CPU/memory in range) and prints a ✓/✗ report, without contacting the daemon. Exits non-zero if any check fails (scriptable). Built on the same client-side resolution as `--dry-run` (`preview::resolve_linux`/`resolve_android`) — see `cli/src/verify.rs`.
+- [x] QEMU backend: improve QMP error handling and recovery — a dropped/stale QMP connection no longer stays cached forever (`pause`/`resume`/`status` now clear it and reconnect once on a connection-level error). New `BackendError::ProcessNotRunning` distinguishes "QEMU process itself is gone" (checked via `is_alive()` before giving up) from a transient QMP hiccup or a genuine command failure (`CommandFailed`/`ParseError`, which are never retried — QEMU already answered, retrying changes nothing). See `diagnose_and_reset_qmp` in `backends/andler-qemu/src/backend.rs`.
+- [x] Core: add disk space pre-check before snapshot operations — checks free space on the disk's filesystem via `statvfs(2)` before calling `backend.snapshot()`, using guest RAM size as a conservative upper bound for vmstate size (exact snapshot size isn't knowable in advance). Fails with `DiskError::InsufficientDiskSpace` (mapped to `Status::resource_exhausted`) instead of letting the operation run out of space partway through. See `services/andler-disk/src/diskspace.rs`.
+- [x] Core: add VM health checks — periodic background task (`ANDLERD_HEALTH_CHECK_INTERVAL_SECS`, default 30s, `0` disables) polls every `Running` instance's real backend status; if the process has died outside the normal `stop_instance` path, the FSM record is transitioned to `Error` and persisted, so a crash is visible in `andler status` instead of silently going unnoticed until someone happens to check. See `daemon/src/daemon/health_ops.rs`.
+      **Auto-restart not implemented as an automatic behavior** — but the
+      underlying blocker found while implementing this (the FSM had no
+      `Start` transition out of `Stopped`/`Error` at all, so *even manual*
+      `andler start` didn't work on a stopped/crashed instance) is fixed,
+      see the item right below. What's left out is specifically the
+      *automatic, unattended* retry-on-crash policy (attempt limits,
+      backoff) — a product decision to make deliberately, not bundle in
+      silently with a monitoring feature.
+- [x] Core: allow restarting a `Stopped`/`Error` instance without recreating it — `andler_core::fsm` now accepts `Start` from both (returns to `Starting`, same path as a fresh `Created` instance); `Daemon::start_instance` needed no changes at all, it was already generic over the source state, only the FSM was refusing to let it through. `is_terminal()` keeps its old meaning ("this run has ended"), not "no transitions remain" — see the updated doc comments in `fsm.rs`. `backend.rs::spawn` also now removes a stale QMP socket file from a previous run before binding a new one (the deterministic per-instance socket path could otherwise collide on restart).
 ## In Progress
 
 - (none currently)
@@ -60,68 +76,6 @@
 > making anything people actually use better. See "Why the second backend
 > is last" below.
 
-### Short-term — QEMU backend & UX polish
-
-- [x] Network modes (Bridge/Isolated) in `andler-net`
-- [x] Host-side bridge creation (via iproute2)
-- [x] `--dry-run` flag on `andler create` — prints the resolved config and
-      QEMU command line without contacting the daemon at all (client-side
-      resolution mirroring the daemon's own logic: OVMF auto-detect, disk
-      relocation, `andler_qemu::cmdline::build_args`). Covers TOML mode
-      and CLI mode; the interactive wizard already has its own summary
-      screen before creating, so `--dry-run` with a bare `andler create`
-      isn't supported — see `cli/src/preview.rs`.
-- [x] `--verify` flag — validates a resolved instance config (paths
-      exist, OVMF found/required-for-Android, disk size sane, GPU
-      memory/CPU/memory in range) and prints a ✓/✗ report, without
-      contacting the daemon. Exits non-zero if any check fails
-      (scriptable). Built on the same client-side resolution as
-      `--dry-run` (`preview::resolve_linux`/`resolve_android`) — see
-      `cli/src/verify.rs`.
-- [x] QEMU backend: improve QMP error handling and recovery — a dropped/
-      stale QMP connection no longer stays cached forever (`pause`/
-      `resume`/`status` now clear it and reconnect once on a connection-
-      level error). New `BackendError::ProcessNotRunning` distinguishes
-      "QEMU process itself is gone" (checked via `is_alive()` before
-      giving up) from a transient QMP hiccup or a genuine command failure
-      (`CommandFailed`/`ParseError`, which are never retried — QEMU
-      already answered, retrying changes nothing). See
-      `diagnose_and_reset_qmp` in `backends/andler-qemu/src/backend.rs`.
-- [x] Core: add disk space pre-check before snapshot operations — checks
-      free space on the disk's filesystem via `statvfs(2)` before calling
-      `backend.snapshot()`, using guest RAM size as a conservative upper
-      bound for vmstate size (exact snapshot size isn't knowable in
-      advance). Fails with `DiskError::InsufficientDiskSpace` (mapped to
-      `Status::resource_exhausted`) instead of letting the operation run
-      out of space partway through. See
-      `services/andler-disk/src/diskspace.rs`.
-- [x] Core: add VM health checks — periodic background task
-      (`ANDLERD_HEALTH_CHECK_INTERVAL_SECS`, default 30s, `0` disables)
-      polls every `Running` instance's real backend status; if the
-      process has died outside the normal `stop_instance` path, the FSM
-      record is transitioned to `Error` and persisted, so a crash is
-      visible in `andler status` instead of silently going unnoticed
-      until someone happens to check. See
-      `daemon/src/daemon/health_ops.rs`.
-      **Auto-restart not implemented as an automatic behavior** — but the
-      underlying blocker found while implementing this (the FSM had no
-      `Start` transition out of `Stopped`/`Error` at all, so *even manual*
-      `andler start` didn't work on a stopped/crashed instance) is fixed,
-      see the item right below. What's left out is specifically the
-      *automatic, unattended* retry-on-crash policy (attempt limits,
-      backoff) — a product decision to make deliberately, not bundle in
-      silently with a monitoring feature.
-- [x] Core: allow restarting a `Stopped`/`Error` instance without
-      recreating it — `andler_core::fsm` now accepts `Start` from both
-      (returns to `Starting`, same path as a fresh `Created` instance);
-      `Daemon::start_instance` needed no changes at all, it was already
-      generic over the source state, only the FSM was refusing to let it
-      through. `is_terminal()` keeps its old meaning ("this run has
-      ended"), not "no transitions remain" — see the updated doc comments
-      in `fsm.rs`. `backend.rs::spawn` also now removes a stale QMP socket
-      file from a previous run before binding a new one (the deterministic
-      per-instance socket path could otherwise collide on restart).
-
 ### Medium-term
 
 - [ ] QEMU backend: add hot-plug support for disk/network devices
@@ -133,7 +87,6 @@
 
 - [ ] GPU passthrough via VFIO (`RenderBackend::Passthrough`)
 - [ ] Tauri GUI client
-- [ ] Guest image pipelines (automated Android builds with Waydroid)
 - [ ] Live migration between hosts
 - [ ] Multi-disk support (snapshot device name parameterization)
 - [ ] QMP event subscription (async events beyond command responses)

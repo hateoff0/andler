@@ -40,6 +40,8 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 - **NVML integration** (`andler-firmware`): `nvml-wrapper` crate for NVIDIA GPU metrics (primary), with `nvidia-smi` CLI fallback.
 - **Hardware auto-detection** (`andler-firmware`): `detect_all()` returns `HardwareDefaults` — GPU render backend, display engine, audio server, ARM translator, OVMF paths, Venus support, passt availability.
 - **Network configuration service** (`andler-net`): `NetworkService` trait and `DefaultNetworkService` implementation for bridge and isolated network modes. Uses `iproute2` for host-side network setup.
+- **Guest image pipelines** (`docker/images/`): Automated Android/Linux base image builds with Waydroid. `base/Dockerfile` builds Arch Linux rootfs with CachyOS kernel, Mesa/Venus, waydroid, gamescope, UKI. `build.sh` orchestrates docker build + disk conversion. `build-disk.sh` converts rootfs to GPT-partitioned bootable qcow2 (ESP + ext4 + UKI). `fetch-waydroid-images.py` downloads system.img/vendor.img from SourceForge with MD5 verification and disk space pre-check. Supports Android 11 (LineageOS 18.1) and 13 (LineageOS 20.0), VANILLA/GAPPS variants.
+- **Base image auto-discovery** (`andler-core`): `base_image::resolve()` scans `~/.andler/cache/base-images/` for `*.manifest.json` files, picks freshest match by (android_major, variant). Daemon uses it automatically when client omits `base_image_path`. Error message names the exact `docker/images/build.sh` invocation to produce a missing image.
 
 #### Daemon
 
