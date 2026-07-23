@@ -68,6 +68,7 @@ impl Daemon {
         instances_root: PathBuf,
         overlay_size_bytes: u64,
         ovmf_vars_template: PathBuf,
+        linked_overlay: bool,
     ) -> Result<InstanceId, DaemonError> {
         let id = InstanceId::new();
         let instance_dir = instances_root.join(id.0.to_string());
@@ -81,8 +82,7 @@ impl Daemon {
             })?;
 
         if ovmf_vars_template.as_os_str().is_empty() {
-                "Android requires UEFI/OVMF. Provide an OVMF_VARS template.".to_string(),
-            ));
+            return Err(DaemonError::MissingOvmfVarsTemplate);
         }
 
         let ovmf_vars_path = instance_dir.join("VARS.fd");
@@ -90,20 +90,28 @@ impl Daemon {
             .await
             .map_err(|e| DaemonError::Firmware(e.to_string()))?;
 
-        let overlay = andler_disk::overlay::create_overlay(
-            &instance_dir,
-            &base_image_path,
-            overlay_size_bytes,
-        )
-        .await?;
+        let disk = if linked_overlay {
+            let overlay = andler_disk::overlay::create_overlay(
+                &instance_dir,
+                &base_image_path,
+                overlay_size_bytes,
+            )
+            .await?;
 
-        let mut cfg = profile.resolve(
-            instance_name,
-            overlay.base_image_path,
-            overlay.overlay_path,
-            overlay_size_bytes,
-            ovmf_vars_path,
-        );
+            andler_core::DiskConfig::overlay(
+                overlay.overlay_path,
+                overlay.base_image_path,
+                overlay_size_bytes,
+            )
+        } else {
+            let disk_path = instance_dir.join("disk.qcow2");
+            andler_disk::qcow2::clone_full(&base_image_path, &disk_path).await?;
+            andler_disk::qcow2::resize(&disk_path, overlay_size_bytes, true).await?;
+
+            andler_core::DiskConfig::standalone(disk_path, overlay_size_bytes)
+        };
+
+        let cfg = profile.resolve(instance_name, disk, ovmf_vars_path);
 
         let registered_id = self.create_instance(cfg).await?;
 

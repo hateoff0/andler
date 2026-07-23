@@ -62,6 +62,20 @@ impl DiskConfig {
             snapshot_timeout_secs: None,
         }
     }
+
+
+    pub fn standalone(path: PathBuf, size_bytes: u64) -> Self {
+        DiskConfig {
+            path,
+            size_bytes,
+            format: DiskFormat::Qcow2,
+            base_image: None,
+            thin_provisioning: true,
+            trim_on_shutdown: true,
+            compact_on_shutdown: false,
+            snapshot_timeout_secs: None,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -80,6 +94,18 @@ mod tests {
             !cfg.compact_on_shutdown,
             "compact_on_shutdown must be opt-in, not a default-on behavior"
         );
+    }
+
+    #[test]
+    fn standalone_has_no_base_image() {
+        let cfg = DiskConfig::standalone(
+            PathBuf::from("/var/lib/andler/instances/abc/disk.qcow2"),
+            20 * DiskConfig::GIB,
+        );
+        assert_eq!(cfg.base_image, None);
+        assert_eq!(cfg.format, DiskFormat::Qcow2);
+        assert_eq!(cfg.size_bytes, 20 * DiskConfig::GIB);
+        assert!(!cfg.compact_on_shutdown);
     }
 
     #[test]

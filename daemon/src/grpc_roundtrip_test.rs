@@ -773,6 +773,168 @@ async fn clone_instance_linux_vm_shared_base_rejected_as_failed_precondition() {
 }
 
 #[tokio::test]
+async fn create_android_instance_auto_resolves_base_image_when_omitted() {
+    use andler_rpc::proto::{
+        AndroidProfile as ProtoAndroidProfile, AndroidVersion as ProtoAndroidVersion,
+        CreateAndroidInstanceRequest,
+    };
+
+    let (mut client, server) = spawn_server_and_connect().await;
+
+    let andler_home = std::env::temp_dir().join(format!(
+        "andler-grpc-test-android-home-{}",
+        uuid::Uuid::new_v4()
+    ));
+    let base_images_dir = andler_home.join("cache").join("base-images");
+    std::fs::create_dir_all(&base_images_dir).expect("create fake base-images dir");
+    let fake_qcow2 = base_images_dir.join("linux-waydroid-android13-vanilla-test.qcow2");
+    andler_disk::qcow2::create(&fake_qcow2, 1024 * 1024 * 1024)
+        .await
+        .expect("create fake base qcow2");
+    std::fs::write(
+        base_images_dir.join("linux-waydroid-android13-vanilla-test.manifest.json"),
+        r#"{"schema_version":1,"android_major":"13","android_variant":"VANILLA","built_at":"2026-01-01T00:00:00Z"}"#,
+    )
+    .expect("write fake manifest");
+
+    let instances_root = std::env::temp_dir().join(format!(
+        "andler-grpc-test-android-instances-{}",
+        uuid::Uuid::new_v4()
+    ));
+    let ovmf_vars_template = std::env::temp_dir().join(format!(
+        "andler-grpc-test-android-ovmf-vars-{}.fd",
+        uuid::Uuid::new_v4()
+    ));
+    std::fs::write(&ovmf_vars_template, b"fake-ovmf-vars").expect("write fake ovmf vars");
+
+    // ANDLER_HOME is a process-wide env var; both scenarios below run sequentially
+    // within this one test function so there's no race with a concurrent test.
+    std::env::set_var(andler_core::paths::ANDLER_HOME_ENV, &andler_home);
+
+    let mut profile = ProtoAndroidProfile::default();
+    profile.set_android_version(ProtoAndroidVersion::Android13);
+
+    let response = client
+        .create_android_instance(CreateAndroidInstanceRequest {
+            name: "auto-resolved-android".to_string(),
+            profile: Some(profile),
+            base_image_path: String::new(),
+            instances_root: instances_root.to_string_lossy().into_owned(),
+            overlay_size_bytes: 1024 * 1024 * 1024,
+            ovmf_vars_template: ovmf_vars_template.to_string_lossy().into_owned(),
+            linked_overlay: true,
+        })
+        .await
+        .expect("a matching base image in base_images_dir() must be auto-resolved")
+        .into_inner();
+
+    let config: GetInstanceConfigResponse = client
+        .get_instance_config(InstanceIdRequest {
+            instance_id: response.instance_id,
+        })
+        .await
+        .expect("freshly created instance must be found")
+        .into_inner();
+    assert_eq!(
+        config.disk.expect("disk must be set").base_image,
+        fake_qcow2.to_string_lossy().into_owned(),
+        "auto-resolved base image must be the one matching manifest found in base_images_dir()"
+    );
+
+    let mut unmatched_profile = ProtoAndroidProfile::default();
+    unmatched_profile.set_android_version(ProtoAndroidVersion::Android11);
+
+    let status = client
+        .create_android_instance(CreateAndroidInstanceRequest {
+            name: "no-matching-base-image".to_string(),
+            profile: Some(unmatched_profile),
+            base_image_path: String::new(),
+            instances_root: instances_root.to_string_lossy().into_owned(),
+            overlay_size_bytes: 1024 * 1024 * 1024,
+            ovmf_vars_template: ovmf_vars_template.to_string_lossy().into_owned(),
+            linked_overlay: false,
+        })
+        .await
+        .expect_err("no Android 11 manifest exists in base_images_dir(), so this must fail");
+    assert_eq!(status.code(), tonic::Code::NotFound);
+
+    std::env::remove_var(andler_core::paths::ANDLER_HOME_ENV);
+    let _ = std::fs::remove_dir_all(&andler_home);
+    let _ = std::fs::remove_dir_all(&instances_root);
+    let _ = std::fs::remove_file(&ovmf_vars_template);
+    server.abort();
+}
+
+#[tokio::test]
+async fn create_android_instance_linked_overlay_false_produces_standalone_disk() {
+    use andler_rpc::proto::{
+        AndroidProfile as ProtoAndroidProfile, AndroidVersion as ProtoAndroidVersion,
+        CreateAndroidInstanceRequest,
+    };
+
+    let (mut client, server) = spawn_server_and_connect().await;
+
+    let base_image = std::env::temp_dir().join(format!(
+        "andler-grpc-test-standalone-base-{}.qcow2",
+        uuid::Uuid::new_v4()
+    ));
+    andler_disk::qcow2::create(&base_image, 512 * 1024 * 1024)
+        .await
+        .expect("create fake base qcow2");
+
+    let instances_root = std::env::temp_dir().join(format!(
+        "andler-grpc-test-standalone-instances-{}",
+        uuid::Uuid::new_v4()
+    ));
+    let ovmf_vars_template = std::env::temp_dir().join(format!(
+        "andler-grpc-test-standalone-ovmf-vars-{}.fd",
+        uuid::Uuid::new_v4()
+    ));
+    std::fs::write(&ovmf_vars_template, b"fake-ovmf-vars").expect("write fake ovmf vars");
+
+    let mut profile = ProtoAndroidProfile::default();
+    profile.set_android_version(ProtoAndroidVersion::Android13);
+
+    let response = client
+        .create_android_instance(CreateAndroidInstanceRequest {
+            name: "standalone-android".to_string(),
+            profile: Some(profile),
+            base_image_path: base_image.to_string_lossy().into_owned(),
+            instances_root: instances_root.to_string_lossy().into_owned(),
+            overlay_size_bytes: 512 * 1024 * 1024,
+            ovmf_vars_template: ovmf_vars_template.to_string_lossy().into_owned(),
+            linked_overlay: false,
+        })
+        .await
+        .expect("standalone (full-copy) creation must succeed")
+        .into_inner();
+
+    let config: GetInstanceConfigResponse = client
+        .get_instance_config(InstanceIdRequest {
+            instance_id: response.instance_id.clone(),
+        })
+        .await
+        .expect("freshly created instance must be found")
+        .into_inner();
+    let disk = config.disk.expect("disk must be set");
+    assert!(
+        disk.base_image.is_empty(),
+        "linked_overlay: false must produce a standalone disk with no backing file"
+    );
+
+    let instance_dir = instances_root.join(&response.instance_id);
+    assert!(
+        instance_dir.join("disk.qcow2").exists(),
+        "standalone disk file must be created on disk"
+    );
+
+    let _ = std::fs::remove_file(&base_image);
+    let _ = std::fs::remove_dir_all(&instances_root);
+    let _ = std::fs::remove_file(&ovmf_vars_template);
+    server.abort();
+}
+
+#[tokio::test]
 async fn list_guest_packages_instance_not_found() {
     let (mut client, server) = spawn_server_and_connect().await;
 

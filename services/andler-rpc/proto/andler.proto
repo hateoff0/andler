@@ -232,6 +232,7 @@ message CreateAndroidInstanceRequest {
     uint64 overlay_size_bytes = 5;
     string ovmf_vars_template = 6;
     reserved 7;
+    bool linked_overlay = 8;
 }
 
 message CreateInstanceResponse {

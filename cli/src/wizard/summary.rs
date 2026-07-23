@@ -156,6 +156,17 @@ fn print_summary(
             );
             println!("│  GApps:             {gapps}{}", suffix(advanced.is_some()));
             println!("│  MicroG:            {microg}{}", suffix(advanced.is_some()));
+
+            let linked_overlay = advanced.map(|adv| adv.linked_overlay).unwrap_or(false);
+            let disk_mode = if linked_overlay {
+                "linked overlay (backing file: base image)"
+            } else {
+                "full copy (independent of base image)"
+            };
+            println!(
+                "│  Disk mode:         {disk_mode}{}",
+                suffix(advanced.is_some())
+            );
         }
     }
 

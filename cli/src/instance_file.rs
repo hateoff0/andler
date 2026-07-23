@@ -92,6 +92,9 @@ pub struct InstanceFile {
     pub overlay_size_gib: Option<u64>,
 
     #[serde(default)]
+    pub linked_overlay: bool,
+
+    #[serde(default)]
     pub gapps: bool,
 
     #[serde(default)]
@@ -258,9 +261,7 @@ impl InstanceFile {
 
 
     fn into_android_request(self) -> CreateAndroidInstanceRequest {
-        let base_image_path = self
-            .base_image_path
-            .expect("base_image_path required for AndroidVm");
+        let base_image_path = self.base_image_path.unwrap_or_default();
 
         let overlay_size_bytes = self
             .overlay_size_gib
@@ -301,6 +302,7 @@ impl InstanceFile {
             instances_root,
             overlay_size_bytes,
             ovmf_vars_template: path_to_string(&self.ovmf_vars_path),
+            linked_overlay: self.linked_overlay,
         }
     }
 }

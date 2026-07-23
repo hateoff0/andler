@@ -103,6 +103,7 @@ async fn create_android_instance_resolves_profile_and_creates_overlay() {
             instances_root.clone(),
             20 * 1024 * 1024 * 1024,
             ovmf_template,
+            true,
         )
         .await
         .unwrap();
@@ -165,6 +166,7 @@ async fn create_android_instance_fails_when_base_image_missing() {
             instances_root.clone(),
             20 * 1024 * 1024 * 1024,
             ovmf_template,
+            true,
         )
         .await
         .unwrap_err();
@@ -208,6 +210,7 @@ async fn create_android_instance_cleans_up_instance_dir_on_missing_ovmf_template
             instances_root.clone(),
             20 * 1024 * 1024 * 1024,
             missing_ovmf_template,
+            true,
         )
         .await
         .unwrap_err();

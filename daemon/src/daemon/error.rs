@@ -148,4 +148,8 @@ pub enum DaemonError {
     #[error("instance {0:?} must be stopped (currently {1:?}) to change config")]
     InstanceMustBeStopped(InstanceId, InstanceState),
 
+
+    #[error("Android requires UEFI/OVMF. Provide an OVMF_VARS template.")]
+    MissingOvmfVarsTemplate,
+
 }

@@ -88,6 +88,7 @@ impl From<DaemonError> for Status {
             DaemonError::InvalidConfigKey(_) => Status::invalid_argument(err.to_string()),
             DaemonError::NotAndroid(_) => Status::failed_precondition(err.to_string()),
             DaemonError::InstanceMustBeStopped(_, _) => Status::failed_precondition(err.to_string()),
+            DaemonError::MissingOvmfVarsTemplate => Status::invalid_argument(err.to_string()),
         }
     }
 }
@@ -146,15 +147,23 @@ impl AndlerService for DaemonService {
             req.ovmf_vars_template.into()
         };
 
+        let base_image_path = if req.base_image_path.is_empty() {
+            andler_core::base_image::resolve(&profile)
+                .map_err(|e| Status::not_found(e.to_string()))?
+        } else {
+            req.base_image_path.into()
+        };
+
         let id = self
             .daemon
             .create_android_instance(
                 profile,
                 req.name,
-                req.base_image_path.into(),
+                base_image_path,
                 req.instances_root.into(),
                 req.overlay_size_bytes,
                 ovmf_vars_template,
+                req.linked_overlay,
             )
             .await?;
 
@@ -462,6 +471,28 @@ impl AndlerService for DaemonService {
             .set_instance_config(id, &cmd.key, &cmd.value)
             .await?;
         Ok(Response::new(Empty {}))
+    }
+
+    async fn switch_android_boot_mode(
+        &self,
+        request: Request<SwitchAndroidBootModeRequest>,
+    ) -> Result<Response<Empty>, Status> {
+        let cmd = convert::SwitchAndroidBootModeCmd::try_from(request.into_inner())?;
+        let id = self.daemon.resolve_instance_id(&cmd.instance_ref).await?;
+        self.daemon.switch_android_boot_mode(id, cmd.mode).await?;
+        Ok(Response::new(Empty {}))
+    }
+
+    async fn get_android_boot_mode(
+        &self,
+        request: Request<InstanceIdRequest>,
+    ) -> Result<Response<GetAndroidBootModeResponse>, Status> {
+        let req = request.into_inner();
+        let id = self.daemon.resolve_instance_id(&req.instance_id).await?;
+        let mode = self.daemon.get_android_boot_mode(id).await?;
+        Ok(Response::new(GetAndroidBootModeResponse {
+            mode: andler_rpc::proto::AndroidBootMode::from(mode) as i32,
+        }))
     }
 
 }

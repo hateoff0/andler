@@ -127,7 +127,15 @@ pub fn verify_android(
     let base_image_check = Check {
         name: "Base image",
         result: if req.base_image_path.is_empty() {
-            Err("no base image given".to_string())
+            match req.profile.clone() {
+                None => Err("missing profile".to_string()),
+                Some(profile_msg) => match andler_core::AndroidProfile::try_from(profile_msg) {
+                    Err(e) => Err(e.to_string()),
+                    Ok(profile) => andler_core::base_image::resolve(&profile)
+                        .map(|path| format!("auto-resolved: {}", path.display()))
+                        .map_err(|e| e.to_string()),
+                },
+            }
         } else if std::path::Path::new(&req.base_image_path).exists() {
             Ok(req.base_image_path.clone())
         } else {
@@ -135,8 +143,18 @@ pub fn verify_android(
         },
     };
 
+    let disk_mode_check = Check {
+        name: "Disk mode",
+        result: Ok(if req.linked_overlay {
+            "linked overlay (backing file: base image)".to_string()
+        } else {
+            "full copy (independent of base image)".to_string()
+        }),
+    };
+
     let checks = vec![
         base_image_check,
+        disk_mode_check,
         check_disk(&resolved),
         check_ovmf(&resolved, true),
         check_gpu_memory(&resolved),

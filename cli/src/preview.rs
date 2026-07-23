@@ -83,8 +83,12 @@ pub(crate) fn resolve_android(
     };
     let instance_dir = instances_root.join(id.0.to_string());
 
-    let base_image_path = PathBuf::from(&req.base_image_path);
-    let overlay_path = instance_dir.join("disk.qcow2");
+    let base_image_path = if req.base_image_path.is_empty() {
+        andler_core::base_image::resolve(&profile).unwrap_or_default()
+    } else {
+        PathBuf::from(&req.base_image_path)
+    };
+    let disk_path = instance_dir.join("disk.qcow2");
     let ovmf_vars_path = instance_dir.join("VARS.fd");
 
     let ovmf_vars_template = if req.ovmf_vars_template.is_empty() {
@@ -95,13 +99,13 @@ pub(crate) fn resolve_android(
         Some(PathBuf::from(&req.ovmf_vars_template))
     };
 
-    let mut cfg = profile.resolve(
-        req.name.clone(),
-        base_image_path,
-        overlay_path,
-        req.overlay_size_bytes,
-        ovmf_vars_path,
-    );
+    let disk = if req.linked_overlay {
+        andler_core::DiskConfig::overlay(disk_path, base_image_path, req.overlay_size_bytes)
+    } else {
+        andler_core::DiskConfig::standalone(disk_path, req.overlay_size_bytes)
+    };
+
+    let mut cfg = profile.resolve(req.name.clone(), disk, ovmf_vars_path);
     cfg.id = id;
 
     Ok(Resolved {
@@ -161,6 +165,15 @@ fn print_preview(resolved: &Resolved) {
         cfg.disk.size_bytes / andler_core::DiskConfig::GIB,
         cfg.disk.format
     );
+    if let InstanceKind::AndroidVm { .. } = &cfg.kind {
+        match &cfg.disk.base_image {
+            Some(base) => println!(
+                "Disk mode:       linked overlay (backing file: {})",
+                base.display()
+            ),
+            None => println!("Disk mode:       full copy (independent of base image)"),
+        }
+    }
     println!("CPU:             {} cores", cfg.cpu.cores);
     println!(
         "Memory:          {} GiB",

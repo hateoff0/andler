@@ -38,6 +38,7 @@ pub struct AdvancedConfig {
     pub microg: bool,
     pub network_mode: NetworkMode,
     pub bridge_interface: Option<String>,
+    pub linked_overlay: bool,
 }
 
 pub fn run_linux(
@@ -86,6 +87,7 @@ pub fn run_linux(
         microg: false,
         network_mode,
         bridge_interface,
+        linked_overlay: false,
     })
 }
 
@@ -129,6 +131,7 @@ pub fn run_android(
         microg,
         network_mode,
         bridge_interface,
+        linked_overlay: ask_linked_overlay(pref.map(|p| p.linked_overlay))?,
     })
 }
 
@@ -442,6 +445,18 @@ fn ask_microg(prefilled: Option<bool>) -> Result<bool, WizardError> {
     Confirm::new("Enable MicroG?")
         .with_default(prefilled.unwrap_or(false))
         .with_help_message("Open-source Google Play replacement. No Google account needed.")
+        .prompt()
+        .map_err(map_inquire_err)
+}
+
+fn ask_linked_overlay(prefilled: Option<bool>) -> Result<bool, WizardError> {
+    Confirm::new("Link disk to base image as an overlay (instead of a full copy)?")
+        .with_default(prefilled.unwrap_or(false))
+        .with_help_message(
+            "Default (No) makes a full, independent copy of the base image — safest, uses \
+             more disk space. Yes creates a thin overlay backed by the base image — saves \
+             space, but the instance breaks if the base image is moved or deleted.",
+        )
         .prompt()
         .map_err(map_inquire_err)
 }

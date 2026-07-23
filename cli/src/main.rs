@@ -320,6 +320,9 @@ enum Command {
 
         #[arg(long, default_value_t = 20)]
         overlay_size_gib: u64,
+
+        #[arg(long)]
+        linked_overlay: bool,
     },
 
     Start(StartArgs),
@@ -561,6 +564,15 @@ impl From<CliAndroidVersion> for ProtoAndroidVersion {
     }
 }
 
+impl From<CliAndroidVersion> for andler_core::AndroidVersion {
+    fn from(value: CliAndroidVersion) -> Self {
+        match value {
+            CliAndroidVersion::Android11 => andler_core::AndroidVersion::Android11,
+            CliAndroidVersion::Android13 => andler_core::AndroidVersion::Android13,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum CliArmTranslator {
     None,
@@ -680,13 +692,14 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             arm_translator,
             instances_root,
             overlay_size_gib,
+            linked_overlay,
         }) => {
             create::handle(
                 &mut client, file, kind, name, ovmf_vars_template,
                 iso_path, disk_path, disk_size_gib, compact_on_shutdown, cdrom_bus,
                 no_uefi, quick, dry_run, verify,
                 android_version, base_image_path, gapps, microg, arm_translator,
-                instances_root, overlay_size_gib,
+                instances_root, overlay_size_gib, linked_overlay,
             ).await?;
         }
         Some(Command::Start(args)) => {

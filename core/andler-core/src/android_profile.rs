@@ -59,9 +59,7 @@ impl AndroidProfile {
     pub fn resolve(
         &self,
         instance_name: String,
-        base_image_path: PathBuf,
-        overlay_path: PathBuf,
-        overlay_size_bytes: u64,
+        disk: DiskConfig,
         ovmf_vars_path: PathBuf,
     ) -> InstanceConfig {
         InstanceConfig {
@@ -73,7 +71,7 @@ impl AndroidProfile {
             backend: BackendKind::Qemu,
             cpu: CpuConfig::reference_default(),
             memory: MemoryConfig::reference_default(),
-            disk: DiskConfig::overlay(overlay_path, base_image_path, overlay_size_bytes),
+            disk,
             display: DisplayConfig::reference_default(),
             gpu: GpuConfig::reference_default(),
             network: NetworkConfig::reference_default(),
@@ -145,12 +143,11 @@ mod tests {
         let profile = sample_profile();
         let base = PathBuf::from("/var/lib/andler/images/android13-gapps-libndk.qcow2");
         let overlay = PathBuf::from("/var/lib/andler/instances/abc/disk.qcow2");
+        let disk = DiskConfig::overlay(overlay.clone(), base.clone(), 20 * DiskConfig::GIB);
 
         let cfg = profile.resolve(
             "my-android".to_string(),
-            base.clone(),
-            overlay.clone(),
-            20 * DiskConfig::GIB,
+            disk,
             PathBuf::from("/var/lib/andler/instances/abc/VARS.fd"),
         );
 
@@ -163,5 +160,21 @@ mod tests {
             }
             InstanceKind::LinuxVm { .. } => panic!("expected AndroidVm"),
         }
+    }
+
+    #[test]
+    fn resolve_accepts_standalone_disk_with_no_base_image() {
+        let profile = sample_profile();
+        let disk_path = PathBuf::from("/var/lib/andler/instances/abc/disk.qcow2");
+        let disk = DiskConfig::standalone(disk_path.clone(), 20 * DiskConfig::GIB);
+
+        let cfg = profile.resolve(
+            "my-android".to_string(),
+            disk,
+            PathBuf::from("/var/lib/andler/instances/abc/VARS.fd"),
+        );
+
+        assert_eq!(cfg.disk.base_image, None);
+        assert_eq!(cfg.disk.path, disk_path);
     }
 }

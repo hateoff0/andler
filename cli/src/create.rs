@@ -32,6 +32,7 @@ pub async fn handle(
     arm_translator: Option<CliArmTranslator>,
     instances_root: String,
     overlay_size_gib: u64,
+    linked_overlay: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let has_file = file.is_some();
     let has_kind = kind.is_some();
@@ -90,8 +91,7 @@ pub async fn handle(
 
     let linux_required = kind == Some(CliKind::Linux)
         && (name.is_none() || iso_path.is_none() || disk_path.is_none());
-    let android_required = kind == Some(CliKind::Android)
-        && (name.is_none() || base_image_path.is_none());
+    let android_required = kind == Some(CliKind::Android) && name.is_none();
     let no_kind = kind.is_none();
     let needs_wizard = quick || no_kind || linux_required || android_required;
 
@@ -178,16 +178,14 @@ pub async fn handle(
             let av = android_version.unwrap_or_else(|| {
                 err_exit("error: --android-version is required for --kind android")
             });
-            let bip = base_image_path.unwrap_or_else(|| {
-                err_exit("error: --base-image-path is required for --kind android")
-            });
-
             let arm_translator = arm_translator.unwrap_or(CliArmTranslator::None);
-            let bip = match validate_base_image_path(&bip) {
-                Ok(path) => path,
-                Err(msg) => err_exit(&format!("error: {msg}")),
+            let bip = match base_image_path {
+                Some(bip) => match validate_base_image_path(&bip) {
+                    Ok(path) => path,
+                    Err(msg) => err_exit(&format!("error: {msg}")),
+                },
+                None => String::new(),
             };
-
 
             let req = build_android_request(
                 name,
@@ -199,6 +197,7 @@ pub async fn handle(
                 arm_translator,
                 instances_root,
                 overlay_size_gib,
+                linked_overlay,
             );
             if dry_run {
                 return crate::preview::print_android_preview(&req);
@@ -326,6 +325,7 @@ fn build_android_request(
     arm_translator: CliArmTranslator,
     instances_root: String,
     overlay_size_gib: u64,
+    linked_overlay: bool,
 ) -> CreateAndroidInstanceRequest {
     let mut profile = ProtoAndroidProfile {
         gapps,
@@ -344,6 +344,7 @@ fn build_android_request(
             .checked_mul(1024 * 1024 * 1024)
             .expect("overlay size overflow"),
         ovmf_vars_template,
+        linked_overlay,
     }
 }
 
