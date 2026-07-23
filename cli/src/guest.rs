@@ -2,12 +2,27 @@
 
 use andler_rpc::proto::andler_service_client::AndlerServiceClient;
 use andler_rpc::proto::{
-    InstallGuestAgentRequest, InstanceIdRequest, RemoveGuestAgentRequest,
-    SwitchArmTranslatorRequest,
+    AndroidBootMode as ProtoAndroidBootMode, InstallGuestAgentRequest, InstanceIdRequest,
+    RemoveGuestAgentRequest, SwitchAndroidBootModeRequest, SwitchArmTranslatorRequest,
 };
 use tonic::transport::Channel;
 
 use crate::lifecycle;
+
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+pub enum CliBootMode {
+    Android,
+    Linux,
+}
+
+impl From<CliBootMode> for ProtoAndroidBootMode {
+    fn from(value: CliBootMode) -> Self {
+        match value {
+            CliBootMode::Android => ProtoAndroidBootMode::Android,
+            CliBootMode::Linux => ProtoAndroidBootMode::Linux,
+        }
+    }
+}
 
 #[derive(Debug, Clone, clap::Subcommand)]
 pub enum GuestAction {
@@ -33,6 +48,13 @@ pub enum GuestAction {
 
         instance_id: String,
     },
+
+    BootMode {
+        instance_id: String,
+
+        #[arg(value_enum)]
+        mode: Option<CliBootMode>,
+    },
 }
 
 pub async fn handle(
@@ -44,6 +66,7 @@ pub async fn handle(
             println!("Usage: andler guest list <instance-id>");
             println!("       andler guest install <package> <instance-id>");
             println!("       andler guest remove <package> <instance-id>");
+            println!("       andler guest boot-mode <instance-id> [android|linux]");
         }
         GuestAction::List {
             instance_id: Some(id),
@@ -138,6 +161,39 @@ pub async fn handle(
                 client.remove_guest_agent(request).await?;
                 println!("Package `{package}` removed successfully");
             }
+        }
+        GuestAction::BootMode {
+            instance_id,
+            mode: None,
+        } => {
+            let (resolved_id, _name) = lifecycle::resolve_echo(client, &instance_id).await;
+            let response = client
+                .get_android_boot_mode(InstanceIdRequest {
+                    instance_id: resolved_id,
+                })
+                .await?;
+            match response.into_inner().mode() {
+                ProtoAndroidBootMode::Android => println!("android"),
+                ProtoAndroidBootMode::Linux => println!("linux"),
+                ProtoAndroidBootMode::Unspecified => println!("unknown"),
+            }
+        }
+        GuestAction::BootMode {
+            instance_id,
+            mode: Some(mode),
+        } => {
+            let (resolved_id, _name) = lifecycle::resolve_echo(client, &instance_id).await;
+            client
+                .switch_android_boot_mode(SwitchAndroidBootModeRequest {
+                    instance_ref: resolved_id,
+                    mode: ProtoAndroidBootMode::from(mode).into(),
+                })
+                .await?;
+            let mode_str = match mode {
+                CliBootMode::Android => "android",
+                CliBootMode::Linux => "linux",
+            };
+            println!("Boot mode switched to `{mode_str}`. Restart the instance to apply it.");
         }
     }
 

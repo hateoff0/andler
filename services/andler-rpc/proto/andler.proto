@@ -27,6 +27,8 @@ service AndlerService {
     rpc ListGuestPackages(InstanceIdRequest) returns (ListGuestPackagesResponse);
     rpc SwitchArmTranslator(SwitchArmTranslatorRequest) returns (Empty);
     rpc SetInstanceConfig(SetInstanceConfigRequest) returns (Empty);
+    rpc SwitchAndroidBootMode(SwitchAndroidBootModeRequest) returns (Empty);
+    rpc GetAndroidBootMode(InstanceIdRequest) returns (GetAndroidBootModeResponse);
 }
 
 message Empty {}
@@ -433,6 +435,21 @@ message SwitchArmTranslatorRequest {
     string instance_ref = 1;
     ArmTranslator translator = 2;
     string translator_dir = 3;
+}
+
+enum AndroidBootMode {
+    ANDROID_BOOT_MODE_UNSPECIFIED = 0;
+    ANDROID_BOOT_MODE_ANDROID = 1;
+    ANDROID_BOOT_MODE_LINUX = 2;
+}
+
+message SwitchAndroidBootModeRequest {
+    string instance_ref = 1;
+    AndroidBootMode mode = 2;
+}
+
+message GetAndroidBootModeResponse {
+    AndroidBootMode mode = 1;
 }
 
 message SetInstanceConfigRequest {

@@ -10,12 +10,13 @@ use andler_rpc::proto::andler_service_server::AndlerService;
 use andler_rpc::proto::{
     CloneInstanceRequest, CreateAndroidInstanceRequest, CreateInstanceRequest,
     CreateInstanceResponse, CreateSnapshotRequest, CreateSnapshotResponse, DeleteSnapshotRequest,
-    Empty, ExportInstanceDiskRequest, ExportInstanceDiskResponse, GetInstanceConfigResponse,
-    GuestPackageEntry, InstallGuestAgentRequest, InstanceIdRequest, InstanceListEntry,
-    InstanceStatusResponse, ListGuestPackagesResponse, ListInstancesResponse, ListSnapshotsResponse,
-    LogLineResponse, RemoveGuestAgentRequest, RemoveInstanceRequest, ResourceMetricsResponse,
-    RestoreSnapshotRequest, SetInstanceConfigRequest, SnapshotEntry, StopInstanceRequest,
-    SwitchArmTranslatorRequest, UpdateInstanceConfigRequest,
+    Empty, ExportInstanceDiskRequest, ExportInstanceDiskResponse, GetAndroidBootModeResponse,
+    GetInstanceConfigResponse, GuestPackageEntry, InstallGuestAgentRequest, InstanceIdRequest,
+    InstanceListEntry, InstanceStatusResponse, ListGuestPackagesResponse, ListInstancesResponse,
+    ListSnapshotsResponse, LogLineResponse, RemoveGuestAgentRequest, RemoveInstanceRequest,
+    ResourceMetricsResponse, RestoreSnapshotRequest, SetInstanceConfigRequest, SnapshotEntry,
+    StopInstanceRequest, SwitchAndroidBootModeRequest, SwitchArmTranslatorRequest,
+    UpdateInstanceConfigRequest,
 };
 use futures_core::Stream;
 use futures_util::StreamExt;

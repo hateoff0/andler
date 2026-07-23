@@ -596,6 +596,66 @@ impl Daemon {
         Ok(results)
     }
 
+    pub async fn switch_android_boot_mode(
+        &self,
+        id: InstanceId,
+        mode: andler_core::AndroidBootMode,
+    ) -> Result<(), DaemonError> {
+        let overlay_path = {
+            let instances = self.instances.read().await;
+            let record = instances
+                .get(&id)
+                .ok_or(DaemonError::InstanceNotFound(id))?;
+
+            match &record.config.kind {
+                InstanceKind::AndroidVm { .. } => {}
+                _ => return Err(DaemonError::NotAndroid(id)),
+            }
+
+            if !record.state.is_disk_idle() {
+                return Err(DaemonError::InstanceMustBeStopped(
+                    id,
+                    record.state.clone(),
+                ));
+            }
+
+            record.config.disk.path.clone()
+        };
+
+        andler_disk::boot_mode::switch_boot_mode(&overlay_path, mode).await?;
+
+        tracing::info!(instance_id = %id.0, mode = ?mode, "android boot mode switched successfully");
+        Ok(())
+    }
+
+    pub async fn get_android_boot_mode(
+        &self,
+        id: InstanceId,
+    ) -> Result<andler_core::AndroidBootMode, DaemonError> {
+        let overlay_path = {
+            let instances = self.instances.read().await;
+            let record = instances
+                .get(&id)
+                .ok_or(DaemonError::InstanceNotFound(id))?;
+
+            match &record.config.kind {
+                InstanceKind::AndroidVm { .. } => {}
+                _ => return Err(DaemonError::NotAndroid(id)),
+            }
+
+            if !record.state.is_disk_idle() {
+                return Err(DaemonError::InstanceMustBeStopped(
+                    id,
+                    record.state.clone(),
+                ));
+            }
+
+            record.config.disk.path.clone()
+        };
+
+        Ok(andler_disk::boot_mode::current_boot_mode(&overlay_path)?)
+    }
+
     pub async fn switch_arm_translator(
         &self,
         id: InstanceId,

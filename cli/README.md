@@ -36,7 +36,8 @@ Exit code: 0 if all checks passed, 1 if any failed — scriptable (`andler creat
 - `--compact-on-shutdown`: Enable automatic disk compaction on graceful shutdown
 - `--cdrom-bus <auto|virtio|ide>`: CD-ROM bus type
 - `--no-uefi`: Disable UEFI, use BIOS/CSM boot
-- `--overlay-size-gib <n>`: Overlay size in GiB (Android only)
+- `--overlay-size-gib <n>`: Disk size in GiB (Android only)
+- `--linked-overlay`: Link the disk to the base image as a thin overlay instead of making a full independent copy (Android only). Default: off — full copy.
 - `--gapps <true|false>`: Include Google Apps (Android only)
 - `--microg <true|false>`: Include microG (Android only)
 - `--arm-translator <libndk|hibridge>`: ARM translation mode (Android only)
@@ -107,6 +108,7 @@ Size format: `64GB`, `128000MB`, `1T`, `512000` (bytes). Case-insensitive.
 | `andler guest install <package> <instance-id>` | Install a package in the guest OS (auto-fallback: online via QMP if running, offline via qemu-nbd if stopped) |
 | `andler guest remove <package> <instance-id>` | Remove a package from the guest OS (auto-fallback) |
 | `andler guest list <instance-id>` | List known packages and their status in the guest OS |
+| `andler guest boot-mode <instance-id> [android\|linux]` | Get (no argument) or switch the guest's boot target on an Android VM's unified base image. Requires a restart to apply. |
 
 Known packages: `spice-vdagent` (shared folders), `qemu-guest-agent` (host-guest communication), `spice-webdavd` (webdav shared folders).
 
@@ -297,10 +299,10 @@ GPU fields (vram, gpu) appear when AMD, NVIDIA, or Intel GPU data is available.
 | Module | File | Purpose |
 |--------|------|---------|
 | `main.rs` | 769 lines | Clap CLI definition, gRPC client setup, subcommand dispatch |
-| `create.rs` | 433 lines | `Create` command — builds gRPC request from CLI flags |
+| `create.rs` | 412 lines | `Create` command — builds gRPC request from CLI flags |
 | `edit.rs` | 96 lines | `Edit` command — open config in `$EDITOR`, send changes to daemon |
 | `disk.rs` | 77 lines | `Disk` command — create, info, resize, compact |
-| `guest.rs` | 90 lines | `Guest` command — install, remove, list packages in guest OS |
+| `guest.rs` | 201 lines | `Guest` command — install/remove/list packages, boot-mode get/switch in guest OS |
 | `status.rs` | 681 lines | `Status`, `List`, `Config`, `Logs`, `Metrics` commands |
 | `snapshot.rs` | 109 lines | `Snapshot` command — create, restore, delete, list (with spinner) |
 | `lifecycle.rs` | 124 lines | `Start`, `Stop`, `Pause`, `Resume`, `Remove` commands |

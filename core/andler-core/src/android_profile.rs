@@ -37,6 +37,21 @@ pub enum ArmTranslator {
     Libhoudini,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AndroidBootMode {
+    Android,
+    Linux,
+}
+
+impl std::fmt::Display for AndroidBootMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AndroidBootMode::Android => write!(f, "android"),
+            AndroidBootMode::Linux => write!(f, "linux"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AndroidProfile {
     pub android_version: AndroidVersion,

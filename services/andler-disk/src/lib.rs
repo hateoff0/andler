@@ -1,6 +1,7 @@
 
 
 pub mod arm_translator;
+pub mod boot_mode;
 pub mod clone;
 pub mod diskspace;
 pub mod error;

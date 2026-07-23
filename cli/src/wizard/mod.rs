@@ -417,6 +417,7 @@ pub(crate) fn build_android_request(
             .checked_mul(andler_core::DiskConfig::GIB)
             .ok_or_else(|| WizardError::Inquire("overlay size overflow".into()))?,
         ovmf_vars_template: ovmf_vars_template(detected),
+        linked_overlay: advanced.map(|a| a.linked_overlay).unwrap_or(false),
     })
 }
 
@@ -713,6 +714,7 @@ mod tests {
             microg: false,
             network_mode: NetworkMode::Nat,
             bridge_interface: None,
+            linked_overlay: false,
         };
         let (req, _) = build_linux_request(&basic, Some(&advanced), &sample_detected()).unwrap();
         let input = req.input.expect("input");
@@ -733,6 +735,116 @@ mod tests {
         assert_eq!(req.name, "android");
         let profile = req.profile.expect("profile");
         assert_eq!(profile.arm_translator(), ProtoArmTranslator::Libndk);
+    }
+
+    static ANDLER_HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    struct AndlerHomeGuard {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        base: PathBuf,
+    }
+
+    impl AndlerHomeGuard {
+        fn new() -> (Self, PathBuf) {
+            static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let lock = ANDLER_HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let base = std::env::temp_dir().join(format!(
+                "andler-wizard-test-home-{}-{n}",
+                std::process::id()
+            ));
+            let cache_dir = base.join("cache").join("base-images");
+            std::fs::create_dir_all(&cache_dir).unwrap();
+            std::env::set_var(andler_core::paths::ANDLER_HOME_ENV, &base);
+            (Self { _lock: lock, base }, cache_dir)
+        }
+    }
+
+    impl Drop for AndlerHomeGuard {
+        fn drop(&mut self) {
+            std::env::remove_var(andler_core::paths::ANDLER_HOME_ENV);
+            let _ = std::fs::remove_dir_all(&self.base);
+        }
+    }
+
+    fn write_manifest(dir: &std::path::Path, name: &str, major: &str, variant: &str) {
+        std::fs::write(dir.join(format!("{name}.qcow2")), b"placeholder").unwrap();
+        std::fs::write(
+            dir.join(format!("{name}.manifest.json")),
+            format!(
+                r#"{{"schema_version":1,"android_major":"{major}","android_variant":"{variant}","built_at":"2026-01-01T00:00:00Z"}}"#
+            ),
+        )
+        .unwrap();
+    }
+
+    fn sample_advanced(gapps: bool) -> AdvancedConfig {
+        AdvancedConfig {
+            cdrom_bus: None,
+            compact_on_shutdown: false,
+            gpu_render: RenderBackend::Venus,
+            gpu_memory_mib: 1024,
+            display_resolution: Resolution::new(1920, 1080),
+            fullscreen: false,
+            audio_backend: AudioBackend::None,
+            clipboard_enabled: true,
+            input_pointer: PointerMode::Mouse,
+            cpu_cores: 4,
+            memory_gib: 8,
+            arm_translator: None,
+            gapps,
+            microg: false,
+            network_mode: NetworkMode::Nat,
+            bridge_interface: None,
+            linked_overlay: false,
+        }
+    }
+
+    #[test]
+    fn reresolve_android_base_image_switches_to_gapps_variant() {
+        let (_guard, dir) = AndlerHomeGuard::new();
+        write_manifest(&dir, "vanilla", "13", "VANILLA");
+        write_manifest(&dir, "gapps", "13", "GAPPS");
+
+        let mut basic_result = BasicResult::Android(AndroidBasicResult {
+            name: "android".into(),
+            base_image: dir.join("vanilla.qcow2").to_string_lossy().into_owned(),
+            base_image_auto_resolved: true,
+            android_version: CliAndroidVersion::Android13,
+            disk_size_gib: 256,
+            instances_root: "/tmp/instances".into(),
+        });
+        let advanced = sample_advanced(true);
+        reresolve_android_base_image(&mut basic_result, Some(&advanced), &sample_detected());
+
+        let BasicResult::Android(a) = &basic_result else {
+            panic!("expected Android variant");
+        };
+        assert_eq!(
+            a.base_image,
+            dir.join("gapps.qcow2").to_string_lossy().into_owned()
+        );
+    }
+
+    #[test]
+    fn reresolve_android_base_image_leaves_manually_entered_path_alone() {
+        let (_guard, _dir) = AndlerHomeGuard::new();
+
+        let mut basic_result = BasicResult::Android(AndroidBasicResult {
+            name: "android".into(),
+            base_image: "/tmp/hand-picked.qcow2".into(),
+            base_image_auto_resolved: false,
+            android_version: CliAndroidVersion::Android13,
+            disk_size_gib: 256,
+            instances_root: "/tmp/instances".into(),
+        });
+        let advanced = sample_advanced(true);
+        reresolve_android_base_image(&mut basic_result, Some(&advanced), &sample_detected());
+
+        let BasicResult::Android(a) = &basic_result else {
+            panic!("expected Android variant");
+        };
+        assert_eq!(a.base_image, "/tmp/hand-picked.qcow2");
     }
 
     use andler_rpc::proto::ArmTranslator as ProtoArmTranslator;
@@ -829,6 +941,7 @@ mod tests {
             microg: false,
             network_mode: NetworkMode::Nat,
             bridge_interface: None,
+            linked_overlay: false,
         };
         let network = build_network_config(Some(&advanced), &detected).unwrap();
         assert!(matches!(network.mode, NetworkMode::Nat));
@@ -850,6 +963,7 @@ mod tests {
             microg: false,
             network_mode: NetworkMode::Bridge { interface: "br0".to_string() },
             bridge_interface: Some("br0".to_string()),
+            linked_overlay: false,
         };
         let network = build_network_config(Some(&advanced_bridge), &detected).unwrap();
         assert!(matches!(network.mode, NetworkMode::Bridge { .. }));

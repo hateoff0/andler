@@ -590,6 +590,16 @@ impl From<CliArmTranslator> for ProtoArmTranslator {
     }
 }
 
+impl From<CliArmTranslator> for andler_core::ArmTranslator {
+    fn from(value: CliArmTranslator) -> Self {
+        match value {
+            CliArmTranslator::None => andler_core::ArmTranslator::None,
+            CliArmTranslator::Libndk => andler_core::ArmTranslator::Libndk,
+            CliArmTranslator::Libhoudini => andler_core::ArmTranslator::Libhoudini,
+        }
+    }
+}
+
 fn err_exit(msg: &str) -> ! {
     eprintln!("{msg}");
     std::process::exit(2);

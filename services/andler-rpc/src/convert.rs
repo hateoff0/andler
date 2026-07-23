@@ -4,11 +4,12 @@ use std::path::PathBuf;
 
 use crate::proto;
 use andler_core::{
-    AndroidProfile, AndroidVersion, ArmTranslator, AudioBackend, AudioConfig, AudioDevice,
-    BackendKind, CdromBus, CloneMode, CpuConfig, CpuPriority, DiskConfig, DiskFormat,
-    DisplayConfig, DisplayEngine, FirmwareConfig, GpuConfig, InputConfig, InstanceConfig,
-    InstanceId, InstanceKind, InstanceState, LogLine, LogStreamSource, MemoryConfig, NatBackend,
-    NetworkConfig, NetworkMode, PointerMode, RenderBackend, Resolution, ResourceMetrics,
+    AndroidBootMode, AndroidProfile, AndroidVersion, ArmTranslator, AudioBackend, AudioConfig,
+    AudioDevice, BackendKind, CdromBus, CloneMode, CpuConfig, CpuPriority, DiskConfig,
+    DiskFormat, DisplayConfig, DisplayEngine, FirmwareConfig, GpuConfig, InputConfig,
+    InstanceConfig, InstanceId, InstanceKind, InstanceState, LogLine, LogStreamSource,
+    MemoryConfig, NatBackend, NetworkConfig, NetworkMode, PointerMode, RenderBackend, Resolution,
+    ResourceMetrics,
 };
 
 
@@ -954,6 +955,39 @@ impl TryFrom<proto::SwitchArmTranslatorRequest> for SwitchArmTranslatorCmd {
                 Some(req.translator_dir.into())
             },
         })
+    }
+}
+
+
+pub struct SwitchAndroidBootModeCmd {
+    pub instance_ref: String,
+    pub mode: AndroidBootMode,
+}
+
+impl TryFrom<proto::SwitchAndroidBootModeRequest> for SwitchAndroidBootModeCmd {
+    type Error = ConvertError;
+
+    fn try_from(req: proto::SwitchAndroidBootModeRequest) -> Result<Self, Self::Error> {
+        let mode = match req.mode() {
+            proto::AndroidBootMode::Unspecified => {
+                return Err(ConvertError::MissingField("mode"));
+            }
+            proto::AndroidBootMode::Android => AndroidBootMode::Android,
+            proto::AndroidBootMode::Linux => AndroidBootMode::Linux,
+        };
+        Ok(Self {
+            instance_ref: req.instance_ref,
+            mode,
+        })
+    }
+}
+
+impl From<AndroidBootMode> for proto::AndroidBootMode {
+    fn from(mode: AndroidBootMode) -> Self {
+        match mode {
+            AndroidBootMode::Android => proto::AndroidBootMode::Android,
+            AndroidBootMode::Linux => proto::AndroidBootMode::Linux,
+        }
     }
 }
 
