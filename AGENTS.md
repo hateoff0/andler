@@ -149,8 +149,10 @@ cargo clippy --workspace -- -D warnings
 ### Naming & Formatting
 
 - **Rust 2021 edition**, stable toolchain
+
 ### Code Comments Policy
 
+**Language: English only.** All code, comments, identifiers, error messages, commit messages, and documentation MUST be in English. No exceptions for convenience or "because the original author spoke X." Non-English text in code is a bug.
 **Default: No comments in code.** The codebase is currently free of doc comments (`///`, `//!`) and inline comments. Keep it that way.
 
 **Exception: 1–2 line comments** allowed ONLY when:
