@@ -1078,6 +1078,7 @@ mod tests {
     }
 
 
+    #[ignore = "requires qemu-system-x86_64 binary, see docker/README.md integration-test target"]
     #[tokio::test]
     async fn pause_after_external_process_kill_returns_process_not_running() {
         let backend = QemuBackend::new();

@@ -111,7 +111,8 @@ impl Daemon {
             andler_core::DiskConfig::standalone(disk_path, overlay_size_bytes)
         };
 
-        let cfg = profile.resolve(instance_name, disk, ovmf_vars_path);
+        let mut cfg = profile.resolve(instance_name, disk, ovmf_vars_path);
+        cfg.id = id;
 
         let registered_id = self.create_instance(cfg).await?;
 
