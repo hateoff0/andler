@@ -272,30 +272,12 @@ impl Daemon {
     }
 
     pub async fn pause_instance(&self, id: InstanceId) -> Result<(), DaemonError> {
-        let (backend, handle) = {
-            let instances = self.instances.read().await;
-            let record = instances
-                .get(&id)
-                .ok_or(DaemonError::InstanceNotFound(id))?;
-
+        let (backend, handle) = self.backend_and_handle(id).await?;
         backend.pause(&handle).await.map_err(DaemonError::Backend)
     }
 
     pub async fn resume_instance(&self, id: InstanceId) -> Result<(), DaemonError> {
-        let (backend, handle) = {
-            let instances = self.instances.read().await;
-            let record = instances
-                .get(&id)
-                .ok_or(DaemonError::InstanceNotFound(id))?;
-
-            let handle = record.handle.clone().ok_or_else(|| {
-                DaemonError::Backend(BackendError::HandleNotFound(id.0.to_string()))
-            })?;
-            let backend = self.backend_for(record.config.backend)?.clone();
-
-            (backend, handle)
-        };
-
+        let (backend, handle) = self.backend_and_handle(id).await?;
         backend.resume(&handle).await.map_err(DaemonError::Backend)
     }
 
@@ -765,8 +747,9 @@ fn spawn_compact_on_shutdown(id: InstanceId, disk: andler_core::DiskConfig) {
         tracing::debug!(
             instance_id = %id.0,
             format = ?disk.format,
-            "compact_on_shutdown is enabled but disk format is not qcow2 — skipping, "
-        return;
+            "compact_on_shutdown is enabled but disk format is not qcow2 — skipping"
+        );
+         return;
     }
 
     let path = disk.path.clone();

@@ -13,3 +13,4 @@ libc = "0.2"
 reqwest = { version = "0.12", features = ["rustls-tls"], default-features = false }
 md5 = "0.7"
 zip = "0.6"
+serde_json = "1"

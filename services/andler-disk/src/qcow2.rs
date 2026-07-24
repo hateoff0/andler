@@ -218,56 +218,44 @@ async fn ensure_parent_dir_exists(path: &Path) -> Result<(), DiskError> {
 
 
 fn parse_json_u64_field(json: &str, field_name: &str) -> Result<u64, DiskError> {
-    let needle_with_space = format!("\"{field_name}\": ");
-    let needle_no_space = format!("\"{field_name}\":");
+    let parsed: serde_json::Value = serde_json::from_str(json).map_err(|e| {
+        DiskError::ParseError(format!("invalid JSON from qemu-img: {e}"))
+    })?;
 
-    let needle_len;
-    let idx = if let Some(i) = json.find(&needle_with_space) {
-        needle_len = needle_with_space.len();
-        i
-    } else if let Some(i) = json.find(&needle_no_space) {
-        needle_len = needle_no_space.len();
-        i
-    } else {
-        return Err(DiskError::ParseError(format!(
-            "field `{field_name}` not found in qemu-img output"
-        )));
-    };
-
-    let after = &json[idx + needle_len..];
-    let value_str: String = after
-        .trim_start()
-        .chars()
-        .take_while(|c| c.is_ascii_digit())
-        .collect();
-
-    value_str.parse::<u64>().map_err(|_| {
-        DiskError::ParseError(format!(
-            "field `{field_name}` is not a valid u64 in qemu-img output"
-        ))
-    })
+    parsed
+        .get(field_name)
+        .ok_or_else(|| {
+            DiskError::ParseError(format!(
+                "field `{field_name}` not found in qemu-img output"
+            ))
+        })?
+        .as_u64()
+        .ok_or_else(|| {
+            DiskError::ParseError(format!(
+                "field `{field_name}` is not a valid u64 in qemu-img output"
+            ))
+        })
 }
 
 
 fn parse_json_string_field(json: &str, field_name: &str) -> Result<String, DiskError> {
-    let needle_with_space = format!("\"{field_name}\": \"");
-    let needle_no_space = format!("\"{field_name}\":\"");
+    let parsed: serde_json::Value = serde_json::from_str(json).map_err(|e| {
+        DiskError::ParseError(format!("invalid JSON from qemu-img: {e}"))
+    })?;
 
-    let needle_len;
-    let idx = if let Some(i) = json.find(&needle_with_space) {
-        needle_len = needle_with_space.len();
-        i
-    } else if let Some(i) = json.find(&needle_no_space) {
-        needle_len = needle_no_space.len();
-        i
-    } else {
-        return Err(DiskError::ParseError(format!(
-            "field `{field_name}` not found in qemu-img output"
-        )));
-    };
-
-    let after = &json[idx + needle_len..];
-    let value: String = after.chars().take_while(|&c| c != '"').collect();
+    let value = parsed
+        .get(field_name)
+        .ok_or_else(|| {
+            DiskError::ParseError(format!(
+                "field `{field_name}` not found in qemu-img output"
+            ))
+        })?
+        .as_str()
+        .ok_or_else(|| {
+            DiskError::ParseError(format!(
+                "field `{field_name}` is not a string in qemu-img output"
+            ))
+        })?;
 
     if value.is_empty() {
         return Err(DiskError::ParseError(format!(
@@ -275,7 +263,7 @@ fn parse_json_string_field(json: &str, field_name: &str) -> Result<String, DiskE
         )));
     }
 
-    Ok(value)
+    Ok(value.to_string())
 }
 
 
@@ -316,10 +304,13 @@ mod tests {
     }
 
     #[test]
-    fn parse_json_u64_field_nested_json_matches_top_level() {
+    fn parse_json_u64_field_ignores_nested_field_with_same_name() {
         let json = r#"{"children":[{"info":{"virtual-size":197120,"format":"file"}}],"virtual-size":1048576,"format":"qcow2"}"#;
         let result = parse_json_u64_field(json, "virtual-size").unwrap();
-        assert_eq!(result, 197120, "flat find() matches nested field first — known limitation");
+        assert_eq!(
+            result, 1048576,
+            "must match the top-level field, not one nested inside `children`"
+        );
     }
 
 

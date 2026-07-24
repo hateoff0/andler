@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use andler_core::{
-    BackendKind, HypervisorBackend, InstanceConfig,
+    BackendError, BackendKind, HypervisorBackend, InstanceConfig,
     InstanceId, InstanceState,
 };
 use andler_qemu::QemuBackend;
@@ -119,6 +119,52 @@ impl Daemon {
         self.backends
             .get(&kind)
             .ok_or(DaemonError::NoBackendRegistered(kind))
+    }
+
+
+    /// Returns (backend, handle) for an instance that has been spawned (handle present),
+    /// regardless of its current lifecycle state.
+    pub(crate) async fn backend_and_handle(
+        &self,
+        id: InstanceId,
+    ) -> Result<(Arc<dyn HypervisorBackend>, andler_core::BackendHandle), DaemonError> {
+        let instances = self.instances.read().await;
+        let record = instances
+            .get(&id)
+            .ok_or(DaemonError::InstanceNotFound(id))?;
+
+        let handle = record.handle.clone().ok_or_else(|| {
+            DaemonError::Backend(BackendError::HandleNotFound(id.0.to_string()))
+        })?;
+        let backend = self.backend_for(record.config.backend)?.clone();
+
+        Ok((backend, handle))
+    }
+
+    /// Returns (backend, handle) for an instance in Running or Paused state.
+    /// Used by snapshot operations, which require the instance to be running or paused.
+    pub(crate) async fn with_running_instance(
+        &self,
+        id: InstanceId,
+    ) -> Result<(Arc<dyn HypervisorBackend>, andler_core::BackendHandle), DaemonError> {
+        let instances = self.instances.read().await;
+        let record = instances
+            .get(&id)
+            .ok_or(DaemonError::InstanceNotFound(id))?;
+
+        if !matches!(record.state, InstanceState::Running | InstanceState::Paused) {
+            return Err(DaemonError::SnapshotOperationRequiresRunningInstance(
+                id,
+                record.state.clone(),
+            ));
+        }
+
+        let handle = record.handle.clone().ok_or_else(|| {
+            DaemonError::Backend(BackendError::HandleNotFound(id.0.to_string()))
+        })?;
+        let backend = self.backend_for(record.config.backend)?.clone();
+
+        Ok((backend, handle))
     }
 
 

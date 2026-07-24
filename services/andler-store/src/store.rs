@@ -34,6 +34,24 @@ pub struct StoredSnapshot {
 
 impl Store {
 
+    /// Runs `f` on a blocking thread with a lock on the shared connection, propagating
+    /// both task-join failures and `f`'s own errors as a single `StoreError`.
+    fn run_blocking<F, T>(&self, f: F) -> impl std::future::Future<Output = Result<T, StoreError>>
+    where
+        F: FnOnce(&Connection) -> Result<T, StoreError> + Send + 'static,
+        T: Send + 'static,
+    {
+        let conn = self.conn.clone();
+        async move {
+            tokio::task::spawn_blocking(move || {
+                let guard = conn.lock().unwrap_or_else(|e| e.into_inner());
+                f(&guard)
+            })
+            .await?
+        }
+    }
+
+
     pub async fn open(path: impl AsRef<Path>) -> Result<Self, StoreError> {
         let path = path.as_ref().to_path_buf();
         let conn = tokio::task::spawn_blocking(move || -> Result<Connection, StoreError> {
@@ -71,10 +89,8 @@ impl Store {
         let id = cfg.id;
         let config_json = serde_json::to_string(cfg)?;
         let state_json = serde_json::to_string(state)?;
-        let conn = self.conn.clone();
 
-        tokio::task::spawn_blocking(move || -> Result<(), StoreError> {
-            let conn = conn.lock().unwrap_or_else(|e| e.into_inner());
+        self.run_blocking(move |conn| {
             conn.execute(
                 "INSERT OR REPLACE INTO instances (id, config_json, state_json) \
                  VALUES (?1, ?2, ?3)",
@@ -82,9 +98,7 @@ impl Store {
             )?;
             Ok(())
         })
-        .await??;
-
-        Ok(())
+        .await
     }
 
 
@@ -94,17 +108,16 @@ impl Store {
         state: &InstanceState,
     ) -> Result<(), StoreError> {
         let state_json = serde_json::to_string(state)?;
-        let conn = self.conn.clone();
 
-        let rows_changed = tokio::task::spawn_blocking(move || -> Result<usize, StoreError> {
-            let conn = conn.lock().unwrap_or_else(|e| e.into_inner());
-            let rows = conn.execute(
-                "UPDATE instances SET state_json = ?1 WHERE id = ?2",
-                (state_json, id.0.to_string()),
-            )?;
-            Ok(rows)
-        })
-        .await??;
+        let rows_changed = self
+            .run_blocking(move |conn| {
+                let rows = conn.execute(
+                    "UPDATE instances SET state_json = ?1 WHERE id = ?2",
+                    (state_json, id.0.to_string()),
+                )?;
+                Ok(rows)
+            })
+            .await?;
 
         if rows_changed == 0 {
             return Err(StoreError::NotFound(id));
@@ -115,10 +128,7 @@ impl Store {
 
 
     pub async fn load_instance(&self, id: InstanceId) -> Result<StoredInstance, StoreError> {
-        let conn = self.conn.clone();
-
-        tokio::task::spawn_blocking(move || -> Result<StoredInstance, StoreError> {
-            let conn = conn.lock().unwrap_or_else(|e| e.into_inner());
+        self.run_blocking(move |conn| {
             let row = conn
                 .query_row(
                     "SELECT config_json, state_json FROM instances WHERE id = ?1",
@@ -136,15 +146,12 @@ impl Store {
 
             row_to_stored_instance(row)
         })
-        .await?
+        .await
     }
 
 
     pub async fn load_all(&self) -> Result<Vec<StoredInstance>, StoreError> {
-        let conn = self.conn.clone();
-
-        tokio::task::spawn_blocking(move || -> Result<Vec<StoredInstance>, StoreError> {
-            let conn = conn.lock().unwrap_or_else(|e| e.into_inner());
+        self.run_blocking(move |conn| {
             let mut stmt = conn.prepare("SELECT config_json, state_json FROM instances")?;
             let rows = stmt.query_map([], |row| {
                 let config_json: String = row.get(0)?;
@@ -158,21 +165,16 @@ impl Store {
             }
             Ok(result)
         })
-        .await?
+        .await
     }
 
 
     pub async fn delete_instance(&self, id: InstanceId) -> Result<(), StoreError> {
-        let conn = self.conn.clone();
-
-        tokio::task::spawn_blocking(move || -> Result<(), StoreError> {
-            let conn = conn.lock().unwrap_or_else(|e| e.into_inner());
+        self.run_blocking(move |conn| {
             conn.execute("DELETE FROM instances WHERE id = ?1", [id.0.to_string()])?;
             Ok(())
         })
-        .await??;
-
-        Ok(())
+        .await
     }
 
 
@@ -183,10 +185,8 @@ impl Store {
         let tag = snapshot.tag.clone();
         let description = snapshot.description.clone();
         let created_at = snapshot.created_at.clone();
-        let conn = self.conn.clone();
 
-        tokio::task::spawn_blocking(move || -> Result<(), StoreError> {
-            let conn = conn.lock().unwrap_or_else(|e| e.into_inner());
+        self.run_blocking(move |conn| {
             conn.execute(
                 "INSERT OR REPLACE INTO snapshots (id, instance_id, tag, description, created_at) \
                  VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -194,9 +194,7 @@ impl Store {
             )?;
             Ok(())
         })
-        .await??;
-
-        Ok(())
+        .await
     }
 
 
@@ -205,27 +203,13 @@ impl Store {
         instance_id: InstanceId,
     ) -> Result<Vec<StoredSnapshot>, StoreError> {
         let instance_id_str = instance_id.0.to_string();
-        let conn = self.conn.clone();
 
-        tokio::task::spawn_blocking(move || -> Result<Vec<StoredSnapshot>, StoreError> {
-            let conn = conn.lock().unwrap_or_else(|e| e.into_inner());
+        self.run_blocking(move |conn| {
             let mut stmt = conn.prepare(
                 "SELECT id, instance_id, tag, description, created_at \
                  FROM snapshots WHERE instance_id = ?1 ORDER BY created_at",
             )?;
-            let rows = stmt.query_map([instance_id_str], |row| {
-                Ok(StoredSnapshot {
-                    id: uuid::Uuid::parse_str(&row.get::<_, String>(0)?)
-                        .map_err(|e| rusqlite::Error::InvalidParameterName(e.to_string()))?,
-                    instance_id: InstanceId(
-                        uuid::Uuid::parse_str(&row.get::<_, String>(1)?)
-                            .map_err(|e| rusqlite::Error::InvalidParameterName(e.to_string()))?,
-                    ),
-                    tag: row.get(2)?,
-                    description: row.get(3)?,
-                    created_at: row.get(4)?,
-                })
-            })?;
+            let rows = stmt.query_map([instance_id_str], row_to_stored_snapshot)?;
 
             let mut result = Vec::new();
             for row in rows {
@@ -233,7 +217,7 @@ impl Store {
             }
             Ok(result)
         })
-        .await?
+        .await
     }
 
 
@@ -244,27 +228,13 @@ impl Store {
     ) -> Result<Option<StoredSnapshot>, StoreError> {
         let instance_id_str = instance_id.0.to_string();
         let tag = tag.to_string();
-        let conn = self.conn.clone();
 
-        tokio::task::spawn_blocking(move || -> Result<Option<StoredSnapshot>, StoreError> {
-            let conn = conn.lock().unwrap_or_else(|e| e.into_inner());
+        self.run_blocking(move |conn| {
             let result = conn.query_row(
                 "SELECT id, instance_id, tag, description, created_at \
                  FROM snapshots WHERE instance_id = ?1 AND tag = ?2",
                 (instance_id_str, tag),
-                |row| {
-                    Ok(StoredSnapshot {
-                        id: uuid::Uuid::parse_str(&row.get::<_, String>(0)?)
-                            .map_err(|e| rusqlite::Error::InvalidParameterName(e.to_string()))?,
-                        instance_id: InstanceId(
-                            uuid::Uuid::parse_str(&row.get::<_, String>(1)?)
-                                .map_err(|e| rusqlite::Error::InvalidParameterName(e.to_string()))?,
-                        ),
-                        tag: row.get(2)?,
-                        description: row.get(3)?,
-                        created_at: row.get(4)?,
-                    })
-                },
+                row_to_stored_snapshot,
             );
 
             match result {
@@ -273,7 +243,7 @@ impl Store {
                 Err(e) => Err(StoreError::Sqlite(e)),
             }
         })
-        .await?
+        .await
     }
 
 
@@ -284,19 +254,15 @@ impl Store {
     ) -> Result<(), StoreError> {
         let instance_id_str = instance_id.0.to_string();
         let tag = tag.to_string();
-        let conn = self.conn.clone();
 
-        tokio::task::spawn_blocking(move || -> Result<(), StoreError> {
-            let conn = conn.lock().unwrap_or_else(|e| e.into_inner());
+        self.run_blocking(move |conn| {
             conn.execute(
                 "DELETE FROM snapshots WHERE instance_id = ?1 AND tag = ?2",
                 (instance_id_str, tag),
             )?;
             Ok(())
         })
-        .await??;
-
-        Ok(())
+        .await
     }
 }
 
@@ -307,6 +273,21 @@ fn row_to_stored_instance(
     let config: InstanceConfig = serde_json::from_str(&config_json)?;
     let state: InstanceState = serde_json::from_str(&state_json)?;
     Ok(StoredInstance { config, state })
+}
+
+
+fn row_to_stored_snapshot(row: &rusqlite::Row<'_>) -> Result<StoredSnapshot, rusqlite::Error> {
+    Ok(StoredSnapshot {
+        id: uuid::Uuid::parse_str(row.get::<_, String>(0)?.as_str())
+            .map_err(|e| rusqlite::Error::InvalidParameterName(e.to_string()))?,
+        instance_id: InstanceId(
+            uuid::Uuid::parse_str(row.get::<_, String>(1)?.as_str())
+                .map_err(|e| rusqlite::Error::InvalidParameterName(e.to_string()))?,
+        ),
+        tag: row.get(2)?,
+        description: row.get(3)?,
+        created_at: row.get(4)?,
+    })
 }
 
 

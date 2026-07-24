@@ -48,7 +48,7 @@ struct Cli {
 
 
 macro_rules! dual_id_args {
-    ($name:ident) => {
+    ($name:ident $(, $($extra:tt)*)?) => {
         #[derive(Args)]
         pub struct $name {
 
@@ -56,6 +56,8 @@ macro_rules! dual_id_args {
 
             #[arg(long, short)]
             pub instance: Option<String>,
+
+            $($($extra)*)?
         }
 
         impl $name {
@@ -79,66 +81,17 @@ dual_id_args!(PauseArgs);
 dual_id_args!(ResumeArgs);
 dual_id_args!(StatusArgs);
 
-#[derive(Args)]
-pub struct StopArgs {
-
-    pub instance_id: Option<String>,
-
-    #[arg(long, short)]
-    pub instance: Option<String>,
-
+dual_id_args!(StopArgs,
     #[arg(long)]
     pub graceful: bool,
-}
+);
 
-impl StopArgs {
-    pub fn resolve_id(&self) -> Result<&str, clap::Error> {
-        match (&self.instance_id, &self.instance) {
-            (Some(id), None) | (None, Some(id)) => Ok(id),
-            (Some(_), Some(_)) => Err(clap::Error::raw(clap::error::ErrorKind::InvalidValue,
-                "specify instance ID once: positional or --instance",
-            )),
-            (None, None) => Err(clap::Error::raw(clap::error::ErrorKind::InvalidValue,
-                "instance ID required: positional or --instance",
-            )),
-        }
-    }
-}
-
-#[derive(Args)]
-pub struct RemoveArgs {
-
-    pub instance_id: Option<String>,
-
-    #[arg(long, short)]
-    pub instance: Option<String>,
-
+dual_id_args!(RemoveArgs,
     #[arg(long)]
     pub purge: bool,
-}
+);
 
-impl RemoveArgs {
-    pub fn resolve_id(&self) -> Result<&str, clap::Error> {
-        match (&self.instance_id, &self.instance) {
-            (Some(id), None) | (None, Some(id)) => Ok(id),
-            (Some(_), Some(_)) => Err(clap::Error::raw(clap::error::ErrorKind::InvalidValue,
-                "specify instance ID once: positional or --instance",
-            )),
-            (None, None) => Err(clap::Error::raw(clap::error::ErrorKind::InvalidValue,
-                "instance ID required: positional or --instance",
-            )),
-        }
-    }
-}
-
-#[derive(Args)]
-pub struct LogsArgs {
-
-    pub instance_id: Option<String>,
-
-    #[arg(long, short)]
-    pub instance: Option<String>,
-
+dual_id_args!(LogsArgs,
     #[arg(long, value_enum)]
     pub(crate) source: Option<CliLogSource>,
 
@@ -147,50 +100,15 @@ pub struct LogsArgs {
 
     #[arg(long)]
     pub tail: Option<usize>,
-}
+);
 
-impl LogsArgs {
-    pub fn resolve_id(&self) -> Result<&str, clap::Error> {
-        match (&self.instance_id, &self.instance) {
-            (Some(id), None) | (None, Some(id)) => Ok(id),
-            (Some(_), Some(_)) => Err(clap::Error::raw(clap::error::ErrorKind::InvalidValue,
-                "specify instance ID once: positional or --instance",
-            )),
-            (None, None) => Err(clap::Error::raw(clap::error::ErrorKind::InvalidValue,
-                "instance ID required: positional or --instance",
-            )),
-        }
-    }
-}
-
-#[derive(Args)]
-pub struct MetricsArgs {
-
-    pub instance_id: Option<String>,
-
-    #[arg(long, short)]
-    pub instance: Option<String>,
-
+dual_id_args!(MetricsArgs,
     #[arg(long)]
     pub once: bool,
 
     #[arg(long)]
     pub json: bool,
-}
-
-impl MetricsArgs {
-    pub fn resolve_id(&self) -> Result<&str, clap::Error> {
-        match (&self.instance_id, &self.instance) {
-            (Some(id), None) | (None, Some(id)) => Ok(id),
-            (Some(_), Some(_)) => Err(clap::Error::raw(clap::error::ErrorKind::InvalidValue,
-                "specify instance ID once: positional or --instance",
-            )),
-            (None, None) => Err(clap::Error::raw(clap::error::ErrorKind::InvalidValue,
-                "instance ID required: positional or --instance",
-            )),
-        }
-    }
-}
+);
 
 
 #[derive(Subcommand)]

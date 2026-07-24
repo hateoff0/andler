@@ -3,18 +3,18 @@
 use std::path::Path;
 
 use andler_core::{
-    AudioBackend, AudioDevice, CdromBus, DiskFormat, DisplayEngine, InstanceConfig, InstanceKind,
-    NatBackend, PointerMode, RenderBackend,
+    AudioBackend, AudioDevice, BackendError, CdromBus, DiskFormat, DisplayEngine, InstanceConfig,
+    InstanceKind, NatBackend, PointerMode, RenderBackend,
 };
 
 
-pub fn build_args(cfg: &InstanceConfig, qmp_socket_path: &Path) -> Vec<String> {
+pub fn build_args(cfg: &InstanceConfig, qmp_socket_path: &Path) -> Result<Vec<String>, BackendError> {
     let mut args = Vec::new();
     args.extend(name_args(cfg));
     args.extend(machine_and_cpu_args(cfg));
     args.extend(memory_args(cfg));
     args.extend(firmware_args(cfg));
-    args.extend(gpu_display_args(cfg));
+    args.extend(gpu_display_args(cfg)?);
     args.extend(disk_args(cfg));
     args.extend(input_args(cfg));
     args.extend(network_args(cfg));
@@ -22,7 +22,7 @@ pub fn build_args(cfg: &InstanceConfig, qmp_socket_path: &Path) -> Vec<String> {
     args.extend(qmp_args(qmp_socket_path));
     args.push("-boot".to_string());
     args.push("menu=on".to_string());
-    args
+    Ok(args)
 }
 
 
@@ -86,7 +86,7 @@ fn firmware_args(cfg: &InstanceConfig) -> Vec<String> {
 }
 
 
-fn gpu_display_args(cfg: &InstanceConfig) -> Vec<String> {
+fn gpu_display_args(cfg: &InstanceConfig) -> Result<Vec<String>, BackendError> {
     let gpu = &cfg.gpu;
     let mut args = Vec::new();
 
@@ -122,10 +122,10 @@ fn gpu_display_args(cfg: &InstanceConfig) -> Vec<String> {
             ));
         }
         RenderBackend::Passthrough { .. } => {
-            panic!(
-                "RenderBackend::Passthrough reached andler-qemu::cmdline::build_args; \
-                 caller must reject it via RenderBackend::is_implemented() before this point"
-            );
+            return Err(BackendError::NotImplemented {
+                backend: "qemu",
+                operation: "RenderBackend::Passthrough",
+            });
         }
     }
 
@@ -148,7 +148,7 @@ fn gpu_display_args(cfg: &InstanceConfig) -> Vec<String> {
     args.push("-display".to_string());
     args.push(display_str);
 
-    args
+    Ok(args)
 }
 
 
@@ -407,7 +407,7 @@ mod tests {
     fn gpu_display_args_match_start_sh_for_venus() {
         let cfg = start_sh_equivalent_config();
         assert_eq!(
-            gpu_display_args(&cfg),
+            gpu_display_args(&cfg).unwrap(),
             vec![
                 "-vga",
                 "none",
@@ -423,7 +423,7 @@ mod tests {
     fn gpu_display_args_for_cpu_backend_uses_vga_std() {
         let mut cfg = start_sh_equivalent_config();
         cfg.gpu.render_backend = RenderBackend::Cpu;
-        let args = gpu_display_args(&cfg);
+        let args = gpu_display_args(&cfg).unwrap();
         assert_eq!(&args[0..2], &["-vga".to_string(), "std".to_string()]);
         assert!(!args.iter().any(|a| a.contains("virtio-gpu")));
     }
@@ -432,7 +432,7 @@ mod tests {
     fn gpu_display_args_for_virtio_gpu_has_no_gl_context() {
         let mut cfg = start_sh_equivalent_config();
         cfg.gpu.render_backend = RenderBackend::VirtioGpu;
-        let args = gpu_display_args(&cfg);
+        let args = gpu_display_args(&cfg).unwrap();
         assert!(args.contains(&"virtio-gpu-pci".to_string()));
         assert!(!args.iter().any(|a| a.contains("venus")));
     }
@@ -441,7 +441,7 @@ mod tests {
     fn gpu_display_args_for_none_display_engine_uses_plain_display_none() {
         let mut cfg = start_sh_equivalent_config();
         cfg.display.display_engine = DisplayEngine::None;
-        let args = gpu_display_args(&cfg);
+        let args = gpu_display_args(&cfg).unwrap();
 
         let display_idx = args
             .iter()
@@ -454,7 +454,7 @@ mod tests {
     fn gpu_display_args_for_gtk_includes_native_clipboard() {
         let mut cfg = start_sh_equivalent_config();
         cfg.display.display_engine = DisplayEngine::Gtk;
-        let args = gpu_display_args(&cfg);
+        let args = gpu_display_args(&cfg).unwrap();
         let display_idx = args
             .iter()
             .position(|a| a == "-display")
@@ -463,13 +463,13 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "Passthrough")]
-    fn gpu_display_args_panics_on_passthrough() {
+    fn gpu_display_args_rejects_passthrough_as_not_implemented() {
         let mut cfg = start_sh_equivalent_config();
         cfg.gpu.render_backend = RenderBackend::Passthrough {
             gpu_pci_id: "0000:01:00.0".to_string(),
         };
-        let _ = gpu_display_args(&cfg);
+        let err = gpu_display_args(&cfg).unwrap_err();
+        assert!(matches!(err, BackendError::NotImplemented { .. }));
     }
 
     #[test]
@@ -673,7 +673,7 @@ mod tests {
     fn build_args_ends_with_boot_menu() {
         let cfg = start_sh_equivalent_config();
         let qmp_path = PathBuf::from("/tmp/andler/linux/qmp.sock");
-        let args = build_args(&cfg, &qmp_path);
+        let args = build_args(&cfg, &qmp_path).unwrap();
         assert_eq!(&args[args.len() - 2..], &["-boot".to_string(), "menu=on".to_string()]);
     }
 
@@ -681,7 +681,7 @@ mod tests {
     fn build_args_contains_all_blocks_for_start_sh_equivalent() {
         let cfg = start_sh_equivalent_config();
         let qmp_path = PathBuf::from("/tmp/andler/linux/qmp.sock");
-        let args = build_args(&cfg, &qmp_path);
+        let args = build_args(&cfg, &qmp_path).unwrap();
         let joined = args.join(" ");
         for expected_fragment in [
             "q35,accel=kvm,usb=on",

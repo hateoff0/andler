@@ -333,7 +333,7 @@ impl HypervisorBackend for QemuBackend {
 
         let _ = tokio::fs::remove_file(&qmp_socket_path).await;
 
-        let args = cmdline::build_args(cfg, &qmp_socket_path);
+        let args = cmdline::build_args(cfg, &qmp_socket_path)?;
 
         let log_file_path = cfg
             .disk

@@ -122,6 +122,17 @@ cargo fmt --all -- --check
 cargo clippy --workspace -- -D warnings
 ```
 
+### Pre-Merge Verification (Mandatory)
+
+**`cargo build --workspace` must be run and must succeed before any change is considered done.** This is not optional and not implied by "the code looks right." Broken, non-compiling code has previously been committed to this repo and stayed broken across multiple commits because nobody ran a build — treat that as the standard this rule exists to prevent.
+
+If the working environment cannot run a full build (e.g. no network access to crates.io, a `Cargo.lock` version newer than the available `cargo`, missing `protoc`), that is not a reason to skip verification silently:
+1. Say explicitly that a build could not be performed and why.
+2. Fall back to a manual, line-by-line trace of every call site touched: function signatures, struct/enum literal shapes (checked against their actual `struct`/`enum` definition, never assumed from a variable name), imports, and every caller of anything whose signature changed.
+3. Ask for (or clearly flag the need for) a real `cargo build --workspace && cargo test --workspace` run before the change is trusted.
+
+Never assume a struct or enum's shape (field names, tuple vs. struct variant, etc.) from how you'd expect it to look — open the actual definition and check.
+
 ## Code Conventions & Common Patterns
 
 ### Error Handling
@@ -181,6 +192,17 @@ cargo clippy --workspace -- -D warnings
 - `default_backends()` function ensures consistent registry across constructors
 - `Option<Store>` — persistence is opt-in, not mandatory
 
+## Refactoring Discipline
+
+Rules that exist because violating them has produced real bugs in this repo:
+
+- **"No behavioral change" is a claim to verify, not assert.** Before calling a refactor purely structural, check whether any existing test's *assertion* (not just its call syntax) would need to change. If a test currently asserts one error variant and the refactor would make it assert a different one, that is a behavior change — say so explicitly, don't fold it into the diff quietly.
+- **A test that pins a bug is still a bug.** If a test asserts on something documented as a known limitation (e.g. "flat string search matches nested field first"), fixing the underlying issue is expected to break that specific test. Rewrite the test to assert the *correct* behavior — do not preserve the old assertion just to keep the diff green, and do not silently leave the bug in place to avoid touching the test.
+- **Shared helpers must have identical preconditions across all call sites, not just identical code shape.** Two functions can look byte-for-byte identical while relying on different state guarantees from their callers (e.g. one caller reachable from a "not yet started" state, another only reachable once running). Before merging duplicated blocks into one helper, check what state/error each call site is exercised under in its tests — if they differ, either don't merge, or split into a smaller shared helper plus a stricter wrapper.
+- **`macro_rules!` fragment specifiers are not interchangeable.** `item` matches top-level items (fn, struct, impl, ...) — it does **not** match a bare struct field like `#[arg(long)] pub foo: bool,`. Use `tt` (token tree) repetition to splice arbitrary field-like syntax into a struct body.
+- **Never guess a struct/enum's exact shape.** Check the real definition before writing a literal that constructs it (tuple variant vs. struct variant, exact field names). Getting this wrong is a compile error, not a style nit, and it's easy to miss when skimming.
+- **Adding a new dependency**: check how other crates in the workspace already declare that dependency before deciding between `[workspace.dependencies]` and a direct per-crate version — match existing convention rather than introducing a second pattern for the same crate.
+
 ## Important Files
 
 ### Entry Points
@@ -219,7 +241,7 @@ cargo clippy --workspace -- -D warnings
 - `daemon/src/daemon/snapshot_ops.rs` — snapshot CRUD via QEMU job API
 - `daemon/src/daemon/query_ops.rs` — status, list, metrics streaming
 - `daemon/src/service.rs` — `DaemonService` (thin gRPC wrapper)
-- `daemon/src/grpc_roundtrip_test.rs` — 24 integration tests (real TCP)
+- `daemon/src/grpc_roundtrip_test.rs` — 28 integration tests (real TCP)
 
 ### CLI Commands
 
@@ -280,7 +302,7 @@ cargo clippy --workspace -- -D warnings
 | `andler-firmware` | 48 | 0 |
 | `andler-store` | 19 | 0 |
 | `andler-rpc` | 44 | 0 |
-| `andler-daemon` | 73+ | 24 (gRPC round-trip) |
+| `andler-daemon` | 73+ | 28 (gRPC round-trip) |
 | `andler-cli` | 91 | 0 |
 
 ### Running Tests

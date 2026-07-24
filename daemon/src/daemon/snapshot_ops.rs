@@ -1,7 +1,7 @@
 use super::Daemon;
 use super::error::DaemonError;
 use super::types::{SnapshotRecord};
-use andler_core::{BackendError, InstanceId, InstanceState};
+use andler_core::InstanceId;
 
 
 const MAX_SNAPSHOTS_PER_INSTANCE: usize = 20;
@@ -15,31 +15,14 @@ impl Daemon {
         description: Option<String>,
         timeout_secs: Option<u64>,
     ) -> Result<SnapshotRecord, DaemonError> {
-        let (backend, handle, disk_path, memory_size_bytes) = {
+        let (backend, handle) = self.with_running_instance(id).await?;
+
+        let (disk_path, memory_size_bytes) = {
             let instances = self.instances.read().await;
             let record = instances
                 .get(&id)
                 .ok_or(DaemonError::InstanceNotFound(id))?;
-
-            let snapshottable = matches!(
-                record.state,
-                InstanceState::Running | InstanceState::Paused
-            );
-            if !snapshottable {
-                return Err(DaemonError::SnapshotOperationRequiresRunningInstance(
-                    id,
-                    record.state.clone(),
-                ));
-            }
-
-            let handle = record
-                .handle
-                .clone()
-                .ok_or_else(|| DaemonError::Backend(BackendError::HandleNotFound(id.0.to_string())))?;
-
             (
-                self.backend_for(record.config.backend)?.clone(),
-                handle,
                 record.config.disk.path.clone(),
                 record.config.memory.size_bytes,
             )
@@ -85,33 +68,7 @@ impl Daemon {
         tag: String,
         timeout_secs: Option<u64>,
     ) -> Result<(), DaemonError> {
-        let (backend, handle) = {
-            let instances = self.instances.read().await;
-            let record = instances
-                .get(&id)
-                .ok_or(DaemonError::InstanceNotFound(id))?;
-
-            let running = matches!(
-                record.state,
-                InstanceState::Running | InstanceState::Paused
-            );
-            if !running {
-                return Err(DaemonError::SnapshotOperationRequiresRunningInstance(
-                    id,
-                    record.state.clone(),
-                ));
-            }
-
-            let handle = record
-                .handle
-                .clone()
-                .ok_or_else(|| DaemonError::Backend(BackendError::HandleNotFound(id.0.to_string())))?;
-
-            (
-                self.backend_for(record.config.backend)?.clone(),
-                handle,
-            )
-        };
+        let (backend, handle) = self.with_running_instance(id).await?;
 
         let timeout = timeout_secs.map(std::time::Duration::from_secs);
         backend.snapshot_restore(&handle, &tag, timeout).await?;
@@ -125,33 +82,7 @@ impl Daemon {
         tag: String,
         timeout_secs: Option<u64>,
     ) -> Result<(), DaemonError> {
-        let (backend, handle) = {
-            let instances = self.instances.read().await;
-            let record = instances
-                .get(&id)
-                .ok_or(DaemonError::InstanceNotFound(id))?;
-
-            let running = matches!(
-                record.state,
-                InstanceState::Running | InstanceState::Paused
-            );
-            if !running {
-                return Err(DaemonError::SnapshotOperationRequiresRunningInstance(
-                    id,
-                    record.state.clone(),
-                ));
-            }
-
-            let handle = record
-                .handle
-                .clone()
-                .ok_or_else(|| DaemonError::Backend(BackendError::HandleNotFound(id.0.to_string())))?;
-
-            (
-                self.backend_for(record.config.backend)?.clone(),
-                handle,
-            )
-        };
+        let (backend, handle) = self.with_running_instance(id).await?;
 
         let timeout = timeout_secs.map(std::time::Duration::from_secs);
         backend.snapshot_delete(&handle, &tag, timeout).await?;

@@ -14,7 +14,7 @@ pub(crate) struct Resolved {
 
 pub fn print_linux_preview(req: &CreateInstanceRequest) -> Result<(), Box<dyn std::error::Error>> {
     let resolved = resolve_linux(req)?;
-    print_preview(&resolved);
+    print_preview(&resolved)?;
     Ok(())
 }
 
@@ -22,7 +22,7 @@ pub fn print_android_preview(
     req: &CreateAndroidInstanceRequest,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let resolved = resolve_android(req)?;
-    print_preview(&resolved);
+    print_preview(&resolved)?;
     Ok(())
 }
 
@@ -128,7 +128,7 @@ fn relocate_fresh_disk(cfg: &mut InstanceConfig, instance_dir: &std::path::Path)
     }
 }
 
-fn print_preview(resolved: &Resolved) {
+fn print_preview(resolved: &Resolved) -> Result<(), Box<dyn std::error::Error>> {
     let Resolved { cfg, instance_dir, ovmf_vars_template } = resolved;
     let ovmf_vars_template = ovmf_vars_template.as_deref();
 
@@ -206,7 +206,7 @@ fn print_preview(resolved: &Resolved) {
     println!();
 
     let qmp_placeholder = instance_dir.join("qmp.sock");
-    let args = andler_qemu::cmdline::build_args(cfg, &qmp_placeholder);
+    let args = andler_qemu::cmdline::build_args(cfg, &qmp_placeholder)?;
     println!("Resolved QEMU command line:");
     println!("  qemu-system-x86_64 \\");
     for chunk in args.chunks(2) {
@@ -218,4 +218,5 @@ fn print_preview(resolved: &Resolved) {
     }
     println!();
     println!("Nothing was created. Remove --dry-run to actually create this VM.");
+    Ok(())
 }
