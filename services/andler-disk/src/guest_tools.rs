@@ -82,7 +82,7 @@ pub fn is_agent_installed(
     let binary = &args[0];
     let cmd_args = &args[1..];
 
-    let output = std::process::Command::new("chroot")
+    let output = nbd::privileged_command("chroot")
         .arg(mount_point)
         .arg(binary)
         .args(cmd_args)
@@ -140,7 +140,7 @@ fn install_agent_offline_blocking(disk_path: &Path, package: &str) -> Result<(),
         PackageManager::Pacman => vec!["-Sy"],
     };
 
-    let _ = std::process::Command::new("chroot")
+    let _ = nbd::privileged_command("chroot")
         .arg(mount_guard.path())
         .arg(pkg_manager.binary_name())
         .args(&update_args)
@@ -152,7 +152,7 @@ fn install_agent_offline_blocking(disk_path: &Path, package: &str) -> Result<(),
     let binary = &install_args[0];
     let cmd_args = &install_args[1..];
 
-    let output = std::process::Command::new("chroot")
+    let output = nbd::privileged_command("chroot")
         .arg(mount_guard.path())
         .arg(binary)
         .args(cmd_args)
@@ -166,7 +166,7 @@ fn install_agent_offline_blocking(disk_path: &Path, package: &str) -> Result<(),
         return Err(DiskError::NbdSetupFailed(format!(
             "package installation failed (exit {}): {}",
             output.status,
-            stderr.trim()
+            nbd::describe_sudo_failure("chroot", stderr.trim())
         )));
     }
 
@@ -216,7 +216,7 @@ fn remove_agent_offline_blocking(disk_path: &Path, package: &str) -> Result<(), 
     let binary = &remove_args[0];
     let cmd_args = &remove_args[1..];
 
-    let output = std::process::Command::new("chroot")
+    let output = nbd::privileged_command("chroot")
         .arg(mount_guard.path())
         .arg(binary)
         .args(cmd_args)
@@ -230,7 +230,7 @@ fn remove_agent_offline_blocking(disk_path: &Path, package: &str) -> Result<(), 
         return Err(DiskError::NbdSetupFailed(format!(
             "package removal failed (exit {}): {}",
             output.status,
-            stderr.trim()
+            nbd::describe_sudo_failure("chroot", stderr.trim())
         )));
     }
 
