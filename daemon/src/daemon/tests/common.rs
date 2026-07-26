@@ -31,6 +31,11 @@ impl Drop for TestTempDir {
 }
 
 pub(crate) fn sample_config() -> InstanceConfig {
+    let disk_path = PathBuf::from("/tmp/test-disk.qcow2");
+    let vars_path = PathBuf::from("/tmp/test-vars.fd");
+    let _ = std::fs::File::create(&disk_path);
+    let _ = std::fs::File::create(&vars_path);
+
     InstanceConfig {
         id: InstanceId::new(),
         name: "test-vm".to_string(),
@@ -41,11 +46,11 @@ pub(crate) fn sample_config() -> InstanceConfig {
         backend: BackendKind::Qemu,
         cpu: CpuConfig::reference_default(),
         memory: MemoryConfig::reference_default(),
-        disk: DiskConfig::reference_default(PathBuf::from("/tmp/test-disk.qcow2")),
+        disk: DiskConfig::reference_default(disk_path),
         display: DisplayConfig::reference_default(),
         gpu: GpuConfig::reference_default(),
         network: NetworkConfig::reference_default(),
-        firmware: FirmwareConfig::reference_default(PathBuf::from("/tmp/test-vars.fd")),
+        firmware: FirmwareConfig::reference_default(vars_path),
         audio: AudioConfig::reference_default(),
         input: InputConfig::reference_default(),
     }

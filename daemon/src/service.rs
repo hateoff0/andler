@@ -46,6 +46,9 @@ impl From<DaemonError> for Status {
             DaemonError::InstanceNotRemovable(_, _) => {
                 Status::failed_precondition(err.to_string())
             }
+            DaemonError::InstanceAlreadyStopped(_, _) => {
+                Status::failed_precondition(err.to_string())
+            }
             DaemonError::InstanceNotClonable(_, _) => Status::failed_precondition(err.to_string()),
             DaemonError::SharedBaseNotSupportedForLinuxVm(_) => {
                 Status::failed_precondition(err.to_string())

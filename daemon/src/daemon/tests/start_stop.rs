@@ -99,6 +99,24 @@ async fn resume_on_unknown_instance_returns_instance_not_found() {
 }
 
 #[tokio::test]
+async fn start_instance_with_missing_disk_file_fails_immediately_not_after_health_check() {
+    let daemon = Daemon::new();
+    let mut cfg = sample_config();
+    cfg.disk.path = std::path::PathBuf::from("/tmp/andler-test-definitely-does-not-exist.qcow2");
+    let id = cfg.id;
+    daemon.create_instance(cfg).await.unwrap();
+
+    let err = daemon.start_instance(id).await.unwrap_err();
+    assert!(matches!(
+        err,
+        DaemonError::Backend(BackendError::Io(ref msg)) if msg.contains("disk file not found")
+    ));
+
+    let status = daemon.status(id).await.unwrap();
+    assert!(matches!(status.state, InstanceState::Error { .. }));
+}
+
+#[tokio::test]
 async fn stop_before_start_returns_handle_not_found() {
     let daemon = Daemon::new();
     let cfg = sample_config();
@@ -110,4 +128,20 @@ async fn stop_before_start_returns_handle_not_found() {
         err,
         DaemonError::Backend(BackendError::HandleNotFound(_))
     ));
+}
+
+#[tokio::test]
+async fn stop_after_crash_returns_already_stopped_not_raw_handle_error() {
+    let daemon = Daemon::new();
+    let cfg = sample_config();
+    let id = cfg.id;
+    daemon.create_instance(cfg).await.unwrap();
+
+    daemon
+        .mark_instance_crashed(id, "process is not running".to_string())
+        .await
+        .unwrap();
+
+    let err = daemon.stop_instance(id, true).await.unwrap_err();
+    assert!(matches!(err, DaemonError::InstanceAlreadyStopped(_, ref reason) if reason == "process is not running"));
 }

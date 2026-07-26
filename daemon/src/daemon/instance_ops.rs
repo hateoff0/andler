@@ -8,6 +8,29 @@ use andler_core::{
     InstanceKind, InstanceState,
 };
 
+/// Checks that the files this instance needs to boot are still present on disk.
+/// Catches the case where the instance directory was deleted or moved outside
+/// andler's knowledge — without this, `spawn()` would fork qemu-system-x86_64
+/// successfully (the OS-level exec succeeds regardless), report the instance as
+/// Running, and only reveal the real failure a health-check cycle later.
+fn validate_instance_files(cfg: &InstanceConfig) -> Result<(), BackendError> {
+    if !cfg.disk.path.exists() {
+        return Err(BackendError::Io(format!(
+            "disk file not found: {} (was the instance directory moved or deleted?)",
+            cfg.disk.path.display()
+        )));
+    }
+
+    if cfg.firmware.enable_uefi && !cfg.firmware.ovmf_vars_path.exists() {
+        return Err(BackendError::Io(format!(
+            "OVMF_VARS file not found: {} (was the instance directory moved or deleted?)",
+            cfg.firmware.ovmf_vars_path.display()
+        )));
+    }
+
+    Ok(())
+}
+
 impl Daemon {
     pub async fn resolve_instance_id(&self, raw: &str) -> Result<InstanceId, DaemonError> {
         if raw.is_empty() {
@@ -57,6 +80,7 @@ impl Daemon {
         }
         self.persist_new_instance(&cfg, &InstanceState::Created).await;
 
+        tracing::info!(instance_id = %id.0, name = %cfg.name, "instance created");
         Ok(id)
     }
 
@@ -110,6 +134,25 @@ impl Daemon {
 
             andler_core::DiskConfig::standalone(disk_path, overlay_size_bytes)
         };
+
+        // The base image's own baked-in default.target is multi-user.target (plain Linux),
+        // since the same image can back both AndroidVm and LinuxVm instances. An AndroidVm
+        // should boot into android.target — set that explicitly on the fresh disk now,
+        // before it's ever started. Best-effort: if this fails (e.g. nbd module not loaded,
+        // or the disk has no real partition table), log it and continue rather than blocking
+        // instance creation entirely — the instance is still usable, just left on whatever
+        // boot mode the base image defaults to, and can be fixed with `andler guest boot-mode`.
+        if let Err(e) =
+            andler_disk::boot_mode::switch_boot_mode(&disk.path, andler_core::AndroidBootMode::Android)
+                .await
+        {
+            tracing::error!(
+                error = %e,
+                "could not set default boot mode to android on new instance disk; \
+                 it will boot into whatever mode the base image defaults to until \
+                 fixed with `andler guest boot-mode <id> android`"
+            );
+        }
 
         let mut cfg = profile.resolve(instance_name, disk, ovmf_vars_path);
         cfg.id = id;
@@ -192,7 +235,10 @@ impl Daemon {
             )
         };
 
-        let spawn_result = backend.spawn(&cfg).await;
+        let spawn_result = match validate_instance_files(&cfg) {
+            Ok(()) => backend.spawn(&cfg).await,
+            Err(e) => Err(e),
+        };
 
         let mut instances = self.instances.write().await;
         let record = instances
@@ -217,6 +263,12 @@ impl Daemon {
         drop(instances);
 
         self.persist_state(id, &final_state).await;
+
+        match &result {
+            Ok(()) => tracing::info!(instance_id = %id.0, "instance started"),
+            Err(err) => tracing::error!(instance_id = %id.0, error = %err, "instance failed to start"),
+        }
+
         result
     }
 
@@ -226,6 +278,10 @@ impl Daemon {
             let record = instances
                 .get_mut(&id)
                 .ok_or(DaemonError::InstanceNotFound(id))?;
+
+            if let InstanceState::Error { message } = &record.state {
+                return Err(DaemonError::InstanceAlreadyStopped(id, message.clone()));
+            }
 
             let handle = record.handle.clone().ok_or_else(|| {
                 DaemonError::Backend(BackendError::HandleNotFound(id.0.to_string()))
@@ -265,6 +321,11 @@ impl Daemon {
 
         self.persist_state(id, &final_state).await;
 
+        match &result {
+            Ok(()) => tracing::info!(instance_id = %id.0, graceful, "instance stopped"),
+            Err(err) => tracing::error!(instance_id = %id.0, error = %err, "instance failed to stop"),
+        }
+
         if result.is_ok() {
             spawn_compact_on_shutdown(id, disk);
         }
@@ -274,12 +335,22 @@ impl Daemon {
 
     pub async fn pause_instance(&self, id: InstanceId) -> Result<(), DaemonError> {
         let (backend, handle) = self.backend_and_handle(id).await?;
-        backend.pause(&handle).await.map_err(DaemonError::Backend)
+        let result = backend.pause(&handle).await.map_err(DaemonError::Backend);
+        match &result {
+            Ok(()) => tracing::info!(instance_id = %id.0, "instance paused"),
+            Err(err) => tracing::error!(instance_id = %id.0, error = %err, "instance failed to pause"),
+        }
+        result
     }
 
     pub async fn resume_instance(&self, id: InstanceId) -> Result<(), DaemonError> {
         let (backend, handle) = self.backend_and_handle(id).await?;
-        backend.resume(&handle).await.map_err(DaemonError::Backend)
+        let result = backend.resume(&handle).await.map_err(DaemonError::Backend);
+        match &result {
+            Ok(()) => tracing::info!(instance_id = %id.0, "instance resumed"),
+            Err(err) => tracing::error!(instance_id = %id.0, error = %err, "instance failed to resume"),
+        }
+        result
     }
 
     pub async fn remove_instance(&self, id: InstanceId, purge: bool) -> Result<(), DaemonError> {
@@ -323,6 +394,7 @@ impl Daemon {
             }
         }
 
+        tracing::info!(instance_id = %id.0, purge, "instance removed");
         Ok(())
     }
 

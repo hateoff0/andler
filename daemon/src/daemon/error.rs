@@ -53,6 +53,13 @@ pub enum DaemonError {
     InstanceNotClonable(InstanceId, InstanceState),
 
 
+    #[error(
+        "instance {0:?} is not running (it already stopped: {1}); nothing to do — \
+         see `andler status` for details, or `andler start` to run it again"
+    )]
+    InstanceAlreadyStopped(InstanceId, String),
+
+
     #[error("shared-base clone is not supported for LinuxVm: {0:?}")]
     SharedBaseNotSupportedForLinuxVm(InstanceId),
 
