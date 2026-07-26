@@ -1,14 +1,9 @@
-
-
 use std::path::{Path, PathBuf};
-
 use crate::error::DiskError;
-
 
 fn mount_dir_base() -> PathBuf {
     andler_core::paths::runtime_dir().join("andler-mounts")
 }
-
 
 /// Builds a `sudo -n <program> ...` command. Connecting/disconnecting nbd devices and
 /// mounting/unmounting their partitions needs root (opening `/dev/nbd*` and qemu-nbd's
@@ -347,14 +342,24 @@ pub fn wait_for_partitions(nbd_dev: &Path) -> Result<Vec<PathBuf>, DiskError> {
 }
 
 
+/// Picks the ext4 root filesystem partition out of an nbd device's partitions.
+///
+/// `build-disk.sh` always lays the disk out the same way (see its own `Disk layout`
+/// doc comment): partition 1 is the vfat ESP (`ANDLER-ESP`, mounted at `/efi`),
+/// and partition 2 is the ext4 root (`andler-root`, mounted at `/`) — sized as the
+/// rest of the disk, i.e. always the *last* partition, however many there are.
+///
+/// `wait_for_partitions` returns partitions sorted by device name (`p1`, `p2`, ...),
+/// so the root filesystem is always `partitions.last()`, never `partitions[0]` — that
+/// would be the ESP itself. Mounting the ESP looks superficially fine (mount succeeds,
+/// there's a filesystem there) but every guest-filesystem path built on top of it
+/// (boot mode switch/read, ARM translator install, `andler guest install`) then fails
+/// to find ordinary root paths like `/etc/systemd/system/...`, since the ESP only
+/// holds the UKI/EFI boot files, not the OS.
 pub fn find_root_partition(partitions: &[PathBuf]) -> Result<PathBuf, DiskError> {
-    if partitions.is_empty() {
-        return Err(DiskError::NbdSetupFailed(
-            "no partitions found in image".to_string(),
-        ));
-    }
-
-    Ok(partitions[0].clone())
+    partitions.last().cloned().ok_or_else(|| {
+        DiskError::NbdSetupFailed("no partitions found in image".to_string())
+    })
 }
 
 
@@ -424,5 +429,22 @@ mod tests {
         let a = unique_mount_name();
         let b = unique_mount_name();
         assert_ne!(a, b);
+    }
+
+    #[test]
+    fn find_root_partition_picks_the_last_partition_not_the_esp() {
+        // Regression test: partitions[0] is /dev/nbd0p1, the ESP created by
+        // build-disk.sh — the ext4 root is always the last partition (p2 today,
+        // but this must keep working if a layout ever grows a 3rd partition).
+        let partitions = vec![PathBuf::from("/dev/nbd0p1"), PathBuf::from("/dev/nbd0p2")];
+        assert_eq!(
+            find_root_partition(&partitions).unwrap(),
+            PathBuf::from("/dev/nbd0p2")
+        );
+    }
+
+    #[test]
+    fn find_root_partition_errors_on_empty_list() {
+        assert!(find_root_partition(&[]).is_err());
     }
 }
