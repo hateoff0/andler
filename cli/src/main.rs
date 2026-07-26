@@ -3,6 +3,7 @@
 mod clone;
 mod create;
 mod disk;
+mod doctor;
 mod edit;
 mod guest;
 mod helpers;
@@ -321,6 +322,13 @@ enum Command {
 
     Wizard {},
 
+    Doctor {
+        /// Offer to write missing passwordless-sudo rules to /etc/sudoers.d/andler
+        /// (asks for confirmation and validates with `visudo -c` before writing).
+        #[arg(long)]
+        fix: bool,
+    },
+
     Completions {
 
         shell: clap_complete::Shell,
@@ -590,6 +598,15 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         .or_else(|| std::env::var("ANDLERD_ADDR").ok())
         .unwrap_or_else(|| DEFAULT_DAEMON_ADDR.to_string());
 
+    if let Some(Command::Doctor { fix }) = &cli.command {
+        let all_ok = doctor::run(&addr, *fix).await;
+        return if all_ok {
+            Ok(())
+        } else {
+            Err("some checks failed".into())
+        };
+    }
+
     let mut client = AndlerServiceClient::connect(addr).await?;
 
     match cli.command {
@@ -778,6 +795,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         Some(Command::Guest { action }) => {
             guest::handle(&mut client, action).await?;
         }
+        Some(Command::Doctor { .. }) => unreachable!(),
         Some(Command::Completions { .. }) => unreachable!(),
     }
 

@@ -88,6 +88,7 @@ Default: UUIDs truncated to 8 characters (matching `docker ps`). Use `--full-id`
 |---------|-------------|
 | `andler edit <instance-id>` | Edit instance config in `$VISUAL`/`$EDITOR` as TOML (falls back to `vi`) |
 | `andler wizard` | Launch interactive wizard (default when no subcommand given) |
+| `andler doctor` | Check the local environment (KVM, QEMU, OVMF, nbd, sudoers, andlerd reachability, base images) — read-only, works even if andlerd isn't running |
 | `andler completions <shell>` | Generate shell completion script (bash/zsh/fish) |
 
 ### Disk Management
