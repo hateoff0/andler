@@ -40,7 +40,7 @@ Exit code: 0 if all checks passed, 1 if any failed — scriptable (`andler creat
 - `--linked-overlay`: Link the disk to the base image as a thin overlay instead of making a full independent copy (Android only). Default: off — full copy.
 - `--gapps <true|false>`: Include Google Apps (Android only)
 - `--microg <true|false>`: Include microG (Android only)
-- `--arm-translator <libndk|hibridge>`: ARM translation mode (Android only)
+- `--arm-translator <libndk|libhoudini>`: ARM translation mode (Android only)
 - `--instances-root <path>`: Custom instances root directory (Android only)
 
 | `andler start <instance-id>` | Start an instance |
@@ -255,7 +255,7 @@ backend = "None"
 
 **Path canonicalization**: `InstanceFile::load()` canonicalizes all path fields (relative paths become absolute from the TOML file's directory). Paths are validated and must exist (for required files) or be creatable (for disk paths).
 
-**Legacy field precedence**: For Android VMs with `arm_translator`, the field accepts `libndk` as a legacy alias for the newer `hibridge` implementation. When both `arm_translator = "libndk"` and `arm_translator = "hibridge"` are present, `hibridge` takes precedence.
+**Legacy field precedence**: For Android VMs with `arm_translator`, the field accepts `libndk` as a legacy alias. When `arm_translator = "libndk"` is set, it maps to the Libndk translator. The valid values are `none`, `libndk`, and `libhoudini` — `hibridge` is not a valid value.
 
 ### Tests
 

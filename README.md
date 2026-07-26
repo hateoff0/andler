@@ -283,7 +283,7 @@ andler guest install spice-vdagent <instance-id>
 ```
 andler/
 ├── core/                          Domain types, backend trait, config, FSM
-│   └── andler-core/               ~41 unit tests, no external dependencies
+│   └── andler-core/               ~49 unit tests, no external dependencies
 │       ├── lib.rs                  Re-exports
 │       ├── error.rs                BackendError, FsmError
 │       ├── backend.rs              HypervisorBackend trait, BackendHandle, BackendStatus, ResourceMetrics
@@ -323,7 +323,7 @@ andler/
 │   │                              host-level GPU metrics (AMD/NVIDIA/Intel)
 │   └── andler-rpc/                gRPC protocol + conversions
 │
-├── daemon/                        Background service (~73 unit + 24 integration tests)
+├── daemon/                        Background service (~94 unit + 28 integration tests)
 │   └── src/
 │       ├── main.rs                 andlerd binary (verbosity flags, signal handling)
 │       ├── firmware.rs             OVMF auto-detection
@@ -331,14 +331,14 @@ andler/
 │       ├── grpc_roundtrip_test.rs  Integration tests
 │       └── daemon/
 │           ├── mod.rs              Core orchestration logic (~268 lines)
-│           ├── error.rs            DaemonError enum (20 variants)
+│           ├── error.rs            DaemonError enum (29 variants)
 │           ├── types.rs            InstanceRecord, SnapshotRecord, InstanceDirGuard
 │           ├── instance_ops.rs     create/start/stop/pause/resume/remove, resolve_instance_id
 │           ├── clone_ops.rs        clone_instance, export, find_live_clones
 │           ├── snapshot_ops.rs     create/restore/delete/list snapshots
 │           ├── query_ops.rs        status, list, get_config, update_instance_config, stream
 │           ├── health_ops.rs       health check, mark_instance_crashed
-│           └── tests/              ~73 unit tests across 10 modules
+│           └── tests/              ~86 unit tests across 10 modules
 │
 ├── cli/                           Command-line client
 │   └── src/
@@ -378,7 +378,8 @@ All data under `~/.andler/`:
 │       ├── instance.toml       Instance configuration
 │       ├── disk.qcow2          Instance disk (or overlay)
 │       └── VARS.fd             Per-instance OVMF vars copy
-└── images/                     Base images (future)
+└── cache/                      
+    └── base-images/            Base images for Android instances
 ```
 
 ## Building
@@ -418,14 +419,14 @@ docker compose -f docker/docker-compose.yml run --rm e2e
 
 Each crate has its own README with detailed API reference:
 
-- [`core/andler-core/README.md`](core/andler-core/README.md) — Domain types, ~30 public types, ~41 tests
-- [`backends/andler-qemu/README.md`](backends/andler-qemu/README.md) — QEMU backend, ~75 tests
+- [`core/andler-core/README.md`](core/andler-core/README.md) — Domain types, ~30 public types, ~49 tests
+- [`backends/andler-qemu/README.md`](backends/andler-qemu/README.md) — QEMU backend, ~80 tests
 - [`backends/andler-vmm/README.md`](backends/andler-vmm/README.md) — Cloud Hypervisor stub
 - [`services/andler-disk/README.md`](services/andler-disk/README.md) — Disk ops + guest tools provisioning
 - [`services/andler-store/README.md`](services/andler-store/README.md) — SQLite persistence
 - [`services/andler-net/README.md`](services/andler-net/README.md) — Bridge/Isolated/NAT networking via iproute2/nftables
-- [`daemon/README.md`](daemon/README.md) — Daemon orchestration, ~73 unit tests + 24 integration tests
-- [`cli/README.md`](cli/README.md) — CLI commands + TOML parser + wizard, 91 tests
+- [`daemon/README.md`](daemon/README.md) — Daemon orchestration, ~94 unit tests + 28 integration tests
+- [`cli/README.md`](cli/README.md) — CLI commands + TOML parser + wizard, 112 tests
 
 ## Metrics
 
@@ -442,7 +443,7 @@ cpu=12.3%    rss=1.23 GiB   disk_r=45.6 MB/s  disk_w=12.3 MB/s  net_rx=1.2 MB/s 
 | Disk I/O | `/proc/<pid>/io` | read_bytes/write_bytes delta |
 | Network I/O | `/proc/<net/dev>` | Delta-based bytes/sec |
 | VRAM | AMD sysfs / NVIDIA NVML (`nvml-wrapper`) / Intel sysfs | Vendor-specific |
-| GPU Load | AMD sysfs / NVIDIA NVML + nvidia-smi fallback / Intel busyiffies delta | Vendor-specific |
+| GPU Load | AMD sysfs / NVIDIA NVML + nvidia-smi fallback / Intel rc6_residency_ms delta | Vendor-specific |
 
 Polling interval: 1 second. GPU metrics: AMD → NVIDIA → Intel (first found vendor wins).
 

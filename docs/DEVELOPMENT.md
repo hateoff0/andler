@@ -117,7 +117,7 @@ docker compose -f docker/docker-compose.yml run --rm e2e
 
 ### gRPC Round-Trip Tests
 
-`daemon/src/grpc_roundtrip_test.rs` contains 24 tests that verify the full gRPC pipeline:
+`daemon/src/grpc_roundtrip_test.rs` contains 28 tests that verify the full gRPC pipeline:
 
 - Real TCP connections (ephemeral ports)
 - Real protobuf serialization/deserialization
@@ -213,13 +213,13 @@ andler/
 │       ├── main.rs               # Entry point, tonic server setup
 │       ├── daemon/
 │       │   ├── mod.rs            # Daemon struct, constructors, persist helpers (~250 lines)
-│       │   ├── error.rs          # DaemonError enum (20 variants)
+│       │   ├── error.rs          # DaemonError enum (29 variants)
 │       │   ├── types.rs          # InstanceRecord, SnapshotRecord, InstanceDirGuard
 │       │   ├── instance_ops.rs   # create/start/stop/pause/resume/remove + create_linux_instance + resolve_instance_id
 │       │   ├── clone_ops.rs      # clone_instance, export, find_live_clones
 │       │   ├── snapshot_ops.rs   # create/restore/delete/list snapshots
 │       │   ├── query_ops.rs      # status, list, get_config, stream, update_instance_config
-│       │   └── tests/            # 9 test modules, 73+ tests
+│       │   └── tests/            # 10 test modules, 94+ tests
 │       ├── service.rs            # DaemonService (gRPC wrapper)
 │       └── grpc_roundtrip_test.rs # Integration tests
 │
@@ -251,7 +251,7 @@ andler/
 │   ├── DEVELOPMENT.md
 │   ├── API.md
 │   ├── CHANGELOG.md
-│   └── archive/                  # Historical/planned docs
+│   └── archive/                  # Historical/planned docs (may not exist)
 │
 └── scripts/
     ├── andlerd.service           # systemd user unit

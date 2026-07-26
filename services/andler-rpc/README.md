@@ -30,6 +30,8 @@ gRPC protocol definition (`proto/andler.proto`) and generated server/client code
 | `ListGuestPackages` | `InstanceIdRequest` | `ListGuestPackagesResponse` | Unary | List known packages with status |
 | `SwitchArmTranslator` | `SwitchArmTranslatorRequest` | `Empty` | Unary | Switch ARM translation backend for AndroidVm |
 | `SetInstanceConfig` | `SetInstanceConfigRequest` | `Empty` | Unary | Set a single config key-value pair on an instance |
+| `SwitchAndroidBootMode` | `SwitchAndroidBootModeRequest` | `Empty` | Unary | Switch Android boot mode for AndroidVm |
+| `GetAndroidBootMode` | `InstanceIdRequest` | `GetAndroidBootModeResponse` | Unary | Get current Android boot mode |
 
 ## Key Proto Messages
 

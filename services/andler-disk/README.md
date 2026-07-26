@@ -153,11 +153,12 @@ Downloads and caches ARM translator archives (ZIP files) into the arm translator
 
 ### Without `qemu-img` / `/dev/kvm`
 
-- **`qcow2`** (14 tests): JSON field parsing (`parse_json_u64_field`, `parse_json_string_field`, `parse_json_optional_string_field`).
-- **`clone`** (1 test): `shared_base_clone_reports_missing_source_as_io_error`.
-- **`guest_tools`** (9 tests): `detect_package_manager_*` (4 tests), `package_manager_install_args` (1 test), `package_manager_remove_args` (1 test), `check_package_status_offline_*` (2 tests), `known_packages_has_entries` (1 test).
+- **`qcow2`** (21 tests): JSON field parsing (`parse_json_u64_field`, `parse_json_string_field`, `parse_json_optional_string_field`), disk info parsing, edge cases.
+- **`clone`** (4 tests): `shared_base_clone_reports_missing_source_as_io_error`, `linked_cloneCreatesOverlay`, `full_standalone_clone_flattens_chain`, `find_live_clones_returns_empty_for_unlinked`.
+- **`overlay`** (3 tests): `create_overlayucceeds`, `factory_reset_creates_fresh_overlay`, `create_overlay_fails_with_missing_base`.
+- **`boot_mode`** (3 tests): `get_boot_mode_returns_linux_by_default`, `switch_boot_mode_persists`, `switch_boot_mode_noop_when_already_set`.
 - **`diskspace`** (4 tests): `available_bytes_on_temp_dir_is_nonzero`, `available_bytes_resolves_to_nearest_existing_ancestor`, `check_available_space_passes_for_a_tiny_requirement`, `check_available_space_fails_for_an_absurd_requirement`.
-- **`nbd`** (2 tests): `find_free_nbd_device_returns_error_when_no_nbd_module`, `unique_mount_name_is_unique`.
+- **`nbd`** (4 tests): `find_free_nbd_device_returns_error_when_no_nbd_module`, `unique_mount_name_is_unique`, `connect_nbd_returns_guard`, `mount_partition_returns_guard`.
 - **`arm_translator`** (1 test): `detect_current_translator_returns_none_on_empty_dir`.
 - **`translator`** (4 tests): `resolve_ndk_has_links`, `resolve_houdini_has_links`, `resolve_none_has_no_links`, `dir_names`.
 

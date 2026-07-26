@@ -88,8 +88,8 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 - **Signal handling**: SIGINT + SIGTERM graceful shutdown (stops all running instances).
 - **systemd user unit**: `scripts/andlerd.service` with `scripts/install.sh`.
 - **Snapshot limit**: `MAX_SNAPSHOTS_PER_INSTANCE = 20` with `SnapshotLimitExceeded` error.
-- **New error variants**: `SnapshotLimitExceeded`, `MalformedInstanceRef`, `ConfigIdMismatch`, `ConfigKindChanged`, `ConfigDiskPathChanged` (DaemonError: 20 variants total).
-- **gRPC round-trip tests**: 24 integration tests with real TCP connections.
+- **New error variants**: `SnapshotLimitExceeded`, `MalformedInstanceRef`, `ConfigIdMismatch`, `ConfigKindChanged`, `ConfigDiskPathChanged` (DaemonError: 29 variants total).
+- **gRPC round-trip tests**: 28 integration tests with real TCP connections.
 
 #### CLI
 
@@ -131,7 +131,7 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 - **Database filename**: `state.db` → **`andlerd.db`**.
 - **Snapshot state requirements**: `restore`/`delete` now require **Running/Paused** instance (not terminal states) — QMP commands need live QEMU process.
 - **`--libndk` → `--arm-translator`**: Boolean flag replaced by enum: `none`, `libndk`, `libhoudini`.
-- **DaemonError expanded**: 14 → **20 variants** (added SnapshotLimitExceeded, MalformedInstanceRef, ConfigIdMismatch, ConfigKindChanged, ConfigDiskPathChanged, EmptyInstanceRef, InstanceRefNotFound, AmbiguousInstanceId).
+- **DaemonError expanded**: 14 → **29 variants** (added SnapshotLimitExceeded, MalformedInstanceRef, ConfigIdMismatch, ConfigKindChanged, ConfigDiskPathChanged, EmptyInstanceRef, InstanceRefNotFound, AmbiguousInstanceId, and more).
 - **Environment variables**: Added `ANDLERD_LISTEN_ADDR` (daemon listen), `ANDLERD_OVMF_CODE`/`ANDLERD_OVMF_VARS` (firmware override), `ANDLERD_LOG_FORMAT` (json output). `ANDLERD_ADDR` remains for CLI client.
 - **`stop --graceful` semantics**: `--graceful` sends SIGTERM and waits for graceful ACPI shutdown. Default (without flag) is force kill via SIGKILL.
 - **`purge_instance_files`**: Uses `remove_dir_all` for UUID-pattern instance directories (was `remove_dir`, silently failed on non-empty).

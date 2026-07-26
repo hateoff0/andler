@@ -36,7 +36,7 @@ andler-core          (no workspace dependencies — bottom layer)
 The foundation crate. Defines all public types that other crates depend on.
 
 **Key types:**
-- `HypervisorBackend` trait: The contract for all hypervisor implementations (16 methods)
+- `HypervisorBackend` trait: The contract for all hypervisor implementations (13 methods)
 - `InstanceConfig`: 9-section configuration struct (disk, cpu, memory, display, gpu, network, audio, input, firmware)
 - `InstanceState` / `InstanceEvent`: FSM with 7 states and 7 events
 - `ResourceMetrics`: All-Optional metrics struct (CPU, RAM, disk I/O, net I/O, GPU)
@@ -45,7 +45,7 @@ The foundation crate. Defines all public types that other crates depend on.
 - `BackendError` / `FsmError`: Domain error types
 - `paths`: Unified path resolution (`runtime_dir()`, `current_uid()`, `ensure_private_dir()`)
 
-**43 unit tests**, fully testable without QEMU or `/dev/kvm`.
+**49 unit tests**, fully testable without QEMU or `/dev/kvm`.
 
 **Must not depend on any other workspace crate.**
 
@@ -75,7 +75,7 @@ Wrapper around `qemu-img` for disk creation/cloning/resizing, plus guest tools o
 - `overlay.rs`: Android-specific overlay disk creation + factory reset
 - `clone.rs`: 3 clone modes (linked, full-standalone, shared-base)
 
-**34 unit tests** + 8 integration tests (`#[ignore]`).
+**53 unit tests**.
 
 ### `services/andler-net` — Network Configuration
 
@@ -93,7 +93,7 @@ Standalone crate for firmware discovery, hardware auto-detection, and GPU metric
 - `metrics/`: GPU metrics collection (NVIDIA via NVML + nvidia-smi fallback, AMD via sysfs, Intel via i915 delta)
 - `HardwareDefaults` struct: `detect_all()` returns detected hardware for wizard defaults
 
-**48 tests** across `detect/` and `metrics/`.
+**47 tests** across `detect/` and `metrics/`.
 
 ### `services/andler-store` — SQLite Persistence
 
@@ -103,13 +103,13 @@ Two-table SQLite store with JSON columns.
 - `instances(id TEXT PRIMARY KEY, config_json TEXT, state_json TEXT)`
 - `snapshots(id, instance_id, tag, description, created_at)` with `ON DELETE CASCADE`
 
-**19 tests** using in-memory SQLite.
+**20 tests** using in-memory SQLite.
 
 ### `services/andler-rpc` — gRPC Protocol
 
 Protobuf definitions and generated code via `tonic`/`prost`.
 
-**20 RPCs** covering instance lifecycle, monitoring, snapshots, clone/export.
+**26 RPCs** covering instance lifecycle, monitoring, snapshots, clone/export.
 **44 conversion tests** for bidirectional proto↔domain type mapping.
 
 ### `daemon/` — Background Service
@@ -124,9 +124,9 @@ Orchestrates all operations. Holds backend registry, instance state, optional pe
 - `resolve_instance_id()` — Docker-style partial ID resolution (8-char hex prefix)
 - `update_instance_config()` — Edit config via gRPC, protects id/kind/disk.path
 - `DaemonService` — thin gRPC wrapper, one method per Daemon method
-- Error mapping: `DaemonError` (28 variants) → gRPC status codes
+- Error mapping: `DaemonError` (29 variants) → gRPC status codes
 
-**73+ unit tests** + **24 gRPC round-trip tests** (real TCP).
+**94 unit tests** + **28 gRPC round-trip tests** (real TCP).
 
 ### `cli/` — Command-Line Interface
 
@@ -141,7 +141,7 @@ Thin gRPC client. Each subcommand = one gRPC request + print response.
 - Shell completions (bash, zsh, fish)
 - Colored status output with `IsTerminal` gating
 - `doctor` command for environment diagnostics and auto-fix
-**91 tests** (TOML parsing, helpers, create, wizard, status).
+**112 tests** (TOML parsing, helpers, create, wizard, status).
 
 ## Data Flow
 

@@ -72,7 +72,7 @@ Any method not implemented by a specific backend must return `BackendError::NotI
 | `net_tx_bytes_per_sec` | `Option<u64>` | `/proc/<net/dev>` delta |
 | `vram_used_bytes` | `Option<u64>` | AMD sysfs / NVIDIA NVML + nvidia-smi / Intel sysfs |
 | `vram_total_bytes` | `Option<u64>` | AMD sysfs / NVIDIA NVML + nvidia-smi / Intel sysfs |
-| `gpu_load_percent` | `Option<f32>` | AMD sysfs / NVIDIA NVML + nvidia-smi / Intel busyiffies delta |
+| `gpu_load_percent` | `Option<f32>` | AMD sysfs / NVIDIA NVML + nvidia-smi / Intel rc6_residency_ms delta |
 
 **`SnapshotInfo`**: `tag` (user-facing identifier), `id` (backend identifier), `created_at` (format is backend-specific).
 
@@ -219,19 +219,19 @@ Each sub-config has a `reference_default()` method that produces sensible defaul
 
 ## Tests
 
-~41 unit tests across 15 test modules. Fully testable without QEMU or `/dev/kvm` — this is the whole point of extracting the domain into a separate crate. If a test in `andler-core` requires a real QEMU process, it's in the wrong crate.
+49 unit tests across 16 test modules. Fully testable without QEMU or `/dev/kvm` — this is the whole point of extracting the domain into a separate crate. If a test in `andler-core` requires a real QEMU process, it's in the wrong crate.
 
 | Module | Tests |
 |--------|-------|
 | `paths` | `andler_home_respects_env_override`, `andler_home_ignores_empty_env_override`, `derived_paths_are_nested_under_andler_home`, `runtime_dir_respects_xdg_runtime_dir_env`, `runtime_dir_ignores_empty_xdg_runtime_dir_env`, `ensure_private_dir_sync_creates_dir_with_0700`, `ensure_private_dir_async_creates_dir_with_0700` |
 | `clone` | `clone_mode_variants_are_distinct` |
-| `fsm` | `happy_path_start_pause_resume_stop`, `cannot_resume_from_running`, `cannot_pause_from_created`, `fail_is_reachable_from_every_active_state`, `terminal_states_accept_only_start_and_reject_everything_else` |
-| `android_profile` | `cache_key_differs_on_arm_translator`, `cache_key_differs_on_gapps`, `resolve_produces_overlay_disk_pointing_at_base_image` |
+| `fsm` | `happy_path_start_pause_resume_stop`, `cannot_resume_from_running`, `cannot_pause_from_created`, `fail_is_reachable_from_every_active_state`, `terminal_states_accept_only_start`, `started_from_stopped_or_error_goes_to_starting` |
+| `android_profile` | `cache_key_differs_on_arm_translator`, `cache_key_differs_on_gapps`, `resolve_produces_overlay_disk_pointing_at_base_image`, `android_version_round_trips_through_serde` |
 | `config::instance` | `instance_id_is_unique`, `config_round_trips_through_serde_json` |
 | `config::cpu` | `reference_default_matches_start_sh` |
 | `config::memory` | `reference_default_matches_start_sh` |
 | `config::gpu` | `passthrough_is_not_implemented`, `venus_and_friends_are_implemented`, `reference_default_matches_start_sh` |
-| `config::disk` | `reference_default_is_256_gib_thin_provisioned_qcow2`, `overlay_points_at_base_image` |
+| `config::disk` | `reference_default_is_256_gib_thin_provisioned_qcow2`, `overlay_points_at_base_image`, `base_image_path_is_optional` |
 | `config::display` | `reference_default_uses_sdl`, `none_display_engine_round_trips_through_serde_json` |
 | `config::network` | `reference_default_matches_start_sh`, `nat_backend_deserializes_with_default_when_missing` |
 | `config::firmware` | `reference_default_has_expected_structure`, `with_code_sets_both_paths` |

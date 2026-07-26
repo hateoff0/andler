@@ -478,10 +478,14 @@ Defined in `services/andler-rpc/proto/andler.proto`. Uses `tonic`/`prost` for Ru
 | `CreateSnapshot` | `CreateSnapshotRequest` | `CreateSnapshotResponse` | Unary |
 | `RestoreSnapshot` | `RestoreSnapshotRequest` | `Empty` | Unary |
 | `DeleteSnapshot` | `DeleteSnapshotRequest` | `Empty` | Unary |
-| `ListSnapshots` | `ListSnapshotsRequest` | `ListSnapshotsResponse` | Unary |
+| `ListSnapshots` | `InstanceIdRequest` | `ListSnapshotsResponse` | Unary |
 | `InstallGuestAgent` | `InstallGuestAgentRequest` | `Empty` | Unary |
 | `RemoveGuestAgent` | `RemoveGuestAgentRequest` | `Empty` | Unary |
 | `ListGuestPackages` | `InstanceIdRequest` | `ListGuestPackagesResponse` | Unary |
+| `SwitchArmTranslator` | `SwitchArmTranslatorRequest` | `Empty` | Unary |
+| `SetInstanceConfig` | `SetInstanceConfigRequest` | `Empty` | Unary |
+| `SwitchAndroidBootMode` | `SwitchAndroidBootModeRequest` | `Empty` | Unary |
+| `GetAndroidBootMode` | `InstanceIdRequest` | `GetAndroidBootModeResponse` | Unary |
 
 ### Error Codes
 
@@ -540,9 +544,19 @@ message CreateInstanceRequest {
 
 ```protobuf
 message UpdateInstanceConfigRequest {
-  string instance_id = 1;
-  optional string name = 2;
-  optional uint32 disk_size_gib = 3;
+  string instance_ref = 1;
+  string name = 2;
+  InstanceKind kind = 3;
+  BackendKind backend = 4;
+  CpuConfig cpu = 5;
+  MemoryConfig memory = 6;
+  DiskConfig disk = 7;
+  DisplayConfig display = 8;
+  GpuConfig gpu = 9;
+  NetworkConfig network = 10;
+  FirmwareConfig firmware = 11;
+  AudioConfig audio = 12;
+  InputConfig input = 13;
 }
 ```
 

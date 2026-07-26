@@ -13,7 +13,7 @@ firmware.rs →  OVMF auto-detection
                ↓
 daemon/
 ├── mod.rs          →  Daemon (backend registry + instance state + optional persistence)
-├── error.rs        →  DaemonError enum (27 variants)
+├── error.rs        →  DaemonError enum (29 variants)
 ├── types.rs        →  InstanceRecord, SnapshotRecord, InstanceDirGuard, InstanceSummary
 ├── instance_ops.rs →  create, create_linux_instance, start, stop, pause, resume, remove, resolve_instance_id
 ├── clone_ops.rs    →  clone_instance, export_instance_disk, find_live_clones
@@ -138,7 +138,7 @@ Overridable via:
 
 **`InstanceDirGuard`** (RAII): Deletes `instance_dir` on drop if the creation sequence didn't complete. Used by `create_linux_instance`, `create_android_instance`, and `clone_instance` for cleanup on partial failure.
 
-28 error variants mapping domain failures to gRPC status codes:
+29 error variants mapping domain failures to gRPC status codes:
 - `InstanceNotFound`, `NoBackendRegistered`, `InvalidTransition`
 - `Backend`, `Disk`, `Firmware`, `Io`, `Restore`
 - `InstanceNotRemovable`, `InstanceNotClonable`
@@ -150,8 +150,9 @@ Overridable via:
 - `ConfigIdMismatch`, `ConfigKindChanged`, `ConfigDiskPathChanged`
 - `GuestAgentUnavailable`, `InvalidConfigKey`, `NotAndroid`, `InstanceMustBeStopped`
 - `InstanceAlreadyStopped` — attempt to stop an already-stopped instance
+- `MissingOvmfVarsTemplate` — Android requires UEFI/OVMF but no template provided
 
-**Detailed Error Semantics** (28 variants):
+**Detailed Error Semantics** (29 variants):
 
 | Variant | gRPC Code | Rationale |
 |---------|-----------|-----------|
@@ -183,6 +184,7 @@ Overridable via:
 | `NotAndroid` | `FAILED_PRECONDITION` | Operation requires Android instance (`switch_arm_translator`) |
 | `InstanceAlreadyStopped` | `FAILED_PRECONDITION` | `stop_instance` called when instance is already in `Stopped` or `Error` state — nothing to stop |
 | `InstanceMustBeStopped` | `FAILED_PRECONDITION` | Operation requires stopped instance (`set_instance_config`, `switch_arm_translator`) |
+| `MissingOvmfVarsTemplate` | `FAILED_PRECONDITION` | Android instance requires UEFI/OVMF but no `OVMF_VARS` template was provided |
 
 ### `daemon/instance_ops.rs` — Instance Lifecycle
 
@@ -228,6 +230,7 @@ Handles: `status`, `stream_instance_logs`, `stream_resource_metrics`, `list_inst
 - `InvalidConfigKey` → `INVALID_ARGUMENT`
 - `NotAndroid` → `FAILED_PRECONDITION`
 - `InstanceMustBeStopped` → `FAILED_PRECONDITION`
+- `MissingOvmfVarsTemplate` → `FAILED_PRECONDITION`
 - Other (`Backend(other)`, `Disk`, `Io`, `Restore`, `Firmware`) → `INTERNAL`
 
 ### `grpc_roundtrip_test.rs` — Integration Tests
@@ -246,22 +249,22 @@ Real TCP gRPC round-trip tests (no `qemu-img`/`/dev/kvm` required). Uses ephemer
 
 ## Tests
 
-### `daemon::tests` (unit tests, no network)
+86 tests across 10 modules:
 
-73 tests across 10 modules:
 
 | Module | Focus | Tests |
 |--------|-------|-------|
 | `common.rs` | Test infrastructure (TestTempDir, sample configs) | — |
 | `create.rs` | Instance creation, Android overlay, TOML parsing | 6 |
-| `start_stop.rs` | Start, pause, resume, stop lifecycle | 6 |
+| `start_stop.rs` | Start, pause, resume, stop lifecycle | 9 |
 | `persistence.rs` | with_store, restore, without_store | 9 |
 | `remove.rs` | Remove, purge, file cleanup, clone protection | 14 |
 | `clone.rs` | Clone (3 modes), export, find_live_clones | 20 |
 | `list_config.rs` | list_instances, get_instance_config | 7 |
 | `status.rs` | Status queries, log/metrics streaming | 3 |
 | `resolve_instance_id.rs` | Partial ID resolution, ambiguity detection | 5 |
-| `health.rs`             | Health check unit tests | — |
+| `health.rs`             | Health check unit tests | 4 |
+| `android_boot_mode.rs`  | Android boot mode switch/get operations | 6 |
 
 - **Instance lifecycle**: create, start (with Passthrough validation), pause/resume before start, stop before start, double create overwrite
 - **Android instance creation**: Profile resolution, overlay creation (`#[ignore]`), missing base image (verifies `InstanceDirGuard` cleanup), missing OVMF template (verifies cleanup)
@@ -274,7 +277,7 @@ Real TCP gRPC round-trip tests (no `qemu-img`/`/dev/kvm` required). Uses ephemer
 
 ### `grpc_roundtrip_test.rs` (integration, real TCP)
 
-24 tests covering the full gRPC round-trip for all major operations.
+28 tests covering the full gRPC round-trip for all major operations.
 
 | Variant | Fields | Description |
 |---------|--------|-------------|

@@ -10,7 +10,7 @@
 - [x] NVIDIA GPU metrics via NVML + `nvidia-smi` fallback
 - [x] Intel GPU metrics via sysfs `i915` (GPU load delta)
 - [x] SQLite state persistence with cascade delete (`andler-store`)
-- [x] gRPC protocol with 20 RPCs and bidirectional conversions
+- [x] gRPC protocol with 26 RPCs and bidirectional conversions
 - [x] Factory reset with file cleanup (`remove --purge`)
 - [x] Clone/export for Linux and Android VMs (3 modes)
 - [x] Configurable per-instance snapshot timeout
