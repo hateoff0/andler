@@ -20,6 +20,7 @@ pub fn build_args(cfg: &InstanceConfig, qmp_socket_path: &Path) -> Result<Vec<St
     args.extend(network_args(cfg));
     args.extend(audio_args(cfg));
     args.extend(qmp_args(qmp_socket_path));
+    args.extend(serial_args(cfg));
     args.push("-boot".to_string());
     args.push("menu=on".to_string());
     Ok(args)
@@ -35,6 +36,18 @@ fn qmp_args(qmp_socket_path: &Path) -> Vec<String> {
     vec![
         "-qmp".to_string(),
         format!("unix:{},server,nowait", qmp_socket_path.display()),
+    ]
+}
+
+
+fn serial_args(cfg: &InstanceConfig) -> Vec<String> {
+    let Some(instance_dir) = cfg.disk.path.parent() else {
+        return Vec::new();
+    };
+    let console_log_path = instance_dir.join("console.log");
+    vec![
+        "-serial".to_string(),
+        format!("file:{}", console_log_path.display()),
     ]
 }
 
@@ -132,12 +145,12 @@ fn gpu_display_args(cfg: &InstanceConfig) -> Result<Vec<String>, BackendError> {
     let show_cursor = if cfg.input.hide_host_cursor { "off" } else { "on" };
     let display_str = match cfg.display.display_engine {
         DisplayEngine::Sdl => format!(
-            "sdl,gl={},show-cursor={}",
+            "sdl,gl={},show-cursor={},window-close=off",
             if gpu.gl { "on" } else { "off" },
             show_cursor
         ),
         DisplayEngine::Gtk => format!(
-            "gtk,gl={},show-cursor={},clipboard=on",
+            "gtk,gl={},show-cursor={},clipboard=on,window-close=off",
             if gpu.gl { "on" } else { "off" },
             show_cursor
         ),
@@ -414,7 +427,7 @@ mod tests {
                 "-device",
                 "virtio-gpu-gl,hostmem=4G,blob=true,venus=true",
                 "-display",
-                "sdl,gl=on,show-cursor=off",
+                "sdl,gl=on,show-cursor=off,window-close=off",
             ]
         );
     }
@@ -459,7 +472,7 @@ mod tests {
             .iter()
             .position(|a| a == "-display")
             .expect("-display must be present");
-        assert_eq!(args[display_idx + 1], "gtk,gl=on,show-cursor=off,clipboard=on");
+        assert_eq!(args[display_idx + 1], "gtk,gl=on,show-cursor=off,clipboard=on,window-close=off");
     }
 
     #[test]
@@ -689,13 +702,15 @@ mod tests {
             "memory-backend-memfd",
             "OVMF_CODE.4m.fd",
             "virtio-gpu-gl,hostmem=4G,blob=true,venus=true",
-            "sdl,gl=on,show-cursor=off",
+            "sdl,gl=on,show-cursor=off,window-close=off",
             "discard=on,detect-zeroes=on,aio=threads",
             "virtio-tablet-pci",
             "qemu-vdagent",
             "user,model=virtio-net-pci",
             "pipewire",
             "unix:/tmp/andler/linux/qmp.sock,server,nowait",
+            "-serial",
+            "file:console.log",
         ] {
             assert!(
                 joined.contains(expected_fragment),
@@ -712,6 +727,19 @@ mod tests {
             vec![
                 "-qmp",
                 "unix:/run/andler/instance-abc/qmp.sock,server,nowait",
+            ]
+        );
+    }
+
+    #[test]
+    fn serial_args_places_console_log_next_to_disk() {
+        let mut cfg = start_sh_equivalent_config();
+        cfg.disk.path = PathBuf::from("/home/user/.andler/instances/abc123/disk.qcow2");
+        assert_eq!(
+            serial_args(&cfg),
+            vec![
+                "-serial",
+                "file:/home/user/.andler/instances/abc123/console.log",
             ]
         );
     }
