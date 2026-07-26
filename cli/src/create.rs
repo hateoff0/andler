@@ -120,6 +120,7 @@ pub async fn handle(
             iso_path: iso_path.clone(),
             base_image_path: base_image_path.clone(),
             instances_root: Some(instances_root.clone()),
+            gapps,
             quick,
         };
 

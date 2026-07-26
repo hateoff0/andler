@@ -6,7 +6,7 @@ use inquire::{CustomType, Select, Text};
 
 use crate::CliAndroidVersion;
 
-use super::{map_inquire_err, WizardError, WizardKind};
+use super::{advanced::ask_gapps, map_inquire_err, WizardError, WizardKind};
 
 const DEFAULT_DISK_GIB: u64 = 256;
 const MAX_DISK_GIB: u64 = 65536;
@@ -26,6 +26,7 @@ pub struct AndroidBasicResult {
     pub base_image: String,
     pub base_image_auto_resolved: bool,
     pub android_version: CliAndroidVersion,
+    pub gapps: bool,
     pub disk_size_gib: u64,
     pub instances_root: String,
 }
@@ -91,7 +92,9 @@ pub fn run_android(
     instances_root: Option<String>,
 ) -> Result<AndroidBasicResult, WizardError> {
     let android_version = ask_android_version()?;
-    let (base_image, base_image_auto_resolved) = ask_base_image(base_image_path, android_version)?;
+    let gapps = ask_gapps(None)?;
+    let (base_image, base_image_auto_resolved) =
+        ask_base_image(base_image_path, android_version, gapps)?;
     let disk_size_gib = ask_disk_size(DEFAULT_DISK_GIB)?;
     let instances_root = instances_root.unwrap_or_else(default_instances_root);
     Ok(AndroidBasicResult {
@@ -99,6 +102,7 @@ pub fn run_android(
         base_image,
         base_image_auto_resolved,
         android_version,
+        gapps,
         disk_size_gib,
         instances_root,
     })
@@ -157,6 +161,7 @@ pub fn ask_iso_path(prefilled: Option<String>) -> Result<String, WizardError> {
 pub fn ask_base_image(
     prefilled: Option<String>,
     android_version: CliAndroidVersion,
+    gapps: bool,
 ) -> Result<(String, bool), WizardError> {
     if let Some(p) = prefilled {
         validate_base_image_path(&p)?;
@@ -165,13 +170,19 @@ pub fn ask_base_image(
 
     let quick_profile = andler_core::AndroidProfile {
         android_version: android_version.into(),
-        gapps: false,
+        gapps,
         microg: false,
         arm_translator: andler_core::ArmTranslator::None,
     };
     let suggested = andler_core::base_image::resolve(&quick_profile)
         .ok()
         .map(|p| p.to_string_lossy().into_owned());
+
+    let no_match_help = format!(
+        "No matching {} image in ~/.andler/cache/base-images/ — build one with \
+         docker/images/build.sh, or point to one manually",
+        if gapps { "GApps" } else { "VANILLA" }
+    );
 
     let mut prompt = Text::new("Path to Android base image:")
         .with_placeholder("/path/to/android-base.qcow2")
@@ -189,10 +200,7 @@ pub fn ask_base_image(
             "Found in ~/.andler/cache/base-images/ — press Enter to use it, \
              or type a different path",
         ),
-        None => prompt.with_help_message(
-            "No matching image in ~/.andler/cache/base-images/ — build one with \
-             docker/images/build.sh, or point to one manually",
-        ),
+        None => prompt.with_help_message(&no_match_help),
     };
 
     let path = prompt.prompt().map_err(map_inquire_err)?;

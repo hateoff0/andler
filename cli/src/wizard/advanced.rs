@@ -92,13 +92,13 @@ pub fn run_linux(
 }
 
 pub fn run_android(
-    _result: &AndroidBasicResult,
+    result: &AndroidBasicResult,
     detected: &HardwareDefaults,
     prefilled: Option<&AdvancedConfig>,
 ) -> Result<AdvancedConfig, WizardError> {
     let pref = prefilled;
 
-    let gapps = ask_gapps(pref.map(|p| p.gapps))?;
+    let gapps = ask_gapps(pref.map(|p| p.gapps).or(Some(result.gapps)))?;
     let microg = if gapps {
         false
     } else {
@@ -431,7 +431,7 @@ fn ask_arm_translator(
     Ok(parse_arm_translator(&choice).unwrap_or(CliArmTranslator::None))
 }
 
-fn ask_gapps(prefilled: Option<bool>) -> Result<bool, WizardError> {
+pub(super) fn ask_gapps(prefilled: Option<bool>) -> Result<bool, WizardError> {
     Confirm::new("Enable GApps?")
         .with_default(prefilled.unwrap_or(false))
         .with_help_message(

@@ -38,6 +38,7 @@ pub struct PartialArgs {
     pub iso_path: Option<String>,
     pub base_image_path: Option<String>,
     pub instances_root: Option<String>,
+    pub gapps: bool,
     pub quick: bool,
 }
 
@@ -292,7 +293,7 @@ fn build_quick(
                 None => {
                     let quick_profile = andler_core::AndroidProfile {
                         android_version: andler_core::AndroidVersion::Android13,
-                        gapps: false,
+                        gapps: partial.gapps,
                         microg: false,
                         arm_translator: ArmTranslator::None,
                     };
@@ -312,6 +313,7 @@ fn build_quick(
                 base_image,
                 base_image_auto_resolved,
                 android_version: CliAndroidVersion::Android13,
+                gapps: partial.gapps,
                 disk_size_gib: 256,
                 instances_root,
             };
@@ -396,7 +398,7 @@ pub(crate) fn build_android_request(
     let (gapps, microg) = if let Some(adv) = advanced {
         (adv.gapps, adv.microg)
     } else {
-        (false, false)
+        (basic.gapps, false)
     };
 
     let mut profile = AndroidProfile {
@@ -728,6 +730,7 @@ mod tests {
             base_image: "/tmp/base.qcow2".into(),
             base_image_auto_resolved: false,
             android_version: CliAndroidVersion::Android13,
+            gapps: false,
             disk_size_gib: 256,
             instances_root: "/tmp/instances".into(),
         };
@@ -811,6 +814,7 @@ mod tests {
             base_image: dir.join("vanilla.qcow2").to_string_lossy().into_owned(),
             base_image_auto_resolved: true,
             android_version: CliAndroidVersion::Android13,
+            gapps: false,
             disk_size_gib: 256,
             instances_root: "/tmp/instances".into(),
         });
@@ -835,6 +839,7 @@ mod tests {
             base_image: "/tmp/hand-picked.qcow2".into(),
             base_image_auto_resolved: false,
             android_version: CliAndroidVersion::Android13,
+            gapps: false,
             disk_size_gib: 256,
             instances_root: "/tmp/instances".into(),
         });

@@ -143,7 +143,7 @@ fn print_summary(
                     })
                 })
                 .unwrap_or(CliArmTranslator::None);
-            let gapps = advanced.map(|adv| adv.gapps).unwrap_or(false);
+            let gapps = advanced.map(|adv| adv.gapps).unwrap_or(a.gapps);
             let microg = advanced.map(|adv| adv.microg).unwrap_or(false);
 
             println!(
@@ -154,7 +154,7 @@ fn print_summary(
                     suffix(advanced.is_some())
                 }
             );
-            println!("│  GApps:             {gapps}{}", suffix(advanced.is_some()));
+            println!("│  GApps:             {gapps}{}", suffix(true));
             println!("│  MicroG:            {microg}{}", suffix(advanced.is_some()));
 
             let linked_overlay = advanced.map(|adv| adv.linked_overlay).unwrap_or(false);
@@ -246,10 +246,8 @@ fn print_summary(
 
     if clipboard {
         println!("Note: clipboard sharing requires spice-vdagent running inside the guest OS.");
-        println!("Install it after first boot:");
-        println!("  Arch/CachyOS:    sudo pacman -S spice-vdagent");
-        println!("  Ubuntu/Debian:   sudo apt install spice-vdagent");
-        println!("  Fedora:          sudo dnf install spice-vdagent");
+        println!("Install it after first boot with:");
+        println!("  andler guest install spice-vdagent <instance-id>");
         println!();
     }
 }
