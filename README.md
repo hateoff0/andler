@@ -455,6 +455,27 @@ Polling interval: 1 second. GPU metrics: AMD → NVIDIA → Intel (first found v
 
 - Linux with KVM (`/dev/kvm`)
 - QEMU with OVMF/UEFI support
+- `nbd` kernel module, for offline guest operations (`andler guest install/remove/boot-mode`
+  on a stopped instance mounts its disk via `qemu-nbd`). `andlerd` tries to auto-load it
+  itself the first time it's needed (`sudo -n modprobe nbd max_part=8`) — this only works
+  if you've added a matching sudoers rule (below); otherwise load it manually:
+  ```bash
+  sudo modprobe nbd max_part=8
+  # to persist across reboots:
+  echo nbd | sudo tee /etc/modules-load.d/nbd.conf
+  ```
+  These same offline operations also need root to open `/dev/nbd*`, to `mount`/`umount`
+  the guest partition, and to `chroot` into it for package management — `andlerd` runs
+  unprivileged and shells out to `sudo -n <tool>` for just these specific calls, rather
+  than running as root itself. Without a passwordless sudo rule these will fail with a
+  permission error; add one via `sudo visudo` (adjust the modprobe args and the binary
+  paths to match `which qemu-nbd`/`which mount`/`which umount`/`which chroot` on your
+  system — sudoers matches modprobe's arguments exactly, so this rule can't be used to
+  load any module other than `nbd`):
+  ```
+  youruser ALL=(root) NOPASSWD: /usr/sbin/modprobe nbd max_part=8, \
+      /usr/bin/qemu-nbd, /usr/bin/mount, /usr/bin/umount, /usr/sbin/chroot
+  ```
 - Rust stable (via rustup)
 - Docker + Docker Compose (for reproducible builds)
 - `protobuf-compiler` (`protoc`) for gRPC code generation

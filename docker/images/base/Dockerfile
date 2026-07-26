@@ -43,6 +43,16 @@ RUN sed -i 's/^#en_US.UTF-8 UTF-8/en_US.UTF-8 UTF-8/' /etc/locale.gen && \
     locale-gen && \
     echo "LANG=en_US.UTF-8" > /etc/locale.conf
 
+# Pre-seed everything systemd-firstboot checks for (timezone, hostname — locale is
+# already set above); systemd-firstboot.service itself is masked further down, once
+# systemd is installed. This is a prebaked appliance image: it must never block boot
+# on an interactive first-boot wizard (Initial Setup), which would otherwise sit on
+# the serial console waiting for input nobody sends, forever, with the graphical
+# session (gamescope/waydroid) never even starting since multi-user.target is never
+# reached.
+RUN ln -sf /usr/share/zoneinfo/UTC /etc/localtime && \
+    echo "cachyos" > /etc/hostname
+
 RUN pacman -S --noconfirm --needed \
         base linux-cachyos \
         systemd systemd-ukify \
@@ -67,7 +77,8 @@ RUN groupadd -f video && groupadd -f render && groupadd -f input && groupadd -f 
 RUN ln -sf /usr/lib/systemd/system/multi-user.target /etc/systemd/system/default.target && \
     systemctl enable systemd-networkd systemd-resolved && \
     systemctl enable waydroid-container.service && \
-    systemctl enable gamescope-waydroid.service
+    systemctl enable gamescope-waydroid.service && \
+    systemctl mask systemd-firstboot.service
     # sshd intentionally disabled — see autologin.conf for console access model.
 
 # Verify andler-build-uki runs successfully during docker build (catches errors early)
