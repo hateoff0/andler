@@ -295,6 +295,15 @@ andler wizard
 
 Interactive guided instance creation wizard. Walks through all configuration options with smart defaults and hardware auto-detection. Outputs a TOML config file for review before creation.
 
+### `doctor`
+
+```bash
+andler doctor [--fix]
+```
+
+Checks the local environment for ANDLER prerequisites: KVM availability, QEMU/OVMF installation, nbd kernel module, passwordless sudo for privileged operations, daemon reachability, and base images. Read-only — works even if andlerd isn't running.
+
+With `--fix`, offers to write missing passwordless-sudo rules to `/etc/sudoers.d/andler` (validates with `visudo -c` before writing).
 ### `completions`
 
 ```bash

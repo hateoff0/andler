@@ -10,6 +10,7 @@ ANDLER manages the complete lifecycle of QEMU-based virtual machines with a focu
 
 - **Linux guests** with 3D GPU acceleration — install from ISO, get full Vulkan/OpenGL support via Venus/VirGL render backends, use as a daily-driver desktop or development environment
 - **Android guests** (Waydroid) — run Android apps with GPU acceleration on Linux hardware, with libndk/libhoudini for ARM→x86 translation
+- **Default XDG paths** — all data under `~/.andler/`, no root required for normal operation (nbd/chroot operations use `sudo -n` for unprivileged daemon, see `andler doctor` for setup)
 - **Real-time monitoring** — CPU, RAM, disk, network, and GPU metrics (VRAM usage, GPU load) streamed every second
 - **Snapshots** — save/restore VM state instantly via QEMU's async job API
 - **Clone & export** — duplicate VMs cheaply (linked overlays) or create standalone copies
@@ -174,6 +175,7 @@ gl = true
 | `disk` | Disk management (create/info/resize `--shrink`/compact) |
 | `guest` | Guest package management (install/remove/list). Auto-fallback: online via QMP if running, offline via qemu-nbd if stopped. |
 | `completions` | Generate shell completion script (bash/zsh/fish) |
+| `doctor` | Check local environment (KVM, QEMU, OVMF, nbd, sudoers, andlerd, base images). `--fix` to auto-write missing sudoers rules. |
 
 See [`docs/API.md`](docs/API.md) for full command reference with all flags.
 
@@ -272,15 +274,8 @@ via `xrandr` or display settings).
 ANDLER can install or detect from the host side. If clipboard doesn't work
 after boot, install it inside the guest:
 
-```
-# Arch/CachyOS
-sudo pacman -S spice-vdagent
-
-# Ubuntu/Debian
-sudo apt install spice-vdagent
-
-# Fedora
-sudo dnf install spice-vdagent
+```bash
+andler guest install spice-vdagent <instance-id>
 ```
 
 ## Repository Structure

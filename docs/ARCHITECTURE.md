@@ -124,7 +124,7 @@ Orchestrates all operations. Holds backend registry, instance state, optional pe
 - `resolve_instance_id()` — Docker-style partial ID resolution (8-char hex prefix)
 - `update_instance_config()` — Edit config via gRPC, protects id/kind/disk.path
 - `DaemonService` — thin gRPC wrapper, one method per Daemon method
-- Error mapping: `DaemonError` (20 variants) → gRPC status codes
+- Error mapping: `DaemonError` (28 variants) → gRPC status codes
 
 **73+ unit tests** + **24 gRPC round-trip tests** (real TCP).
 
@@ -140,7 +140,7 @@ Thin gRPC client. Each subcommand = one gRPC request + print response.
 - Disk management (create, info, resize with shrink protection, compact)
 - Shell completions (bash, zsh, fish)
 - Colored status output with `IsTerminal` gating
-
+- `doctor` command for environment diagnostics and auto-fix
 **91 tests** (TOML parsing, helpers, create, wizard, status).
 
 ## Data Flow

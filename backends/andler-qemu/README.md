@@ -20,6 +20,7 @@ Pure function `build_args(&InstanceConfig, &Path) -> Vec<String>` that translate
 | Network | `network_args` | `-nic user,model=virtio-net-pci` (Slirp/NAT), `-netdev passt` + `-device` (Passt), or Bridge/Isolated modes |
 | Audio | `audio_args` | `-audiodev`, `-device` for PipeWire/PulseAudio |
 | QMP | `qmp_args` | `-qmp unix:<path>,server,nowait` |
+| Serial | `serial_args` | `-serial file:console.log` (instance directory) |
 
 Always ends with `-boot menu=on`.
 **QEMU flag rationale**:
@@ -37,8 +38,8 @@ Always ends with `-boot menu=on`.
 - `Passthrough` → **panics** — `QemuBackend::spawn` rejects it before reaching `cmdline`
 
 **DisplayEngine mapping:**
-- `Sdl` → `-display sdl,gl=on|off,show-cursor=on|off`
-- `Gtk` → `-display gtk,gl=on|off,show-cursor=on|off,clipboard=on`
+- `Sdl` → `-display sdl,gl=on|off,show-cursor=on|off,window-close=off`
+- `Gtk` → `-display gtk,gl=on|off,show-cursor=on|off,clipboard=on,window-close=off`
 - `Spice` → `-display spice-app`
 - `Dbus` → `-display dbus`
 - `None` → `-display none`

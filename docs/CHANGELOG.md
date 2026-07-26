@@ -6,6 +6,34 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+
+### Added
+
+#### CLI
+
+- **`andler doctor` command**: Checks local environment health — KVM, QEMU, OVMF, nbd module, passwordless sudo, daemon reachability, base images. `--fix` flag offers to write missing sudoers rules via `visudo`.
+
+#### Backend (`andler-qemu`)
+
+- **Serial console logging**: `-serial file:console.log` captures QEMU serial output to a file next to the instance disk for debugging.
+- **`window-close=off`**: SDL and GTK display windows no longer close the VM when the window is closed — prevents accidental shutdown.
+
+#### Daemon
+
+- **Pre-start file validation**: `validate_instance_files()` checks disk and firmware paths exist before spawning QEMU, catching deleted/moved instance directories early instead of letting QEMU fork and fail silently.
+- **Structured lifecycle tracing**: `info`/`error` tracing for all instance lifecycle operations (create, start, stop, pause, resume, remove) with `instance_id` and error details.
+- **`InstanceAlreadyStopped` error**: Clear error message when stopping an already-stopped instance, instead of a generic error.
+
+### Changed
+
+#### Services (`andler-disk`)
+
+- **Privileged operations via `sudo -n`**: `nbd` and `guest_tools` modules now use `privileged_command()` that wraps `sudo -n` for `qemu-nbd`, `umount`, and `chroot` operations. Keeps the daemon unprivileged while still able to mount disks. `describe_sudo_failure()` provides actionable error messages.
+
+#### CLI
+
+- **GApps prompt moved earlier in wizard**: Base image variant selection (VANILLA vs GApps) now happens before base image choice, so the wizard uses it to filter available images. Forwarded through quick-mode.
+
 ### Added
 
 #### Core (`andler-core`)

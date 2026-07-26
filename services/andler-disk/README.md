@@ -89,6 +89,8 @@ Manages QEMU NBD (Network Block Device) connections for mounting disk images wit
 |----------|-----------|-------------|
 | `find_free_nbd_device` | `() -> Result<PathBuf, DiskError>` | Find a free `/dev/nbd*` device. Fails with `NbdSetupFailed` if no NBD kernel module loaded or no free device. |
 | `connect_nbd` | `(overlay_path: &Path) -> Result<NbdGuard, DiskError>` | Connect an overlay disk to an NBD device via `qemu-nbd --connect`. Returns `NbdGuard` (RAII: disconnects on drop). |
+| `privileged_command` | `(program: &str, args: &[&str]) -> Command` | Build a `sudo -n <program> ...` command. Used by `connect_nbd`, `umount`, and `chroot` operations that need root (opening `/dev/nbd*`, lock files in `/var/lock`). Non-interactive: fails immediately instead of hanging on a password prompt. |
+| `describe_sudo_failure` | `(program: &str, stderr: &str) -> String` | Rewrite stderr from a failed `sudo -n` into an actionable error message pointing at the missing sudoers rule. |
 | `wait_for_partitions` | `(nbd_dev: &Path) -> Result<Vec<PathBuf>, DiskError>` | Wait for partition devices to appear after NBD connect (polls `/sys/block/<dev>/` for up to 5s). |
 | `find_root_partition` | `(partitions: &[PathBuf]) -> Result<PathBuf, DiskError>` | Identify the root partition from a list (largest partition by sector count). |
 | `unique_mount_name` | `() -> String` | Generate a unique mount point name under the runtime dir. |

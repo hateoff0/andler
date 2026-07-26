@@ -138,7 +138,7 @@ Overridable via:
 
 **`InstanceDirGuard`** (RAII): Deletes `instance_dir` on drop if the creation sequence didn't complete. Used by `create_linux_instance`, `create_android_instance`, and `clone_instance` for cleanup on partial failure.
 
-24 error variants mapping domain failures to gRPC status codes:
+28 error variants mapping domain failures to gRPC status codes:
 - `InstanceNotFound`, `NoBackendRegistered`, `InvalidTransition`
 - `Backend`, `Disk`, `Firmware`, `Io`, `Restore`
 - `InstanceNotRemovable`, `InstanceNotClonable`
@@ -149,8 +149,9 @@ Overridable via:
 - `MalformedInstanceRef`
 - `ConfigIdMismatch`, `ConfigKindChanged`, `ConfigDiskPathChanged`
 - `GuestAgentUnavailable`, `InvalidConfigKey`, `NotAndroid`, `InstanceMustBeStopped`
+- `InstanceAlreadyStopped` — attempt to stop an already-stopped instance
 
-**Detailed Error Semantics** (27 variants):
+**Detailed Error Semantics** (28 variants):
 
 | Variant | gRPC Code | Rationale |
 |---------|-----------|-----------|
@@ -180,11 +181,14 @@ Overridable via:
 | `GuestAgentUnavailable` | `INTERNAL` | Guest agent binary unavailable or failed to start |
 | `InvalidConfigKey` | `INVALID_ARGUMENT` | Invalid or unknown configuration key for `update_instance_config` |
 | `NotAndroid` | `FAILED_PRECONDITION` | Operation requires Android instance (`switch_arm_translator`) |
+| `InstanceAlreadyStopped` | `FAILED_PRECONDITION` | `stop_instance` called when instance is already in `Stopped` or `Error` state — nothing to stop |
 | `InstanceMustBeStopped` | `FAILED_PRECONDITION` | Operation requires stopped instance (`set_instance_config`, `switch_arm_translator`) |
 
 ### `daemon/instance_ops.rs` — Instance Lifecycle
 
 Handles: `create_instance`, `create_linux_instance`, `create_android_instance`, `start_instance`, `stop_instance`, `pause_instance`, `resume_instance`, `remove_instance`, `resolve_instance_id`.
+
+**Pre-start validation**: `validate_instance_files()` checks that the disk and firmware files referenced by `InstanceConfig` exist on disk before calling `backend.spawn()`. Catches deleted/moved instance directories early — without this, `spawn()` would fork `qemu-system-x86_64` successfully (the OS-level exec succeeds regardless), report the instance as `Running`, and only reveal the real failure a health-check cycle later.
 
 ### `daemon/clone_ops.rs` — Clone & Export
 
