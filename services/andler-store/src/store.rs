@@ -82,8 +82,10 @@ impl Store {
 
         self.run_blocking(move |conn| {
             conn.execute(
-                "INSERT OR REPLACE INTO instances (id, config_json, state_json) \
-                 VALUES (?1, ?2, ?3)",
+                "INSERT INTO instances (id, config_json, state_json) VALUES (?1, ?2, ?3) \
+                 ON CONFLICT(id) DO UPDATE SET \
+                     config_json = excluded.config_json, \
+                     state_json = excluded.state_json",
                 (id.to_string(), config_json, state_json),
             )?;
             Ok(())
@@ -365,6 +367,46 @@ mod tests {
         let loaded = store.load_instance(id).await.unwrap();
         assert_eq!(loaded.config.name, "renamed");
         assert_eq!(loaded.state, InstanceState::Starting);
+    }
+
+    #[tokio::test]
+    async fn save_instance_does_not_cascade_delete_snapshots() {
+        let store = Store::open_in_memory().await.unwrap();
+        let mut cfg = sample_config();
+        let id = cfg.id;
+
+        store
+            .save_instance(&cfg, &InstanceState::Created)
+            .await
+            .unwrap();
+
+        let snapshot = StoredSnapshot {
+            id: uuid::Uuid::new_v4(),
+            instance_id: id,
+            tag: "snap-first".to_string(),
+            description: Some("first".to_string()),
+            created_at: "2026-01-01T00:00:00+00:00".to_string(),
+        };
+        store.save_snapshot(&snapshot).await.unwrap();
+
+        cfg.name = "renamed".to_string();
+        store
+            .save_instance(&cfg, &InstanceState::Starting)
+            .await
+            .unwrap();
+        store
+            .save_instance(&cfg, &InstanceState::Running)
+            .await
+            .unwrap();
+
+        let snapshots = store.load_snapshots(id).await.unwrap();
+        assert_eq!(
+            snapshots.len(),
+            1,
+            "save_instance must not delete snapshot metadata"
+        );
+        assert_eq!(snapshots[0].tag, "snap-first");
+        assert_eq!(snapshots[0].description.as_deref(), Some("first"));
     }
 
     #[tokio::test]

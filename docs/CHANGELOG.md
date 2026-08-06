@@ -30,15 +30,27 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 #### Structure
 
 - **`apps/` group**: `cli/` and `daemon/` moved under `apps/` — every crate now lives in a role group (`core/`, `backends/`, `services/`, `apps/`) at `<group>/<crate>/`. Package names and binary names (`andler`, `andlerd`) unchanged.
+- **`docker/dev` → `docker/e2e`**: the containerized test harness moved to `docker/e2e/` (`Dockerfile`, `compose.yaml`, `e2e.sh`). The single E2E smoke script was replaced by a modular suite (`docker/e2e/tests/NN_*.sh`) covering all CLI commands, with a shared assertion library; builds are incremental (BuildKit cache mounts, no `--no-cache`); the e2e image is a slim Debian runtime with QEMU/OVMF; deep guest tests (offline install/remove/list, boot-mode switching) run against a baked Debian rootfs via qemu-nbd and SKIP when the `nbd` module is unavailable.
 
 #### Services (`andler-disk`)
 
 - **Privileged operations via `sudo -n`**: `nbd` and `guest_tools` modules now use `privileged_command()` that wraps `sudo -n` for `qemu-nbd`, `umount`, and `chroot` operations. Keeps the daemon unprivileged while still able to mount disks. `describe_sudo_failure()` provides actionable error messages.
+- **Guest package detection checks multiple binary paths**: `GuestPackage` now carries `binary_checks: &[&str]` instead of a single `binary_check`; `guest list` reports a package installed when any candidate exists (`/usr/bin/qemu-ga` *or* `/usr/sbin/qemu-ga`, likewise `spice-vdagentd`). Distros differ in where they install the same tool — Debian/Ubuntu put `qemu-ga` in `/usr/sbin`, Arch in `/usr/bin` — so a Debian guest previously showed `qemu-guest-agent` as `not installed` right after a successful install.
 
 #### CLI
 
 - **GApps prompt moved earlier in wizard**: Base image variant selection (VANILLA vs GApps) now happens before base image choice, so the wizard uses it to filter available images. Forwarded through quick-mode.
 - **Docker-style instance IDs**: Instance IDs are 64 lowercase hex chars (formatted like docker/SHA IDs) instead of UUIDv4. Human output (`create`, `clone`, `start`/`stop`/`pause`/`resume`, `remove`, `list`, `config`) shows the 12-char short ID; the full ID is available via `list --full-id`, `list --json`, and the `~/.andler/instances/<id>/` directory name. Instance references resolve by any unique hex prefix (existing behavior, now hex-only). Old UUID-named instance data is not migrated — remove and recreate.
+
+### Fixed
+
+#### Store (`andler-store`)
+
+- **Snapshot metadata destroyed on every state change**: `save_instance` used `INSERT OR REPLACE`, which SQLite implements as DELETE + INSERT; combined with the `snapshots.instance_id ... ON DELETE CASCADE` foreign key, every `persist_state` (start, stop, pause, resume) silently deleted all snapshot metadata for the instance. `snapshot list` for a stopped instance returned nothing, and the records were unrecoverable (the qcow2 snapshots themselves were never touched). `save_instance` now uses `ON CONFLICT DO UPDATE`, which updates in place and never fires the cascade. Found by the new E2E snapshot suite; regression-covered by `save_instance_does_not_cascade_delete_snapshots`.
+
+#### Services (`andler-disk`)
+
+- **Offline `guest remove` was refused even after a successful install**: `is_agent_installed` ran `chroot <mount> <manager> dpkg -l <pkg>` with the query binary passed as an *argument* to the manager — `apt-get dpkg` is not a valid invocation ("unknown command"), so the package was always reported as not installed and removal was refused. The install-state query now uses the manager's own query command (`dpkg -l` for Apt, `rpm -q` for Dnf, `pacman -Qi` for Pacman) via `PackageManager::check_installed_command`; the online QGA probe checks every candidate binary path too.
 
 ### Added
 
