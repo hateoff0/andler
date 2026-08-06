@@ -49,7 +49,7 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 
 #### Backend (`andler-qemu`)
 
-- **QEMU VM snapshots**: Full CRUD — create, restore, delete, list snapshots via QEMU's `snapshot-save`/`snapshot-load`/`snapshot-delete` job API. Polls `query-jobs` for completion with configurable timeout.
+- **Disk-only internal snapshots (backend)**: `snapshot_save`/`snapshot_delete` QMP methods now use synchronous `blockdev-snapshot-internal-sync`/`-delete-internal-sync` (qcow2 internal snapshots, `device`+`name` wire schema — no job-id/vmstate/devices) instead of the vmstate job API. The old `snapshot-save`/`snapshot-load` path serializes through QEMU's migration machinery, which blocks on every default component (`virtio-sound`, virgl, `invtsc` CPU flag) — it was removed, not kept as a fallback. `wait_job_completion` remains as a generic QMP utility.
 - **Resource metrics from `/proc`**: Real-time streaming of CPU%, RAM usage, disk I/O, and network I/O. No QMP required. 1-second polling interval.
 - **Stale QMP socket cleanup on spawn**: removes a leftover socket file from a previous run before binding a new one — the per-instance QMP socket path is deterministic, so restarting the same instance (see FSM restart above) could otherwise fail to bind with "address already in use" even though nothing was actually listening there anymore.
 - **GPU metrics (AMD)**: Sysfs-based GPU metrics — VRAM used/total and GPU load percentage from `/sys/class/drm/card*/device/`.
@@ -60,7 +60,7 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 
 #### Services
 
-- **Disk error variants**: `ShrinkRequiresConfirmation` (requires `--shrink` flag), `CompactNotApplicable` (non-qcow2 disk), `InsufficientDiskSpace` (pre-checked before snapshot creation via `statvfs(2)`, using guest RAM size as a conservative upper bound for vmstate size — maps to `Status::resource_exhausted`).
+- **Disk error variants**: `ShrinkRequiresConfirmation` (requires `--shrink` flag), `CompactNotApplicable` (non-qcow2 disk), `InsufficientDiskSpace` (pre-checked before snapshot creation via `statvfs(2)`, using guest RAM size as a conservative upper bound for the snapshot's disk footprint — maps to `Status::resource_exhausted`).
 
 #### Guest images (`docker/images`)
 
@@ -217,26 +217,21 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
   is what surfaced the mismatch). Covered by
   `create_instance_honors_explicit_ovmf_vars_template` in
   `daemon/src/grpc_roundtrip_test.rs`.
-- **`andler-qemu` snapshot QMP wire protocol**: `snapshot-save`/`snapshot-load`/`snapshot-delete`
-  were sending a singular `"device"` argument and, for save/load, omitting the required
-  `"vmstate"` field — real QEMU (job-based API, 6.0+) expects a `"devices"` array plus
-  `"vmstate"` for save/load, and rejects the malformed request immediately with `{"error": ...}`
-  without ever starting the job. Fixed to send the correct schema.
 - **`wait_job_completion` terminal status check**: was matching on `"completed"`/`"failed"`/
   `"aborted"`, none of which exist in QEMU's real job status enum (the only terminal status is
   `"concluded"`; success/failure is distinguished by the presence of an `error` field, not by a
   separate status value). This meant every snapshot operation — even a successful one — would
   poll until timeout rather than ever detecting completion. Fixed, and `job-dismiss` is now
   called after a job concludes (previously never called, leaving concluded jobs visible in
-  `query-jobs` forever).
+  `query-jobs` forever). This machinery is now only reachable via `wait_job_completion` as a
+  generic QMP utility — snapshot paths use the synchronous disk-only API (see Changed).
 - **`execute_raw` no longer errors on async QMP events** (e.g. `JOB_STATUS_CHANGE`) received
   between sending a command and reading its reply — these can legitimately interleave with
   command/response traffic during job polling. Previously any such message was treated as a
   parse error.
-- None of the above were caught by the existing test suite — `snapshot_save`/`load`/`delete` had
-  no tests asserting on the actual JSON sent, and `wait_job_completion`'s tests encoded the same
-  incorrect status strings as the implementation. New tests cover the real wire protocol using a
-  `UnixStream::pair`-based fake QMP peer (see `andler-qemu/src/qmp.rs`).
+- None of the above were caught by the existing test suite — `wait_job_completion`'s tests
+  encoded the same incorrect status strings as the implementation. New tests cover the real
+  status semantics over a `UnixStream::pair`-based fake QMP peer (see `andler-qemu/src/qmp.rs`).
 - **`andler-qemu` Intel GPU metrics**: the sysfs path used for GPU load
   (`device/gt/gt0/attrs/busyiffies`) and the two used for VRAM
   (`mem_info_dev_local_mem_alloc`, `mem_info_stolen_local_mem`) do not exist anywhere in the real

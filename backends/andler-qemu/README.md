@@ -123,7 +123,7 @@ command in QEMU's block-layer API.
 **`QemuBackend`**: `HypervisorBackend` implementation tying together `cmdline`, `process`, and `qmp`.
 
 - `instances: Mutex<HashMap<BackendHandle, RunningInstance>>` — registry of live instances.
-- Each `RunningInstance` holds: `process: QemuProcess`, `qmp_client: Option<QmpClient>` (lazy-connected on first QMP operation), `snapshot_timeout: Duration` (from `DiskConfig::snapshot_timeout_secs`, default 30s).
+- Each `RunningInstance` holds: `process: QemuProcess`, `qmp_client: Option<QmpClient>` (lazy-connected on first QMP operation).
 
 
 **QMP socket directory**: Uses `andler_core::paths::runtime_dir()` → `$XDG_RUNTIME_DIR` on most Linux hosts (typically `/run/user/<uid>`), not `/tmp` — on multi-user systems `/tmp` is world-writable and vulnerable to symlink attacks on IPC sockets. The directory is created with 0700 permissions via `ensure_private_dir` in `spawn`.
@@ -196,9 +196,15 @@ All marked `#[ignore]` with reason — run separately in `integration-test` Dock
 
 - **`status()` without live QMP**: If QMP socket isn't ready (just spawned, or connection dropped), degrades to "process alive, exact status unknown" — reflected in `detail`, not silently assumed `Running`.
 - **No QMP event queue**: `qmp.rs` doesn't distinguish asynchronous events from command responses. Not a problem for current scope (stop/cont/query-status don't generate client-relevant events), but will be a limitation when event subscription is added.
-- **Snapshot with virtio-sound**: `snapshot-save` with vmstate is blocked by QEMU when `virtio-sound-pci` is attached ("State blocked by non-migratable device") — a snapshot of an instance with `VirtioSound` audio fails with this error. This is an upstream QEMU constraint; see `docs/ARCHITECTURE.md` (Snapshots).
+- **Full VM-state snapshots are impossible on the default launch config.** `snapshot-save`/`snapshot-load` serialize through QEMU's migration machinery, and every default component is non-migratable by design (verified live on QEMU 11.0.3):
+  - `virtio-sound-pci` → `State blocked by non-migratable device '.../virtio-sound-device'`
+  - Venus/virgl display → `virgl is not yet migratable`
+  - CPU (`-cpu host,kvm=on,+topoext,migratable=no` in `cmdline.rs`, intentional) → `State blocked by non-migratable CPU device (invtsc flag)`
+
+  `snapshot-save` with an empty `vmstate` never completes either (the job enters `running` and stays there forever). Snapshots are therefore **disk-only** (internal qcow2): `snapshot_save`/`snapshot_delete` are synchronous `blockdev-snapshot-internal-sync`/`-delete-internal-sync`; restore is an offline `qemu-img snapshot -a` performed by the daemon (`andler_disk::qcow2::restore_internal_snapshot`) and requires a stopped instance — QEMU's block API has no live revert. Don't reintroduce the vmstate job API.
+- **`qemu-img snapshot` must not run against a live disk** (QEMU holds exclusive locks; `qemu-img snapshot -l` on a running instance fails or blocks). List snapshots via QMP `query-block` (`query_block_snapshots` / `andler snapshot list`); restore requires the instance stopped.
+- **`guest-*` commands are NOT registered on QMP (QEMU ≥ 9)** — online guest operations (package install/remove, file writes, `set_guest_display_resolution`) must go through the QGA chardev socket (`*.qga.sock`, `org.qemu.guest_agent.0`) with `connect_agent`. The QMP socket is VM control only. See "Agent socket exclusivity" above: a chardev delivers to the *last* client only, so parallel readers starve the daemon — never probe these sockets from a second client while the daemon is attached (a 30s hang was reproduced that way).
 - **Hardcoded snapshot device name**: `drive-disk0`. Will need parameterization if multi-disk support is added.
-- **Snapshot timeout**: Configurable per-instance via `DiskConfig::snapshot_timeout_secs` (default 30s). For very large snapshots (hundreds of GiB), this may need per-operation tuning.
 
 ## What Is NOT Implemented Here
 

@@ -14,7 +14,7 @@ User → andler-cli (gRPC client) → andler-daemon (gRPC server) → andler-qem
 
 **Key design principles:**
 - **Domain-driven separation**: Pure domain types in `andler-core` — no I/O dependencies
-- **Backend abstraction**: `HypervisorBackend` trait defines hypervisor-agnostic interface (17 methods: 13 async + 4 sync — `name`, `supported_render_backends`, `metrics_stream`, `log_stream`). New backend = implement this trait
+- **Backend abstraction**: `HypervisorBackend` trait defines hypervisor-agnostic interface — sync methods: `name`, `supported_render_backends`, `metrics_stream`, `log_stream`; async: lifecycle (`spawn`/`pause`/`resume`/`stop`/`status`), snapshots (`snapshot`/`snapshot_restore`/`snapshot_delete`/`snapshot_list`), guest operations (`is_guest_agent_available`, `set_guest_display_resolution`, `guest_exec_install`, `guest_exec_remove`, `guest_check_binary_installed`). Method counts drift with features — count from `core/andler-core/src/backend.rs`, never from this file. New backend = implement this trait
 - **Explicit FSM**: Instance lifecycle governed by strict state machine (7 states, 7 events). No implicit transitions
 - **Persistence optional**: Daemon works with or without SQLite. In-memory is source of truth for current session
 - **No global state**: Each crate has clear responsibilities
@@ -140,19 +140,22 @@ If the working environment cannot run a full build (e.g. no network access to cr
 
 Never assume a struct or enum's shape (field names, tuple vs. struct variant, etc.) from how you'd expect it to look — open the actual definition and check.
 
+**5. Commit policy**: the agent proposes commits (message + file list), the user makes them. Never run `git add`/`git commit` without explicit user approval; an unrequested commit is a workflow violation even when the change itself is good.
+
 ## Code Conventions & Common Patterns
 
 ### Error Handling
 
 - **`thiserror`** for all domain errors (`BackendError`, `FsmError`, `DaemonError`, `StoreError`, `DiskError`, `ConvertError`)
 - `BackendError::NotImplemented` for unimplemented backend methods (never `todo!()`/`unimplemented!()`)
-- `DaemonError` has 29 variants → maps to gRPC status codes
+- `DaemonError` (30+ variants, drifts with each PR — count from `error.rs`) → maps to gRPC status codes
 - `ConvertError` in `andler-rpc` for proto↔domain conversion failures
+- **Actionable error text**: user-facing errors (CLI output, gRPC messages) must instruct the user what to do next, not just describe the failure — e.g. `InstanceMustBeStopped` says "stop it first", `InstanceAlreadyStopped` points at `andler status`/`andler start`. Surfacing raw QEMU/io stderr verbatim is a UX bug: sanitize, truncate (`status_message()`, 384 chars), and explain.
 
 ### Async Patterns
 
 - **`tokio`** runtime with `rt-multi-thread`, `macros`, `process`, `fs`, `net`, `sync`, `time`, `io-util`, `signal`
-- **`async_trait`** for the 13 async methods of `HypervisorBackend` (the other 4 trait methods are sync: `name`, `supported_render_backends`, `metrics_stream`, `log_stream`)
+- **`async_trait`** for the async methods of `HypervisorBackend` (the sync ones: `name`, `supported_render_backends`, `metrics_stream`, `log_stream`)
 - `rusqlite` calls wrapped in `tokio::task::spawn_blocking` (blocking API)
 - `tokio::sync::RwLock` for `Daemon.instances` (concurrent reads, rare writes)
 - `tokio::sync::broadcast` for metrics streaming
@@ -217,6 +220,21 @@ Rules that exist because violating them has produced real bugs in this repo:
 
 - **Cross-crate duplication must be hoisted, not copied.** If the same logic (parsing, formatting, path resolution) is needed in two crates, it belongs in `andler-core` or in one crate re-used via a workspace dependency — never a second copy. Real bug: the same validation was fixed twice in `cli` and `daemon` because each had its own copy.
 
+## Documentation Sync
+
+Docs drift is a bug, same severity as a failing test. Rules that keep the repo honest:
+
+- **Code and docs change together, in the same commit.** Any change that alters observable behavior — RPC surface, error text, config keys, CLI flags, lifecycle semantics, snapshot behavior — must update the docs that describe it in the same commit:
+  - proto messages / gRPC status codes → `docs/GRPC_API.md`
+  - CLI surface and behavior → `docs/API.md`
+  - architecture, FSM, snapshot mechanism → `docs/ARCHITECTURE.md`
+  - crate-local behavior → that crate's `README.md` (QEMU wire schemas and integration notes live in `backends/andler-qemu/README.md`)
+  - user-visible feature changes → `docs/CHANGELOG.md` (Unreleased)
+  - top-level feature list → root `README.md`
+- **AGENTS.md is an index, not a knowledge base.** Technical detail lives in the doc that owns it; AGENTS.md only points at the owner. Never copy content into AGENTS.md — duplicated knowledge drifts in one of the copies.
+- **No unverified numbers in docs.** Any count (variants, methods, tests, RPCs) must be checkable against the code at review time; prefer "count from the file" over a literal number. Pinned counts rot — test counts are already unpinned, and the same rule applies to `DaemonError` variants and `HypervisorBackend` methods.
+- **When fixing behavior, grep the docs that describe it** (error text, section headers, README feature lists) and fix them in the same commit — a doc claim that contradicts code is a bug report waiting to happen.
+
 ## Important Files
 
 ### Entry Points
@@ -226,7 +244,7 @@ Rules that exist because violating them has produced real bugs in this repo:
 
 ### Core Domain
 
-- `core/andler-core/src/backend.rs` — `HypervisorBackend` trait (17 methods), `ResourceMetrics`, `BackendHandle`
+- `core/andler-core/src/backend.rs` — `HypervisorBackend` trait, `ResourceMetrics`, `BackendHandle`
 - `core/andler-core/src/base_image.rs` — Android base-image auto-discovery (`base_image::resolve()`), used by the daemon when the client omits `base_image_path`
 - `core/andler-core/src/android_profile.rs` — Android version/root/store profiles
 - `core/andler-core/src/clone.rs` — CloneMode and clone-type domain logic
@@ -257,13 +275,13 @@ Rules that exist because violating them has produced real bugs in this repo:
 - `daemon/src/daemon/mod.rs` — `Daemon` struct, constructors, backend registry
 - `daemon/src/daemon/instance_ops.rs` — create/start/stop/pause/resume/remove
 - `daemon/src/daemon/clone_ops.rs` — clone/export/find_live_clones
-- `daemon/src/daemon/snapshot_ops.rs` — snapshot CRUD via QEMU job API
+- `daemon/src/daemon/snapshot_ops.rs` — disk-only snapshots: live create/delete over QMP `blockdev-snapshot-internal-sync`/`-delete-internal-sync`; offline restore via `qemu-img snapshot -a` (instance must be stopped; no live revert exists)
 - `daemon/src/daemon/health_ops.rs` — periodic VM health checks (`ANDLERD_HEALTH_CHECK_INTERVAL_SECS`, default 30s, 0 disables)
 - `daemon/src/daemon/query_ops.rs` — status, list, metrics streaming
 - `daemon/src/daemon/types.rs` — InstanceRecord, SnapshotRecord, InstanceDirGuard
-- `daemon/src/daemon/error.rs` — `DaemonError` (29 variants) → gRPC status mapping
+- `daemon/src/daemon/error.rs` — `DaemonError` (30+ variants) → gRPC status mapping
 - `daemon/src/service.rs` — `DaemonService` (thin gRPC wrapper)
-- `daemon/src/grpc_roundtrip_test.rs` — 28 integration tests (real TCP)
+- `daemon/src/grpc_roundtrip_test.rs` — 30 integration tests (real TCP; count drifts with each PR)
 
 ### CLI Commands
 
@@ -271,7 +289,7 @@ Rules that exist because violating them has produced real bugs in this repo:
 - `cli/src/status.rs` — Status, List, Config, Logs, Metrics (`--json` on status/list/metrics)
 - `cli/src/disk.rs` — disk create/info/resize/compact (action flags mutually exclusive)
 - `cli/src/snapshot.rs` — snapshot create/restore/delete/list (`--json` before the subcommand)
-- `cli/src/guest.rs` — guest install/remove/list/boot-mode (online QMP ↔ offline qemu-nbd fallback)
+- `cli/src/guest.rs` — guest install/remove/list/boot-mode (online via QGA chardev `*.qga.sock`; offline qemu-nbd fallback)
 - `cli/src/doctor.rs` — environment checks (KVM/QEMU/OVMF/nbd/sudoers/daemon/base images)
 - `cli/src/lifecycle.rs` — start/stop/pause/resume/remove (remove `--purge` confirms on TTY)
 - `cli/src/edit.rs` — `config edit`: opens the real `instance.toml` in `$VISUAL`/`$EDITOR`

@@ -12,7 +12,7 @@ ANDLER manages the complete lifecycle of QEMU-based virtual machines with a focu
 - **Android guests** (Waydroid) — run Android apps with GPU acceleration on Linux hardware, with libndk/libhoudini for ARM→x86 translation
 - **Default XDG paths** — all data under `~/.andler/`, no root required for normal operation (nbd/chroot operations use `sudo -n` for unprivileged daemon, see `andler doctor` for setup)
 - **Real-time monitoring** — CPU, RAM, disk, network, and GPU metrics (VRAM usage, GPU load) streamed every second
-- **Snapshots** — save/restore VM state instantly via QEMU's async job API
+- **Snapshots** — disk-only internal qcow2 snapshots: create/delete live on any GPU/audio/CPU configuration, restore offline with a stopped instance
 - **Clone & export** — duplicate VMs cheaply (linked overlays) or create standalone copies
 
 All managed through a single `andler` CLI or gRPC API, with data stored under `~/.andler/` (no root required).
@@ -194,7 +194,7 @@ Optional sections with defaults:
 
 ```toml
 disk_size_gib = 256
-snapshot_timeout_secs = 30
+snapshot_timeout_secs = 30   # accepted for compatibility; snapshot ops are synchronous
 compact_on_shutdown = false
 
 [cpu]
