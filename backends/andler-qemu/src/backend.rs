@@ -1046,7 +1046,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires qemu-system-x86_64 binary, see docker/README.md integration-test target"]
+    #[ignore = "requires qemu-system-x86_64 binary, see docker/e2e/README.md integration-test target"]
     async fn spawn_then_status_then_stop_round_trip() {
         let backend = QemuBackend::new();
         let mut cfg = sample_config(RenderBackend::Cpu);
@@ -1062,7 +1062,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires qemu-system-x86_64 binary, see docker/README.md integration-test target"]
+    #[ignore = "requires qemu-system-x86_64 binary, see docker/e2e/README.md integration-test target"]
     async fn spawn_then_pause_then_resume_round_trip() {
         let backend = QemuBackend::new();
         let mut cfg = sample_config(RenderBackend::Cpu);
@@ -1081,7 +1081,7 @@ mod tests {
         backend.stop(&handle, false).await.unwrap();
     }
 
-    #[ignore = "requires qemu-system-x86_64 binary, see docker/README.md integration-test target"]
+    #[ignore = "requires qemu-system-x86_64 binary, see docker/e2e/README.md integration-test target"]
     #[tokio::test]
     async fn pause_after_external_process_kill_returns_process_not_running() {
         let backend = QemuBackend::new();
@@ -1116,7 +1116,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires qemu-system-x86_64 binary, see docker/README.md integration-test target"]
+    #[ignore = "requires qemu-system-x86_64 binary, see docker/e2e/README.md integration-test target"]
     async fn log_stream_receives_real_process_output() {
         use futures_util::StreamExt;
         use tokio::time::{timeout, Duration};

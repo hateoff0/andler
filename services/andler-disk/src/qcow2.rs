@@ -372,7 +372,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires qemu-img binary, see docker/README.md integration-test target"]
+    #[ignore = "requires qemu-img binary, see docker/e2e/README.md integration-test target"]
     async fn create_then_virtual_size_round_trips() {
         let dir = std::env::temp_dir().join("andler-disk-test-create");
         tokio::fs::create_dir_all(&dir).await.unwrap();
@@ -386,7 +386,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires qemu-img binary, see docker/README.md integration-test target"]
+    #[ignore = "requires qemu-img binary, see docker/e2e/README.md integration-test target"]
     async fn create_with_backing_file_fails_fast_on_missing_backing() {
         let dir = std::env::temp_dir().join("andler-disk-test-missing-backing");
         tokio::fs::create_dir_all(&dir).await.unwrap();
@@ -403,7 +403,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires qemu-img binary, see docker/README.md integration-test target"]
+    #[ignore = "requires qemu-img binary, see docker/e2e/README.md integration-test target"]
     async fn resize_grow_succeeds_without_confirmation() {
         let dir = std::env::temp_dir().join("andler-disk-test-resize-grow");
         tokio::fs::create_dir_all(&dir).await.unwrap();
@@ -418,7 +418,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires qemu-img binary, see docker/README.md integration-test target"]
+    #[ignore = "requires qemu-img binary, see docker/e2e/README.md integration-test target"]
     async fn resize_shrink_without_confirmation_is_rejected() {
         let dir = std::env::temp_dir().join("andler-disk-test-resize-shrink-reject");
         tokio::fs::create_dir_all(&dir).await.unwrap();
@@ -436,7 +436,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires qemu-img binary, see docker/README.md integration-test target"]
+    #[ignore = "requires qemu-img binary, see docker/e2e/README.md integration-test target"]
     async fn resize_shrink_with_confirmation_succeeds() {
         let dir = std::env::temp_dir().join("andler-disk-test-resize-shrink-confirmed");
         tokio::fs::create_dir_all(&dir).await.unwrap();
@@ -451,7 +451,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires qemu-img binary, see docker/README.md integration-test target"]
+    #[ignore = "requires qemu-img binary, see docker/e2e/README.md integration-test target"]
     async fn compact_qcow2_succeeds() {
         let dir = std::env::temp_dir().join("andler-disk-test-compact-qcow2");
         tokio::fs::create_dir_all(&dir).await.unwrap();
@@ -466,7 +466,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires qemu-img binary, see docker/README.md integration-test target"]
+    #[ignore = "requires qemu-img binary, see docker/e2e/README.md integration-test target"]
     async fn compact_raw_is_rejected_as_not_applicable() {
         let dir = std::env::temp_dir().join("andler-disk-test-compact-raw");
         tokio::fs::create_dir_all(&dir).await.unwrap();

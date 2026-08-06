@@ -391,13 +391,13 @@ Requires `/dev/kvm` (user in `kvm` group) for integration tests. Unit tests do n
 ### Docker
 
 ```bash
-# Unit tests (no KVM required)
-docker compose -f docker/dev/docker-compose.yml build --no-cache unit-test
-docker compose -f docker/dev/docker-compose.yml run --rm unit-test
+# Unit tests (no KVM required; incremental thanks to BuildKit cache mounts)
+docker compose -f docker/e2e/compose.yaml build unit-test
+docker compose -f docker/e2e/compose.yaml run --rm unit-test
 
-# E2E smoke test (requires KVM)
-docker compose -f docker/dev/docker-compose.yml build --no-cache e2e
-docker compose -f docker/dev/docker-compose.yml run --rm e2e
+# E2E suite (requires KVM; covers all CLI commands)
+docker compose -f docker/e2e/compose.yaml build e2e
+docker compose -f docker/e2e/compose.yaml run --rm e2e
 ```
 
 ## Documentation

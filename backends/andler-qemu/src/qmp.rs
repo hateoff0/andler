@@ -729,7 +729,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires qemu-system-x86_64 binary with a live QMP socket, see docker/README.md integration-test target"]
+    #[ignore = "requires qemu-system-x86_64 binary with a live QMP socket, see docker/e2e/README.md integration-test target"]
     async fn connect_then_pause_then_resume_round_trip() {}
 
     #[test]

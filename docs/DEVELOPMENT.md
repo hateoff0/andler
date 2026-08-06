@@ -26,16 +26,16 @@ cargo build --release
 
 ### Docker Build (Recommended for Reproducibility)
 
-The Docker setup lives under `docker/dev/` (`Dockerfile.dev`, `docker-compose.yml`, `e2e_smoke.sh`); guest image pipelines live under `docker/images/`.
+The containerized test harness lives under `docker/e2e/` (`Dockerfile`, `compose.yaml`, `e2e.sh`, `tests/`); guest image pipelines live under `docker/images/`. BuildKit cache mounts make rebuilds incremental — no `--no-cache` needed (see `docker/e2e/README.md` for details and troubleshooting).
 
 ```bash
 # Unit tests
-docker compose -f docker/dev/docker-compose.yml build --no-cache unit-test
-docker compose -f docker/dev/docker-compose.yml run --rm unit-test
+docker compose -f docker/e2e/compose.yaml build unit-test
+docker compose -f docker/e2e/compose.yaml run --rm unit-test
 
-# E2E smoke test
-docker compose -f docker/dev/docker-compose.yml build --no-cache e2e
-docker compose -f docker/dev/docker-compose.yml run --rm e2e
+# E2E suite
+docker compose -f docker/e2e/compose.yaml build e2e
+docker compose -f docker/e2e/compose.yaml run --rm e2e
 ```
 
 ## Running
@@ -114,27 +114,29 @@ Integration tests require `qemu-img` and/or `/dev/kvm`. They're marked `#[ignore
 
 ```bash
 # Via Docker (recommended)
-docker compose -f docker/dev/docker-compose.yml run --rm unit-test -- --ignored
+docker compose -f docker/e2e/compose.yaml run --rm integration-test
 
 # Or directly (requires qemu-img + /dev/kvm)
 cargo test --workspace -- --ignored
 ```
 
-### E2E Smoke Test
+### E2E Suite
 
-The `docker/dev/e2e_smoke.sh` script runs a full lifecycle test:
+`docker/e2e/e2e.sh` orchestrates the suite: it starts a fresh `andlerd` on an isolated SQLite store and runs each `docker/e2e/tests/NN_*.sh` suite in order, printing an assertion count per suite and a final summary (non-zero exit on any failure). Each suite is self-contained and leaves no instances behind.
 
-1. Start `andlerd` as a background process
-2. Create an Android instance from TOML (ID parsed from output)
-3. Negative checks: `status` of a nonexistent instance fails with "not found", `disk create --size 0` is rejected, `create --disk-size-gib 0` is rejected by clap
-4. Configure headless (`display_engine: None`), then really start QEMU under `/dev/kvm` → `Running`
-5. Stream metrics (optional sample) and subscribe to logs — the log subscription catches the SIGTERM of QEMU
-6. `stop --graceful` → `Stopped`; logs after stop are empty
-7. Restart `andlerd` (persistence via SQLite restore) → `remove --purge` (disk.qcow2/VARS.fd deleted, foreign files kept)
-8. Android clone cascade: `clone` linked (removing the source with a live linked clone fails with "live"), full-standalone, shared-base → `export` → count=4 → cascade remove
+Coverage (all CLI commands):
+
+1. Lifecycle + FSM negatives: create from TOML/flags, list/status (text + `--json`, short-id resolution), start/pause/resume/stop, double-start/double-stop, remove-while-running, metrics (`--once`, `--json`), log streaming (SIGTERM line captured, empty after stop), remove with/without `--purge`
+2. Config: `config view`, `config set` (name, `display.resolution`, malformed value, unknown key), `config edit` via `$VISUAL` (success + broken TOML)
+3. Disk: create/info/resize (grow + shrink refusal)/compact (qcow2 + raw), zero-size and unparsable-size negatives
+4. Snapshots: live create (incl. duplicate tag)/list/`--json`, offline restore, restore-while-running, create/delete-while-stopped
+5. Clone/export: Android create (incl. missing base image), linked/full-standalone/shared-base clones, live-clone removal protection, export, nonexistent-source negatives
+6. Guest: error paths always; deep tests (offline install/remove/list against a real Debian rootfs via qemu-nbd, Android boot-mode switching) when the `nbd` module is available — otherwise SKIP, rest of the suite still runs
+7. Client-side: `create --dry-run`, `--verify` pass/fail, wizard non-TTY refusal, shell completions, `andler doctor`
+8. Persistence: daemon restart against the same store (state survives), final cleanup
 
 ```bash
-docker compose -f docker/dev/docker-compose.yml run --rm e2e
+docker compose -f docker/e2e/compose.yaml run --rm e2e
 ```
 
 ### gRPC Round-Trip Tests
@@ -274,10 +276,11 @@ andler/
 │           └── helpers.rs        # parse_size, format_size, format_bytes, ensure_qcow2_extension
 │
 ├── docker/
-│   ├── dev/                      # Build environment + E2E
-│   │   ├── Dockerfile.dev        # Build environment
-│   │   ├── docker-compose.yml    # Unit-test + E2E targets
-│   │   └── e2e_smoke.sh          # End-to-end smoke test
+│   ├── e2e/                      # Containerized test harness
+│   │   ├── Dockerfile            # Multi-stage build + test targets
+│   │   ├── compose.yaml          # unit-test / integration-test / e2e / daemon
+│   │   ├── e2e.sh                # E2E suite orchestrator
+│   │   └── tests/                # Per-feature suites (common.sh, NN_*.sh)
 │   └── images/                   # Guest image pipelines (Waydroid, base images)
 │
 ├── docs/                          # Project documentation

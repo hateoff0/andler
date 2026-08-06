@@ -1,0 +1,51 @@
+services:
+  # Full workspace unit tests. No KVM, works anywhere.
+  unit-test:
+    build:
+      context: ../..
+      dockerfile: docker/e2e/Dockerfile
+      target: unit-test
+
+  # #[ignore] tests (qemu-img, QMP round-trip, spawn). Requires /dev/kvm.
+  integration-test:
+    build:
+      context: ../..
+      dockerfile: docker/e2e/Dockerfile
+      target: integration-test
+    devices:
+      - /dev/kvm
+
+  # Full E2E suite (docker/e2e/e2e.sh). Requires /dev/kvm.
+  # privileged + /lib/modules are only needed for the deep guest tests
+  # (offline package install/list, boot-mode: qemu-nbd + mount inside the
+  # container). The suite skips them when the nbd module is unavailable, so
+  # set E2E_PRIVILEGED=false to run without them.
+  e2e:
+    build:
+      context: ../..
+      dockerfile: docker/e2e/Dockerfile
+      target: e2e
+    devices:
+      - /dev/kvm
+    privileged: ${E2E_PRIVILEGED:-true}
+    volumes:
+      - /lib/modules:/lib/modules:ro
+    environment:
+      E2E_DEEP_GUEST: "1"
+
+  # andlerd in a container for manual experiments (not a distribution channel —
+  # see docker/e2e/README.md).
+  daemon:
+    build:
+      context: ../..
+      dockerfile: docker/e2e/Dockerfile
+      target: daemon
+    devices:
+      - /dev/kvm
+    environment:
+      ANDLER_HOME: /var/lib/andler
+    volumes:
+      - andler-data:/var/lib/andler
+
+volumes:
+  andler-data:

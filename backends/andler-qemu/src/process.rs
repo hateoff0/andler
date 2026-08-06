@@ -217,7 +217,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    #[ignore = "requires qemu-system-x86_64 binary, see docker/README.md integration-test target"]
+    #[ignore = "requires qemu-system-x86_64 binary, see docker/e2e/README.md integration-test target"]
     async fn spawn_then_is_alive_then_terminate() {
         let qmp_path = std::env::temp_dir().join("andler-process-test-qmp.sock");
         let args = vec![
@@ -234,7 +234,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires qemu-system-x86_64 binary, see docker/README.md integration-test target"]
+    #[ignore = "requires qemu-system-x86_64 binary, see docker/e2e/README.md integration-test target"]
     async fn force_kill_stops_unresponsive_process() {
         let qmp_path = std::env::temp_dir().join("andler-process-test-qmp-killed.sock");
         let args = vec![

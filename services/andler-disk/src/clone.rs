@@ -67,7 +67,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    #[ignore = "requires qemu-img binary, see docker/README.md integration-test target"]
+    #[ignore = "requires qemu-img binary, see docker/e2e/README.md integration-test target"]
     async fn linked_clone_points_at_source_instance_disk() {
         let dir = std::env::temp_dir().join("andler-disk-test-linked-clone");
         tokio::fs::create_dir_all(&dir).await.unwrap();
@@ -101,7 +101,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires qemu-img binary, see docker/README.md integration-test target"]
+    #[ignore = "requires qemu-img binary, see docker/e2e/README.md integration-test target"]
     async fn full_standalone_clone_has_no_backing_file() {
         let dir = std::env::temp_dir().join("andler-disk-test-standalone-clone");
         tokio::fs::create_dir_all(&dir).await.unwrap();
@@ -133,7 +133,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires qemu-img binary, see docker/README.md integration-test target"]
+    #[ignore = "requires qemu-img binary, see docker/e2e/README.md integration-test target"]
     async fn shared_base_clone_does_not_depend_on_source_after_copy() {
         let dir = std::env::temp_dir().join("andler-disk-test-shared-base-clone");
         tokio::fs::create_dir_all(&dir).await.unwrap();

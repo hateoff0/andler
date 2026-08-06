@@ -105,7 +105,7 @@ Bidirectional conversions between proto and domain types:
 
 ## Build
 
-`build.rs` compiles `.proto` via `tonic_build::compile_protos`. Requires system `protoc` (`protobuf-compiler` package — see `docker/Dockerfile.dev`).
+`build.rs` compiles `.proto` via `tonic_build::compile_protos`. Requires system `protoc` (`protobuf-compiler` package — see `docker/e2e/Dockerfile`).
 
 `src/lib.rs`: `pub mod proto { tonic::include_proto!("andler"); }`
 

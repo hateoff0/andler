@@ -32,7 +32,7 @@ async fn double_create_with_same_id_overwrites_record() {
 }
 
 #[tokio::test]
-#[ignore = "requires qemu-img binary, see docker/README.md integration-test target"]
+#[ignore = "requires qemu-img binary, see docker/e2e/README.md integration-test target"]
 async fn create_linux_instance_places_disk_inside_own_instance_dir() {
     let dir = std::env::temp_dir().join(format!(
         "andler-daemon-test-linux-disk-path-{}",
@@ -73,7 +73,7 @@ async fn create_linux_instance_places_disk_inside_own_instance_dir() {
 }
 
 #[tokio::test]
-#[ignore = "requires qemu-img binary, see docker/README.md integration-test target"]
+#[ignore = "requires qemu-img binary, see docker/e2e/README.md integration-test target"]
 async fn create_android_instance_resolves_profile_and_creates_overlay() {
     let dir = std::env::temp_dir().join("andler-daemon-test-android-e2e");
     tokio::fs::create_dir_all(&dir).await.unwrap();

@@ -61,7 +61,7 @@ Any active state can transition to `Error` via `Fail(msg)`. `Stopped`/`Error` ac
 | `services/andler-rpc/` | Protobuf definitions, gRPC generated code, proto↔domain conversions |
 | `apps/daemon/` | Background service: orchestrates backends, FSM transitions, gRPC server |
 | `apps/cli/` | Thin gRPC client: one subcommand = one gRPC request + print response |
-| `docker/dev/` | Build environment, compose targets, E2E smoke test |
+| `docker/e2e/` | Containerized test harness: build env, compose targets, E2E suite |
 | `docker/images/` | Guest base-image build pipelines (rootfs → bootable qcow2) |
 | `docs/` | Architecture, development guide, API reference, gRPC reference, changelog, roadmap |
 | `scripts/` | systemd service unit, installation script |
@@ -77,8 +77,8 @@ Every crate directory has its own `README.md` with crate-local behavior and inte
 cargo build --workspace
 cargo build --release
 
-# Docker build (recommended for reproducibility)
-docker compose -f docker/dev/docker-compose.yml build --no-cache unit-test
+# Docker build (recommended for reproducibility; incremental thanks to BuildKit cache mounts)
+docker compose -f docker/e2e/compose.yaml build unit-test
 ```
 
 ### Run
@@ -101,7 +101,7 @@ ANDLERD_STORE_PATH=/path/to/andlerd.db ./target/release/andlerd
 cargo test --workspace
 
 # Docker unit tests
-docker compose -f docker/dev/docker-compose.yml run --rm unit-test
+docker compose -f docker/e2e/compose.yaml run --rm unit-test
 
 # Integration tests (requires qemu-img + /dev/kvm)
 cargo test --workspace -- --ignored
@@ -109,8 +109,8 @@ cargo test --workspace -- --ignored
 # gRPC round-trip tests (real TCP, no QEMU required)
 cargo test -p andler-daemon grpc_roundtrip
 
-# E2E smoke test
-docker compose -f docker/dev/docker-compose.yml run --rm e2e
+# E2E suite
+docker compose -f docker/e2e/compose.yaml run --rm e2e
 ```
 
 ### Lint & Format
@@ -246,7 +246,7 @@ Docs drift is a bug, same severity as a failing test. Rules that keep the repo h
 - **AGENTS.md is an index, not a knowledge base.** Technical detail lives in the doc that owns it; AGENTS.md only points at the owner. Never copy content into AGENTS.md — duplicated knowledge drifts in one of the copies.
 - **No unverified numbers in docs.** Any count (variants, methods, tests, RPCs) must be checkable against the code at review time; prefer "count from the file" over a literal number. Pinned counts rot — test counts are already unpinned, and the same rule applies to `DaemonError` variants and `HypervisorBackend` methods.
 - **When fixing behavior, grep the docs that describe it** (error text, section headers, README feature lists) and fix them in the same commit — a doc claim that contradicts code is a bug report waiting to happen.
-- **Removing a component** (crate, RPC, CLI command, config key) is a behavior change too: update the owning docs and grep the whole repo for stale references — crate graphs (AGENTS.md, `docs/ARCHITECTURE.md`), README trees and crate-doc lists, `docs/GRPC_API.md` value tables, `docker/dev/Dockerfile.dev` COPY lines and stub loops, e2e scripts.
+- **Removing a component** (crate, RPC, CLI command, config key) is a behavior change too: update the owning docs and grep the whole repo for stale references — crate graphs (AGENTS.md, `docs/ARCHITECTURE.md`), README trees and crate-doc lists, `docs/GRPC_API.md` value tables, `docker/e2e/Dockerfile` COPY lines and stub loops, e2e scripts.
 
 ### Docs map
 
@@ -261,7 +261,7 @@ Where the living truths live — read the owner before writing the claim anywher
 | `docs/DEVELOPMENT.md` | development workflow, crate layout |
 | `docs/CHANGELOG.md` | user-visible changes (Unreleased section) |
 | `docs/ROADMAP.md` | planned work |
-| `docker/dev/README.md` | docker build/test/e2e targets, containerized verification |
+| `docker/e2e/README.md` | docker build/test/e2e targets, containerized verification |
 | `backends/andler-qemu/README.md` | QEMU integration facts and Known Limitations |
 | other crate `README.md` | crate-local behavior |
 
@@ -347,9 +347,9 @@ A new file in `docs/` must be registered here in the same commit.
 
 - `Cargo.toml` — Workspace definition, shared dependencies
 - `rust-toolchain.toml` — Stable channel, rustfmt + clippy components
-- `docker/dev/docker-compose.yml` — Unit test, integration test, E2E targets
-- `docker/dev/Dockerfile.dev` — Multi-stage build environment
-- `docker/dev/e2e_smoke.sh` — Full lifecycle E2E test
+- `docker/e2e/compose.yaml` — Unit test, integration test, E2E targets
+- `docker/e2e/Dockerfile` — Multi-stage build + test harness
+- `docker/e2e/e2e.sh` — E2E suite orchestrator (runs tests/NN_*.sh)
 
 ## Runtime/Tooling Preferences
 
@@ -420,7 +420,7 @@ A new file in `docs/` must be registered here in the same commit.
 
 - **Unit tests**: Built-in `#[cfg(test)]` modules in each crate
 - **Integration tests**: `#[ignore]` attribute for tests requiring QEMU/KVM
-- **E2E tests**: Shell script (`docker/dev/e2e_smoke.sh`) with real daemon + CLI
+- **E2E tests**: Orchestrated shell suite (`docker/e2e/e2e.sh` + `docker/e2e/tests/NN_*.sh`) with real daemon + CLI
 
 ### Test Counts
 
@@ -447,9 +447,9 @@ cargo test -p andler-daemon grpc_roundtrip
 cargo test --workspace -- --ignored
 
 # Docker tests (recommended)
-docker compose -f docker/dev/docker-compose.yml run --rm unit-test
-docker compose -f docker/dev/docker-compose.yml run --rm unit-test -- --ignored
-docker compose -f docker/dev/docker-compose.yml run --rm e2e
+docker compose -f docker/e2e/compose.yaml run --rm unit-test
+docker compose -f docker/e2e/compose.yaml run --rm integration-test
+docker compose -f docker/e2e/compose.yaml run --rm e2e
 ```
 
 ### Test Patterns
@@ -460,17 +460,19 @@ docker compose -f docker/dev/docker-compose.yml run --rm e2e
 - gRPC round-trip tests: Real TCP, real protobuf, real tonic server/client
 - CLI tests: TOML parsing, helper functions, error formatting
 
-### E2E Smoke Test
+### E2E Suite
 
-`docker/dev/e2e_smoke.sh` runs full lifecycle:
-1. Start `andlerd` background process
-2. Create Android instance (extracts the short ID from the `Created instance <name> (<id>)` output)
-3. Negative checks: `status` of a nonexistent instance fails with "not found"; `disk create --size 0` is rejected; `create --disk-size-gib 0` is rejected by clap's range
-4. Start instance
-5. Stream metrics for 5 seconds
-6. Stop instance (SIGTERM, asserts the qemu stderr line is visible in `andler logs`)
-7. Remove instance with `--purge`
-8. Verify clean shutdown
+`docker/e2e/e2e.sh` orchestrates the suite: it starts a fresh `andlerd` on an
+isolated sqlite store and runs every `docker/e2e/tests/NN_*.sh` suite in
+order (each self-contained and with its own assertion counter), then prints a
+summary and exits non-zero when any suite fails. Coverage spans all CLI
+commands: lifecycle + FSM negatives (start/pause/resume/stop, remove-while-
+running, double-stop), config view/set/edit, disk create/info/resize/compact,
+live snapshots + offline restore, clone/export (all three modes + removal
+protection), guest install/remove/list and boot-mode (deep tests over a real
+rootfs via qemu-nbd, SKIP when the `nbd` module is unavailable), dry-run/
+verify/wizard/completions/doctor, and daemon-restart persistence. Each suite
+leaves no instances behind.
 
 ### Coverage Expectations
 

@@ -48,7 +48,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    #[ignore = "requires qemu-img binary, see docker/README.md integration-test target"]
+    #[ignore = "requires qemu-img binary, see docker/e2e/README.md integration-test target"]
     async fn create_overlay_points_at_given_base_image() {
         let dir = std::env::temp_dir().join("andler-disk-test-overlay");
         tokio::fs::create_dir_all(&dir).await.unwrap();
@@ -73,7 +73,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires qemu-img binary, see docker/README.md integration-test target"]
+    #[ignore = "requires qemu-img binary, see docker/e2e/README.md integration-test target"]
     async fn create_overlay_fails_when_base_image_missing() {
         let dir = std::env::temp_dir().join("andler-disk-test-overlay-missing-base");
         tokio::fs::create_dir_all(&dir).await.unwrap();
@@ -90,7 +90,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires qemu-img binary, see docker/README.md integration-test target"]
+    #[ignore = "requires qemu-img binary, see docker/e2e/README.md integration-test target"]
     async fn factory_reset_recreates_overlay() {
         let dir = std::env::temp_dir().join("andler-disk-test-factory-reset");
         tokio::fs::create_dir_all(&dir).await.unwrap();

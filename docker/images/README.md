@@ -2,7 +2,7 @@
 
 Building what becomes the **backing file** for qcow2 overlays used by
 Android and Linux instances of ANDLER (`services/andler-disk`). This is not the
-same as `docker/dev/` — that builds and tests ANDLER itself
+same as `docker/e2e/` — that builds and tests ANDLER itself
 (daemon/CLI); here we build the guest system that later
 *runs inside* an instance under QEMU.
 

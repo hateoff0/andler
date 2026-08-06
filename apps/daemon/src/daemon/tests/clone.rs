@@ -344,7 +344,7 @@ async fn clone_linux_vm_rejects_non_terminal_source_state() {
 }
 
 #[tokio::test]
-#[ignore = "requires qemu-img binary, see docker/README.md integration-test target"]
+#[ignore = "requires qemu-img binary, see docker/e2e/README.md integration-test target"]
 async fn export_linux_vm_disk_creates_standalone_file() {
     let dir = TestTempDir::new();
     let disk_path = dir.path().join("disk.qcow2");
@@ -371,7 +371,7 @@ async fn export_linux_vm_disk_creates_standalone_file() {
 }
 
 #[tokio::test]
-#[ignore = "requires qemu-img binary, see docker/README.md integration-test target"]
+#[ignore = "requires qemu-img binary, see docker/e2e/README.md integration-test target"]
 async fn clone_instance_with_linked_mode_creates_overlay_pointing_at_source_disk() {
     let dir = std::env::temp_dir().join("andler-daemon-test-clone-linked");
     tokio::fs::create_dir_all(&dir).await.unwrap();
@@ -446,7 +446,7 @@ async fn clone_instance_with_linked_mode_creates_overlay_pointing_at_source_disk
 }
 
 #[tokio::test]
-#[ignore = "requires qemu-img binary, see docker/README.md integration-test target"]
+#[ignore = "requires qemu-img binary, see docker/e2e/README.md integration-test target"]
 async fn clone_instance_with_full_standalone_mode_has_no_base_image() {
     let dir = std::env::temp_dir().join("andler-daemon-test-clone-standalone");
     tokio::fs::create_dir_all(&dir).await.unwrap();
@@ -502,7 +502,7 @@ async fn clone_instance_with_full_standalone_mode_has_no_base_image() {
 }
 
 #[tokio::test]
-#[ignore = "requires qemu-img binary, see docker/README.md integration-test target"]
+#[ignore = "requires qemu-img binary, see docker/e2e/README.md integration-test target"]
 async fn clone_instance_with_shared_base_mode_survives_source_purge() {
     let dir = std::env::temp_dir().join("andler-daemon-test-clone-shared-base");
     tokio::fs::create_dir_all(&dir).await.unwrap();
@@ -559,7 +559,7 @@ async fn clone_instance_with_shared_base_mode_survives_source_purge() {
 }
 
 #[tokio::test]
-#[ignore = "requires qemu-img binary, see docker/README.md integration-test target"]
+#[ignore = "requires qemu-img binary, see docker/e2e/README.md integration-test target"]
 async fn clone_instance_of_a_clone_is_allowed() {
     let dir = std::env::temp_dir().join("andler-daemon-test-clone-of-clone");
     tokio::fs::create_dir_all(&dir).await.unwrap();
@@ -634,7 +634,7 @@ async fn clone_instance_of_a_clone_is_allowed() {
 }
 
 #[tokio::test]
-#[ignore = "requires qemu-img binary, see docker/README.md integration-test target"]
+#[ignore = "requires qemu-img binary, see docker/e2e/README.md integration-test target"]
 async fn export_instance_disk_creates_standalone_file_without_registering_instance() {
     let dir = std::env::temp_dir().join("andler-daemon-test-export");
     tokio::fs::create_dir_all(&dir).await.unwrap();
