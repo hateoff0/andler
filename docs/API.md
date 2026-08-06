@@ -230,21 +230,25 @@ GPU fields (vram, gpu) appear when AMD, NVIDIA, or Intel GPU data is available. 
 ### `snapshot`
 
 ```bash
-# Create (requires Running/Paused instance)
-andler snapshot create <instance-id> --tag before-update --description "Pre-upgrade state" --timeout 120
+# Create (live; requires Running/Paused instance)
+andler snapshot create <instance-id> --tag before-update --description "Pre-upgrade state"
 
-# Restore (requires Running/Paused instance)
-andler snapshot restore <instance-id> --tag before-update --timeout 10
+# Restore (offline; requires a stopped instance — fails with FAILED_PRECONDITION if Running/Paused)
+andler snapshot restore <instance-id> --tag before-update
 
-# Delete (requires Running/Paused instance)
-andler snapshot delete <instance-id> --tag before-update --timeout 5
+# Delete (live; requires Running/Paused instance)
+andler snapshot delete <instance-id> --tag before-update
 
 # List (any state)
 andler snapshot list <instance-id>
 andler snapshot --json list <instance-id>
 ```
 
-The `--timeout` flag overrides the per-instance `snapshot_timeout_secs` for a single operation. If not specified, uses the instance default (30s).
+Snapshots are disk-only internal qcow2 snapshots: create/delete run live over QMP
+(`blockdev-snapshot-internal-sync`/`-delete-internal-sync`), restore runs offline
+(`qemu-img snapshot -a`) and takes effect on the next start — the guest reboots, RAM is
+not restored. `--timeout` is accepted for CLI compatibility but unused (the operations are
+synchronous).
 
 `delete` asks for confirmation on an interactive terminal (answering `n` prints `Cancelled.` and keeps the snapshot).
 
@@ -394,7 +398,7 @@ disk_path = "/home/user/.andler/my-linux-vm/disk.qcow2"
 ovmf_vars_path = "/home/user/.andler/my-linux-vm/VARS.fd"
 
 disk_size_gib = 100
-snapshot_timeout_secs = 60
+snapshot_timeout_secs = 60   # accepted for compatibility; snapshot ops are synchronous
 
 [cpu]
 cores = 8

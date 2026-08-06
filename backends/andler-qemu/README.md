@@ -83,9 +83,8 @@ QMP client over a unix socket. Handles handshake, command execution, and async j
 | `pause` | `async fn(&mut self) -> Result<(), QmpError>` | Sends `stop` command |
 | `resume` | `async fn(&mut self) -> Result<(), QmpError>` | Sends `cont` command |
 | `query_status` | `async fn(&mut self) -> Result<VmStatus, QmpError>` | Sends `query-status` |
-| `snapshot_save` | `async fn(&mut self, device, tag) -> Result<String, QmpError>` | Async `snapshot-save` job |
-| `snapshot_load` | `async fn(&mut self, device, tag) -> Result<String, QmpError>` | Async `snapshot-load` job |
-| `snapshot_delete` | `async fn(&mut self, device, tag) -> Result<String, QmpError>` | Async `snapshot-delete` job |
+| `snapshot_save` | `async fn(&mut self, device, tag) -> Result<(), QmpError>` | Synchronous `blockdev-snapshot-internal-sync` (disk-only internal snapshot) |
+| `snapshot_delete` | `async fn(&mut self, device, tag) -> Result<(), QmpError>` | Synchronous `blockdev-snapshot-delete-internal-sync` |
 | `wait_job_completion` | `async fn(&mut self, job_id, timeout) -> Result<(), QmpError>` | Polls `query-jobs` until `"concluded"`, then `job-dismiss` |
 | `guest_ping` | `async fn(&mut self) -> Result<(), QmpError>` | Check if guest agent is reachable (agent socket only) |
 | `guest_exec` | `async fn(&mut self, path: &str, args: &[String]) -> Result<u64, QmpError>` | Execute command in guest (agent socket only) |
@@ -100,17 +99,20 @@ QMP client over a unix socket. Handles handshake, command execution, and async j
 
 **`GuestExecStatus`**: `exitcode: i64`, `exited: bool`, `out_data: String`, `err_data: String`.
 
-**QMP wire schema for `snapshot-save`/`-load`/`-delete` (job-based API, QEMU 6.0+)**:
+**QMP wire schema for snapshots (disk-only, no VM state)**:
 
 ```text
-snapshot-save:   {"job-id": ..., "tag": ..., "vmstate": <node-name>, "devices": [<node-name>, ...]}
-snapshot-load:   {"job-id": ..., "tag": ..., "vmstate": <node-name>, "devices": [<node-name>, ...]}
-snapshot-delete: {"job-id": ..., "tag": ..., "devices": [<node-name>, ...]}               (no vmstate)
+blockdev-snapshot-internal-sync:        {"device": <node-name>, "name": <tag>}
+blockdev-snapshot-delete-internal-sync: {"device": <node-name>, "name": <tag>}
 ```
 
-`devices` is a **list**, not a singular `device` field — QEMU rejects the command outright (`{"error": ...}`, job never starts) if you send `device` instead. `snapshot-save`/`-load` also require `vmstate` (the node where CPU/RAM state is stored); `snapshot-delete` does not. This crate's `device: &str` parameter on `snapshot_save`/`snapshot_load`/`snapshot_delete` is used to build both `vmstate` and the single-element `devices` array internally.
-
-**Job status polling** — QEMU's job state machine has exactly one terminal status, `"concluded"` (`created`/`running`/`paused`/`ready`/`standby`/`waiting`/`pending`/`aborting` are all non-terminal). Success vs. failure of a `"concluded"` job is distinguished by the presence of an `error` field, not by a different status value. After a job reaches `"concluded"` (either outcome), `job-dismiss` must be called explicitly — otherwise it stays visible in `query-jobs` forever.
+These are synchronous commands — no job-id, no `vmstate`, no `devices` array. This is a deliberate
+design decision: the full vmstate path (`snapshot-save` with a mandatory `vmstate` node) serializes
+VM state through the migration machinery, which QEMU blocks on every default component of an
+andler VM (`virtio-sound`, `virgl`, and the `invtsc` CPU flag are all non-migratable by design).
+Disk-only snapshots work on any configuration, at the cost that **restore is an offline operation**
+(`qemu-img snapshot -a` via the daemon, requires a stopped instance) — there is no live revert
+command in QEMU's block-layer API.
 
 **Package manager auto-detection**: `guest_exec_package` (used by guest package installation/removal) runs a detection script inside the guest via the agent (`connect_agent` on `*.qga.sock`): `command -v apt-get → exit 0`, `command -v dnf → exit 10`, `command -v pacman → exit 20`, else exit 30 (error "no supported package manager found"). The detected manager then runs `install -y` / `remove -y` (pacman: `-S --noconfirm` / `-R --noconfirm`). A non-zero exit propagates `GuestExecFailed` with the decoded stderr.
 **Agent socket exclusivity** — the agent connect is established lazily per operation by `backend::guest_agent_client`. A QEMU chardev delivers its data to the *last* client only, so concurrent guest operations against the same `*.qga.sock` must serialize; never hold the socket across long operations.
@@ -173,7 +175,7 @@ GPU metrics (AMD/NVIDIA/Intel sysfs + NVML) live in `services/andler-firmware/sr
 ## Tests
 
 - **`cmdline`** (~30 tests): All argument blocks tested independently against reference configuration. Includes edge cases: `Passthrough` panic, `None` display engine, clipboard disabled, size suffixes.
-- **`qmp`**: JSON parsing of QMP responses (`QmpReply`, `VmStatus`, `QueryStatusReturn`, `SnapshotInfo`, `QueryJobInfo`), plus `UnixStream::pair`-based fake-QMP-peer tests covering the real `snapshot-save`/`-load`/`-delete` wire schema (`devices`+`vmstate`), `wait_job_completion`'s `"concluded"`+`error` semantics, `job-dismiss`, and async-event skipping during polling.
+- **`qmp`**: JSON parsing of QMP responses (`QmpReply`, `VmStatus`, `QueryStatusReturn`, `SnapshotInfo`, `QueryJobInfo`), plus `UnixStream::pair`-based fake-QMP-peer tests covering the real `blockdev-snapshot-internal-sync`/`-delete-internal-sync` wire schema (`device`+`name`, no job-id/vmstate/devices), `wait_job_completion`'s `"concluded"`+`error` semantics, `job-dismiss`, and async-event skipping during polling.
 - **`backend`** (~20 tests): `name_returns_qemu`, `Passthrough` validation, unknown handle handling, `VmStatus → InstanceState` mapping, empty `metrics_stream`/`log_stream`.
 - **`process`**: `SpawnFailed` via missing binary, `drain_to_tracing` line publishing, subscriber tolerance, multiple subscribers fan-out.
 - **`metrics`**: CPU stat parsing, CPU% computation, I/O rates, RSS parsing, net_dev parsing.

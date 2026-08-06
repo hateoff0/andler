@@ -123,39 +123,24 @@ impl QmpClient {
         Ok(parsed.status)
     }
 
-    pub async fn snapshot_save(&mut self, device: &str, tag: &str) -> Result<String, QmpError> {
-        let job_id = format!("snap-{tag}");
+    pub async fn snapshot_save(&mut self, device: &str, tag: &str) -> Result<(), QmpError> {
         let args = json!({
-            "job-id": &job_id,
-            "tag": tag,
-            "vmstate": device,
-            "devices": [device],
+            "device": device,
+            "name": tag,
         });
-        self.execute_raw("snapshot-save", Some(args)).await?;
-        Ok(job_id)
+        self.execute_raw("blockdev-snapshot-internal-sync", Some(args))
+            .await?;
+        Ok(())
     }
 
-    pub async fn snapshot_load(&mut self, device: &str, tag: &str) -> Result<String, QmpError> {
-        let job_id = format!("load-{tag}");
+    pub async fn snapshot_delete(&mut self, device: &str, tag: &str) -> Result<(), QmpError> {
         let args = json!({
-            "job-id": &job_id,
-            "tag": tag,
-            "vmstate": device,
-            "devices": [device],
+            "device": device,
+            "name": tag,
         });
-        self.execute_raw("snapshot-load", Some(args)).await?;
-        Ok(job_id)
-    }
-
-    pub async fn snapshot_delete(&mut self, device: &str, tag: &str) -> Result<String, QmpError> {
-        let job_id = format!("del-{tag}");
-        let args = json!({
-            "job-id": &job_id,
-            "tag": tag,
-            "devices": [device],
-        });
-        self.execute_raw("snapshot-delete", Some(args)).await?;
-        Ok(job_id)
+        self.execute_raw("blockdev-snapshot-delete-internal-sync", Some(args))
+            .await?;
+        Ok(())
     }
 
     pub async fn wait_job_completion(
@@ -534,7 +519,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn snapshot_save_sends_devices_array_and_vmstate_not_singular_device() {
+    async fn snapshot_save_sends_internal_sync_device_and_name() {
         let (mut client, server) = fake_qmp_pair();
         let (mut server_read, mut server_write) = tokio::io::split(server);
 
@@ -550,27 +535,32 @@ mod tests {
             req
         });
 
-        let job_id = client
+        client
             .snapshot_save("drive-disk0", "my-tag")
             .await
             .expect("snapshot_save should send the request and parse the reply");
-        assert_eq!(job_id, "snap-my-tag");
 
         let req = request_fut.await.expect("server task did not panic");
-        assert_eq!(req["execute"], "snapshot-save");
+        assert_eq!(req["execute"], "blockdev-snapshot-internal-sync");
         let args = &req["arguments"];
-        assert_eq!(args["job-id"], "snap-my-tag");
-        assert_eq!(args["tag"], "my-tag");
-        assert_eq!(args["vmstate"], "drive-disk0");
-        assert_eq!(args["devices"], serde_json::json!(["drive-disk0"]));
+        assert_eq!(args["device"], "drive-disk0");
+        assert_eq!(args["name"], "my-tag");
         assert!(
-            args.get("device").is_none(),
-            "must not send the old singular `device` field"
+            args.get("vmstate").is_none(),
+            "disk-only snapshots must not send vmstate"
+        );
+        assert!(
+            args.get("devices").is_none(),
+            "must not send the job-API `devices` array"
+        );
+        assert!(
+            args.get("job-id").is_none(),
+            "must not send the job-API `job-id`"
         );
     }
 
     #[tokio::test]
-    async fn snapshot_delete_sends_devices_array_without_vmstate() {
+    async fn snapshot_delete_sends_internal_delete_device_and_name() {
         let (mut client, server) = fake_qmp_pair();
         let (mut server_read, mut server_write) = tokio::io::split(server);
 
@@ -592,12 +582,21 @@ mod tests {
             .expect("snapshot_delete should succeed");
 
         let req = request_fut.await.expect("server task did not panic");
-        assert_eq!(req["execute"], "snapshot-delete");
+        assert_eq!(req["execute"], "blockdev-snapshot-delete-internal-sync");
         let args = &req["arguments"];
-        assert_eq!(args["devices"], serde_json::json!(["drive-disk0"]));
+        assert_eq!(args["device"], "drive-disk0");
+        assert_eq!(args["name"], "old-tag");
         assert!(
             args.get("vmstate").is_none(),
-            "snapshot-delete has no vmstate parameter, unlike snapshot-save/-load"
+            "disk-only delete has no vmstate parameter"
+        );
+        assert!(
+            args.get("devices").is_none(),
+            "must not send the job-API `devices` array"
+        );
+        assert!(
+            args.get("job-id").is_none(),
+            "must not send the job-API `job-id`"
         );
     }
 

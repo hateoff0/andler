@@ -111,7 +111,7 @@ Disk configuration.
 | `base_image` | `string` | Path to a backing image (empty = independent disk). |
 | `thin_provisioning` | `bool` | Allocate disk space on write (if supported). |
 | `trim_on_shutdown` | `bool` | Issue TRIM commands when VM shuts down. |
-| `snapshot_timeout_secs` | `optional uint64` | Timeout for snapshot operations (default: 30s). |
+| `snapshot_timeout_secs` | `optional uint64` | Accepted for compatibility; unused — snapshot operations are synchronous. |
 | `compact_on_shutdown` | `bool` | Automatically compact the disk after shutdown (qcow2 only). |
 
 ### `Resolution`
@@ -531,7 +531,7 @@ Request to create a snapshot.
 | `instance_id` | `string` | Instance ID. |
 | `tag` | `string` | Snapshot tag (unique identifier). |
 | `description` | `string` | Human-readable description. |
-| `timeout_secs` | `optional uint64` | Operation timeout (default: instance's `snapshot_timeout_secs`). |
+| `timeout_secs` | `optional uint64` | Accepted for compatibility; unused — snapshot operations are synchronous. |
 
 ### `CreateSnapshotResponse`
 

@@ -43,9 +43,7 @@ Venus and VirGL provide **paravirtualized 3D acceleration** — the guest sees a
 
 ### Snapshots
 
-- **QEMU job-based snapshots** — async create/restore/delete/list via `snapshot-save`/`snapshot-load` job API
-- **Per-instance timeout** — configurable `snapshot_timeout_secs` (default 30s)
-- **Per-operation override** — `--timeout` flag on snapshot commands
+- **Disk-only snapshots** — create/delete live via QMP (`blockdev-snapshot-internal-sync`) on any GPU/audio/CPU configuration; restore offline via `qemu-img snapshot -a` (requires stopped instance)
 - **SQLite metadata** — tag, description, creation time stored with `ON DELETE CASCADE`
 
 ### Monitoring

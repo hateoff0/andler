@@ -25,8 +25,6 @@ struct RunningInstance {
     process: QemuProcess,
     qmp_client: Option<QmpClient>,
 
-    snapshot_timeout: std::time::Duration,
-
     network_info: NetworkInfo,
 }
 
@@ -365,9 +363,6 @@ impl HypervisorBackend for QemuBackend {
             RunningInstance {
                 process,
                 qmp_client: None,
-                snapshot_timeout: std::time::Duration::from_secs(
-                    cfg.disk.snapshot_timeout_secs.unwrap_or(30),
-                ),
                 network_info,
             },
         );
@@ -586,7 +581,7 @@ impl HypervisorBackend for QemuBackend {
         &self,
         handle: &BackendHandle,
         tag: &str,
-        timeout: Option<std::time::Duration>,
+        _timeout: Option<std::time::Duration>,
     ) -> Result<(), BackendError> {
         let mut instances = self.instances.lock().await;
         let instance = instances
@@ -598,13 +593,7 @@ impl HypervisorBackend for QemuBackend {
             .map_err(qmp_error_to_backend_error)?;
 
         let qmp = instance.qmp_client.as_mut().expect("just connected");
-        let job_id = qmp
-            .snapshot_save(DISK_DEVICE, tag)
-            .await
-            .map_err(qmp_error_to_backend_error)?;
-
-        let effective_timeout = timeout.unwrap_or(instance.snapshot_timeout);
-        qmp.wait_job_completion(&job_id, effective_timeout)
+        qmp.snapshot_save(DISK_DEVICE, tag)
             .await
             .map_err(qmp_error_to_backend_error)?;
 
@@ -613,38 +602,21 @@ impl HypervisorBackend for QemuBackend {
 
     async fn snapshot_restore(
         &self,
-        handle: &BackendHandle,
-        tag: &str,
-        timeout: Option<std::time::Duration>,
+        _handle: &BackendHandle,
+        _tag: &str,
+        _timeout: Option<std::time::Duration>,
     ) -> Result<(), BackendError> {
-        let mut instances = self.instances.lock().await;
-        let instance = instances
-            .get_mut(handle)
-            .ok_or_else(|| BackendError::HandleNotFound(handle.0.clone()))?;
-
-        Self::ensure_qmp_connected(instance)
-            .await
-            .map_err(qmp_error_to_backend_error)?;
-
-        let qmp = instance.qmp_client.as_mut().expect("just connected");
-        let job_id = qmp
-            .snapshot_load(DISK_DEVICE, tag)
-            .await
-            .map_err(qmp_error_to_backend_error)?;
-
-        let effective_timeout = timeout.unwrap_or(instance.snapshot_timeout);
-        qmp.wait_job_completion(&job_id, effective_timeout)
-            .await
-            .map_err(qmp_error_to_backend_error)?;
-
-        Ok(())
+        Err(BackendError::NotImplemented {
+            backend: "qemu",
+            operation: "snapshot_restore (restore is an offline qemu-img operation, see daemon restore_snapshot)",
+        })
     }
 
     async fn snapshot_delete(
         &self,
         handle: &BackendHandle,
         tag: &str,
-        timeout: Option<std::time::Duration>,
+        _timeout: Option<std::time::Duration>,
     ) -> Result<(), BackendError> {
         let mut instances = self.instances.lock().await;
         let instance = instances
@@ -656,13 +628,7 @@ impl HypervisorBackend for QemuBackend {
             .map_err(qmp_error_to_backend_error)?;
 
         let qmp = instance.qmp_client.as_mut().expect("just connected");
-        let job_id = qmp
-            .snapshot_delete(DISK_DEVICE, tag)
-            .await
-            .map_err(qmp_error_to_backend_error)?;
-
-        let effective_timeout = timeout.unwrap_or(instance.snapshot_timeout);
-        qmp.wait_job_completion(&job_id, effective_timeout)
+        qmp.snapshot_delete(DISK_DEVICE, tag)
             .await
             .map_err(qmp_error_to_backend_error)?;
 

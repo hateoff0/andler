@@ -129,6 +129,17 @@ pub async fn virtual_size_bytes(path: &Path) -> Result<u64, DiskError> {
     parse_json_u64_field(&output, "virtual-size")
 }
 
+pub async fn restore_internal_snapshot(path: &Path, tag: &str) -> Result<(), DiskError> {
+    if !path.exists() {
+        return Err(DiskError::Io {
+            path: path.to_path_buf(),
+            source: std::io::Error::new(std::io::ErrorKind::NotFound, "disk file does not exist"),
+        });
+    }
+
+    run_qemu_img(&["snapshot", "-a", tag, &path.to_string_lossy()]).await
+}
+
 pub async fn disk_usage_bytes(path: &Path) -> Result<u64, DiskError> {
     let output =
         run_qemu_img_capturing_stdout(&["info", "--output=json", &path.to_string_lossy()]).await?;

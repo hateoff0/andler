@@ -20,6 +20,7 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 
 #### Daemon
 
+- **Disk-only snapshots**: `snapshot create`/`delete` now use synchronous `blockdev-snapshot-internal-sync`/`-delete-internal-sync` (qcow2 internal snapshots) instead of the vmstate job API — they work on any GPU/audio/CPU configuration, including the defaults (`virtio-sound`, Venus, `invtsc`), which QEMU's migration machinery refuses to serialize. `snapshot restore` is an offline `qemu-img snapshot -a` that requires a stopped instance (`InstanceMustBeStopped`); the guest boots from the snapshot on next start (RAM is not restored).
 - **Pre-start file validation**: `validate_instance_files()` checks disk and firmware paths exist before spawning QEMU, catching deleted/moved instance directories early instead of letting QEMU fork and fail silently.
 - **Structured lifecycle tracing**: `info`/`error` tracing for all instance lifecycle operations (create, start, stop, pause, resume, remove) with `instance_id` and error details.
 - **`InstanceAlreadyStopped` error**: Clear error message when stopping an already-stopped instance, instead of a generic error.
@@ -41,7 +42,6 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 - **Unified `create` command**: Single `create` command with `--kind linux`/`--kind android` flag to select VM type. TOML mode auto-detects type from content.
 - **`--kind` flag**: `--kind linux` creates LinuxVm via CLI flags (`--iso-path`, `--disk-path`, `--ovmf-vars-template`). `--kind android` creates AndroidVm via CLI flags. Mutually exclusive with `--file`.
 - **AndroidVm from TOML**: `InstanceFile` supports `android_version`, `base_image_path`, `overlay_size_gib`, `gapps`, `microg`, `libndk`, `instances_root`. Auto-detected: presence of `android_version` or `base_image_path` → AndroidVm; otherwise LinuxVm.
-- **Snapshot timeout**: Configurable per-instance (`DiskConfig::snapshot_timeout_secs`, default 30s) and per-operation (`--timeout` flag on `create`/`restore`/`delete`).
 - **LinuxVm clone/export**: `CloneMode::Linked` and `CloneMode::FullStandalone` supported. `SharedBase` rejected with `SharedBaseNotSupportedForLinuxVm`.
 - **Path utilities**: `runtime_dir()` (XDG_RUNTIME_DIR fallback), `current_uid()` (getuid FFI), `ensure_private_dir()` / `ensure_private_dir_sync()` (0700 permissions).
 - **`ensure_qcow2_extension()`**: Auto-appends `.qcow2` extension to disk paths.

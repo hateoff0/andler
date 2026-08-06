@@ -1,7 +1,7 @@
 use super::error::DaemonError;
 use super::types::SnapshotRecord;
 use super::Daemon;
-use andler_core::InstanceId;
+use andler_core::{InstanceId, InstanceState};
 
 const MAX_SNAPSHOTS_PER_INSTANCE: usize = 20;
 
@@ -63,12 +63,19 @@ impl Daemon {
         &self,
         id: InstanceId,
         tag: String,
-        timeout_secs: Option<u64>,
+        _timeout_secs: Option<u64>,
     ) -> Result<(), DaemonError> {
-        let (backend, handle) = self.with_running_instance(id).await?;
+        let (disk_path, state) = {
+            let instances = self.instances.read().await;
+            let record = instances
+                .get(&id)
+                .ok_or(DaemonError::InstanceNotFound(id))?;
+            (record.config.disk.path.clone(), record.state.clone())
+        };
 
-        let timeout = timeout_secs.map(std::time::Duration::from_secs);
-        backend.snapshot_restore(&handle, &tag, timeout).await?;
+        ensure_snapshot_restore_allowed(id, &state)?;
+
+        andler_disk::qcow2::restore_internal_snapshot(&disk_path, &tag).await?;
         Ok(())
     }
 
@@ -164,6 +171,16 @@ fn check_snapshot_limit(
     Ok(())
 }
 
+fn ensure_snapshot_restore_allowed(
+    id: InstanceId,
+    state: &InstanceState,
+) -> Result<(), DaemonError> {
+    if matches!(state, InstanceState::Running | InstanceState::Paused) {
+        return Err(DaemonError::InstanceMustBeStopped(id, state.clone()));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod snapshot_limit_tests {
     use super::*;
@@ -208,5 +225,41 @@ mod snapshot_limit_tests {
             MAX_SNAPSHOTS_PER_INSTANCE
         )
         .is_err());
+    }
+
+    #[test]
+    fn restore_rejected_while_running() {
+        let id = InstanceId::new();
+        let err = ensure_snapshot_restore_allowed(id, &InstanceState::Running).unwrap_err();
+        assert!(matches!(
+            err,
+            DaemonError::InstanceMustBeStopped(instance_id, InstanceState::Running)
+                if instance_id == id
+        ));
+    }
+
+    #[test]
+    fn restore_rejected_while_paused() {
+        let id = InstanceId::new();
+        let err = ensure_snapshot_restore_allowed(id, &InstanceState::Paused).unwrap_err();
+        assert!(matches!(
+            err,
+            DaemonError::InstanceMustBeStopped(instance_id, InstanceState::Paused)
+                if instance_id == id
+        ));
+    }
+
+    #[test]
+    fn restore_allowed_on_stopped_created_and_error() {
+        let id = InstanceId::new();
+        assert!(ensure_snapshot_restore_allowed(id, &InstanceState::Stopped).is_ok());
+        assert!(ensure_snapshot_restore_allowed(id, &InstanceState::Created).is_ok());
+        assert!(ensure_snapshot_restore_allowed(
+            id,
+            &InstanceState::Error {
+                message: "boom".to_string()
+            }
+        )
+        .is_ok());
     }
 }

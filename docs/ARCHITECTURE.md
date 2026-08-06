@@ -231,22 +231,23 @@ Any active state (Created/Starting/Running/Paused/Stopping) can transition to `E
 
 ## Snapshot Mechanism
 
-Uses QEMU's async job API (not filesystem-level snapshots):
+Disk-only internal qcow2 snapshots — no VM-state (RAM) serialization, so they work on any
+GPU/audio/CPU configuration (the old `snapshot-save` VM-state path is blocked by QEMU's
+migration machinery on every accelerated default: `virtio-sound`, `virgl`, and the
+`invtsc` CPU flag are all non-migratable by design).
 
-1. **Create**: `snapshot-save` job (`{job-id, tag, vmstate, devices: [...]}` — `devices` is a
-   list and `vmstate` is required) →
-   poll `query-jobs` until status `"concluded"` (the terminal job status; success vs. failure
-   is the presence of an `error` field) →
-   `job-dismiss` (configurable timeout per-instance, default 30s)
-2. **Restore**: `snapshot-load` job (same `vmstate`+`devices` schema) → poll `query-jobs` →
-   `job-dismiss`
-3. **Delete**: `snapshot-delete` job (`devices` only, no `vmstate`) → poll `query-jobs` →
-   `job-dismiss`
+1. **Create** (live, instance must be Running/Paused): QMP `blockdev-snapshot-internal-sync`
+   `{device, name}` — synchronous, writes a qcow2 internal snapshot of `drive-disk0`
+2. **Restore** (offline, instance must NOT be Running/Paused): `qemu-img snapshot -a <tag> <disk>`
+   via `andler_disk::qcow2::restore_internal_snapshot` — the guest boots from the snapshot
+   state on next start; RAM is not restored (no live revert exists in QEMU)
+3. **Delete** (live, instance must be Running/Paused): QMP
+   `blockdev-snapshot-delete-internal-sync` `{device, name}`
 4. **List**: `query-block` → extract snapshot metadata
 
-Snapshot metadata (tag, description, created_at) stored in SQLite `snapshots` table with `ON DELETE CASCADE` from `instances`. Maximum 20 snapshots per instance (`MAX_SNAPSHOTS_PER_INSTANCE`); free space is pre-checked via `statvfs(2)` with guest RAM size as a conservative vmstate upper bound (`InsufficientDiskSpace`).
+Snapshot metadata (tag, description, created_at) stored in SQLite `snapshots` table with `ON DELETE CASCADE` from `instances`. Maximum 20 snapshots per instance (`MAX_SNAPSHOTS_PER_INSTANCE`); free space is pre-checked via `statvfs(2)` with guest RAM size as a conservative upper bound (`InsufficientDiskSpace`).
 
-**Known QEMU limitation**: snapshot-save serializes VM state through the migration machinery, so a non-migratable device blocks the job — e.g. `virtio-sound` fails with `State blocked by non-migratable device '.../virtio-sound-device'` (the VM is launched with `-cpu ... migratable=no` by design). The job reaches `concluded` with an `error` field and the raw QEMU message is surfaced as `INTERNAL`.
+`RestoreSnapshot` on a running instance fails with `FAILED_PRECONDITION` (`InstanceMustBeStopped`) — stop the instance first, then restore, then start again.
 
 ## Metrics Collection
 
