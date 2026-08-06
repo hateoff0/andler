@@ -5,6 +5,7 @@ mod doctor;
 mod edit;
 mod guest;
 mod helpers;
+mod hotplug;
 mod instance_file;
 mod lifecycle;
 mod preview;
@@ -320,6 +321,18 @@ enum Command {
         flags: DiskFlags,
     },
 
+    /// Hot-plug a disk or network device into a running instance
+    Attach {
+        #[command(subcommand)]
+        action: AttachAction,
+    },
+
+    /// Hot-unplug a disk or network device from a running instance
+    Detach {
+        #[command(subcommand)]
+        action: DetachAction,
+    },
+
     /// Manage guest packages and Android boot mode (requires the andlerd daemon)
     Guest {
         #[command(subcommand)]
@@ -436,6 +449,77 @@ enum DiskAction {
     Compact {
         path: PathBuf,
     },
+}
+
+#[derive(Subcommand)]
+enum AttachAction {
+    /// Attach a disk image; creates a new qcow2 when the path does not exist (--size required then)
+    Disk {
+        /// Instance ID or unique prefix
+        instance_id: String,
+
+        /// Path of the disk image; defaults to disk-extraN.qcow2 inside the instance directory
+        #[arg(long)]
+        path: Option<PathBuf>,
+
+        /// Virtual size of a new disk (e.g. 20G); ignored for existing images
+        #[arg(long, value_parser = helpers::parse_size)]
+        size: Option<u64>,
+    },
+
+    /// Attach a network device
+    Net {
+        /// Instance ID or unique prefix
+        instance_id: String,
+
+        #[arg(long, value_enum, default_value = "nat")]
+        mode: CliAttachNetMode,
+
+        /// Bridge interface to use with --mode bridge
+        #[arg(long)]
+        bridge: Option<String>,
+
+        #[arg(long, default_value = "virtio-net-pci")]
+        model: String,
+
+        #[arg(long, value_enum, default_value = "slirp")]
+        nat_backend: CliNatBackend,
+    },
+}
+
+#[derive(Subcommand)]
+enum DetachAction {
+    /// Detach a disk image by path (the file itself is kept)
+    Disk {
+        /// Instance ID or unique prefix
+        instance_id: String,
+
+        /// Path of the attached disk, as shown by `andler config <id>`
+        path: PathBuf,
+    },
+
+    /// Detach a network device by its index (0-based, in attach order)
+    Net {
+        /// Instance ID or unique prefix
+        instance_id: String,
+
+        /// Index of the extra network device, as shown by `andler config <id>`
+        index: usize,
+    },
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum CliAttachNetMode {
+    Nat,
+    Bridge,
+    Isolated,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Default, ValueEnum)]
+enum CliNatBackend {
+    #[default]
+    Slirp,
+    Passt,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -815,6 +899,12 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
         Some(Command::Guest { action }) => {
             guest::handle(&mut client, action).await?;
+        }
+        Some(Command::Attach { action }) => {
+            hotplug::handle_attach(&mut client, action).await?;
+        }
+        Some(Command::Detach { action }) => {
+            hotplug::handle_detach(&mut client, action).await?;
         }
         Some(Command::Doctor { .. }) => unreachable!(),
         Some(Command::Completions { .. }) => unreachable!(),

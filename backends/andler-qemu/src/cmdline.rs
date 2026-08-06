@@ -2,7 +2,7 @@ use std::path::Path;
 
 use andler_core::{
     AudioBackend, AudioDevice, BackendError, CdromBus, DiskFormat, DisplayEngine, InstanceConfig,
-    InstanceKind, NatBackend, PointerMode, RenderBackend,
+    InstanceKind, NatBackend, NetworkMode, PointerMode, RenderBackend,
 };
 
 pub fn build_args(
@@ -42,6 +42,39 @@ fn qmp_args(qmp_socket_path: &Path) -> Vec<String> {
         "-qmp".to_string(),
         format!("unix:{},server,nowait", qmp_socket_path.display()),
     ]
+}
+
+/// QEMU ids for hotplugged block devices, derived from the device's position in
+/// `InstanceConfig::extra_disks`. Both `cmdline.rs` (boot-time re-attach) and the
+/// QMP hotplug path must agree on these so a device attached at runtime comes
+/// back with the same ids after a restart.
+pub fn extra_disk_drive_id(index: usize) -> String {
+    format!("drive-extra{index}")
+}
+
+pub fn extra_disk_device_id(index: usize) -> String {
+    format!("extra{index}")
+}
+
+/// QEMU netdev id (the NIC device shares it) for a hotplugged NIC at position
+/// `index` in `InstanceConfig::extra_networks`.
+pub fn extra_net_id(index: usize) -> String {
+    format!("net-extra{index}")
+}
+
+/// Host-side tap interface name for a hotplugged bridge NIC. The instance id is
+/// part of the name because multiple instances may share one host bridge — the
+/// primary NIC uses `tap{id}`, extras use `tap{id}-e{index}`. Linux caps
+/// interface names at IFNAMSIZ (15 chars), so only the first 8 hex chars of the
+/// id (the CLI's short-id form) fit.
+pub fn extra_net_bridge_tap_iface(instance_id: &str, index: usize) -> String {
+    let short = &instance_id[..instance_id.len().min(8)];
+    format!("tap{short}-e{index}")
+}
+
+/// Host-side veth endpoint name for a hotplugged isolated NIC.
+pub fn extra_net_isolated_iface(index: usize) -> String {
+    format!("andler-e{index}")
 }
 
 fn guest_agent_args(cfg: &InstanceConfig, qmp_socket_path: &Path) -> Vec<String> {
@@ -220,6 +253,25 @@ fn disk_args(cfg: &InstanceConfig) -> Vec<String> {
         "virtio-blk-pci,drive=drive-disk0,id=disk0,bootindex=1,num-queues=4".to_string(),
     ];
 
+    for (index, extra) in cfg.extra_disks.iter().enumerate() {
+        let extra_format = match extra.format {
+            DiskFormat::Qcow2 => "qcow2",
+            DiskFormat::Raw => "raw",
+            DiskFormat::Vdi => "vdi",
+        };
+        let drive_id = extra_disk_drive_id(index);
+        let device_id = extra_disk_device_id(index);
+        args.push("-drive".to_string());
+        args.push(format!(
+            "file={},format={},if=none,id={},discard=on,detect-zeroes=on,aio=threads",
+            extra.path.display(),
+            extra_format,
+            drive_id
+        ));
+        args.push("-device".to_string());
+        args.push(format!("virtio-blk-pci,drive={drive_id},id={device_id}"));
+    }
+
     if let InstanceKind::LinuxVm {
         iso_path,
         cdrom_bus,
@@ -275,8 +327,36 @@ fn input_args(cfg: &InstanceConfig) -> Vec<String> {
 }
 
 fn network_args(cfg: &InstanceConfig) -> Vec<String> {
-    use andler_core::NetworkMode;
+    let mut args = primary_network_args(cfg);
 
+    for (index, extra) in cfg.extra_networks.iter().enumerate() {
+        let netdev_id = extra_net_id(index);
+        let netdev = match &extra.mode {
+            NetworkMode::Nat => match extra.nat_backend {
+                NatBackend::Slirp => format!("user,id={netdev_id}"),
+                NatBackend::Passt => format!("passt,id={netdev_id}"),
+            },
+            NetworkMode::Bridge { interface: bridge } => {
+                let tap_iface = extra_net_bridge_tap_iface(&cfg.id.to_string(), index);
+                format!(
+                    "tap,id={netdev_id},ifname={tap_iface},bridge={bridge},script=no,downscript=no"
+                )
+            }
+            NetworkMode::Isolated => {
+                let tap_iface = extra_net_isolated_iface(index);
+                format!("tap,id={netdev_id},ifname={tap_iface},script=no,downscript=no")
+            }
+        };
+        args.push("-netdev".to_string());
+        args.push(netdev);
+        args.push("-device".to_string());
+        args.push(format!("{},netdev={netdev_id}", extra.device_model));
+    }
+
+    args
+}
+
+fn primary_network_args(cfg: &InstanceConfig) -> Vec<String> {
     match &cfg.network.mode {
         NetworkMode::Nat => match cfg.network.nat_backend {
             NatBackend::Slirp => vec![
@@ -376,6 +456,8 @@ mod tests {
             display: DisplayConfig::reference_default(),
             gpu: GpuConfig::reference_default(),
             network: NetworkConfig::reference_default(),
+            extra_disks: Vec::new(),
+            extra_networks: Vec::new(),
             firmware: FirmwareConfig::reference_default(PathBuf::from("linux_VARS.fd")),
             audio: AudioConfig::reference_default(),
             input: InputConfig::reference_default(),
@@ -831,5 +913,115 @@ mod tests {
                 "file:/home/user/.andler/instances/abc123/console.log",
             ]
         );
+    }
+
+    #[test]
+    fn extra_disks_appear_after_primary_without_bootindex() {
+        let mut cfg = start_sh_equivalent_config();
+        cfg.extra_disks.push(DiskConfig::standalone(
+            PathBuf::from("/home/user/extra-data.qcow2"),
+            16 * DiskConfig::GIB,
+        ));
+        let args = disk_args(&cfg);
+        let start = args
+            .windows(2)
+            .position(|w| w[0] == "-drive" && w[1].contains("id=drive-extra0"))
+            .expect("extra disk drive args present");
+        assert_eq!(
+            args[start..start + 4],
+            vec![
+                "-drive".to_string(),
+                "file=/home/user/extra-data.qcow2,format=qcow2,if=none,id=drive-extra0,discard=on,detect-zeroes=on,aio=threads".to_string(),
+                "-device".to_string(),
+                "virtio-blk-pci,drive=drive-extra0,id=extra0".to_string(),
+            ]
+        );
+        let extra_args = args[start..start + 4].join(" ");
+        assert!(
+            !extra_args.contains("bootindex"),
+            "extra disks must not claim a boot order slot: {extra_args}"
+        );
+        assert!(
+            !extra_args.contains("num-queues"),
+            "extra disks must not hardcode virtio queue counts: {extra_args}"
+        );
+    }
+
+    #[test]
+    fn extra_disk_ids_follow_index_scheme() {
+        assert_eq!(extra_disk_drive_id(1), "drive-extra1");
+        assert_eq!(extra_disk_device_id(1), "extra1");
+    }
+
+    #[test]
+    fn extra_net_ids_and_host_ifaces_follow_index_scheme() {
+        assert_eq!(extra_net_id(2), "net-extra2");
+        assert_eq!(extra_net_bridge_tap_iface("deadbeef", 2), "tapdeadbeef-e2");
+        assert_eq!(extra_net_isolated_iface(2), "andler-e2");
+    }
+
+    #[test]
+    fn bridge_tap_iface_truncates_full_instance_id_below_ifnamsiz() {
+        let full = "a".repeat(64);
+        let name = extra_net_bridge_tap_iface(&full, 9);
+        assert_eq!(name, "tapaaaaaaaa-e9");
+        assert!(name.len() <= 15, "tap name must fit IFNAMSIZ: {name}");
+    }
+
+    #[test]
+    fn extra_networks_append_after_primary_for_each_mode() {
+        let mut cfg = start_sh_equivalent_config();
+        cfg.extra_networks.push(NetworkConfig {
+            mode: NetworkMode::Nat,
+            device_model: "virtio-net-pci".to_string(),
+            nat_backend: NatBackend::Slirp,
+        });
+        cfg.extra_networks.push(NetworkConfig {
+            mode: NetworkMode::Bridge {
+                interface: "br0".to_string(),
+            },
+            device_model: "e1000e".to_string(),
+            nat_backend: NatBackend::Slirp,
+        });
+        cfg.extra_networks.push(NetworkConfig {
+            mode: NetworkMode::Isolated,
+            device_model: "virtio-net-pci".to_string(),
+            nat_backend: NatBackend::Slirp,
+        });
+
+        let args = network_args(&cfg);
+        let primary_len = primary_network_args(&cfg).len();
+        assert_eq!(
+            args[primary_len..],
+            vec![
+                "-netdev".to_string(),
+                "user,id=net-extra0".to_string(),
+                "-device".to_string(),
+                "virtio-net-pci,netdev=net-extra0".to_string(),
+                "-netdev".to_string(),
+                format!(
+                    "tap,id=net-extra1,ifname={},bridge=br0,script=no,downscript=no",
+                    extra_net_bridge_tap_iface(&cfg.id.to_string(), 1)
+                ),
+                "-device".to_string(),
+                "e1000e,netdev=net-extra1".to_string(),
+                "-netdev".to_string(),
+                "tap,id=net-extra2,ifname=andler-e2,script=no,downscript=no".to_string(),
+                "-device".to_string(),
+                "virtio-net-pci,netdev=net-extra2".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn extra_network_uses_passt_netdev_when_selected() {
+        let mut cfg = start_sh_equivalent_config();
+        cfg.extra_networks.push(NetworkConfig {
+            mode: NetworkMode::Nat,
+            device_model: "virtio-net-pci".to_string(),
+            nat_backend: NatBackend::Passt,
+        });
+        let args = network_args(&cfg);
+        assert!(args.contains(&"passt,id=net-extra0".to_string()));
     }
 }

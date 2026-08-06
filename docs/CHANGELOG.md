@@ -12,15 +12,18 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 #### CLI
 
 - **`andler doctor` command**: Checks local environment health — KVM, QEMU, OVMF, nbd module, passwordless sudo, daemon reachability, base images. `--fix` flag offers to write missing sudoers rules via `visudo`.
+- **`andler attach` / `andler detach`**: Hot-plug extra disks (`attach disk --path <p> --size <s>` / `detach disk <p>`) and network devices (`attach net [--mode nat|bridge|isolated] [--bridge <if>] [--model <m>] [--nat-backend slirp|passt]` / `detach net <index>`) into a running/paused instance. Attached devices are persisted in `instance.toml` (`extra_disks`/`extra_networks`) and re-created automatically on the next start. Detaching a disk never deletes the image file.
 
 #### Backend (`andler-qemu`)
 
 - **Serial console logging**: `-serial file:console.log` captures QEMU serial output to a file next to the instance disk for debugging.
 - **`window-close=off`**: SDL and GTK display windows no longer close the VM when the window is closed — prevents accidental shutdown.
+- **Device hot-plug**: `blockdev-add`/`device_add` (virtio-blk-pci, virtio-net-pci) and `netdev-add` (user/tap/passt) over QMP for extra disks and networks, plus async-aware `device_del` (retries `blockdev-del`/`netdev-del` only while QEMU reports the device in use). Extra devices are also wired into the boot command line (`drive-extraN`/`net-extraN`, bridge taps embed the first 8 hex chars of the instance id), so attached devices reappear after a restart. Host tap/veth lifecycle for bridge mode is set up before spawn and torn down on stop, with rollback on failure.
 
 #### Daemon
 
 - **Disk-only snapshots**: `snapshot create`/`delete` now use synchronous `blockdev-snapshot-internal-sync`/`-delete-internal-sync` (qcow2 internal snapshots) instead of the vmstate job API — they work on any GPU/audio/CPU configuration, including the defaults (`virtio-sound`, Venus, `invtsc`), which QEMU's migration machinery refuses to serialize. `snapshot restore` is an offline `qemu-img snapshot -a` that requires a stopped instance (`InstanceMustBeStopped`); the guest boots from the snapshot on next start (RAM is not restored).
+- **Hotplug ops**: `attach_disk`/`detach_disk`/`attach_network`/`detach_network` daemon operations, gated on `Running`/`Paused` (`HotplugRequiresRunningInstance` otherwise). New extra disks are created as qcow2 (size 0 rejected, existing images report their actual virtual size), config is persisted after the backend confirms, and a failed backend op rolls back a just-created image file. Duplicate paths (including the primary disk) → `DiskAlreadyAttached`; detaching an unattached device → `DiskNotAttached`/`NetworkNotAttached`. `validate_instance_files` now also checks extra disk paths at boot; `remove --purge` deletes extra disk files that live inside the instance directory and leaves out-of-dir user data untouched.
 - **Pre-start file validation**: `validate_instance_files()` checks disk and firmware paths exist before spawning QEMU, catching deleted/moved instance directories early instead of letting QEMU fork and fail silently.
 - **Structured lifecycle tracing**: `info`/`error` tracing for all instance lifecycle operations (create, start, stop, pause, resume, remove) with `instance_id` and error details.
 - **`InstanceAlreadyStopped` error**: Clear error message when stopping an already-stopped instance, instead of a generic error.
@@ -57,6 +60,11 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 #### Core (`andler-core`)
 
 - **Unified `create` command**: Single `create` command with `--kind linux`/`--kind android` flag to select VM type. TOML mode auto-detects type from content.
+- **Hotplugged devices in `InstanceConfig`**: `extra_disks: Vec<DiskConfig>` and `extra_networks: Vec<NetworkConfig>` (serde-defaulted for existing `instance.toml` files); new `HypervisorBackend` methods `attach_disk`/`detach_disk`/`attach_network`/`detach_network` (default `NotImplemented`).
+
+#### RPC (`andler-rpc`)
+
+- **`AttachDisk`/`DetachDisk`/`AttachNetwork`/`DetachNetwork`**: four new unary RPCs for live device hot-plug; `GetInstanceConfigResponse`/`UpdateInstanceConfigRequest` gained `extra_disks`/`extra_networks` repeated fields so attached devices round-trip through get-edit-put.
 - **`--kind` flag**: `--kind linux` creates LinuxVm via CLI flags (`--iso-path`, `--disk-path`, `--ovmf-vars-template`). `--kind android` creates AndroidVm via CLI flags. Mutually exclusive with `--file`.
 - **AndroidVm from TOML**: `InstanceFile` supports `android_version`, `base_image_path`, `overlay_size_gib`, `gapps`, `microg`, `libndk`, `instances_root`. Auto-detected: presence of `android_version` or `base_image_path` → AndroidVm; otherwise LinuxVm.
 - **LinuxVm clone/export**: `CloneMode::Linked` and `CloneMode::FullStandalone` supported. `SharedBase` rejected with `SharedBaseNotSupportedForLinuxVm`.

@@ -137,7 +137,7 @@ andler config set <instance-id> <key> <value>
 andler config --instance <instance-id> [--edit]
 ```
 
-`view` prints the full instance configuration (all 9 sections + metadata). Output format is human-readable but not valid TOML.
+`view` prints the full instance configuration (all 9 sections + hotplugged device lists + metadata). Output format is human-readable but not valid TOML.
 
 `edit` opens the real on-disk `instance.toml` in `$VISUAL`/`$EDITOR` (falling back to `vi`/`vim`/`nano`), then applies the edited config via gRPC. If the TOML is invalid, nothing is applied and the error message points at the file to fix. `config edit` requires the CLI to run on the same machine as the daemon (it edits the file on disk). Prints `No changes made.` when the file is left untouched.
 
@@ -315,6 +315,55 @@ Known packages: `spice-vdagent` (shared folders), `qemu-guest-agent` (host-guest
 | `list <instance-id>` | List known packages and their status (installed/not installed) |
 | `boot-mode <instance-id> [mode]` | Get or set the Android boot mode (`android`/`linux`) |
 
+### `attach`
+
+Hot-plugs an extra disk or network device into a **running or paused** instance. The device is recorded in `extra_disks`/`extra_networks` in `instance.toml` and re-created automatically on the next `start` — no config step needed after a reboot.
+
+```bash
+# Attach a new 20 GiB disk (creates the qcow2 image)
+andler attach disk <instance-id> --path /data/games.qcow2 --size 20G
+
+# Attach an existing image (its actual virtual size is used; --size is ignored)
+andler attach disk <instance-id> --path /data/backup.qcow2
+
+# No --path: creates disk-extraN.qcow2 inside the instance directory (--size required)
+andler attach disk <instance-id> --size 10G
+
+# Attach a NAT network device (default model virtio-net-pci)
+andler attach net <instance-id>
+
+# Attach a bridged network device on a host bridge
+andler attach net <instance-id> --mode bridge --bridge br0
+
+# NAT backend selection (slirp is the default)
+andler attach net <instance-id> --nat-backend passt
+```
+
+| Flag | Applies to | Description |
+|------|------------|-------------|
+| `--path <path>` | disk | Image path; absolute paths are used as-is, plain file names land in the instance directory, omitted → `disk-extraN.qcow2` in the instance directory |
+| `--size <size>` | disk | Virtual size for a new image (same format as `disk create`); required when the path does not exist yet; `0` is rejected |
+| `--mode <nat\|bridge\|isolated>` | net | Network mode (default `nat`) |
+| `--bridge <iface>` | net | Host bridge for `--mode bridge` |
+| `--model <model>` | net | Device model (default `virtio-net-pci`) |
+| `--nat-backend <slirp\|passt>` | net | NAT implementation (default `slirp`) |
+
+Prints the resolved disk path + index, or the network index (0-based, in attach order). Attaching an already-attached path (including the primary disk) fails with `already attached`. Extra disks are **not** covered by internal snapshots (`snapshot create` snapshots the primary `drive-disk0` only).
+
+### `detach`
+
+Hot-unplugs a previously attached device. The disk image file is **never deleted** — only the config entry and the live QEMU device.
+
+```bash
+# Detach by path (as shown by `andler config <id>`)
+andler detach disk <instance-id> /data/games.qcow2
+
+# Detach by index (0-based, in attach order)
+andler detach net <instance-id> 0
+```
+
+Detaching a path/index that is not attached fails with `is not attached` and points at `andler config <id>` for the current lists.
+
 ### `wizard`
 
 ```bash
@@ -444,6 +493,23 @@ hide_host_cursor = true
 clipboard_enabled = true
 ```
 
+Hotplugged devices are persisted as array-of-tables (added by `andler attach`, editable by hand when the instance is stopped):
+
+```toml
+[[extra_disks]]
+path = "/data/games.qcow2"
+size_bytes = 21474836480
+format = "Qcow2"
+thin_provisioning = true
+trim_on_shutdown = false
+compact_on_shutdown = false
+
+[[extra_networks]]
+mode = "Nat"
+device_model = "virtio-net-pci"
+nat_backend = "Slirp"
+```
+
 ### Headless Mode
 
 ```toml
@@ -514,15 +580,19 @@ Defined in `services/andler-rpc/proto/andler.proto`. Uses `tonic`/`prost` for Ru
 | `SetInstanceConfig` | `SetInstanceConfigRequest` | `Empty` | Unary |
 | `SwitchAndroidBootMode` | `SwitchAndroidBootModeRequest` | `Empty` | Unary |
 | `GetAndroidBootMode` | `InstanceIdRequest` | `GetAndroidBootModeResponse` | Unary |
+| `AttachDisk` | `AttachDiskRequest` | `AttachDiskResponse` | Unary |
+| `DetachDisk` | `DetachDiskRequest` | `Empty` | Unary |
+| `AttachNetwork` | `AttachNetworkRequest` | `AttachNetworkResponse` | Unary |
+| `DetachNetwork` | `DetachNetworkRequest` | `Empty` | Unary |
 
 ### Error Codes
 
 | gRPC Status | Daemon Error | When |
 |-------------|--------------|------|
-| `NOT_FOUND` | `InstanceNotFound`, `SnapshotNotFound`, `InstanceRefNotFound` | Unknown instance/snapshot/ref |
+| `NOT_FOUND` | `InstanceNotFound`, `SnapshotNotFound`, `InstanceRefNotFound`, `DiskNotAttached`, `NetworkNotAttached` | Unknown instance/snapshot/ref, or detaching a device that is not attached |
 | `UNIMPLEMENTED` | `NoBackendRegistered`, `Backend(NotImplemented)` | Backend kind not available |
-| `FAILED_PRECONDITION` | `InvalidTransition`, `InstanceNotRemovable`, `InstanceNotClonable`, `InstanceAlreadyStopped`, `SharedBaseNotSupportedForLinuxVm`, `InstanceHasLiveClones`, `SnapshotOperationRequiresRunningInstance`, `SnapshotLimitExceeded`, `GuestAgentUnavailable`, `NotAndroid`, `InstanceMustBeStopped`, `Backend(HandleNotFound)`, `Backend(ProcessNotRunning)` | Wrong lifecycle state, resource limit, guest agent unavailable, wrong instance kind |
-| `ALREADY_EXISTS` | `SnapshotAlreadyExists` | Duplicate snapshot tag |
+| `FAILED_PRECONDITION` | `InvalidTransition`, `InstanceNotRemovable`, `InstanceNotClonable`, `InstanceAlreadyStopped`, `SharedBaseNotSupportedForLinuxVm`, `InstanceHasLiveClones`, `SnapshotOperationRequiresRunningInstance`, `SnapshotLimitExceeded`, `GuestAgentUnavailable`, `NotAndroid`, `InstanceMustBeStopped`, `HotplugRequiresRunningInstance`, `Backend(HandleNotFound)`, `Backend(ProcessNotRunning)` | Wrong lifecycle state, resource limit, guest agent unavailable, wrong instance kind |
+| `ALREADY_EXISTS` | `SnapshotAlreadyExists`, `DiskAlreadyAttached` | Duplicate snapshot tag, or disk image already attached |
 | `INVALID_ARGUMENT` | `ConvertError`, `EmptyInstanceRef`, `MalformedInstanceRef`, `AmbiguousInstanceId`, `ConfigIdMismatch`, `ConfigKindChanged`, `ConfigDiskPathChanged`, `InvalidConfig`, `InvalidConfigKey`, `MissingOvmfVarsTemplate` | Malformed request or invalid arguments |
 | `RESOURCE_EXHAUSTED` | `InsufficientDiskSpace` | Not enough free space for a snapshot operation |
 | `INTERNAL` | Other `Backend`/`Disk`/`Io`/`Store`/`Firmware` errors — including all `andler-disk` errors other than `InsufficientDiskSpace` (`AgentNotInstalled`, `AgentAlreadyInstalled`, `PackageManagerNotFound`, ...) | Backend/disk/store failures |

@@ -6,11 +6,13 @@ use andler_core::{CloneMode, InstanceConfig};
 use andler_rpc::convert;
 use andler_rpc::proto::andler_service_server::AndlerService;
 use andler_rpc::proto::{
+    AttachDiskRequest, AttachDiskResponse, AttachNetworkRequest, AttachNetworkResponse,
     CloneInstanceRequest, CreateAndroidInstanceRequest, CreateInstanceRequest,
     CreateInstanceResponse, CreateSnapshotRequest, CreateSnapshotResponse, DeleteSnapshotRequest,
-    Empty, ExportInstanceDiskRequest, ExportInstanceDiskResponse, GetAndroidBootModeResponse,
-    GetInstanceConfigResponse, GuestPackageEntry, InstallGuestAgentRequest, InstanceIdRequest,
-    InstanceListEntry, InstanceStatusResponse, ListGuestPackagesResponse, ListInstancesResponse,
+    DetachDiskRequest, DetachNetworkRequest, Empty, ExportInstanceDiskRequest,
+    ExportInstanceDiskResponse, GetAndroidBootModeResponse, GetInstanceConfigResponse,
+    GuestPackageEntry, InstallGuestAgentRequest, InstanceIdRequest, InstanceListEntry,
+    InstanceStatusResponse, ListGuestPackagesResponse, ListInstancesResponse,
     ListSnapshotsResponse, LogLineResponse, RemoveGuestAgentRequest, RemoveInstanceRequest,
     ResourceMetricsResponse, RestoreSnapshotRequest, SetInstanceConfigRequest, SnapshotEntry,
     StopInstanceRequest, SwitchAndroidBootModeRequest, SwitchArmTranslatorRequest,
@@ -99,6 +101,12 @@ impl From<DaemonError> for Status {
             DaemonError::NotAndroid(_) => Status::failed_precondition(msg.clone()),
             DaemonError::InstanceMustBeStopped(_, _) => Status::failed_precondition(msg.clone()),
             DaemonError::MissingOvmfVarsTemplate => Status::invalid_argument(msg.clone()),
+            DaemonError::HotplugRequiresRunningInstance(_, _) => {
+                Status::failed_precondition(msg.clone())
+            }
+            DaemonError::DiskAlreadyAttached(_, _) => Status::already_exists(msg.clone()),
+            DaemonError::DiskNotAttached(_, _) => Status::not_found(msg.clone()),
+            DaemonError::NetworkNotAttached { .. } => Status::not_found(msg.clone()),
         }
     }
 }
@@ -542,5 +550,61 @@ impl AndlerService for DaemonService {
         Ok(Response::new(GetAndroidBootModeResponse {
             mode: andler_rpc::proto::AndroidBootMode::from(mode) as i32,
         }))
+    }
+
+    async fn attach_disk(
+        &self,
+        request: Request<AttachDiskRequest>,
+    ) -> Result<Response<AttachDiskResponse>, Status> {
+        let req = request.into_inner();
+        let id = self.daemon.resolve_instance_id(&req.instance_id).await?;
+        let path = if req.path.is_empty() {
+            None
+        } else {
+            Some(std::path::PathBuf::from(req.path))
+        };
+        let (path, index) = self.daemon.attach_disk(id, path, req.size_bytes).await?;
+        Ok(Response::new(AttachDiskResponse {
+            path: path.to_string_lossy().into_owned(),
+            index: index as u32,
+        }))
+    }
+
+    async fn detach_disk(
+        &self,
+        request: Request<DetachDiskRequest>,
+    ) -> Result<Response<Empty>, Status> {
+        let req = request.into_inner();
+        let id = self.daemon.resolve_instance_id(&req.instance_id).await?;
+        self.daemon
+            .detach_disk(id, std::path::PathBuf::from(req.path))
+            .await?;
+        Ok(Response::new(Empty {}))
+    }
+
+    async fn attach_network(
+        &self,
+        request: Request<AttachNetworkRequest>,
+    ) -> Result<Response<AttachNetworkResponse>, Status> {
+        let req = request.into_inner();
+        let id = self.daemon.resolve_instance_id(&req.instance_id).await?;
+        let network = req
+            .network
+            .ok_or_else(|| Status::invalid_argument("network is required"))?
+            .try_into()?;
+        let index = self.daemon.attach_network(id, network).await?;
+        Ok(Response::new(AttachNetworkResponse {
+            index: index as u32,
+        }))
+    }
+
+    async fn detach_network(
+        &self,
+        request: Request<DetachNetworkRequest>,
+    ) -> Result<Response<Empty>, Status> {
+        let req = request.into_inner();
+        let id = self.daemon.resolve_instance_id(&req.instance_id).await?;
+        self.daemon.detach_network(id, req.index as usize).await?;
+        Ok(Response::new(Empty {}))
     }
 }

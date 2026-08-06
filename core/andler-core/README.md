@@ -54,6 +54,10 @@ Defines the `HypervisorBackend` trait — the contract that all hypervisor imple
 | `guest_exec_install` | `async fn(&self, handle: &BackendHandle, package: &str) -> Result<(), BackendError>` | Install package in guest via the guest agent (`guest-exec`) |
 | `guest_exec_remove` | `async fn(&self, handle: &BackendHandle, package: &str) -> Result<(), BackendError>` | Remove package from guest via the guest agent (`guest-exec`) |
 | `guest_check_binary_installed` | `async fn(&self, handle: &BackendHandle, binary: &str) -> Result<bool, BackendError>` | Check if binary exists in guest filesystem |
+| `attach_disk` | `async fn(&self, handle: &BackendHandle, disk: &DiskConfig, index: usize) -> Result<(), BackendError>` | Hot-plug an extra disk at `index` in `extra_disks` (default: `NotImplemented`); must roll back partially-created state on failure |
+| `detach_disk` | `async fn(&self, handle: &BackendHandle, index: usize) -> Result<(), BackendError>` | Hot-unplug the extra disk at `index` (default: `NotImplemented`) |
+| `attach_network` | `async fn(&self, handle: &BackendHandle, network: &NetworkConfig, index: usize) -> Result<(), BackendError>` | Hot-plug an extra network device at `index` in `extra_networks` (default: `NotImplemented`); must tear down host tap/veth state on failure |
+| `detach_network` | `async fn(&self, handle: &BackendHandle, index: usize) -> Result<(), BackendError>` | Hot-unplug the extra network device at `index`, including host-side interface teardown (default: `NotImplemented`) |
 
 Any method not implemented by a specific backend must return `BackendError::NotImplemented` — never panic. Exception: `metrics_stream`/`log_stream` have signatures (`fn`, not `async fn`, no `Result`) that don't allow returning errors; "not implemented" or "no active stream" is expressed as an immediately-empty stream.
 
@@ -130,11 +134,18 @@ pub struct InstanceConfig {
     pub display: DisplayConfig,
     pub gpu: GpuConfig,
     pub network: NetworkConfig,
+    pub extra_disks: Vec<DiskConfig>,
+    pub extra_networks: Vec<NetworkConfig>,
     pub firmware: FirmwareConfig,
     pub audio: AudioConfig,
     pub input: InputConfig,
 }
 ```
+
+`extra_disks` / `extra_networks` hold hot-plugged devices (see `attach`/`detach` in the daemon):
+they are `#[serde(default)]` so pre-hotplug `instance.toml` files load unchanged, they are
+re-created from the command line at boot by the QEMU backend, and `validate()` rejects an
+extra disk with size 0. Both lists are addressed by index (QEMU ids derive from it).
 
 Each sub-config has a `reference_default()` method that produces sensible defaults.
 

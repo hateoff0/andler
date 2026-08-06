@@ -114,6 +114,16 @@ pub struct InstanceConfig {
     pub gpu: GpuConfig,
     pub network: NetworkConfig,
 
+    /// Extra block devices attached while the instance is running; persisted and
+    /// re-attached at boot. Not covered by internal snapshots (primary disk only).
+    #[serde(default)]
+    pub extra_disks: Vec<DiskConfig>,
+
+    /// Extra NICs attached while the instance is running; persisted and re-created
+    /// at boot (host-side taps/veths are torn down on stop like the primary NIC).
+    #[serde(default)]
+    pub extra_networks: Vec<NetworkConfig>,
+
     pub firmware: FirmwareConfig,
     pub audio: AudioConfig,
     pub input: InputConfig,
@@ -141,6 +151,14 @@ impl InstanceConfig {
                 "display resolution must be non-zero (got {}x{})",
                 self.display.resolution.width, self.display.resolution.height
             ));
+        }
+        for disk in &self.extra_disks {
+            if disk.size_bytes == 0 {
+                return Err(format!(
+                    "extra disk {} has size 0; attach it with a positive --size",
+                    disk.path.display()
+                ));
+            }
         }
         Ok(())
     }
@@ -194,6 +212,8 @@ mod tests {
             display: DisplayConfig::reference_default(),
             gpu: GpuConfig::reference_default(),
             network: NetworkConfig::reference_default(),
+            extra_disks: Vec::new(),
+            extra_networks: Vec::new(),
             firmware: FirmwareConfig::reference_default(PathBuf::from("test-vm_VARS.fd")),
             audio: AudioConfig::reference_default(),
             input: InputConfig::reference_default(),
@@ -219,6 +239,8 @@ mod tests {
             display: DisplayConfig::reference_default(),
             gpu: GpuConfig::reference_default(),
             network: NetworkConfig::reference_default(),
+            extra_disks: Vec::new(),
+            extra_networks: Vec::new(),
             firmware: FirmwareConfig::reference_default(PathBuf::from("test-vm_VARS.fd")),
             audio: AudioConfig::reference_default(),
             input: InputConfig::reference_default(),

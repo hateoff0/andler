@@ -39,6 +39,10 @@ The core service exposing all instance management operations.
 | `SetInstanceConfig` | `SetInstanceConfigRequest` | `Empty` | Unary | Partially updates an instance configuration by key. |
 | `SwitchAndroidBootMode` | `SwitchAndroidBootModeRequest` | `Empty` | Unary | Switches the Android boot mode in offline mode. |
 | `GetAndroidBootMode` | `InstanceIdRequest` | `GetAndroidBootModeResponse` | Unary | Gets the current Android boot mode. |
+| `AttachDisk` | `AttachDiskRequest` | `AttachDiskResponse` | Unary | Hot-plugs an extra disk into a running/paused instance and persists it in the config. |
+| `DetachDisk` | `DetachDiskRequest` | `Empty` | Unary | Hot-unplugs an extra disk (the image file is kept). |
+| `AttachNetwork` | `AttachNetworkRequest` | `AttachNetworkResponse` | Unary | Hot-plugs an extra network device into a running/paused instance and persists it in the config. |
+| `DetachNetwork` | `DetachNetworkRequest` | `Empty` | Unary | Hot-unplugs an extra network device by index. |
 
 ---
 
@@ -439,6 +443,8 @@ Full configuration of an instance (read-only).
 | `display` | `DisplayConfig` | Display config. |
 | `gpu` | `GpuConfig` | GPU config. |
 | `network` | `NetworkConfig` | Network config. |
+| `extra_disks` | `repeated DiskConfig` | Hot-plugged extra disks (`andler attach disk`), in attach order. |
+| `extra_networks` | `repeated NetworkConfig` | Hot-plugged extra network devices (`andler attach net`), in attach order. |
 | `firmware` | `FirmwareConfig` | Firmware config. |
 | `audio` | `AudioConfig` | Audio config. |
 | `input` | `InputConfig` | Input config. |
@@ -459,9 +465,61 @@ Request to replace the entire configuration of an instance. Must match current `
 | `display` | `DisplayConfig` | Display config. |
 | `gpu` | `GpuConfig` | GPU config. |
 | `network` | `NetworkConfig` | Network config. |
+| `extra_disks` | `repeated DiskConfig` | Hot-plugged extra disks; round-trips through get-edit-put like the rest of the config. |
+| `extra_networks` | `repeated NetworkConfig` | Hot-plugged extra network devices; round-trips through get-edit-put like the rest of the config. |
 | `firmware` | `FirmwareConfig` | Firmware config. |
 | `audio` | `AudioConfig` | Audio config. |
 | `input` | `InputConfig` | Input config. |
+
+### `AttachDiskRequest`
+
+Request to hot-plug an extra disk into a running/paused instance.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `instance_id` | `string` | Instance ID (full or prefix). |
+| `path` | `string` | Image path. Empty = `disk-extraN.qcow2` inside the instance directory; a plain file name is also placed there; an absolute path is used as-is. |
+| `size_bytes` | `uint64` | Virtual size for a *new* image (required by the CLI when the path does not exist). Ignored for existing images — the actual virtual size is read from the file. `0` for a new image is rejected (`INVALID_ARGUMENT`). |
+
+### `AttachDiskResponse`
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `path` | `string` | Resolved image path. |
+| `index` | `uint32` | Index in the `extra_disks` list (also the QEMU device index). |
+
+### `DetachDiskRequest`
+
+Request to hot-unplug an extra disk.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `instance_id` | `string` | Instance ID (full or prefix). |
+| `path` | `string` | Path of the attached disk, as shown by `andler config <id>`. The image file itself is never deleted. |
+
+### `AttachNetworkRequest`
+
+Request to hot-plug an extra network device into a running/paused instance.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `instance_id` | `string` | Instance ID (full or prefix). |
+| `network` | `NetworkConfig` | Full network config (mode, device model, NAT backend). Missing → `INVALID_ARGUMENT`. |
+
+### `AttachNetworkResponse`
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `index` | `uint32` | Index in the `extra_networks` list (also the QEMU netdev/device index). |
+
+### `DetachNetworkRequest`
+
+Request to hot-unplug an extra network device.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `instance_id` | `string` | Instance ID (full or prefix). |
+| `index` | `uint32` | Index in the `extra_networks` list; out-of-range → `NOT_FOUND`. |
 
 ### `LogStreamSource`
 
@@ -659,10 +717,10 @@ Single package entry.
 
 | gRPC Status | Daemon Error | When |
 |-------------|--------------|------|
-| `NOT_FOUND` | `InstanceNotFound`, `SnapshotNotFound`, `InstanceRefNotFound` | Unknown instance/snapshot/ref. |
+| `NOT_FOUND` | `InstanceNotFound`, `SnapshotNotFound`, `InstanceRefNotFound`, `DiskNotAttached`, `NetworkNotAttached` | Unknown instance/snapshot/ref, or detaching a device that is not attached. |
 | `UNIMPLEMENTED` | `NoBackendRegistered`, `Backend(NotImplemented)` | Backend kind not available. |
-| `FAILED_PRECONDITION` | `InvalidTransition`, `InstanceNotRemovable`, `InstanceNotClonable`, `InstanceAlreadyStopped`, `SharedBaseNotSupportedForLinuxVm`, `InstanceHasLiveClones`, `SnapshotOperationRequiresRunningInstance`, `SnapshotLimitExceeded`, `GuestAgentUnavailable`, `NotAndroid`, `InstanceMustBeStopped`, `Backend(HandleNotFound)`, `Backend(ProcessNotRunning)` | Wrong lifecycle state, resource limit, guest agent unavailable, wrong instance kind. |
-| `ALREADY_EXISTS` | `SnapshotAlreadyExists` | Duplicate snapshot tag. |
+| `FAILED_PRECONDITION` | `InvalidTransition`, `InstanceNotRemovable`, `InstanceNotClonable`, `InstanceAlreadyStopped`, `SharedBaseNotSupportedForLinuxVm`, `InstanceHasLiveClones`, `SnapshotOperationRequiresRunningInstance`, `SnapshotLimitExceeded`, `GuestAgentUnavailable`, `NotAndroid`, `InstanceMustBeStopped`, `HotplugRequiresRunningInstance`, `Backend(HandleNotFound)`, `Backend(ProcessNotRunning)` | Wrong lifecycle state, resource limit, guest agent unavailable, wrong instance kind. |
+| `ALREADY_EXISTS` | `SnapshotAlreadyExists`, `DiskAlreadyAttached` | Duplicate snapshot tag, or attaching a disk image that is already attached (including the primary disk). |
 | `INVALID_ARGUMENT` | `ConvertError`, `EmptyInstanceRef`, `MalformedInstanceRef`, `AmbiguousInstanceId`, `ConfigIdMismatch`, `ConfigKindChanged`, `ConfigDiskPathChanged`, `InvalidConfig`, `InvalidConfigKey`, `MissingOvmfVarsTemplate` | Malformed request or invalid arguments |
 | `RESOURCE_EXHAUSTED` | `InsufficientDiskSpace` | Not enough free space for a snapshot operation |
 | `INTERNAL` | Other `Backend`/`Disk`/`Io`/`Store`/`Firmware` errors — including all `andler-disk` errors except `InsufficientDiskSpace` (`AgentNotInstalled`, `AgentAlreadyInstalled`, `PackageManagerNotFound`, ...) | Backend/disk/store failures |
@@ -683,6 +741,7 @@ Single package entry.
 - **`ResourceMetricsResponse`** fields are all optional because metrics may be unavailable (e.g., GPU on non-AMD hardware).
 - **`CloneInstanceRequest`** supports three modes with different cost/independence trade-offs.
 - **`ExportInstanceDisk`** is a separate RPC from cloning because it does not create a new instance.
+- **Attach/Detach** require the instance to be `RUNNING` or `PAUSED` (`HotplugRequiresRunningInstance` → `FAILED_PRECONDITION` otherwise). Attached devices are appended to `extra_disks`/`extra_networks`, persisted in `instance.toml`, and re-created from the command line at the next `StartInstance` — no `UpdateInstanceConfig` needed. Detach identifies disks by path and networks by list index; a detach never deletes the disk image file.
 
 ---
 

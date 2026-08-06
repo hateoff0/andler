@@ -672,6 +672,8 @@ impl TryFrom<proto::CreateInstanceRequest> for InstanceConfig {
                 .network
                 .ok_or(ConvertError::MissingField("network"))?
                 .try_into()?,
+            extra_disks: Vec::new(),
+            extra_networks: Vec::new(),
             firmware: value
                 .firmware
                 .ok_or(ConvertError::MissingField("firmware"))?
@@ -735,6 +737,8 @@ impl From<InstanceConfig> for proto::GetInstanceConfigResponse {
             display: Some(value.display.into()),
             gpu: Some(value.gpu.into()),
             network: Some(value.network.into()),
+            extra_disks: value.extra_disks.into_iter().map(Into::into).collect(),
+            extra_networks: value.extra_networks.into_iter().map(Into::into).collect(),
             firmware: Some(value.firmware.into()),
             audio: Some(value.audio.into()),
             input: Some(value.input.into()),
@@ -781,6 +785,16 @@ impl TryFrom<proto::GetInstanceConfigResponse> for InstanceConfig {
                 .network
                 .ok_or(ConvertError::MissingField("network"))?
                 .try_into()?,
+            extra_disks: value
+                .extra_disks
+                .into_iter()
+                .map(TryInto::try_into)
+                .collect::<Result<Vec<_>, _>>()?,
+            extra_networks: value
+                .extra_networks
+                .into_iter()
+                .map(TryInto::try_into)
+                .collect::<Result<Vec<_>, _>>()?,
             firmware: value
                 .firmware
                 .ok_or(ConvertError::MissingField("firmware"))?
@@ -853,6 +867,8 @@ pub fn instance_config_to_update_request(
         display: response.display,
         gpu: response.gpu,
         network: response.network,
+        extra_disks: response.extra_disks,
+        extra_networks: response.extra_networks,
         firmware: response.firmware,
         audio: response.audio,
         input: response.input,
@@ -898,6 +914,16 @@ pub fn update_request_to_instance_config(
             .network
             .ok_or(ConvertError::MissingField("network"))?
             .try_into()?,
+        extra_disks: req
+            .extra_disks
+            .into_iter()
+            .map(TryInto::try_into)
+            .collect::<Result<Vec<_>, _>>()?,
+        extra_networks: req
+            .extra_networks
+            .into_iter()
+            .map(TryInto::try_into)
+            .collect::<Result<Vec<_>, _>>()?,
         firmware: req
             .firmware
             .ok_or(ConvertError::MissingField("firmware"))?
@@ -1138,6 +1164,8 @@ mod tests {
             display: DisplayConfig::reference_default(),
             gpu: GpuConfig::reference_default(),
             network: NetworkConfig::reference_default(),
+            extra_disks: Vec::new(),
+            extra_networks: Vec::new(),
             firmware: FirmwareConfig::reference_default(PathBuf::from("/tmp/VARS.fd")),
             audio: AudioConfig::reference_default(),
             input: InputConfig::reference_default(),
@@ -1565,6 +1593,39 @@ mod tests {
         let cfg = sample_instance_config();
         let response: proto::GetInstanceConfigResponse = cfg.clone().into();
         let back: InstanceConfig = response.try_into().unwrap();
+        assert_eq!(cfg, back);
+    }
+
+    #[test]
+    fn extra_devices_round_trip_through_config_response_and_update_request() {
+        let mut cfg = sample_instance_config();
+        cfg.extra_disks.push(DiskConfig {
+            path: PathBuf::from("/data/extra.qcow2"),
+            size_bytes: 64 * DiskConfig::GIB,
+            format: DiskFormat::Qcow2,
+            base_image: None,
+            thin_provisioning: true,
+            trim_on_shutdown: false,
+            compact_on_shutdown: false,
+            snapshot_timeout_secs: None,
+        });
+        cfg.extra_networks.push(NetworkConfig {
+            mode: NetworkMode::Nat,
+            device_model: "virtio-net-pci".to_string(),
+            nat_backend: NatBackend::Slirp,
+        });
+        cfg.extra_networks.push(NetworkConfig {
+            mode: NetworkMode::Isolated,
+            device_model: "e1000".to_string(),
+            nat_backend: NatBackend::Passt,
+        });
+
+        let response: proto::GetInstanceConfigResponse = cfg.clone().into();
+        let back: InstanceConfig = response.try_into().unwrap();
+        assert_eq!(cfg, back);
+
+        let req = instance_config_to_update_request(cfg.clone(), cfg.id.to_string());
+        let back = update_request_to_instance_config(cfg.id, req).unwrap();
         assert_eq!(cfg, back);
     }
 

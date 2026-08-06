@@ -5,7 +5,8 @@ use andler_core::InstanceId;
 use andler_rpc::proto::andler_service_client::AndlerServiceClient;
 use andler_rpc::proto::andler_service_server::AndlerServiceServer;
 use andler_rpc::proto::{
-    AudioConfig, CloneInstanceRequest, CloneMode, CpuConfig, CreateInstanceRequest, DiskConfig,
+    AttachDiskRequest, AttachNetworkRequest, AudioConfig, CloneInstanceRequest, CloneMode,
+    CpuConfig, CreateInstanceRequest, DetachDiskRequest, DetachNetworkRequest, DiskConfig,
     DisplayConfig, Empty, ExportInstanceDiskRequest, FirmwareConfig, GetInstanceConfigResponse,
     GpuConfig, InputConfig, InstanceIdRequest, InstanceStateKind, MemoryConfig, NetworkConfig,
     RemoveInstanceRequest, Resolution, SetInstanceConfigRequest,
@@ -1003,6 +1004,189 @@ async fn set_instance_config_display_resolution_rejects_malformed_value() {
         .await
         .expect_err("malformed resolution must fail");
     assert_eq!(status.code(), tonic::Code::InvalidArgument);
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn attach_disk_on_created_instance_round_trips_as_failed_precondition() {
+    let (mut client, server) = spawn_server_and_connect().await;
+    let create_response = client
+        .create_instance(sample_create_instance_request())
+        .await
+        .expect("create_instance must succeed")
+        .into_inner();
+
+    let status = client
+        .attach_disk(AttachDiskRequest {
+            instance_id: create_response.instance_id.clone(),
+            path: String::new(),
+            size_bytes: 8 * 1024 * 1024 * 1024,
+        })
+        .await
+        .expect_err("hotplug requires the instance to be running or paused");
+    assert_eq!(status.code(), tonic::Code::FailedPrecondition);
+    assert!(
+        status.message().contains("start it first"),
+        "state gate message must tell the user what to do: {}",
+        status.message()
+    );
+
+    let status = client
+        .detach_disk(DetachDiskRequest {
+            instance_id: create_response.instance_id.clone(),
+            path: "/tmp/x.qcow2".to_string(),
+        })
+        .await
+        .expect_err("detach also requires running or paused");
+    assert_eq!(status.code(), tonic::Code::FailedPrecondition);
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn attach_network_on_created_instance_round_trips_as_failed_precondition() {
+    let (mut client, server) = spawn_server_and_connect().await;
+    let create_response = client
+        .create_instance(sample_create_instance_request())
+        .await
+        .expect("create_instance must succeed")
+        .into_inner();
+
+    let mut network = NetworkConfig {
+        mode: None,
+        device_model: "virtio-net-pci".to_string(),
+        ..Default::default()
+    };
+    network.set_nat_backend(andler_rpc::proto::NatBackend::Slirp);
+    network.mode = Some(andler_rpc::proto::NetworkMode {
+        kind: Some(andler_rpc::proto::network_mode::Kind::Nat(
+            andler_rpc::proto::network_mode::Nat {},
+        )),
+    });
+
+    let status = client
+        .attach_network(AttachNetworkRequest {
+            instance_id: create_response.instance_id,
+            network: Some(network),
+        })
+        .await
+        .expect_err("hotplug requires the instance to be running or paused");
+    assert_eq!(status.code(), tonic::Code::FailedPrecondition);
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn hotplug_on_unknown_instance_round_trips_as_not_found() {
+    let (mut client, server) = spawn_server_and_connect().await;
+    let unknown_id = "b".repeat(64);
+
+    let status = client
+        .attach_disk(AttachDiskRequest {
+            instance_id: unknown_id.clone(),
+            path: String::new(),
+            size_bytes: 1024,
+        })
+        .await
+        .expect_err("unknown instance must produce NOT_FOUND");
+    assert_eq!(status.code(), tonic::Code::NotFound);
+
+    let status = client
+        .detach_network(DetachNetworkRequest {
+            instance_id: unknown_id.clone(),
+            index: 0,
+        })
+        .await
+        .expect_err("unknown instance must produce NOT_FOUND");
+    assert_eq!(status.code(), tonic::Code::NotFound);
+
+    let status = client
+        .attach_network(AttachNetworkRequest {
+            instance_id: unknown_id.clone(),
+            network: None,
+        })
+        .await
+        .expect_err("missing network field must be rejected as invalid_argument");
+    assert_eq!(status.code(), tonic::Code::InvalidArgument);
+
+    let mut network = NetworkConfig {
+        mode: None,
+        device_model: "virtio-net-pci".to_string(),
+        ..Default::default()
+    };
+    network.set_nat_backend(andler_rpc::proto::NatBackend::Slirp);
+    network.mode = Some(andler_rpc::proto::NetworkMode {
+        kind: Some(andler_rpc::proto::network_mode::Kind::Isolated(
+            andler_rpc::proto::network_mode::Isolated {},
+        )),
+    });
+    let status = client
+        .attach_network(AttachNetworkRequest {
+            instance_id: unknown_id,
+            network: Some(network),
+        })
+        .await
+        .expect_err("unknown instance with a valid network must produce NOT_FOUND");
+    assert_eq!(status.code(), tonic::Code::NotFound);
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn config_round_trip_preserves_extra_devices_over_real_grpc() {
+    let (mut client, server) = spawn_server_and_connect().await;
+    let create_response = client
+        .create_instance(sample_create_instance_request())
+        .await
+        .expect("create_instance must succeed")
+        .into_inner();
+
+    let mut config = client
+        .get_instance_config(InstanceIdRequest {
+            instance_id: create_response.instance_id.clone(),
+        })
+        .await
+        .expect("get_instance_config must succeed")
+        .into_inner();
+    assert!(
+        config.extra_disks.is_empty() && config.extra_networks.is_empty(),
+        "a fresh instance must start with no hotplugged devices"
+    );
+
+    config.extra_disks.push(andler_rpc::proto::DiskConfig {
+        path: "/data/extra.qcow2".to_string(),
+        size_bytes: 1024,
+        format: 1, // QCOW2
+        base_image: String::new(),
+        thin_provisioning: true,
+        trim_on_shutdown: false,
+        compact_on_shutdown: false,
+        snapshot_timeout_secs: None,
+        ..Default::default()
+    });
+
+    // UpdateInstanceConfigRequest round-trips through the daemon's update path.
+    let update = andler_rpc::convert::instance_config_to_update_request(
+        config
+            .clone()
+            .try_into()
+            .expect("response must convert back to a domain config"),
+        create_response.instance_id.clone(),
+    );
+    client
+        .update_instance_config(update)
+        .await
+        .expect("update must succeed");
+
+    let config_after = client
+        .get_instance_config(InstanceIdRequest {
+            instance_id: create_response.instance_id,
+        })
+        .await
+        .expect("get_instance_config must succeed")
+        .into_inner();
+    assert_eq!(config_after.extra_disks.len(), 1);
 
     server.abort();
 }

@@ -602,6 +602,7 @@ dependencies = [
  "andler-rpc",
  "andler-store",
  "async-stream",
+ "async-trait",
  "chrono",
  "futures-core",
  "futures-util",

@@ -10,7 +10,7 @@
 - [x] NVIDIA GPU metrics via NVML + `nvidia-smi` fallback
 - [x] Intel GPU metrics via sysfs `i915` (GPU load delta)
 - [x] SQLite state persistence with cascade delete (`andler-store`)
-- [x] gRPC protocol with 26 RPCs and bidirectional conversions
+- [x] gRPC protocol with 30 RPCs and bidirectional conversions
 - [x] Factory reset with file cleanup (`remove --purge`)
 - [x] Clone/export for Linux and Android VMs (3 modes)
 - [x] Configurable per-instance snapshot timeout
@@ -53,18 +53,13 @@
 - [x] `--verify` flag — validates a resolved instance config (paths exist, OVMF found/required-for-Android, disk size sane, GPU memory/CPU/memory in range) and prints a ✓/✗ report, without contacting the daemon. Exits non-zero if any check fails (scriptable). Built on the same client-side resolution as `--dry-run` (`preview::resolve_linux`/`resolve_android`) — see `apps/cli/src/verify.rs`.
 - [x] QEMU backend: improve QMP error handling and recovery — a dropped/stale QMP connection is cleared on a connection-level error and reconnected once per operation (`pause`/`resume`/`status`). `BackendError::ProcessNotRunning` distinguishes "QEMU process itself is gone" (checked via `is_alive()` before giving up) from a transient QMP hiccup or a genuine command failure (`CommandFailed`/`ParseError`, never retried — QEMU already answered, retrying changes nothing). See `diagnose_and_reset_qmp` in `backends/andler-qemu/src/backend.rs`.
 - [x] Core: add disk space pre-check before snapshot operations — checks free space on the disk's filesystem via `statvfs(2)` before calling `backend.snapshot()`, using guest RAM size as a conservative upper bound for vmstate size (exact snapshot size isn't knowable in advance). Fails with `DiskError::InsufficientDiskSpace` (mapped to `Status::resource_exhausted`) instead of letting the operation run out of space partway through. See `services/andler-disk/src/diskspace.rs`.
-- [x] Core: add VM health checks — periodic background task (`ANDLERD_HEALTH_CHECK_INTERVAL_SECS`, default 30s, `0` disables) polls every `Running` instance's real backend status; if the process has died outside the normal `stop_instance` path, the FSM record is transitioned to `Error` and persisted, so a crash is visible in `andler status` instead of silently going unnoticed until someone happens to check. See `apps/daemon/src/daemon/health_ops.rs`.
-      **Auto-restart not implemented as an automatic behavior** — manual
-      `andler start` on a stopped/crashed instance works (the FSM accepts
-      `Start` from `Stopped`/`Error`, see the item right below). What's left
-      out is specifically the *automatic, unattended* retry-on-crash policy
-      (attempt limits, backoff) — a product decision to make deliberately,
-      not bundle in silently with a monitoring feature.
+- [x] Core: add VM health checks — periodic background task (`ANDLERD_HEALTH_CHECK_INTERVAL_SECS`, default 30s, `0` disables) polls every `Running` instance's real backend status; if the process has died outside the normal `stop_instance` path, the FSM record is transitioned to `Error` and persisted, so a crash is visible in `andler status` instead of silently going unnoticed until someone happens to check. See `apps/daemon/src/daemon/health_ops.rs`. **Auto-restart not implemented as an automatic behavior** — manual `andler start` on a stopped/crashed instance works (the FSM accepts `Start` from `Stopped`/`Error`, see the item right below). What's left out is specifically the *automatic, unattended* retry-on-crash policy (attempt limits, backoff) — a product decision to make deliberately, not bundle in silently with a monitoring feature.
 - [x] Core: allow restarting a `Stopped`/`Error` instance without recreating it — `andler_core::fsm` accepts `Start` from both (returns to `Starting`, same path as a fresh `Created` instance); `Daemon::start_instance` is generic over the source state. `is_terminal()` means "this run has ended", not "no transitions remain". `backend.rs::spawn` removes a stale QMP socket file before binding a new one (the deterministic per-instance socket path would otherwise collide on restart).
 - [x] Offline guest install on fresh images — the mounted guest is prepared for real package-manager runs: guest `/etc/resolv.conf` written with the host's `nameserver` directives (direct write through NOPASSWD `chroot`; a bind-mount fails on the dangling `stub-resolv.conf` symlink), `/dev`/`/proc`/`/sys` bind-mounted, tmpfs on guest `/run` (gpg-agent), and package indexes refreshed (`update`/`makecache`/`-Sy`) before install. `host_nameservers`/`write_guest_resolv`/`bind_host_mounts` in `services/andler-disk/src/nbd.rs`.
 - [x] Online guest operations over the QGA chardev socket (`*.qga.sock`, `org.qemu.guest_agent.0`) instead of QMP — QEMU ≥ 9 registers no `guest-*` commands on QMP. Package install/remove, file writes, and live resolution changes (`set_guest_display_resolution`) all talk to `qemu-ga`.
 - [x] gRPC error messages sanitized and truncated (384 chars) — long multi-KB package-manager stderr no longer trips the tonic h2 client with "h2 protocol error".
 - [x] `config set` whitelist + live display resolution — keys `display.resolution` (any state; applied live to a running guest via QGA and persisted via fw_cfg), `name`, `arm_translator` (stopped).
+- [x] QEMU backend: hot-plug disk/network devices — `andler attach disk|net` / `andler detach disk|net` over four new RPCs (`AttachDisk`/`DetachDisk`/`AttachNetwork`/`DetachNetwork`), gated on `Running`/`Paused`. Extra devices persist in `extra_disks`/`extra_networks` in `instance.toml` and are re-created from the command line at boot; QMP `blockdev-add`/`device_add`/`netdev_add`/`device_del` with async-aware detach (retries only on `DeviceInUse`), host tap lifecycle for bridge mode, rollback on failure. Extra disks are not covered by internal snapshots (see Known Limitations in `backends/andler-qemu/README.md`).
 
 ## In Progress
 
@@ -72,8 +67,8 @@
 
 ### Medium-term
 
-- [ ] QEMU backend: add hot-plug support for disk/network devices
 - [ ] Core: add VM resource limits (CPU pinning, memory overcommit)
+- [ ] QMP event subscription (async events beyond command responses)
 - [ ] CLI: add `--export` flag to export VM as OCI container
 - [ ] Core: add VM template system for quick VM creation
 
@@ -81,6 +76,5 @@
 
 - [ ] Tauri GUI client
 - [ ] Multi-disk support (snapshot device name parameterization)
-- [ ] QMP event subscription (async events beyond command responses)
 - [ ] Live migration between hosts
 - [ ] GPU passthrough via VFIO (`RenderBackend::Passthrough`)

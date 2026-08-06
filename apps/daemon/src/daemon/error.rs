@@ -128,4 +128,30 @@ pub enum DaemonError {
 
     #[error("Android requires UEFI/OVMF. Provide an OVMF_VARS template.")]
     MissingOvmfVarsTemplate,
+
+    #[error(
+        "hotplug requires instance {0:?} to be running or paused (currently {1:?}); \
+         start it first"
+    )]
+    HotplugRequiresRunningInstance(InstanceId, InstanceState),
+
+    #[error("disk {1:?} is already attached to instance {0:?}")]
+    DiskAlreadyAttached(InstanceId, PathBuf),
+
+    #[error(
+        "disk {1:?} is not attached to instance {0:?}; \
+         see `andler config <id>` for the extra_disks list"
+    )]
+    DiskNotAttached(InstanceId, PathBuf),
+
+    #[error(
+        "network device {index} is not attached to instance {instance_id:?} \
+         (only {attached} extra network(s) present); \
+         see `andler config <id>` for the extra_networks list"
+    )]
+    NetworkNotAttached {
+        instance_id: InstanceId,
+        index: usize,
+        attached: usize,
+    },
 }

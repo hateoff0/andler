@@ -1,6 +1,7 @@
 mod clone_ops;
 mod error;
 mod health_ops;
+mod hotplug_ops;
 mod instance_ops;
 mod query_ops;
 mod snapshot_ops;

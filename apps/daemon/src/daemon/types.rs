@@ -84,6 +84,21 @@ pub(crate) async fn purge_instance_files(id: InstanceId, config: &InstanceConfig
         );
     }
 
+    let instance_dir = config.disk.path.parent();
+    for disk in &config.extra_disks {
+        if disk.path.parent() != instance_dir {
+            continue;
+        }
+        if let Err(err) = tokio::fs::remove_file(&disk.path).await {
+            tracing::error!(
+                instance_id = %id,
+                path = %disk.path.display(),
+                error = %err,
+                "purge: failed to remove extra disk file"
+            );
+        }
+    }
+
     if let Some(parent) = config.disk.path.parent() {
         let is_instance_dir = parent
             .file_name()

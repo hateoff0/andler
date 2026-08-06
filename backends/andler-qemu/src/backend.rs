@@ -3,9 +3,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use andler_core::{
-    BackendError, BackendHandle, BackendStatus, HypervisorBackend, InstanceConfig, InstanceKind,
-    InstanceState, LogLine, LogStreamSource, NetworkMode, RenderBackend, Resolution,
-    ResourceMetrics,
+    BackendError, BackendHandle, BackendStatus, DiskConfig, DiskFormat, HypervisorBackend,
+    InstanceConfig, InstanceKind, InstanceState, LogLine, LogStreamSource, NatBackend,
+    NetworkConfig, NetworkMode, RenderBackend, Resolution, ResourceMetrics,
 };
 use andler_net::{DefaultNetworkService, NetworkService};
 use async_trait::async_trait;
@@ -26,6 +26,9 @@ struct RunningInstance {
     qmp_client: Option<QmpClient>,
 
     network_info: NetworkInfo,
+    /// (netdev id, host-side info) for every hotplugged extra NIC, so `stop` and
+    /// `detach_network` can tear down their taps/veths like the primary NIC's.
+    extra_network_infos: Vec<(String, NetworkInfo)>,
 }
 
 #[derive(Clone)]
@@ -145,6 +148,116 @@ exit 30";
         }
 
         Ok(())
+    }
+
+    fn instance_id_from_handle(handle: &BackendHandle) -> Result<&str, BackendError> {
+        handle
+            .0
+            .strip_prefix("qemu:")
+            .ok_or_else(|| BackendError::HandleNotFound(handle.0.clone()))
+    }
+
+    async fn setup_extra_network(
+        &self,
+        network: &NetworkConfig,
+        index: usize,
+        instance_id: &str,
+    ) -> Result<NetworkInfo, BackendError> {
+        match &network.mode {
+            NetworkMode::Bridge { interface: bridge } => {
+                let tap_iface = cmdline::extra_net_bridge_tap_iface(instance_id, index);
+                self.network_service
+                    .setup_bridge(bridge, &tap_iface)
+                    .await
+                    .map_err(|e| BackendError::Io(e.to_string()))?;
+                Ok(NetworkInfo::Bridge {
+                    bridge: bridge.clone(),
+                    tap_iface,
+                })
+            }
+            NetworkMode::Isolated => {
+                let vm_iface = cmdline::extra_net_isolated_iface(index);
+                let (host_veth, vm_veth) = self
+                    .network_service
+                    .setup_isolated(&vm_iface)
+                    .await
+                    .map_err(|e| BackendError::Io(e.to_string()))?;
+                Ok(NetworkInfo::Isolated { host_veth, vm_veth })
+            }
+            NetworkMode::Nat => Ok(NetworkInfo::Nat),
+        }
+    }
+
+    async fn teardown_network_info(&self, info: &NetworkInfo) {
+        match info {
+            NetworkInfo::Bridge { bridge, tap_iface } => {
+                let _ = self
+                    .network_service
+                    .teardown_bridge(bridge, tap_iface)
+                    .await;
+            }
+            NetworkInfo::Isolated { host_veth, vm_veth } => {
+                let _ = self
+                    .network_service
+                    .teardown_isolated(host_veth, vm_veth)
+                    .await;
+            }
+            NetworkInfo::Nat => {}
+        }
+    }
+
+    /// Runs a QMP operation with the same recovery contract as `pause`/`resume`:
+    /// connect if needed; fail immediately on a command-level error (QEMU already
+    /// answered, retrying changes nothing); on a connection-level error, clear the
+    /// stale client, verify the process is alive, reconnect, and run the op once
+    /// more. `op` must be callable twice (recoverable connection errors), so
+    /// closures should clone their captured values per call.
+    async fn run_qmp_operation<T, F>(
+        instance: &mut RunningInstance,
+        mut op: F,
+    ) -> Result<T, BackendError>
+    where
+        F: for<'a> FnMut(
+            &'a mut QmpClient,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<T, QmpError>> + Send + 'a>,
+        >,
+    {
+        Self::ensure_qmp_connected(instance)
+            .await
+            .map_err(qmp_error_to_backend_error)?;
+
+        let first_attempt = op(instance
+            .qmp_client
+            .as_mut()
+            .expect("qmp_client is Some after ensure_qmp_connected succeeded"))
+        .await;
+
+        match first_attempt {
+            Ok(value) => Ok(value),
+            Err(err)
+                if matches!(
+                    err,
+                    QmpError::CommandFailed { .. } | QmpError::ParseError(_)
+                ) =>
+            {
+                Err(qmp_error_to_backend_error(err))
+            }
+            Err(_connection_level_err) => {
+                if let Some(err) = Self::diagnose_and_reset_qmp(instance).await {
+                    return Err(err);
+                }
+                Self::ensure_qmp_connected(instance)
+                    .await
+                    .map_err(qmp_error_to_backend_error)?;
+                op(instance
+                    .qmp_client
+                    .as_mut()
+                    .expect("qmp_client is Some after ensure_qmp_connected succeeded"))
+                .await
+                .map_err(qmp_error_to_backend_error)
+            }
+        }
     }
 }
 
@@ -336,22 +449,28 @@ impl HypervisorBackend for QemuBackend {
             }
             NetworkMode::Nat => NetworkInfo::Nat,
         };
+        let mut extra_network_infos = Vec::new();
+        for (index, extra) in cfg.extra_networks.iter().enumerate() {
+            match self
+                .setup_extra_network(extra, index, &cfg.id.to_string())
+                .await
+            {
+                Ok(info) => extra_network_infos.push((cmdline::extra_net_id(index), info)),
+                Err(err) => {
+                    self.teardown_network_info(&network_info).await;
+                    for (_, info) in &extra_network_infos {
+                        self.teardown_network_info(info).await;
+                    }
+                    return Err(err);
+                }
+            }
+        }
+
         let process = QemuProcess::spawn(&args, qmp_socket_path, log_file_path).await;
         if let Err(err) = process {
-            match &network_info {
-                NetworkInfo::Bridge { bridge, tap_iface } => {
-                    let _ = self
-                        .network_service
-                        .teardown_bridge(bridge, tap_iface)
-                        .await;
-                }
-                NetworkInfo::Isolated { host_veth, vm_veth } => {
-                    let _ = self
-                        .network_service
-                        .teardown_isolated(host_veth, vm_veth)
-                        .await;
-                }
-                NetworkInfo::Nat => {}
+            self.teardown_network_info(&network_info).await;
+            for (_, info) in &extra_network_infos {
+                self.teardown_network_info(info).await;
             }
             return Err(process_error_to_backend_error(err));
         }
@@ -364,6 +483,7 @@ impl HypervisorBackend for QemuBackend {
                 process,
                 qmp_client: None,
                 network_info,
+                extra_network_infos,
             },
         );
 
@@ -481,6 +601,7 @@ impl HypervisorBackend for QemuBackend {
         }
 
         let network_info = instance.network_info.clone();
+        let extra_network_infos = std::mem::take(&mut instance.extra_network_infos);
         instances.remove(handle);
 
         match network_info {
@@ -497,6 +618,24 @@ impl HypervisorBackend for QemuBackend {
                     .map_err(|e| BackendError::Io(e.to_string()))?;
             }
             NetworkInfo::Nat => {}
+        }
+
+        for (_, info) in &extra_network_infos {
+            match info {
+                NetworkInfo::Bridge { bridge, tap_iface } => {
+                    self.network_service
+                        .teardown_bridge(bridge, tap_iface)
+                        .await
+                        .map_err(|e| BackendError::Io(e.to_string()))?;
+                }
+                NetworkInfo::Isolated { host_veth, vm_veth } => {
+                    self.network_service
+                        .teardown_isolated(host_veth, vm_veth)
+                        .await
+                        .map_err(|e| BackendError::Io(e.to_string()))?;
+                }
+                NetworkInfo::Nat => {}
+            }
         }
 
         Ok(())
@@ -662,6 +801,155 @@ impl HypervisorBackend for QemuBackend {
                 created_at: s.datetime,
             })
             .collect())
+    }
+
+    async fn attach_disk(
+        &self,
+        handle: &BackendHandle,
+        disk: &DiskConfig,
+        index: usize,
+    ) -> Result<(), BackendError> {
+        let mut instances = self.instances.lock().await;
+        let instance = instances
+            .get_mut(handle)
+            .ok_or_else(|| BackendError::HandleNotFound(handle.0.clone()))?;
+
+        let drive_id = cmdline::extra_disk_drive_id(index);
+        let device_id = cmdline::extra_disk_device_id(index);
+        let path = disk.path.to_string_lossy().into_owned();
+        let format_str = match disk.format {
+            DiskFormat::Qcow2 => "qcow2",
+            DiskFormat::Raw => "raw",
+            DiskFormat::Vdi => "vdi",
+        };
+
+        Self::run_qmp_operation(instance, move |qmp| {
+            let drive_id = drive_id.clone();
+            let device_id = device_id.clone();
+            let path = path.clone();
+            Box::pin(async move {
+                qmp.blockdev_add(&drive_id, &path, format_str).await?;
+                match qmp.device_add_block(&device_id, &drive_id).await {
+                    Ok(()) => Ok(()),
+                    Err(err) => {
+                        // Roll back the block node so a failed device_add leaves no
+                        // orphan: a detach later could never reach it anyway.
+                        let _ = qmp.blockdev_del(&drive_id).await;
+                        Err(err)
+                    }
+                }
+            })
+        })
+        .await
+    }
+
+    async fn detach_disk(&self, handle: &BackendHandle, index: usize) -> Result<(), BackendError> {
+        let mut instances = self.instances.lock().await;
+        let instance = instances
+            .get_mut(handle)
+            .ok_or_else(|| BackendError::HandleNotFound(handle.0.clone()))?;
+
+        let drive_id = cmdline::extra_disk_drive_id(index);
+        let device_id = cmdline::extra_disk_device_id(index);
+
+        Self::run_qmp_operation(instance, move |qmp| {
+            let drive_id = drive_id.clone();
+            let device_id = device_id.clone();
+            Box::pin(async move {
+                qmp.detach_block_device(&device_id, &drive_id, std::time::Duration::from_secs(15))
+                    .await
+            })
+        })
+        .await
+    }
+
+    async fn attach_network(
+        &self,
+        handle: &BackendHandle,
+        network: &NetworkConfig,
+        index: usize,
+    ) -> Result<(), BackendError> {
+        let mut instances = self.instances.lock().await;
+        let instance = instances
+            .get_mut(handle)
+            .ok_or_else(|| BackendError::HandleNotFound(handle.0.clone()))?;
+        let instance_id = Self::instance_id_from_handle(handle)?.to_string();
+
+        // Host-side tap/veth first, so a failure leaves the VM completely untouched.
+        let info = self
+            .setup_extra_network(network, index, &instance_id)
+            .await?;
+
+        let network = network.clone();
+        let model = network.device_model.clone();
+        let result = Self::run_qmp_operation(instance, move |qmp| {
+            let model = model.clone();
+            let network = network.clone();
+            let instance_id = instance_id.clone();
+            Box::pin(async move {
+                let netdev_id = cmdline::extra_net_id(index);
+                match &network.mode {
+                    NetworkMode::Nat => match network.nat_backend {
+                        NatBackend::Slirp => qmp.netdev_add_user(&netdev_id).await?,
+                        NatBackend::Passt => qmp.netdev_add_passt(&netdev_id).await?,
+                    },
+                    NetworkMode::Bridge { .. } => {
+                        let ifname = cmdline::extra_net_bridge_tap_iface(&instance_id, index);
+                        qmp.netdev_add_tap(&netdev_id, &ifname).await?
+                    }
+                    NetworkMode::Isolated => {
+                        let ifname = cmdline::extra_net_isolated_iface(index);
+                        qmp.netdev_add_tap(&netdev_id, &ifname).await?
+                    }
+                }
+                qmp.device_add_net(&netdev_id, &netdev_id, &model).await
+            })
+        })
+        .await;
+
+        match result {
+            Ok(()) => {
+                let netdev_id = cmdline::extra_net_id(index);
+                instance.extra_network_infos.push((netdev_id, info));
+                Ok(())
+            }
+            Err(err) => {
+                self.teardown_network_info(&info).await;
+                Err(err)
+            }
+        }
+    }
+
+    async fn detach_network(
+        &self,
+        handle: &BackendHandle,
+        index: usize,
+    ) -> Result<(), BackendError> {
+        let mut instances = self.instances.lock().await;
+        let instance = instances
+            .get_mut(handle)
+            .ok_or_else(|| BackendError::HandleNotFound(handle.0.clone()))?;
+
+        Self::run_qmp_operation(instance, move |qmp| {
+            Box::pin(async move {
+                let netdev_id = cmdline::extra_net_id(index);
+                qmp.detach_net_device(&netdev_id, &netdev_id, std::time::Duration::from_secs(15))
+                    .await
+            })
+        })
+        .await?;
+
+        let netdev_id = cmdline::extra_net_id(index);
+        if let Some(pos) = instance
+            .extra_network_infos
+            .iter()
+            .position(|(id, _)| *id == netdev_id)
+        {
+            let (_, info) = instance.extra_network_infos.remove(pos);
+            self.teardown_network_info(&info).await;
+        }
+
+        Ok(())
     }
 
     fn metrics_stream(&self, handle: &BackendHandle) -> BoxStream<'_, ResourceMetrics> {
@@ -852,7 +1140,9 @@ mod tests {
             display: DisplayConfig::reference_default(),
             gpu,
             network: NetworkConfig::reference_default(),
-            firmware: FirmwareConfig::reference_default(PathBuf::from("/tmp/test-vars.fd")),
+            extra_disks: Vec::new(),
+            extra_networks: Vec::new(),
+            firmware: FirmwareConfig::reference_default(PathBuf::from("test-vm_VARS.fd")),
             audio: AudioConfig::reference_default(),
             input: InputConfig::reference_default(),
         }

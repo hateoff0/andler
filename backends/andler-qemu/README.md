@@ -17,9 +17,9 @@ Pure function `build_args(&InstanceConfig, &Path) -> Vec<String>` that translate
 | GPU & Display | `gpu_display_args` | `-device virtio-gpu-pci`, `-display`, `-vga` depending on `RenderBackend` and `DisplayEngine` |
 | Guest agent | `guest_agent_args` | `-chardev socket,id=qga,path=<...>/qmp.qga.sock,server=on,wait=off` + `-device virtserialport,chardev=qga,id=qga,name=org.qemu.guest_agent.0` (reuses the `virtio-serial-pci` bus from `input_args`) |
 | Display resolution | `display_resolution_fwcfg_args` | `-fw_cfg name=opt/andler/display-resolution,string=<W>x<H>` when a resolution is configured (read at boot by the guest oneshot `andler-display-resolution.service`) |
-| Disk | `disk_args` | `-drive file=...,format=qcow2,id=drive-disk0`, `-device virtio-blk-pci` |
+| Disk | `disk_args` | `-drive file=...,format=qcow2,id=drive-disk0`, `-device virtio-blk-pci`; extra hotplugged disks follow as `drive-extraN` + `extraN` (no bootindex) |
 | Input | `input_args` | `-device virtio-tablet-pci` (or `virtio-mouse-pci`), `-device virtio-serial-pci`, `-device virtserialport,chardev=ch1,id=ch1,name=com.redhat.spice.0`, `-chardev qemu-vdagent` (when clipboard enabled) |
-| Network | `network_args` | `-nic user,model=virtio-net-pci` (Slirp/NAT), `-netdev passt` + `-device` (Passt), or Bridge/Isolated modes |
+| Network | `network_args` | `-nic user,model=virtio-net-pci` (Slirp/NAT), `-netdev passt` + `-device` (Passt), or Bridge/Isolated modes; extra hotplugged networks append as `net-extraN` netdevs + devices |
 | Audio | `audio_args` | `-audiodev`, `-device` for PipeWire/PulseAudio |
 | QMP | `qmp_args` | `-qmp unix:<path>,server,nowait` |
 | Serial | `serial_args` | `-serial file:console.log` (instance directory) |
@@ -92,6 +92,10 @@ QMP client over a unix socket. Handles handshake, command execution, and async j
 | `guest_file_write` | `async fn(&mut self, path: &str, content: &str) -> Result<(), QmpError>` | Write a whole file in the guest via `guest-file-open`/`guest-file-write`/`guest-file-close` (wire param is `buf-b64`, not `data-b64`) |
 | `is_guest_agent_available` | `async fn(&mut self) -> bool` | Returns `true` if guest agent responds to `guest-ping` |
 | `query_block_snapshots` | `async fn(&mut self, device) -> Result<Vec<SnapshotInfo>, QmpError>` | Lists snapshots for a block device |
+| `blockdev_add` / `device_add_block` | `async fn(&mut self, ...) -> Result<(), QmpError>` | `blockdev-add` (qcow2 node) + `device_add` virtio-blk-pci |
+| `device_add_net` / `netdev_add_*` | `async fn(&mut self, ...) -> Result<(), QmpError>` | `device_add` net model + `netdev_add` user/passt/tap |
+| `detach_block_device` | `async fn(&mut self, device_id, node_name, timeout) -> Result<(), QmpError>` | `device_del` then `blockdev-del`; retries the latter on `DeviceInUse`/`in use` |
+| `detach_net_device` | `async fn(&mut self, device_id, netdev_id, timeout) -> Result<(), QmpError>` | `device_del` then `netdev-del`; retries on `DeviceInUse`/`in use` |
 
 **`VmStatus`**: `Running` | `Paused` | `Shutdown` | `Other`.
 
@@ -113,6 +117,27 @@ andler VM (`virtio-sound`, `virgl`, and the `invtsc` CPU flag are all non-migrat
 Disk-only snapshots work on any configuration, at the cost that **restore is an offline operation**
 (`qemu-img snapshot -a` via the daemon, requires a stopped instance) — there is no live revert
 command in QEMU's block-layer API.
+
+**QMP wire schema for hotplug (extra disks/networks)**:
+
+```text
+blockdev-add:  {"driver": "qcow2", "node-name": "drive-extraN", "discard": "unmap",
+                "detect-zeroes": "on", "file": {"driver": "file", "filename": <path>}}
+device_add:    {"driver": "virtio-blk-pci", "id": "extraN", "drive": "drive-extraN"}
+netdev_add:    {"type": "user", "id": "net-extraN"}                          (Slirp)
+               {"type": "passt", "id": "net-extraN"}                         (Passt)
+               {"type": "tap", "id": "net-extraN", "ifname": <host iface>,
+                "script": "no", "downscript": "no"}                          (Bridge/Isolated)
+device_add:    {"driver": <model>, "id": "net-extraN", "netdev": "net-extraN"}
+device_del:    {"id": "extraN" | "net-extraN"}
+blockdev-del:  {"node-name": "drive-extraN"} / netdev-del: {"id": "net-extraN"}
+```
+
+`device_del` is asynchronous: QEMU completes it in its own event loop, so a follow-up
+`blockdev-del`/`netdev-del` can race it and be refused with `DeviceInUse` ("Device '...' is in
+use"). `detach_block_device`/`detach_net_device` retry only while the error class is `DeviceInUse`
+or the description contains "in use" (250ms × 15s); any other `CommandFailed` fails immediately —
+retrying a real error (e.g. an unknown node name) would only mask it.
 
 **Package manager auto-detection**: `guest_exec_package` (used by guest package installation/removal) runs a detection script inside the guest via the agent (`connect_agent` on `*.qga.sock`): `command -v apt-get → exit 0`, `command -v dnf → exit 10`, `command -v pacman → exit 20`, else exit 30 (error "no supported package manager found"). The detected manager then runs `install -y` / `remove -y` (pacman: `-S --noconfirm` / `-R --noconfirm`). A non-zero exit propagates `GuestExecFailed` with the decoded stderr.
 **Agent socket exclusivity** — the agent connect is established lazily per operation by `backend::guest_agent_client`. A QEMU chardev delivers its data to the *last* client only, so concurrent guest operations against the same `*.qga.sock` must serialize; never hold the socket across long operations.
@@ -205,6 +230,8 @@ All marked `#[ignore]` with reason — run separately in `integration-test` Dock
 - **`qemu-img snapshot` must not run against a live disk** (QEMU holds exclusive locks; `qemu-img snapshot -l` on a running instance fails or blocks). List snapshots via QMP `query-block` (`query_block_snapshots` / `andler snapshot list`); restore requires the instance stopped.
 - **`guest-*` commands are NOT registered on QMP (QEMU ≥ 9)** — online guest operations (package install/remove, file writes, `set_guest_display_resolution`) must go through the QGA chardev socket (`*.qga.sock`, `org.qemu.guest_agent.0`) with `connect_agent`. The QMP socket is VM control only. See "Agent socket exclusivity" above: a chardev delivers to the *last* client only, so parallel readers starve the daemon — never probe these sockets from a second client while the daemon is attached (a 30s hang was reproduced that way).
 - **Hardcoded snapshot device name**: `drive-disk0`. Will need parameterization if multi-disk support is added.
+- **Internal snapshots cover only the primary disk**: extra hotplugged disks (`drive-extraN`) are not included in `blockdev-snapshot-internal-sync` — `snapshot create` snapshots `drive-disk0` alone.
+- **`device_del` is asynchronous**: the detach path retries `blockdev-del`/`netdev-del` only while QEMU reports the device in use; a guest that keeps the device busy (open files on an attached disk, active sockets on a NIC) can delay or fail the detach — the config entry is only removed after the backend confirms.
 
 ## What Is NOT Implemented Here
 

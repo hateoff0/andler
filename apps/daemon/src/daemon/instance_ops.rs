@@ -28,6 +28,15 @@ fn validate_instance_files(cfg: &InstanceConfig) -> Result<(), BackendError> {
         )));
     }
 
+    for disk in &cfg.extra_disks {
+        if !disk.path.exists() {
+            return Err(BackendError::Io(format!(
+                "extra disk file not found: {} (attached disk was moved or deleted?)",
+                disk.path.display()
+            )));
+        }
+    }
+
     Ok(())
 }
 

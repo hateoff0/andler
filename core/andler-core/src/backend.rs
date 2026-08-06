@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use futures_core::stream::BoxStream;
 
-use crate::config::{InstanceConfig, Resolution};
+use crate::config::{DiskConfig, InstanceConfig, NetworkConfig, Resolution};
 use crate::error::BackendError;
 use crate::fsm::InstanceState;
 use crate::InstanceKind;
@@ -121,6 +121,58 @@ pub trait HypervisorBackend: Send + Sync {
         Err(BackendError::NotImplemented {
             backend: self.name(),
             operation: "snapshot_list",
+        })
+    }
+
+    /// Attaches `disk` as hotplug device `index` (index into the instance's
+    /// `extra_disks` list — the backend derives QEMU ids from it). The caller
+    /// persists the device in the instance config after a successful attach.
+    async fn attach_disk(
+        &self,
+        handle: &BackendHandle,
+        disk: &DiskConfig,
+        index: usize,
+    ) -> Result<(), BackendError> {
+        let _ = (handle, disk, index);
+        Err(BackendError::NotImplemented {
+            backend: self.name(),
+            operation: "attach_disk",
+        })
+    }
+
+    async fn detach_disk(&self, handle: &BackendHandle, index: usize) -> Result<(), BackendError> {
+        let _ = (handle, index);
+        Err(BackendError::NotImplemented {
+            backend: self.name(),
+            operation: "detach_disk",
+        })
+    }
+
+    /// Attaches `network` as hotplug device `index` (index into the instance's
+    /// `extra_networks` list). Host-side taps/veths are created before the QMP
+    /// hotplug and torn down again on failure or detach.
+    async fn attach_network(
+        &self,
+        handle: &BackendHandle,
+        network: &NetworkConfig,
+        index: usize,
+    ) -> Result<(), BackendError> {
+        let _ = (handle, network, index);
+        Err(BackendError::NotImplemented {
+            backend: self.name(),
+            operation: "attach_network",
+        })
+    }
+
+    async fn detach_network(
+        &self,
+        handle: &BackendHandle,
+        index: usize,
+    ) -> Result<(), BackendError> {
+        let _ = (handle, index);
+        Err(BackendError::NotImplemented {
+            backend: self.name(),
+            operation: "detach_network",
         })
     }
 

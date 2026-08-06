@@ -5,6 +5,7 @@ mod clone;
 mod common;
 mod create;
 mod health;
+mod hotplug;
 mod list_config;
 mod persistence;
 mod remove;

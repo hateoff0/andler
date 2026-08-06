@@ -29,6 +29,10 @@ service AndlerService {
     rpc SetInstanceConfig(SetInstanceConfigRequest) returns (Empty);
     rpc SwitchAndroidBootMode(SwitchAndroidBootModeRequest) returns (Empty);
     rpc GetAndroidBootMode(InstanceIdRequest) returns (GetAndroidBootModeResponse);
+    rpc AttachDisk(AttachDiskRequest) returns (AttachDiskResponse);
+    rpc DetachDisk(DetachDiskRequest) returns (Empty);
+    rpc AttachNetwork(AttachNetworkRequest) returns (AttachNetworkResponse);
+    rpc DetachNetwork(DetachNetworkRequest) returns (Empty);
 }
 
 message Empty {}
@@ -317,6 +321,8 @@ message GetInstanceConfigResponse {
     FirmwareConfig firmware = 11;
     AudioConfig audio = 12;
     InputConfig input = 13;
+    repeated DiskConfig extra_disks = 14;
+    repeated NetworkConfig extra_networks = 15;
 }
 
 message UpdateInstanceConfigRequest {
@@ -333,6 +339,8 @@ message UpdateInstanceConfigRequest {
     FirmwareConfig firmware = 11;
     AudioConfig audio = 12;
     InputConfig input = 13;
+    repeated DiskConfig extra_disks = 14;
+    repeated NetworkConfig extra_networks = 15;
 }
 
 enum LogStreamSource {
@@ -456,6 +464,36 @@ message SetInstanceConfigRequest {
     string instance_ref = 1;
     string key = 2;
     string value = 3;
+}
+
+message AttachDiskRequest {
+    string instance_id = 1;
+    string path = 2;
+    uint64 size_bytes = 3;
+}
+
+message AttachDiskResponse {
+    string path = 1;
+    uint32 index = 2;
+}
+
+message DetachDiskRequest {
+    string instance_id = 1;
+    string path = 2;
+}
+
+message AttachNetworkRequest {
+    string instance_id = 1;
+    NetworkConfig network = 2;
+}
+
+message AttachNetworkResponse {
+    uint32 index = 1;
+}
+
+message DetachNetworkRequest {
+    string instance_id = 1;
+    uint32 index = 2;
 }
 
 message GuestPackageEntry {

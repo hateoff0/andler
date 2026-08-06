@@ -109,7 +109,7 @@ Two-table SQLite store with JSON columns.
 
 Protobuf definitions and generated code via `tonic`/`prost`.
 
-**26 RPCs** covering instance lifecycle, monitoring, snapshots, clone/export.
+**30 RPCs** covering instance lifecycle, monitoring, snapshots, clone/export, hotplug.
 **~45 conversion tests** for bidirectional proto↔domain type mapping.
 
 ### `apps/daemon/` — Background Service
@@ -244,6 +244,17 @@ Snapshot metadata (tag, description, created_at) stored in SQLite `snapshots` ta
 
 `RestoreSnapshot` on a running instance fails with `FAILED_PRECONDITION` (`InstanceMustBeStopped`) — stop the instance first, then restore, then start again.
 
+## Hotplug Mechanism
+
+Extra disks and network devices can be attached to a `Running`/`Paused` instance and detached again, and are re-created automatically at the next boot.
+
+1. **Persistence**: attached devices live in `InstanceConfig.extra_disks` / `extra_networks` (serde-defaulted `Vec`s, so old `instance.toml` files load unchanged). The daemon appends to the list *after* the backend confirms the live device, and persists via the same `persist_config_update` path as any config change — the store needs no migration (it stores the full config JSON).
+2. **Identity**: devices are addressed by list index; the backend derives QEMU ids from it (`drive-extraN`/`extraN` blockdev/device, `net-extraN` netdev/device, bridge taps `tap<instance-id>-eN` so multiple VMs on one bridge never collide). Detach identifies disks by **path** and networks by **index**, so cmdline wiring at boot and QMP hot-plug always agree.
+3. **Live attach** (QMP): `blockdev-add` (`{"driver":"qcow2","node-name":"drive-extraN",...}`) + `device_add` (virtio-blk-pci), or `netdev_add` (user/tap/passt) + `device_add` (net model). On failure the backend rolls back: `blockdev-del` after a failed `device_add`, host tap teardown after a failed netdev setup.
+4. **Live detach** (QMP): `device_del` is asynchronous — QEMU completes it on its own schedule, so the follow-up `blockdev-del`/`netdev-del` may hit `DeviceInUse`. The daemon retries only while QEMU reports the device in use (`DeviceInUse` class or `in use` description, 250ms × 15s); any other `CommandFailed` fails immediately.
+5. **Boot re-attach**: the cmdline builder emits the extra `-drive`/`-device`/`-netdev` args in list order; host taps for bridge mode are created before spawn and torn down on stop.
+6. **Limitations**: internal snapshots (`snapshot create`) cover the primary `drive-disk0` only — extra disks are not snapshotted. Attached disks are identified by absolute path; a relative or bare-name path resolves into the instance directory at attach time.
+
 ## Metrics Collection
 
 All host-side metrics from `/proc` — no QMP communication needed for metrics:
@@ -305,7 +316,7 @@ Conversion logic: `services/andler-rpc/src/convert.rs`.
 
 ## Configuration Types
 
-Configuration is organized into 9 sections in `InstanceConfig` (plus metadata fields `id`, `name`, `kind`, `backend`):
+Configuration is organized into 9 sections in `InstanceConfig` (plus metadata fields `id`, `name`, `kind`, `backend`), two hotplug lists (`extra_disks`, `extra_networks`), and the primary config sections:
 
 1. **disk**: Path, format (qcow2/raw/vdi), size, base image, thin provisioning, trim/compact on shutdown, snapshot timeout. The instance disk is always named `disk.qcow2` inside the instance directory. The CD-ROM is not part of `DiskConfig` — it lives in `InstanceKind::LinuxVm` as `cdrom_bus` (`VirtioScsi`/`Ide`, pre-resolved from `auto` via `recommended_for_iso_filename()`)
 2. **cpu**: vCPU count (`cores`/`sockets`/`threads`), affinity (CPU pinning), priority class (`Low`/`Normal`/`High`)
@@ -341,5 +352,7 @@ The `Daemon` struct orchestrates all operations. Key methods:
 | `list_guest_packages` | Lists installed packages in guest OS |
 | `switch_arm_translator` | Switches ARM translator in offline mode |
 | `set_instance_config` | Partial config update |
+| `attach_disk` / `detach_disk` | Hot-plug/unplug an extra disk (Running/Paused only) |
+| `attach_network` / `detach_network` | Hot-plug/unplug an extra network device (Running/Paused only) |
 
 Each method corresponds to a real `Daemon` implementation and follows the FSM transitions.

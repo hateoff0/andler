@@ -83,6 +83,8 @@ impl AndroidProfile {
             display: DisplayConfig::reference_default(),
             gpu: GpuConfig::reference_default(),
             network: NetworkConfig::reference_default(),
+            extra_disks: Vec::new(),
+            extra_networks: Vec::new(),
             firmware: FirmwareConfig::reference_default(ovmf_vars_path),
             audio: AudioConfig::reference_default(),
             input: InputConfig::reference_default(),

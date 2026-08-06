@@ -204,6 +204,153 @@ impl QmpClient {
         Ok(Vec::new())
     }
 
+    pub async fn blockdev_add(
+        &mut self,
+        node_name: &str,
+        file_path: &str,
+        format: &str,
+    ) -> Result<(), QmpError> {
+        let args = json!({
+            "driver": format,
+            "node-name": node_name,
+            "discard": "unmap",
+            "detect-zeroes": "on",
+            "file": {
+                "driver": "file",
+                "filename": file_path,
+                "aio": "threads",
+            },
+        });
+        self.execute_raw("blockdev-add", Some(args)).await?;
+        Ok(())
+    }
+
+    pub async fn device_add_block(&mut self, id: &str, drive: &str) -> Result<(), QmpError> {
+        let args = json!({
+            "driver": "virtio-blk-pci",
+            "id": id,
+            "drive": drive,
+        });
+        self.execute_raw("device_add", Some(args)).await?;
+        Ok(())
+    }
+
+    pub async fn device_add_net(
+        &mut self,
+        id: &str,
+        netdev: &str,
+        model: &str,
+    ) -> Result<(), QmpError> {
+        let args = json!({
+            "driver": model,
+            "id": id,
+            "netdev": netdev,
+        });
+        self.execute_raw("device_add", Some(args)).await?;
+        Ok(())
+    }
+
+    pub async fn device_del(&mut self, id: &str) -> Result<(), QmpError> {
+        let args = json!({ "id": id });
+        self.execute_raw("device_del", Some(args)).await?;
+        Ok(())
+    }
+
+    pub async fn blockdev_del(&mut self, node_name: &str) -> Result<(), QmpError> {
+        let args = json!({ "node-name": node_name });
+        self.execute_raw("blockdev-del", Some(args)).await?;
+        Ok(())
+    }
+
+    pub async fn netdev_add_user(&mut self, id: &str) -> Result<(), QmpError> {
+        let args = json!({ "type": "user", "id": id });
+        self.execute_raw("netdev_add", Some(args)).await?;
+        Ok(())
+    }
+
+    pub async fn netdev_add_passt(&mut self, id: &str) -> Result<(), QmpError> {
+        let args = json!({ "type": "passt", "id": id });
+        self.execute_raw("netdev_add", Some(args)).await?;
+        Ok(())
+    }
+
+    pub async fn netdev_add_tap(&mut self, id: &str, ifname: &str) -> Result<(), QmpError> {
+        let args = json!({
+            "type": "tap",
+            "id": id,
+            "ifname": ifname,
+            "script": "no",
+            "downscript": "no",
+        });
+        self.execute_raw("netdev_add", Some(args)).await?;
+        Ok(())
+    }
+
+    pub async fn netdev_del(&mut self, id: &str) -> Result<(), QmpError> {
+        let args = json!({ "id": id });
+        self.execute_raw("netdev_del", Some(args)).await?;
+        Ok(())
+    }
+
+    /// `device_del` is asynchronous: QEMU only detaches the PCI device after the
+    /// guest acknowledges the unplug request, so `blockdev-del` keeps failing
+    /// with "Device is in use" until then. Retries only that error until it
+    /// succeeds or `timeout` elapses; any other failure is returned immediately.
+    pub async fn detach_block_device(
+        &mut self,
+        device_id: &str,
+        node_name: &str,
+        timeout: std::time::Duration,
+    ) -> Result<(), QmpError> {
+        self.device_del(device_id).await?;
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            match self.blockdev_del(node_name).await {
+                Ok(()) => return Ok(()),
+                Err(err)
+                    if Self::is_device_in_use_error(&err)
+                        && std::time::Instant::now() < deadline =>
+                {
+                    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                }
+                Err(err) => return Err(err),
+            }
+        }
+    }
+
+    /// Same async-release retry as [`Self::detach_block_device`], for NICs:
+    /// `netdev-del` fails with "is in use" until the guest releases the NIC.
+    pub async fn detach_net_device(
+        &mut self,
+        device_id: &str,
+        netdev_id: &str,
+        timeout: std::time::Duration,
+    ) -> Result<(), QmpError> {
+        self.device_del(device_id).await?;
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            match self.netdev_del(netdev_id).await {
+                Ok(()) => return Ok(()),
+                Err(err)
+                    if Self::is_device_in_use_error(&err)
+                        && std::time::Instant::now() < deadline =>
+                {
+                    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                }
+                Err(err) => return Err(err),
+            }
+        }
+    }
+
+    fn is_device_in_use_error(err: &QmpError) -> bool {
+        match err {
+            QmpError::CommandFailed { class, desc, .. } => {
+                class == "DeviceInUse" || desc.to_ascii_lowercase().contains("in use")
+            }
+            _ => false,
+        }
+    }
+
     pub async fn guest_ping(&mut self) -> Result<(), QmpError> {
         self.execute_raw("guest-ping", None).await?;
         Ok(())
@@ -898,5 +1045,216 @@ mod tests {
             err.to_string().contains("Timeout"),
             "expected timeout error, got: {err}"
         );
+    }
+
+    async fn run_with_server(
+        server: UnixStream,
+        replies: Vec<&'static [u8]>,
+        op: impl std::future::Future<Output = Result<(), QmpError>>,
+    ) -> Vec<Value> {
+        let (mut server_read, mut server_write) = tokio::io::split(server);
+        let server_task = tokio::spawn(async move {
+            let mut buf = BufReader::new(&mut server_read);
+            let mut requests = Vec::new();
+            for reply in replies {
+                let mut line = String::new();
+                buf.read_line(&mut line).await.unwrap();
+                requests.push(serde_json::from_str::<Value>(&line).unwrap());
+                server_write.write_all(reply).await.unwrap();
+            }
+            requests
+        });
+        op.await.unwrap();
+        server_task.await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn blockdev_add_sends_driver_node_and_file() {
+        let (mut client, server) = fake_qmp_pair();
+        let requests = run_with_server(server, vec![b"{\"return\": {}}\n"], async {
+            client
+                .blockdev_add("drive-extra0", "/data/extra.qcow2", "qcow2")
+                .await
+        })
+        .await;
+        let req = &requests[0];
+        assert_eq!(req["execute"], "blockdev-add");
+        let args = &req["arguments"];
+        assert_eq!(args["driver"], "qcow2");
+        assert_eq!(args["node-name"], "drive-extra0");
+        assert_eq!(args["discard"], "unmap");
+        assert_eq!(args["detect-zeroes"], "on");
+        assert_eq!(args["file"]["driver"], "file");
+        assert_eq!(args["file"]["filename"], "/data/extra.qcow2");
+        assert_eq!(args["file"]["aio"], "threads");
+    }
+
+    #[tokio::test]
+    async fn device_add_block_sends_virtio_blk_pci() {
+        let (mut client, server) = fake_qmp_pair();
+        let requests = run_with_server(server, vec![b"{\"return\": {}}\n"], async {
+            client.device_add_block("extra0", "drive-extra0").await
+        })
+        .await;
+        let req = &requests[0];
+        assert_eq!(req["execute"], "device_add");
+        let args = &req["arguments"];
+        assert_eq!(args["driver"], "virtio-blk-pci");
+        assert_eq!(args["id"], "extra0");
+        assert_eq!(args["drive"], "drive-extra0");
+    }
+
+    #[tokio::test]
+    async fn device_add_net_sends_model_id_netdev() {
+        let (mut client, server) = fake_qmp_pair();
+        let requests = run_with_server(server, vec![b"{\"return\": {}}\n"], async {
+            client
+                .device_add_net("net-extra0", "net-extra0", "virtio-net-pci")
+                .await
+        })
+        .await;
+        let req = &requests[0];
+        assert_eq!(req["execute"], "device_add");
+        let args = &req["arguments"];
+        assert_eq!(args["driver"], "virtio-net-pci");
+        assert_eq!(args["id"], "net-extra0");
+        assert_eq!(args["netdev"], "net-extra0");
+    }
+
+    #[tokio::test]
+    async fn netdev_add_sends_type_per_backend() {
+        let (mut client, server) = fake_qmp_pair();
+        let requests = run_with_server(
+            server,
+            vec![
+                b"{\"return\": {}}\n",
+                b"{\"return\": {}}\n",
+                b"{\"return\": {}}\n",
+            ],
+            async {
+                client.netdev_add_user("net-extra0").await?;
+                client.netdev_add_passt("net-extra1").await?;
+                client.netdev_add_tap("net-extra2", "andler-e2").await
+            },
+        )
+        .await;
+        assert_eq!(requests[0]["execute"], "netdev_add");
+        assert_eq!(requests[0]["arguments"]["type"], "user");
+        assert_eq!(requests[0]["arguments"]["id"], "net-extra0");
+        assert_eq!(requests[1]["arguments"]["type"], "passt");
+        assert_eq!(requests[2]["arguments"]["type"], "tap");
+        assert_eq!(requests[2]["arguments"]["ifname"], "andler-e2");
+        assert_eq!(requests[2]["arguments"]["script"], "no");
+        assert_eq!(requests[2]["arguments"]["downscript"], "no");
+    }
+
+    #[tokio::test]
+    async fn detach_block_device_sends_device_del_then_blockdev_del() {
+        let (mut client, server) = fake_qmp_pair();
+        let requests = run_with_server(
+            server,
+            vec![b"{\"return\": {}}\n", b"{\"return\": {}}\n"],
+            async {
+                client
+                    .detach_block_device(
+                        "extra0",
+                        "drive-extra0",
+                        std::time::Duration::from_secs(5),
+                    )
+                    .await
+            },
+        )
+        .await;
+        assert_eq!(requests[0]["execute"], "device_del");
+        assert_eq!(requests[0]["arguments"]["id"], "extra0");
+        assert_eq!(requests[1]["execute"], "blockdev-del");
+        assert_eq!(requests[1]["arguments"]["node-name"], "drive-extra0");
+    }
+
+    #[tokio::test]
+    async fn detach_block_device_retries_blockdev_del_while_device_in_use() {
+        let (mut client, server) = fake_qmp_pair();
+        let error = b"{\"error\": {\"class\": \"DeviceInUse\", \"desc\": \"Device 'drive-extra0' is in use\"}}\n";
+        let requests = run_with_server(
+            server,
+            vec![b"{\"return\": {}}\n", error, b"{\"return\": {}}\n"],
+            async {
+                client
+                    .detach_block_device(
+                        "extra0",
+                        "drive-extra0",
+                        std::time::Duration::from_secs(5),
+                    )
+                    .await
+            },
+        )
+        .await;
+        assert_eq!(
+            requests.len(),
+            3,
+            "device_del + failed blockdev-del + retried blockdev-del"
+        );
+        assert_eq!(requests[1]["execute"], "blockdev-del");
+        assert_eq!(requests[2]["execute"], "blockdev-del");
+    }
+
+    #[tokio::test]
+    async fn detach_block_device_fails_fast_on_non_in_use_errors() {
+        let (mut client, server) = fake_qmp_pair();
+        let error = b"{\"error\": {\"class\": \"GenericError\", \"desc\": \"Node not found\"}}\n";
+        let (mut server_read, mut server_write) = tokio::io::split(server);
+        let server_task = tokio::spawn(async move {
+            let mut buf = BufReader::new(&mut server_read);
+            for reply in [b"{\"return\": {}}\n".as_slice(), error] {
+                let mut line = String::new();
+                buf.read_line(&mut line).await.unwrap();
+                server_write.write_all(reply).await.unwrap();
+            }
+            // must NOT get a third request: the retry only covers in-use errors
+            let mut extra = String::new();
+            let n = tokio::time::timeout(
+                std::time::Duration::from_millis(400),
+                buf.read_line(&mut extra),
+            )
+            .await;
+            let no_retry = match n {
+                Err(_) => true,
+                Ok(Ok(0)) => true,
+                _ => false,
+            };
+            assert!(no_retry, "no retry expected after non-in-use error");
+        });
+        let err = client
+            .detach_block_device("extra0", "drive-extra0", std::time::Duration::from_secs(5))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, QmpError::CommandFailed { .. }),
+            "expected CommandFailed, got: {err:?}"
+        );
+        server_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn detach_net_device_sends_device_del_then_netdev_del() {
+        let (mut client, server) = fake_qmp_pair();
+        let requests = run_with_server(
+            server,
+            vec![b"{\"return\": {}}\n", b"{\"return\": {}}\n"],
+            async {
+                client
+                    .detach_net_device(
+                        "net-extra0",
+                        "net-extra0",
+                        std::time::Duration::from_secs(5),
+                    )
+                    .await
+            },
+        )
+        .await;
+        assert_eq!(requests[0]["execute"], "device_del");
+        assert_eq!(requests[0]["arguments"]["id"], "net-extra0");
+        assert_eq!(requests[1]["execute"], "netdev_del");
+        assert_eq!(requests[1]["arguments"]["id"], "net-extra0");
     }
 }
