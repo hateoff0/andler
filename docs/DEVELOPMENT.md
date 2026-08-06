@@ -26,14 +26,16 @@ cargo build --release
 
 ### Docker Build (Recommended for Reproducibility)
 
+The Docker setup lives under `docker/dev/` (`Dockerfile.dev`, `docker-compose.yml`, `e2e_smoke.sh`); guest image pipelines live under `docker/images/`.
+
 ```bash
 # Unit tests
-docker compose -f docker/docker-compose.yml build --no-cache unit-test
-docker compose -f docker/docker-compose.yml run --rm unit-test
+docker compose -f docker/dev/docker-compose.yml build --no-cache unit-test
+docker compose -f docker/dev/docker-compose.yml run --rm unit-test
 
 # E2E smoke test
-docker compose -f docker/docker-compose.yml build --no-cache e2e
-docker compose -f docker/docker-compose.yml run --rm e2e
+docker compose -f docker/dev/docker-compose.yml build --no-cache e2e
+docker compose -f docker/dev/docker-compose.yml run --rm e2e
 ```
 
 ## Running
@@ -62,6 +64,17 @@ Default: `~/.andler/andlerd.db`. Override with:
 ANDLERD_STORE_PATH=/path/to/andlerd.db ./target/release/andlerd
 ```
 
+### Passwordless sudo for privileged operations
+
+The daemon runs unprivileged; offline guest operations (offline `guest install`/`remove`, ARM translator switching, boot-mode switching) need root only for a fixed set of commands:
+
+- `qemu-nbd` (connect/disconnect NBD devices)
+- `mount` / `umount` (partitions, bind mounts, tmpfs)
+- `chroot` (running package managers / writes inside the guest filesystem)
+- `modprobe` (best-effort `nbd max_part=8` module autoload)
+
+Configure with `andler doctor --fix` (writes `/etc/sudoers.d/andler`, validated with `visudo -c`), or manually. Without these rules, offline operations fail with an actionable message naming the missing sudoers entry.
+
 ### Default Paths
 
 All instance data lives under `~/.andler/`:
@@ -73,9 +86,15 @@ All instance data lives under `~/.andler/`:
 │   └── <uuid>/
 │       ├── instance.toml       # Instance configuration
 │       ├── disk.qcow2          # Instance disk (or overlay)
-│       └── VARS.fd             # Per-instance OVMF vars copy
-└── images/                     # Base images (future)
+│       ├── VARS.fd             # Per-instance OVMF vars copy
+│       ├── console.log         # QEMU serial console output
+│       └── qemu.log            # QEMU stdout/stderr (log history for `andler logs`)
+└── cache/
+    ├── base-images/            # Android base images (*.manifest.json + qcow2)
+    └── arm-translators/        # Downloaded ARM translators (libndk/libhoudini)
 ```
+
+Runtime sockets live under `$XDG_RUNTIME_DIR` (default `/run/user/<uid>/`, 0700): the per-instance QMP socket (`<instance>/qmp.sock`) and the guest-agent chardev socket (`<instance>/qmp.qga.sock`).
 
 ## Testing
 
@@ -87,13 +106,15 @@ cargo test --workspace
 
 All crates have unit tests that run without QEMU or `/dev/kvm`. Tests in `andler-core` are pure domain logic. Tests in `andler-qemu` use mocked data or test specific parsing/validation logic.
 
+Test counts are not pinned anywhere in the docs — they drift as tests are added, and `cargo test --workspace` is the authoritative source. Approximate counts in READMEs are intentional.
+
 ### Integration Tests
 
 Integration tests require `qemu-img` and/or `/dev/kvm`. They're marked `#[ignore]` in the source and run separately:
 
 ```bash
 # Via Docker (recommended)
-docker compose -f docker/docker-compose.yml run --rm unit-test -- --ignored
+docker compose -f docker/dev/docker-compose.yml run --rm unit-test -- --ignored
 
 # Or directly (requires qemu-img + /dev/kvm)
 cargo test --workspace -- --ignored
@@ -101,23 +122,24 @@ cargo test --workspace -- --ignored
 
 ### E2E Smoke Test
 
-The `docker/e2e_smoke.sh` script runs a full lifecycle test:
+The `docker/dev/e2e_smoke.sh` script runs a full lifecycle test:
 
 1. Start `andlerd` as a background process
-2. Create an Android instance
-3. Start the instance
-4. Stream metrics for 5 seconds
-5. Stop the instance
-6. Remove the instance with `--purge`
-7. Verify clean shutdown
+2. Create an Android instance from TOML (ID parsed from output)
+3. Negative checks: `status` of a nonexistent instance fails with "not found", `disk create --size 0` is rejected, `create --disk-size-gib 0` is rejected by clap
+4. Configure headless (`display_engine: None`), then really start QEMU under `/dev/kvm` → `Running`
+5. Stream metrics (optional sample) and subscribe to logs — the log subscription catches the SIGTERM of QEMU
+6. `stop --graceful` → `Stopped`; logs after stop are empty
+7. Restart `andlerd` (persistence via SQLite restore) → `remove --purge` (disk.qcow2/VARS.fd deleted, foreign files kept)
+8. Android clone cascade: `clone` linked (removing the source with a live linked clone fails with "live"), full-standalone, shared-base → `export` → count=4 → cascade remove
 
 ```bash
-docker compose -f docker/docker-compose.yml run --rm e2e
+docker compose -f docker/dev/docker-compose.yml run --rm e2e
 ```
 
 ### gRPC Round-Trip Tests
 
-`daemon/src/grpc_roundtrip_test.rs` contains 28 tests that verify the full gRPC pipeline:
+`daemon/src/grpc_roundtrip_test.rs` contains a suite of tests that verify the full gRPC pipeline:
 
 - Real TCP connections (ephemeral ports)
 - Real protobuf serialization/deserialization
@@ -151,11 +173,12 @@ andler/
 │           ├── fsm.rs             # InstanceState, InstanceEvent
 │           ├── clone.rs           # CloneMode
 │           ├── android_profile.rs # AndroidProfile, AndroidVersion
+│           ├── base_image.rs      # Base image auto-discovery (~/.andler/cache/base-images)
 │           ├── error.rs           # BackendError, FsmError
 │           ├── paths.rs           # Unified path resolution (runtime_dir, current_uid, ensure_private_dir)
 │           └── config/            # 9 config modules
 │               ├── mod.rs
-│               ├── instance.rs    # InstanceConfig, InstanceId
+│               ├── instance.rs    # InstanceConfig, InstanceId, validate()
 │               ├── cpu.rs
 │               ├── memory.rs
 │               ├── disk.rs        # DiskConfig, snapshot_timeout_secs
@@ -163,6 +186,7 @@ andler/
 │               ├── gpu.rs         # RenderBackend, GpuConfig
 │               ├── network.rs
 │               ├── firmware.rs
+│               ├── cdrom.rs       # CdromBus
 │               ├── audio.rs
 │               └── input.rs
 │
@@ -174,7 +198,7 @@ andler/
 │   │       ├── process.rs        # QemuProcess (spawn, logs, metrics)
 │   │       ├── qmp.rs            # QMP client (pause, resume, snapshots)
 │   │       ├── backend.rs        # QemuBackend (HypervisorBackend impl)
-│   │       └── metrics.rs        # /proc-based per-VM metrics poller
+│   │       └── metrics.rs        # /proc-based per-VM metrics poller (spawn_blocking)
 │   │
 │   └── andler-vmm/               # Stub — future Cloud Hypervisor
 │
@@ -185,6 +209,10 @@ andler/
 │   │       ├── qcow2.rs          # qemu-img wrapper (7 functions)
 │   │       ├── overlay.rs        # Android overlay disks
 │   │       ├── clone.rs          # 3 clone modes
+│   │       ├── nbd.rs            # nbd device management (flock), nbd_status()
+│   │       ├── guest_tools.rs    # offline guest provisioning (qemu-nbd + mount)
+│   │       ├── arm_translator.rs # ARM translator package staging
+│   │       ├── diskspace.rs      # free-space pre-check for snapshots
 │   │       └── error.rs          # DiskError
 │   │
 │   ├── andler-net/               # Network configuration (bridge/isolated modes)
@@ -219,9 +247,10 @@ andler/
 │       │   ├── clone_ops.rs      # clone_instance, export, find_live_clones
 │       │   ├── snapshot_ops.rs   # create/restore/delete/list snapshots
 │       │   ├── query_ops.rs      # status, list, get_config, stream, update_instance_config
-│       │   └── tests/            # 10 test modules, 94+ tests
+│       │   ├── health_ops.rs     # periodic VM health checks (ANDLERD_HEALTH_CHECK_INTERVAL_SECS)
+│       │   └── tests/            # 12 test modules (incl. gRPC round-trip tests)
 │       ├── service.rs            # DaemonService (gRPC wrapper)
-│       └── grpc_roundtrip_test.rs # Integration tests
+│       └── grpc_roundtrip_test.rs # integration tests, real TCP
 │
 ├── cli/
 │   └── src/
@@ -233,7 +262,11 @@ andler/
 │       ├── disk.rs               # Disk commands
 │       ├── lifecycle.rs          # Start, Stop, Pause, Resume, Remove
 │       ├── clone.rs              # Clone, Export
-│       ├── edit.rs               # Edit instance config
+│       ├── guest.rs              # Guest package management + boot mode
+│       ├── doctor.rs             # Environment diagnostics
+│       ├── edit.rs               # `config edit` — editor-based config editing
+│       ├── preview.rs            # `create --dry-run` resolution
+│       ├── verify.rs             # `create --verify` checks
 │       ├── wizard/               # Interactive wizard
 │       │   ├── mod.rs            # Wizard entry point, handle_wizard()
 │       │   ├── basic.rs          # BasicResult, ask_kind, ask_name, ask_iso, ask_disk
@@ -242,15 +275,19 @@ andler/
 │       └── helpers.rs            # parse_size, format_size, format_bytes, ensure_qcow2_extension
 │
 ├── docker/
-│   ├── Dockerfile.dev            # Build environment
-│   ├── docker-compose.yml        # Unit-test + E2E targets
-│   └── e2e_smoke.sh              # End-to-end smoke test
+│   ├── dev/                      # Build environment + E2E
+│   │   ├── Dockerfile.dev        # Build environment
+│   │   ├── docker-compose.yml    # Unit-test + E2E targets
+│   │   └── e2e_smoke.sh          # End-to-end smoke test
+│   └── images/                   # Guest image pipelines (Waydroid, base images)
 │
 ├── docs/                          # Project documentation
 │   ├── ARCHITECTURE.md
 │   ├── DEVELOPMENT.md
 │   ├── API.md
+│   ├── GRPC_API.md
 │   ├── CHANGELOG.md
+│   ├── ROADMAP.md
 │   └── archive/                  # Historical/planned docs (may not exist)
 │
 └── scripts/

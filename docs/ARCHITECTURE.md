@@ -36,7 +36,7 @@ andler-core          (no workspace dependencies — bottom layer)
 The foundation crate. Defines all public types that other crates depend on.
 
 **Key types:**
-- `HypervisorBackend` trait: The contract for all hypervisor implementations (13 methods)
+- `HypervisorBackend` trait: The contract for all hypervisor implementations (17 methods)
 - `InstanceConfig`: 9-section configuration struct (disk, cpu, memory, display, gpu, network, audio, input, firmware)
 - `InstanceState` / `InstanceEvent`: FSM with 7 states and 7 events
 - `ResourceMetrics`: All-Optional metrics struct (CPU, RAM, disk I/O, net I/O, GPU)
@@ -45,7 +45,7 @@ The foundation crate. Defines all public types that other crates depend on.
 - `BackendError` / `FsmError`: Domain error types
 - `paths`: Unified path resolution (`runtime_dir()`, `current_uid()`, `ensure_private_dir()`)
 
-**49 unit tests**, fully testable without QEMU or `/dev/kvm`.
+**~50 unit tests**, fully testable without QEMU or `/dev/kvm`.
 
 **Must not depend on any other workspace crate.**
 
@@ -54,11 +54,11 @@ The foundation crate. Defines all public types that other crates depend on.
 Implements `HypervisorBackend` for QEMU via process management, QMP communication, and `/proc`-based metrics.
 
 **Key components:**
-- `cmdline.rs`: Pure function translating `InstanceConfig` to QEMU CLI arguments (10 argument blocks, each tested independently against reference configuration)
-- `process.rs`: `QemuProcess` — spawn, terminate, force-kill, log/metrics broadcast channels
-- `qmp.rs`: `QmpClient` — QMP protocol over unix socket (handshake, pause/resume/status, snapshot job API)
-- `backend.rs`: `QemuBackend` — ties everything together, manages `RunningInstance` registry
-- `metrics.rs`: Background poller reading `/proc/<pid>/stat`, `/proc/<pid>/status`, `/sys/block/*/stat`, `/proc/<net/dev` (per-VM); calls into `andler-firmware::metrics` for the GPU fields (host-level, not per-VM — moved there to sit next to GPU vendor detection)
+- `cmdline.rs`: Pure function translating `InstanceConfig` to QEMU CLI arguments (argument blocks, each tested independently against reference configuration). Includes the guest-agent block: a `socket` chardev (`*.qga.sock`, `server=on,wait=off`) wired to a `virtserialport` named `org.qemu.guest_agent.0`, plus a `-fw_cfg name=opt/andler/display-resolution,string=WxH` entry when a resolution is configured
+- `process.rs`: `QemuProcess` — spawn, terminate, force-kill, log/metrics broadcast channels, `qga_socket_path()`
+- `qmp.rs`: `QmpClient` — QMP protocol over unix socket (handshake, pause/resume/status, snapshot job API) **and** the QEMU guest agent (QGA) protocol via `connect_agent()` on the `*.qga.sock` chardev (`guest-ping`/`guest-exec`/`guest-exec-status`/`guest-file-open`/...)
+- `backend.rs`: `QemuBackend` — ties everything together, manages `RunningInstance` registry; guest operations (`guest_exec_package`, `set_guest_display_resolution`, ...) talk to the agent chardev socket, **not** the QMP monitor (QEMU ≥ 9 no longer registers `guest-*` commands on QMP)
+- `metrics.rs`: Background poller reading `/proc/<pid>/stat`, `/proc/<pid>/status`, `/sys/block/*/stat`, `/proc/<net/dev` (per-VM); calls into `andler-firmware::metrics` for the GPU fields (host-level, not per-VM — moved there to sit next to GPU vendor detection). Sample collection runs in `tokio::task::spawn_blocking` — the `/proc` and sysfs reads are synchronous I/O and must not block the async runtime.
 
 **Tests**: unit + integration, across `cmdline`/`process`/`qmp`/`backend`/`metrics` (GPU metrics tests moved to `services/andler-firmware`).
 
@@ -74,15 +74,20 @@ Wrapper around `qemu-img` for disk creation/cloning/resizing, plus guest tools o
 - `qcow2.rs`: 7 async functions wrapping `qemu-img` CLI
 - `overlay.rs`: Android-specific overlay disk creation + factory reset
 - `clone.rs`: 3 clone modes (linked, full-standalone, shared-base)
+- `nbd.rs`: nbd device management with flock-based locking, `nbd_status()`, and the chroot environment setup (`bind_host_mounts`): the guest's `/etc/resolv.conf` is *written* with the host's nameservers (via NOPASSWD `sudo chroot` — a dangling symlink would make a bind-mount fail with ENOENT), `/dev`, `/proc`, `/sys` are bind-mounted, and a fresh tmpfs is mounted on the guest's `/run` (gpg-agent, used by pacman, needs a writable `/run`)
+- `guest_tools.rs`: offline guest provisioning via `qemu-nbd` + mount + chroot: detects the package manager (apt-get/dnf/pacman), refreshes package indexes (`update`/`makecache`/`-Sy`) and installs/removes packages inside the chroot
+- `arm_translator.rs`: ARM translator package staging in guest images (atomic staging + rename)
+- `boot_mode.rs`: Android/Linux boot-mode switching by re-pointing the guest's `default.target` symlink through chroot
+- `diskspace.rs`: free-space pre-check before snapshots
 
-**53 unit tests**.
+**~45 unit tests** (+ ignored integration tests requiring qemu-img).
 
 ### `services/andler-net` — Network Configuration
 
 Implements bridge and isolated network modes for QEMU VMs via host-side network configuration.
 
 **Key components:**
-- `lib.rs`: `NetworkService` trait and `DefaultNetworkService` implementation using `iproute2` for bridge/isolated setup
+- `lib.rs`: `NetworkService` trait and `DefaultNetworkService` implementation using `iproute2` for bridge setup/teardown. `setup_isolated` is **not implemented** yet (returns an explicit `SetupFailed("isolated network mode is not implemented yet")` error) — the config type exists, the network setup does not.
 
 ### `services/andler-firmware` — Firmware & Hardware Detection
 
@@ -93,7 +98,7 @@ Standalone crate for firmware discovery, hardware auto-detection, and GPU metric
 - `metrics/`: GPU metrics collection (NVIDIA via NVML + nvidia-smi fallback, AMD via sysfs, Intel via i915 delta)
 - `HardwareDefaults` struct: `detect_all()` returns detected hardware for wizard defaults
 
-**47 tests** across `detect/` and `metrics/`.
+**~50 tests** across `detect/` and `metrics/`.
 
 ### `services/andler-store` — SQLite Persistence
 
@@ -103,14 +108,14 @@ Two-table SQLite store with JSON columns.
 - `instances(id TEXT PRIMARY KEY, config_json TEXT, state_json TEXT)`
 - `snapshots(id, instance_id, tag, description, created_at)` with `ON DELETE CASCADE`
 
-**20 tests** using in-memory SQLite.
+**~20 tests** using in-memory SQLite.
 
 ### `services/andler-rpc` — gRPC Protocol
 
 Protobuf definitions and generated code via `tonic`/`prost`.
 
 **26 RPCs** covering instance lifecycle, monitoring, snapshots, clone/export.
-**44 conversion tests** for bidirectional proto↔domain type mapping.
+**~45 conversion tests** for bidirectional proto↔domain type mapping.
 
 ### `daemon/` — Background Service
 
@@ -126,7 +131,7 @@ Orchestrates all operations. Holds backend registry, instance state, optional pe
 - `DaemonService` — thin gRPC wrapper, one method per Daemon method
 - Error mapping: `DaemonError` (29 variants) → gRPC status codes
 
-**94 unit tests** + **28 gRPC round-trip tests** (real TCP).
+**~120 unit tests** (some ignored) + **gRPC round-trip tests** (real TCP).
 
 ### `cli/` — Command-Line Interface
 
@@ -141,7 +146,7 @@ Thin gRPC client. Each subcommand = one gRPC request + print response.
 - Shell completions (bash, zsh, fish)
 - Colored status output with `IsTerminal` gating
 - `doctor` command for environment diagnostics and auto-fix
-**112 tests** (TOML parsing, helpers, create, wizard, status).
+**~120 tests** (TOML parsing, helpers, create, wizard, status).
 
 ## Data Flow
 
@@ -159,6 +164,28 @@ QEMU process → VM
 Metrics poller → broadcast → StreamResourceMetrics → CLI display
   ↓ (SQLite)
 andler-store (andlerd.db)
+```
+
+## Guest Provisioning (`guest` operations)
+
+Package management and resolution changes inside a guest use a two-tier strategy:
+
+**Online (VM `Running`, guest agent available)**: commands run inside the guest via the QEMU guest agent (QGA) — `guest-exec`/`guest-exec-status` (package install/remove, package-manager detection) and `guest-file-*` (config file writes, e.g. `display.conf` on resolution change). The agent wire runs over the dedicated `*.qga.sock` chardev (`virtserialport name=org.qemu.guest_agent.0`), never the QMP monitor. This requires `qemu-guest-agent` inside the guest, which the base image ships enabled (`qemu-guest-agent.service`).
+
+**Offline path (VM stopped)** — the disk is exposed via `qemu-nbd` and the root partition mounted, then operations run inside a `sudo -n chroot`:
+
+- package manager detected by binary (`apt-get`/`dnf`/`pacman`); package index is refreshed first (`apt-get update` / `dnf makecache` / `pacman -Sy`) so installs work on fresh images
+- the chroot is made network- and signature-capable by `bind_host_mounts`: host nameservers are written into the guest's `/etc/resolv.conf` (via chroot, replacing the dangling `stub-resolv.conf` symlink), `/dev`, `/proc`, `/sys` are bind-mounted, and a tmpfs is mounted on the guest's `/run` (gpg-agent needs it for pacman signatures)
+- all privileged operations go through `sudo -n` (NOPASSWD rules for `qemu-nbd`, `mount`, `umount`, `chroot`, `modprobe` — see `andler doctor --fix`)
+
+ARM translators (`libndk`/`libhoudini`) use the same offline mount machinery via `switch_arm_translator`: version-keyed download (MD5-verified, cached under `~/.andler/cache/arm-translators/`), staged into `var/lib/waydroid/overlay/system`, `build.prop` updated, old translator removed only after the new one is fully staged.
+
+## Data Flow (guest operations)
+
+```
+andler CLI → gRPC → daemon
+  ├─ running: backend.qga socket (*.qga.sock) → qemu-ga (guest) → guest-exec/file ops
+  └─ stopped: andler-disk → sudo -n qemu-nbd --connect /dev/nbdN → mount → chroot (resolv /dev /proc /sys tmpfs-/-run) → package manager
 ```
 
 ## Instance Lifecycle FSM
@@ -196,8 +223,7 @@ andler-store (andlerd.db)
 
 `Stopped`/`Error` both accept `Start` and return to `Starting` — restarting
  the same instance record works the same way a fresh `Created` instance does
- (`Daemon::start_instance` is generic over the source state; this was purely
- an FSM-level restriction that's since been lifted). `is_terminal()` still
+ (`Daemon::start_instance` is generic over the source state). `is_terminal()`
  returns `true` for both — that means "this run has ended", not "no
  transitions remain".
 
@@ -207,10 +233,10 @@ Any active state (Created/Starting/Running/Paused/Stopping) can transition to `E
 
 Uses QEMU's async job API (not filesystem-level snapshots):
 
-1. **Create**: `snapshot-save` job (`{job-id, tag, vmstate, devices: [...]}` — note `devices` is a
-   list, and `vmstate` is required; there's no singular `device` field in the real protocol) →
-   poll `query-jobs` until status `"concluded"` (the only real terminal status — there's no
-   `"completed"`/`"failed"` string; success vs. failure is the presence of an `error` field) →
+1. **Create**: `snapshot-save` job (`{job-id, tag, vmstate, devices: [...]}` — `devices` is a
+   list and `vmstate` is required) →
+   poll `query-jobs` until status `"concluded"` (the terminal job status; success vs. failure
+   is the presence of an `error` field) →
    `job-dismiss` (configurable timeout per-instance, default 30s)
 2. **Restore**: `snapshot-load` job (same `vmstate`+`devices` schema) → poll `query-jobs` →
    `job-dismiss`
@@ -218,7 +244,9 @@ Uses QEMU's async job API (not filesystem-level snapshots):
    `job-dismiss`
 4. **List**: `query-block` → extract snapshot metadata
 
-Snapshot metadata (tag, description, created_at) stored in SQLite `snapshots` table with `ON DELETE CASCADE` from `instances`.
+Snapshot metadata (tag, description, created_at) stored in SQLite `snapshots` table with `ON DELETE CASCADE` from `instances`. Maximum 20 snapshots per instance (`MAX_SNAPSHOTS_PER_INSTANCE`); free space is pre-checked via `statvfs(2)` with guest RAM size as a conservative vmstate upper bound (`InsufficientDiskSpace`).
+
+**Known QEMU limitation**: snapshot-save serializes VM state through the migration machinery, so a non-migratable device blocks the job — e.g. `virtio-sound` fails with `State blocked by non-migratable device '.../virtio-sound-device'` (the VM is launched with `-cpu ... migratable=no` by design). The job reaches `concluded` with an `error` field and the raw QEMU message is surfaced as `INTERNAL`.
 
 ## Metrics Collection
 
@@ -239,9 +267,8 @@ Polling interval: 1 second. Broadcast via `tokio::sync::broadcast`.
 GPU vendor detection priority: AMD → NVIDIA → Intel (first found wins). AMD uses direct sysfs reads. NVIDIA uses NVML (`nvml-wrapper` crate, primary) with `nvidia-smi` CLI fallback. Intel uses `i915` sysfs `power/rc6_residency_ms` (documented idle-time ABI) for GPU load, derived from a real elapsed-time delta; Intel has no VRAM metric (stolen-memory accounting is a `debugfs`, not `sysfs`, interface).
 
 ## Future Directions
-- **Bridge/Isolated network modes**: Implemented in `andler-net` using `iproute2` for bridge creation and network configuration
+- **Bridge network mode**: Implemented in `andler-net` using `iproute2` for bridge creation and network configuration. Isolated mode is config-representable but not yet implemented (`setup_isolated` returns an explicit error)
 - **GPU passthrough**: VFIO-based `RenderBackend::Passthrough`
-- **NVIDIA/Intel GPU metrics**: Extend sysfs reader after VFIO works
 - **Cloud Hypervisor backend**: `andler-vmm` with `rust-vmm` crates
 - **GUI**: Tauri-based client (planned, not started)
 - **Guest image pipelines**: Automated Android image builds with Waydroid
@@ -283,19 +310,19 @@ Conversion logic: `services/andler-rpc/src/convert.rs`.
 
 ## Configuration Types
 
-Configuration is organized into 9 sections in `InstanceConfig`:
+Configuration is organized into 9 sections in `InstanceConfig` (plus metadata fields `id`, `name`, `kind`, `backend`):
 
-1. **disk**: Disk path, format (qcow2), size, CD-ROM
-2. **cpu**: vCPU count, affinity, priority class
-3. **memory**: RAM in MiB
-4. **display**: Display engine (Virtio, std VGA, QXL, Gop), clipboard
-5. **gpu**: Render backend (Passthrough, Venus, VirtioGpu)
-6. **network**: Mode (NAT/Bridge/Isolated), NAT backend (slirp), interface
-7. **audio**: Backend (spice, hda), device (virtio-sound)
-8. **input**: Pointer mode (tablet/absolute), keyboard layout
-9. **firmware**: OVMF code/vars paths, ARM translator
+1. **disk**: Path, format (qcow2/raw/vdi), size, base image, thin provisioning, trim/compact on shutdown, snapshot timeout. The instance disk is always named `disk.qcow2` inside the instance directory. The CD-ROM is not part of `DiskConfig` — it lives in `InstanceKind::LinuxVm` as `cdrom_bus` (`VirtioScsi`/`Ide`, pre-resolved from `auto` via `recommended_for_iso_filename()`)
+2. **cpu**: vCPU count (`cores`/`sockets`/`threads`), affinity (CPU pinning), priority class (`Low`/`Normal`/`High`)
+3. **memory**: `size_bytes` (not MiB), ballooning, zram, ksm
+4. **display**: `resolution` (width/height), dpi, fps_limit, display engine (`Sdl`/`Gtk`/`Spice`/`Dbus`/`None`), fullscreen. Clipboard lives in `input`, not here. The resolution is applied inside the guest: passed as QEMU fw_cfg (`opt/andler/display-resolution`) and read by guest units (`andler-display-resolution.service` → `/etc/andler/display.conf`); a running VM can be switched live via `set_guest_display_resolution` over the guest agent
+5. **gpu**: Render backend (Venus, VirtioGpu, VirGl, Cpu, Passthrough), hostmem bytes, blob, gl
+6. **network**: Mode (Nat/Bridge/Isolated), NAT backend (Slirp/Passt), interface. Isolated is accepted by config but not implemented in `andler-net`
+7. **audio**: Backend (`Pipewire`/`Pulseaudio`/`None`), device (`VirtioSound`/`Ich9Hda`)
+8. **input**: Pointer mode (Tablet/Mouse), hide_host_cursor, clipboard_enabled
+9. **firmware**: enable_uefi, OVMF code/vars paths. The ARM translator is not part of firmware — it lives in `AndroidProfile`
 
-Each section has reasonable defaults from hardware auto-detection (see `services/andler-firmware`).
+Each section has reasonable defaults from hardware auto-detection (see `services/andler-firmware`). `InstanceConfig::validate()` rejects zero cores/memory/disk sizes and zero resolutions.
 
 Disk defaults: 256 GiB thin-provisioned qcow2.
 

@@ -27,11 +27,11 @@ The core service exposing all instance management operations.
 | `StreamInstanceLogs` | `InstanceIdRequest` | `stream LogLineResponse` | Server-streaming | Streams live logs from the hypervisor process. |
 | `StreamResourceMetrics` | `InstanceIdRequest` | `stream ResourceMetricsResponse` | Server-streaming | Streams CPU, memory, disk, network, and GPU metrics. |
 | `CloneInstance` | `CloneInstanceRequest` | `CreateInstanceResponse` | Unary | Clones an existing instance. |
-| `ExportInstanceDisk` | `ExportInstanceDiskRequest` | `ExportInstanceDiskResponse` | Unary | Exports the disk file of an Android VM to a standalone path. |
+| `ExportInstanceDisk` | `ExportInstanceDiskRequest` | `ExportInstanceDiskResponse` | Unary | Exports the disk file of a Linux or Android VM to a standalone path. |
 | `CreateSnapshot` | `CreateSnapshotRequest` | `CreateSnapshotResponse` | Unary | Creates a snapshot of a running/paused instance. |
 | `RestoreSnapshot` | `RestoreSnapshotRequest` | `Empty` | Unary | Restores an instance to a snapshot state. |
 | `DeleteSnapshot` | `DeleteSnapshotRequest` | `Empty` | Unary | Deletes a snapshot. |
-| `ListSnapshots` | `ListSnapshotsRequest` | `ListSnapshotsResponse` | Unary | Lists all snapshots for an instance. |
+| `ListSnapshots` | `InstanceIdRequest` | `ListSnapshotsResponse` | Unary | Lists all snapshots for an instance. |
 | `InstallGuestAgent` | `InstallGuestAgentRequest` | `Empty` | Unary | Installs a package in the guest OS. |
 | `RemoveGuestAgent` | `RemoveGuestAgentRequest` | `Empty` | Unary | Removes a package from the guest OS. |
 | `ListGuestPackages` | `InstanceIdRequest` | `ListGuestPackagesResponse` | Unary | Lists known guest packages and their installation status. |
@@ -91,11 +91,11 @@ Disk image format.
 
 ### `CdromBus`
 
-CD-ROM bus interface. `CDROM_BUS_UNSPECIFIED` is intentionally treated as the default (`IDE`) for backward compatibility with existing stored configs that predate this field.
+CD-ROM bus interface. `CDROM_BUS_UNSPECIFIED` is rejected on the create/update paths (`ConvertError::MissingField("cdrom_bus")` → `INVALID_ARGUMENT`) — the field is mandatory in requests. The conversion from a stored config (daemon → proto direction) maps `CdromBus::Ide`/`VirtioScsi` explicitly; there is no silent default.
 
 | Value | Description |
 |-------|-------------|
-| `CDROM_BUS_UNSPECIFIED` (0) | Defaults to `IDE`. |
+| `CDROM_BUS_UNSPECIFIED` (0) | Invalid in requests — rejected with `INVALID_ARGUMENT` |
 | `VIRTIO_SCSI` (1) | VirtIO SCSI (high performance). |
 | `IDE` (2) | Traditional IDE (safe fallback). |
 
@@ -325,6 +325,7 @@ Request to create an Android VM.
 | `instances_root` | `string` | Root directory for instance files. |
 | `overlay_size_bytes` | `uint64` | Size of overlay disk. |
 | `ovmf_vars_template` | `string` | Template for OVMF variables. |
+| `linked_overlay` | `bool` | Use a linked (backing-file) overlay instead of a standalone copy. |
 
 ### `CreateInstanceResponse`
 
@@ -394,6 +395,7 @@ Entry in the instance list (summary).
 | `instance_id` | `string` | Instance UUID. |
 | `name` | `string` | Instance name. |
 | `state` | `InstanceStateKind` | State. |
+| `error_message` | `string` | Error message (empty unless state == ERROR). |
 
 ### `ListInstancesResponse`
 
@@ -639,7 +641,7 @@ Request for a partial configuration update by key/value.
 | Field | Type | Description |
 |-------|------|-------------|
 | `instance_ref` | `string` | Instance ID (full or prefix). |
-| `key` | `string` | Configuration key (e.g., `arm_translator`, `name`). |
+| `key` | `string` | Configuration key. Supported: `display.resolution` (any state, applied live to a running guest via the guest agent and persisted via fw_cfg), `name` (stopped instance), `arm_translator` (Android, stopped instance). |
 | `value` | `string` | New value. |
 
 ### `GuestPackageEntry`
@@ -658,21 +660,25 @@ Single package entry.
 
 | gRPC Status | Daemon Error | When |
 |-------------|--------------|------|
-| `NOT_FOUND` | `InstanceNotFound`, `SnapshotNotFound`, `InstanceRefNotFound`, `AgentNotInstalled`, `PackageManagerNotFound` | Unknown instance/snapshot/ref/package. |
-| `UNIMPLEMENTED` | `NoBackendRegistered` | Backend kind not available. |
-| `FAILED_PRECONDITION` | `InvalidTransition`, `InstanceNotRemovable`, `InstanceNotClonable`, `SharedBaseNotSupportedForLinuxVm`, `InstanceHasLiveClones`, `SnapshotOperationRequiresRunningInstance`, `SnapshotLimitExceeded`, `GuestAgentUnavailable` | Wrong lifecycle state, resource limit, or guest agent unavailable. |
-| `ALREADY_EXISTS` | `SnapshotAlreadyExists`, `AgentAlreadyInstalled` | Duplicate snapshot tag or package already installed. |
-| `INVALID_ARGUMENT` | `ConvertError`, `EmptyInstanceRef`, `MalformedInstanceRef`, `AmbiguousInstanceId`, `ConfigIdMismatch`, `ConfigKindChanged`, `ConfigDiskPathChanged` | Malformed request or invalid arguments. |
-| `INTERNAL` | Other errors | Backend/disk/store failures. |
+| `NOT_FOUND` | `InstanceNotFound`, `SnapshotNotFound`, `InstanceRefNotFound` | Unknown instance/snapshot/ref. |
+| `UNIMPLEMENTED` | `NoBackendRegistered`, `Backend(NotImplemented)` | Backend kind not available. |
+| `FAILED_PRECONDITION` | `InvalidTransition`, `InstanceNotRemovable`, `InstanceNotClonable`, `InstanceAlreadyStopped`, `SharedBaseNotSupportedForLinuxVm`, `InstanceHasLiveClones`, `SnapshotOperationRequiresRunningInstance`, `SnapshotLimitExceeded`, `GuestAgentUnavailable`, `NotAndroid`, `InstanceMustBeStopped`, `Backend(HandleNotFound)`, `Backend(ProcessNotRunning)` | Wrong lifecycle state, resource limit, guest agent unavailable, wrong instance kind. |
+| `ALREADY_EXISTS` | `SnapshotAlreadyExists` | Duplicate snapshot tag. |
+| `INVALID_ARGUMENT` | `ConvertError`, `EmptyInstanceRef`, `MalformedInstanceRef`, `AmbiguousInstanceId`, `ConfigIdMismatch`, `ConfigKindChanged`, `ConfigDiskPathChanged`, `InvalidConfig`, `InvalidConfigKey`, `MissingOvmfVarsTemplate` | Malformed request or invalid arguments |
+| `RESOURCE_EXHAUSTED` | `InsufficientDiskSpace` | Not enough free space for a snapshot operation |
+| `INTERNAL` | Other `Backend`/`Disk`/`Io`/`Store`/`Firmware` errors — including all `andler-disk` errors except `InsufficientDiskSpace` (`AgentNotInstalled`, `AgentAlreadyInstalled`, `PackageManagerNotFound`, ...) | Backend/disk/store failures |
+
+**Message truncation**: every error passes through `status_message()` before becoming a `grpc-message` header — control characters other than tab are replaced with spaces, and the message is truncated to 384 characters. Package-manager stderr can be multi-KB; sending it untruncated makes h2 clients fail with "h2 protocol error" instead of showing the real error.
 
 ---
 
 ## Design Notes
 
-- **`CdromBus`** uses `UNSPECIFIED` as a default to avoid breaking existing stored configs that predate the field.
+- **`CdromBus`** must be set explicitly in requests — `UNSPECIFIED` is rejected with `MissingField` instead of a silent default; only *requests* must name the bus.
 - **`NetworkConfig.nat_backend`** defaults to `SLIRP` for backward compatibility.
 - **`InputConfig.tablet_mode`** is deprecated; `pointer_mode` should be used instead.
-- **`CreateInstanceRequest`** omits `id` and `backend` because they are generated by the daemon; `UpdateInstanceConfigRequest` mirrors `GetInstanceConfigResponse` to allow a "get-edit-put" workflow.
+- **`CreateInstanceRequest`** omits `id` and `backend` because they are generated by the daemon; `UpdateInstanceConfigRequest` mirrors `GetInstanceConfigResponse` to allow a "get-edit-put" workflow. `UpdateInstanceConfig` additionally requires the instance to be stopped (`InstanceMustBeStopped` otherwise) and never mutates `id`/`kind`/`disk.path` (see Error Codes).
+- **`CreateAndroidInstanceRequest`** with an empty `base_image_path` triggers daemon-side auto-discovery: the freshest matching image in `~/.andler/cache/base-images/` (by `android_major` + variant) is used; no match → `NOT_FOUND` with the exact `docker/images/build.sh` invocation to produce one.
 - **`RemoveInstanceRequest`** has a separate `purge` field to avoid dragging it into all other request types that use `InstanceIdRequest`.
 - **`LogStreamSource`** includes `UNSPECIFIED` for consistency with other enums, though the server always fills it.
 - **`ResourceMetricsResponse`** fields are all optional because metrics may be unavailable (e.g., GPU on non-AMD hardware).

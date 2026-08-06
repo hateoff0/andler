@@ -50,19 +50,22 @@ andler create \
 | `--kind <type>` | Yes* | VM type: `linux` or `android` (*mutually exclusive with `--file`) |
 | `--quick` | No | Skip interactive wizard, create with all defaults. Requires `--kind`. Mutually exclusive with `--file`. |
 | `--name <name>` | Yes** | Instance name (**required in CLI mode) |
-| `--ovmf-vars-template <path>` | Yes** | Path to OVMF_VARS template (**required in CLI mode) |
+| `--ovmf-vars-template <path>` | No | Path to OVMF_VARS template (auto-detected when omitted) |
 | `--iso-path <path>` | Yes*** | Path to installer ISO (***required for `--kind linux`) |
 | `--disk-path <path>` | Yes*** | Path to disk file (***required for `--kind linux`) |
-| `--disk-size-gib <size>` | No | Disk size in GiB (default: 256, Linux only) |
+| `--disk-size-gib <size>` | No | Disk size in GiB, must be ≥ 1 (default: 256, Linux only) |
 | `--cdrom-bus <bus>` | No | CD-ROM bus: `auto` (default), `virtio`, `ide` (Linux only) |
 | `--compact-on-shutdown` | No | Auto-compact disk after shutdown (Linux only) |
 | `--android-version <ver>` | Yes**** | Android version: `11` or `13` (****required for `--kind android`) |
-| `--base-image-path <path>` | Yes**** | Path to Android base image qcow2 (****required for `--kind android`) |
+| `--base-image-path <path>` | No | Android base image qcow2; when omitted the daemon auto-discovers the freshest matching image in `~/.andler/cache/base-images/` |
 | `--gapps` | No | Include Google Apps |
 | `--microg` | No | Include microG |
 | `--arm-translator <mode>` | No | ARM→x86 translation: `none` (default), `libndk`, `libhoudini` |
 | `--overlay-size-gib <size>` | No | Overlay disk size in GiB (default: 20, Android only) |
+| `--linked-overlay` | No | Use a linked (backing-file) overlay instead of a standalone copy (Android only) |
 | `--instances-root <path>` | No | Instance directory root (default: `~/.andler/instances`) |
+
+On success both file and CLI modes print `Created instance <name> (<id>)`. TOML mode requires `disk_path` and `iso_path`; a missing field is a clean error (`missing required field disk_path in instance file`), and an unknown `android_version` is rejected (`unsupported value for android_version: 12`).
 
 ### `start`
 
@@ -100,34 +103,55 @@ Resumes a paused instance via QMP `cont` command. Instance must be in `Paused` s
 ### `status`
 
 ```bash
-andler status <instance-id>
+andler status <instance-id> [--json]
 ```
 
 Prints current state: `Created`, `Starting`, `Running`, `Paused`, `Stopping`, `Stopped`, or `Error`.
 
+| Flag | Description |
+|------|-------------|
+| `--json` | Output as a JSON object: `{ "instance_id", "state", "detail", "error_message" }` (`error_message` omitted when empty) |
+
 ### `list`
 
 ```bash
-andler list [--state <STATE>] [--name <NAME>] [--sort <FIELD>] [--json] [--full-id]
+andler list [--state <STATE>] [--name <REGEX>] [--sort <FIELD>] [--json] [--full-id]
 ```
 
-Lists all registered instances. Supports filtering by state and name (partial, case-insensitive).
+Lists all registered instances. Supports filtering by state and name (regex, case-insensitive).
 
 | Flag | Description |
 |------|-------------|
 | `--state <STATE>` | Filter by state: `Created`, `Starting`, `Running`, `Paused`, `Stopping`, `Stopped`, `Error` |
-| `--name <NAME>` | Filter by instance name (partial match, case-insensitive) |
-| `--sort <FIELD>` | Sort by: `name` (default), `state`, `created` |
+| `--name <REGEX>` | Filter by instance name (regular expression, case-insensitive) |
+| `--sort <FIELD>` | Sort by: `none` (default), `name`, `state` |
 | `--json` | Output as JSON array |
 | `--full-id` / `-q` | Show full UUID instead of 8-char short ID |
 
 ### `config`
 
 ```bash
-andler config <instance-id>
+andler config view <instance-id>
+andler config edit <instance-id>
+andler config set <instance-id> <key> <value>
+andler config --instance <instance-id> [--edit]
 ```
 
-Prints full instance configuration (all 9 sections + metadata). Output format is human-readable but not valid TOML.
+`view` prints the full instance configuration (all 9 sections + metadata). Output format is human-readable but not valid TOML.
+
+`edit` opens the real on-disk `instance.toml` in `$VISUAL`/`$EDITOR` (falling back to `vi`/`vim`/`nano`), then applies the edited config via gRPC. If the TOML is invalid, nothing is applied and the error message points at the file to fix. `config edit` requires the CLI to run on the same machine as the daemon (it edits the file on disk). Prints `No changes made.` when the file is left untouched.
+
+`set` updates a single config key by name. Supported keys:
+
+| Key | Value | Requirements |
+|-----|-------|--------------|
+| `display.resolution` | `WxH`, e.g. `1920x1080` | Works in any state; on a `Running`/`Paused` instance the new resolution is pushed into the guest over the QEMU guest agent immediately (applied by the guest compositor/session), and persisted for the next boot (delivered via fw_cfg) |
+| `name` | any valid instance name | Instance must be stopped (`disk_idle`) |
+| `arm_translator` | `none` \| `libndk` \| `libhoudini` | Android instances only, instance must be stopped; performs the same offline switch as `SwitchArmTranslator` |
+
+Anything else is rejected with `invalid config key: <key>` (`INVALID_ARGUMENT`).
+
+The flag form `andler config --instance <id>` is equivalent to `view`; add `--edit`/`-e` for the editor. Protected fields (`id`, `kind`, `disk.path`) cannot be changed.
 
 ### `remove`
 
@@ -141,6 +165,8 @@ With `--purge`: also deletes `disk.path` and `firmware.ovmf_vars_path`. Never de
 Instance must be in a terminal state (`Created`, `Stopped`, or `Error`). Use `stop` first for running instances.
 
 With `--purge`, refuses if the instance has live `Linked` clones (deleting the source disk would break them).
+
+With `--purge` on an interactive terminal, asks for confirmation before deleting; answering `n` prints `Cancelled.` and leaves the instance untouched. Non-interactive (scripted) runs skip the prompt.
 
 ### `clone`
 
@@ -205,19 +231,24 @@ GPU fields (vram, gpu) appear when AMD, NVIDIA, or Intel GPU data is available. 
 
 ```bash
 # Create (requires Running/Paused instance)
-andler snapshot <instance-id> create --tag before-update --description "Pre-upgrade state" --timeout 120
+andler snapshot create <instance-id> --tag before-update --description "Pre-upgrade state" --timeout 120
 
 # Restore (requires Running/Paused instance)
-andler snapshot <instance-id> restore --tag before-update --timeout 10
+andler snapshot restore <instance-id> --tag before-update --timeout 10
 
 # Delete (requires Running/Paused instance)
-andler snapshot <instance-id> delete --tag before-update --timeout 5
+andler snapshot delete <instance-id> --tag before-update --timeout 5
 
 # List (any state)
-andler snapshot <instance-id> list
+andler snapshot list <instance-id>
+andler snapshot --json list <instance-id>
 ```
 
 The `--timeout` flag overrides the per-instance `snapshot_timeout_secs` for a single operation. If not specified, uses the instance default (30s).
+
+`delete` asks for confirmation on an interactive terminal (answering `n` prints `Cancelled.` and keeps the snapshot).
+
+List output shows `tag`, `id`, `created_at` (human-readable local time), and `description`. `--json` (placed before the subcommand) emits a JSON array of `{ "tag", "snapshot_id", "created_at", "description" }`.
 
 ### `disk`
 
@@ -240,18 +271,20 @@ andler disk resize /path/to/disk.qcow2 --size 50GB --shrink  # shrink requires e
 andler disk compact /path/to/disk.qcow2
 ```
 
-**Size format**: Supports `GB`, `GiB`, `MB`, `MiB`, `TB`, `TiB` (case-insensitive). Space between number and unit is optional. Plain number = bytes.
+**Size format**: Supports `GB`, `GiB`, `MB`, `MiB`, `TB`, `TiB` (case-insensitive). Space between number and unit is optional. Plain number = bytes. Sizes must be greater than zero (a 0-byte disk is rejected with `disk: refusing to create a 0-byte disk image`).
 
 | Command | Description |
 |---------|-------------|
-| `create <path> --size <size>` | Create a new empty qcow2 disk (default 256 GiB) |
+| `create <path> --size <size>` | Create a new empty qcow2 disk (`--size` required) |
 | `info <path>` | Show disk info (virtual size, actual usage, format, backing file) |
 | `resize <path> --size <size>` | Resize an existing disk (requires `--shrink` to reduce size) |
 | `compact <path>` | Compact a disk (reclaim unused space via `qemu-img convert`, only works on qcow2) |
 
+The flag form (`andler disk --create --path <p> --size <s>`, `--info`, `--resize`, `--compact`) is also accepted; the action flags are mutually exclusive (`disk: actions are mutually exclusive, got --create and --info`), and at least one is required.
+
 ### `guest`
 
-Guest package management — install, remove, or list packages in the guest OS. Auto-fallback: if VM is running and guest agent is available → online via QMP `guest-exec`; if VM is stopped → offline via `qemu-nbd` + mount.
+Guest package management — install, remove, or list packages in the guest OS. Auto-fallback: if VM is running and guest agent is available → online via the guest agent socket (`guest-exec`); if VM is stopped → offline via `qemu-nbd` + mount.
 
 ```bash
 # Install a package
@@ -262,30 +295,21 @@ andler guest remove spice-vdagent <instance-id>
 
 # List known packages and their status
 andler guest list <instance-id>
+
+# Switch Android boot mode (Android instances)
+andler guest boot-mode <instance-id> [android|linux]
 ```
 
 Known packages: `spice-vdagent` (shared folders), `qemu-guest-agent` (host-guest communication), `spice-webdavd` (webdav shared folders).
+
+**ARM translators**: `install libndk <id>` / `install libhoudini <id>` are special-cased — they go through `SwitchArmTranslator` (offline disk staging) instead of the package-manager path. Optional `--translator-dir <path>` points at a local cache directory with the extracted translator instead of downloading it.
 
 | Command | Description |
 |---------|-------------|
 | `install <package> <instance-id>` | Install a package in the guest OS |
 | `remove <package> <instance-id>` | Remove a package from the guest OS |
 | `list <instance-id>` | List known packages and their status (installed/not installed) |
-
-### `edit`
-
-```bash
-andler edit <instance-id> [--name <NAME>] [--disk-size-gib <SIZE>]
-```
-
-Edits instance configuration. Changes are applied to both the SQLite store and the `instance.toml` file.
-
-| Flag | Description |
-|------|-------------|
-| `--name <NAME>` | New instance name |
-| `--disk-size-gib <SIZE>` | New disk size in GiB |
-
-Protected fields (`id`, `kind`, `disk.path`) cannot be changed.
+| `boot-mode <instance-id> [mode]` | Get or set the Android boot mode (`android`/`linux`) |
 
 ### `wizard`
 
@@ -293,7 +317,7 @@ Protected fields (`id`, `kind`, `disk.path`) cannot be changed.
 andler wizard
 ```
 
-Interactive guided instance creation wizard. Walks through all configuration options with smart defaults and hardware auto-detection. Outputs a TOML config file for review before creation.
+Interactive guided instance creation wizard (also the default when `andler` is invoked with no subcommand). Walks through all configuration options with smart defaults and hardware auto-detection. Prints a full summary before creation and offers `Create VM` / `Modify advanced settings` / `Cancel`.
 
 ### `doctor`
 
@@ -301,7 +325,7 @@ Interactive guided instance creation wizard. Walks through all configuration opt
 andler doctor [--fix]
 ```
 
-Checks the local environment for ANDLER prerequisites: KVM availability, QEMU/OVMF installation, nbd kernel module, passwordless sudo for privileged operations, daemon reachability, and base images. Read-only — works even if andlerd isn't running.
+Checks the local environment for ANDLER prerequisites: KVM availability, QEMU/OVMF installation, nbd kernel module (a scan failure is reported with `Run: sudo modprobe nbd max_part=8`), passwordless sudo for privileged operations, daemon reachability, and base images. Read-only — works even if andlerd isn't running.
 
 With `--fix`, offers to write missing passwordless-sudo rules to `/etc/sudoers.d/andler` (validates with `visudo -c` before writing).
 ### `completions`
@@ -357,7 +381,7 @@ ovmf_vars_path = "/path/to/VARS.fd"
 overlay_size_gib = 20
 gapps = false
 microg = false
-libndk = false
+arm_translator = "none"   # or "libndk" / "libhoudini"
 instances_root = "/home/user/.andler/instances"
 ```
 
@@ -491,12 +515,15 @@ Defined in `services/andler-rpc/proto/andler.proto`. Uses `tonic`/`prost` for Ru
 
 | gRPC Status | Daemon Error | When |
 |-------------|--------------|------|
-| `NOT_FOUND` | `InstanceNotFound`, `SnapshotNotFound`, `InstanceRefNotFound`, `AgentNotInstalled`, `PackageManagerNotFound` | Unknown instance/snapshot/ref/package |
-| `UNIMPLEMENTED` | `NoBackendRegistered` | Backend kind not available |
-| `FAILED_PRECONDITION` | `InvalidTransition`, `InstanceNotRemovable`, `InstanceNotClonable`, `SharedBaseNotSupportedForLinuxVm`, `InstanceHasLiveClones`, `SnapshotOperationRequiresRunningInstance`, `SnapshotLimitExceeded`, `GuestAgentUnavailable` | Wrong lifecycle state, resource limit, or guest agent unavailable |
-| `ALREADY_EXISTS` | `SnapshotAlreadyExists`, `AgentAlreadyInstalled` | Duplicate snapshot tag or package already installed |
-| `INVALID_ARGUMENT` | `ConvertError`, `EmptyInstanceRef`, `MalformedInstanceRef`, `AmbiguousInstanceId`, `ConfigIdMismatch`, `ConfigKindChanged`, `ConfigDiskPathChanged` | Malformed request or invalid arguments |
-| `INTERNAL` | Other errors | Backend/disk/store failures |
+| `NOT_FOUND` | `InstanceNotFound`, `SnapshotNotFound`, `InstanceRefNotFound` | Unknown instance/snapshot/ref |
+| `UNIMPLEMENTED` | `NoBackendRegistered`, `Backend(NotImplemented)` | Backend kind not available |
+| `FAILED_PRECONDITION` | `InvalidTransition`, `InstanceNotRemovable`, `InstanceNotClonable`, `InstanceAlreadyStopped`, `SharedBaseNotSupportedForLinuxVm`, `InstanceHasLiveClones`, `SnapshotOperationRequiresRunningInstance`, `SnapshotLimitExceeded`, `GuestAgentUnavailable`, `NotAndroid`, `InstanceMustBeStopped`, `Backend(HandleNotFound)`, `Backend(ProcessNotRunning)` | Wrong lifecycle state, resource limit, guest agent unavailable, wrong instance kind |
+| `ALREADY_EXISTS` | `SnapshotAlreadyExists` | Duplicate snapshot tag |
+| `INVALID_ARGUMENT` | `ConvertError`, `EmptyInstanceRef`, `MalformedInstanceRef`, `AmbiguousInstanceId`, `ConfigIdMismatch`, `ConfigKindChanged`, `ConfigDiskPathChanged`, `InvalidConfig`, `InvalidConfigKey`, `MissingOvmfVarsTemplate` | Malformed request or invalid arguments |
+| `RESOURCE_EXHAUSTED` | `InsufficientDiskSpace` | Not enough free space for a snapshot operation |
+| `INTERNAL` | Other `Backend`/`Disk`/`Io`/`Store`/`Firmware` errors — including all `andler-disk` errors other than `InsufficientDiskSpace` (`AgentNotInstalled`, `AgentAlreadyInstalled`, `PackageManagerNotFound`, ...) | Backend/disk/store failures |
+
+All error messages pass through `status_message()`: control characters (other than tab) are replaced with spaces and messages longer than 384 characters are truncated before being sent as the gRPC `grpc-message` header (long multi-line package-manager stderr otherwise trips the h2 client with "h2 protocol error").
 
 ### Key Messages
 
@@ -560,4 +587,4 @@ message UpdateInstanceConfigRequest {
 }
 ```
 
-Protected fields (`id`, `kind`, `disk.path`) cannot be changed.
+`UpdateInstanceConfig` requires the instance to be stopped (disk idle) — a running instance gets `InstanceMustBeStopped` (`FAILED_PRECONDITION`). Protected fields (`id`, `kind`, `disk.path`) cannot be changed: `id` is always taken from the request's `instance_ref` (`ConfigIdMismatch` if a different id is supplied), `kind` changes are `ConfigKindChanged`, `disk.path` changes are `ConfigDiskPathChanged` — all `INVALID_ARGUMENT`. `cdrom_bus` (`kind.linux_vm.cdrom_bus`) is validated the same way as on create: `UNSPECIFIED` is rejected with `ConvertError::MissingField`.

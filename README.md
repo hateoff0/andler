@@ -79,7 +79,7 @@ cargo build --release
 ./target/release/andlerd
 ```
 
-Listens on `127.0.0.1:50051` by default. Override with `ANDLERD_ADDR` env var.
+Listens on `127.0.0.1:50051` by default. Override with `ANDLERD_LISTEN_ADDR` env var (the client connects via `ANDLERD_ADDR` or `--daemon-addr`).
 
 ### Create a Linux VM (with 3D GPU)
 
@@ -139,7 +139,7 @@ gl = true
 ./target/release/andler logs <instance-id>
 
 # Create a snapshot
-./target/release/andler snapshot <instance-id> create --tag before-update
+./target/release/andler snapshot create <instance-id> --tag before-update
 
 # List known guest packages and their status
 ./target/release/andler guest list <instance-id>
@@ -148,7 +148,7 @@ gl = true
 ./target/release/andler stop <instance-id>
 
 # Restore from snapshot
-./target/release/andler snapshot <instance-id> restore --tag before-update
+./target/release/andler snapshot restore <instance-id> --tag before-update
 
 # Remove with file cleanup
 ./target/release/andler remove <instance-id> --purge
@@ -160,7 +160,7 @@ gl = true
 |---------|-------------|
 | `create` | Create instance (TOML auto-detect, or `--kind linux`/`--kind android` CLI flags) |
 | `wizard` | Launch interactive wizard (default when `andler` is invoked without a subcommand) |
-| `edit` | Edit instance config in `$VISUAL`/`$EDITOR` (does not restart running instance) |
+| `config` | View/edit/set instance config (`config view`, `config edit` opens `instance.toml` in `$VISUAL`/`$EDITOR`) |
 | `start` | Start instance |
 | `stop` | Stop instance (default: force kill (SIGKILL); `--graceful`: graceful ACPI shutdown (SIGTERM)) |
 | `pause` | Pause running instance |
@@ -173,7 +173,7 @@ gl = true
 | `metrics` | Stream resource metrics (`--once` for single sample, `--json`) |
 | `snapshot` | Snapshot CRUD (create/restore/delete/list) |
 | `disk` | Disk management (create/info/resize `--shrink`/compact) |
-| `guest` | Guest package management (install/remove/list). Auto-fallback: online via QMP if running, offline via qemu-nbd if stopped. |
+| `guest` | Guest package management (install/remove/list). Auto-fallback: online via the QGA guest-agent socket if running, offline via qemu-nbd if stopped. |
 | `completions` | Generate shell completion script (bash/zsh/fish) |
 | `doctor` | Check local environment (KVM, QEMU, OVMF, nbd, sudoers, andlerd, base images). `--fix` to auto-write missing sudoers rules. |
 
@@ -253,10 +253,7 @@ clipboard_enabled = true
 | `Dbus` | D-Bus compositor integration |
 | `None` | Headless (`-display none`) |
 
-Note: the configured `resolution` is stored but not currently applied to
-`Sdl`/`Gtk` output — QEMU's SDL/GTK backends don't take a width/height
-parameter. Set the resolution inside the guest OS after boot for now (e.g.
-via `xrandr` or display settings).
+Note: the configured `resolution` **is applied inside the guest OS**: on every boot the guest applies it from fw_cfg (`opt/andler/display-resolution`, oneshot `andler-display-resolution.service` in the base image), and `andler config set <id> display.resolution WxH` on a running instance applies it live through the guest agent (Android: compositor restart; Linux: `andler-apply-resolution`). Host-side `Sdl`/`Gtk` windows size themselves to the guest framebuffer.
 
 ### Network Modes
 
@@ -283,7 +280,7 @@ andler guest install spice-vdagent <instance-id>
 ```
 andler/
 ├── core/                          Domain types, backend trait, config, FSM
-│   └── andler-core/               ~49 unit tests, no external dependencies
+│   └── andler-core/               ~50 unit tests, no external dependencies
 │       ├── lib.rs                  Re-exports
 │       ├── error.rs                BackendError, FsmError
 │       ├── backend.rs              HypervisorBackend trait, BackendHandle, BackendStatus, ResourceMetrics
@@ -316,14 +313,14 @@ andler/
 │
 ├── services/                      Infrastructure services
 │   ├── andler-disk/               qemu-img wrapper + guest tools offline provisioning
-│   ├── andler-net/                Bridge/Isolated/NAT networking via iproute2/nftables
+│   ├── andler-net/                Bridge/NAT networking via iproute2 (isolated: config-only)
 │   ├── andler-store/              SQLite state persistence
 │   ├── andler-firmware/           OVMF detect/provision + host hardware
 │   │                              auto-detect (GPU/ARM/audio/passt) +
 │   │                              host-level GPU metrics (AMD/NVIDIA/Intel)
 │   └── andler-rpc/                gRPC protocol + conversions
 │
-├── daemon/                        Background service (~94 unit + 28 integration tests)
+├── daemon/                        Background service (~120 unit tests, incl. gRPC round-trip)
 │   └── src/
 │       ├── main.rs                 andlerd binary (verbosity flags, signal handling)
 │       ├── firmware.rs             OVMF auto-detection
@@ -338,7 +335,7 @@ andler/
 │           ├── snapshot_ops.rs     create/restore/delete/list snapshots
 │           ├── query_ops.rs        status, list, get_config, update_instance_config, stream
 │           ├── health_ops.rs       health check, mark_instance_crashed
-│           └── tests/              ~86 unit tests across 10 modules
+│           └── tests/              12 test modules
 │
 ├── cli/                           Command-line client
 │   └── src/
@@ -351,8 +348,9 @@ andler/
 │       ├── lifecycle.rs           Start, Stop, Pause, Resume, Remove
 │       ├── clone.rs               Clone, Export
 │       ├── helpers.rs             parse_size, format_size, ensure_qcow2_extension
-│       ├── guest.rs               Guest subcommand (package management via QMP)
-│       ├── edit.rs                Edit command ($VISUAL/$EDITOR config open)
+│       ├── guest.rs               Guest subcommand (package management via guest agent)
+│       ├── doctor.rs              Doctor subcommand (environment checks)
+│       ├── edit.rs                config edit ($VISUAL/$EDITOR on real instance.toml)
 │       ├── verify.rs              --verify flag (pre-flight checks)
 │       ├── preview.rs             --dry-run flag (resolve QEMU command line)
 │       └── wizard/                Interactive setup wizard
@@ -397,12 +395,12 @@ Requires `/dev/kvm` (user in `kvm` group) for integration tests. Unit tests do n
 
 ```bash
 # Unit tests (no KVM required)
-docker compose -f docker/docker-compose.yml build --no-cache unit-test
-docker compose -f docker/docker-compose.yml run --rm unit-test
+docker compose -f docker/dev/docker-compose.yml build --no-cache unit-test
+docker compose -f docker/dev/docker-compose.yml run --rm unit-test
 
 # E2E smoke test (requires KVM)
-docker compose -f docker/docker-compose.yml build --no-cache e2e
-docker compose -f docker/docker-compose.yml run --rm e2e
+docker compose -f docker/dev/docker-compose.yml build --no-cache e2e
+docker compose -f docker/dev/docker-compose.yml run --rm e2e
 ```
 
 ## Documentation
@@ -419,14 +417,16 @@ docker compose -f docker/docker-compose.yml run --rm e2e
 
 Each crate has its own README with detailed API reference:
 
-- [`core/andler-core/README.md`](core/andler-core/README.md) — Domain types, ~30 public types, ~49 tests
+- [`core/andler-core/README.md`](core/andler-core/README.md) — Domain types, ~30 public types, ~50 tests
 - [`backends/andler-qemu/README.md`](backends/andler-qemu/README.md) — QEMU backend, ~80 tests
 - [`backends/andler-vmm/README.md`](backends/andler-vmm/README.md) — Cloud Hypervisor stub
 - [`services/andler-disk/README.md`](services/andler-disk/README.md) — Disk ops + guest tools provisioning
 - [`services/andler-store/README.md`](services/andler-store/README.md) — SQLite persistence
-- [`services/andler-net/README.md`](services/andler-net/README.md) — Bridge/Isolated/NAT networking via iproute2/nftables
-- [`daemon/README.md`](daemon/README.md) — Daemon orchestration, ~94 unit tests + 28 integration tests
-- [`cli/README.md`](cli/README.md) — CLI commands + TOML parser + wizard, 112 tests
+- [`services/andler-net/README.md`](services/andler-net/README.md) — Bridge/NAT networking via iproute2 (isolated: config-only)
+- [`services/andler-firmware/README.md`](services/andler-firmware/README.md) — Hardware auto-detection + GPU metrics
+- [`services/andler-rpc/README.md`](services/andler-rpc/README.md) — gRPC protocol and conversions
+- [`daemon/README.md`](daemon/README.md) — Daemon orchestration, ~120 unit tests (incl. gRPC round-trip)
+- [`cli/README.md`](cli/README.md) — CLI commands + TOML parser + wizard, ~120 tests
 
 ## Metrics
 

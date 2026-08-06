@@ -61,14 +61,28 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 #### Services
 
 - **Disk error variants**: `ShrinkRequiresConfirmation` (requires `--shrink` flag), `CompactNotApplicable` (non-qcow2 disk), `InsufficientDiskSpace` (pre-checked before snapshot creation via `statvfs(2)`, using guest RAM size as a conservative upper bound for vmstate size — maps to `Status::resource_exhausted`).
+
+#### Guest images (`docker/images`)
+
+- **Android container DNS fixed**: the image now creates `/etc/resolv.conf` at boot (systemd-tmpfiles rule `rootfs/etc/tmpfiles.d/andler-resolv.conf`, `L+` overwrite) as a symlink to systemd-resolved's stub (`/run/systemd/resolve/stub-resolv.conf`). Root cause chain: `docker build` never bakes a resolv.conf into the image (the path is a Docker bind-mount during RUN steps), and `docker export` (used by `build-disk.sh`) injects an **empty** regular `/etc/resolv.conf` into the rootfs tar — a plain `L` rule silently skips the existing empty file and Arch's own `L!` rule is dropped as a duplicate path, so the waydroid container's dnsmasq had no upstream (`no servers found in /etc/resolv.conf`) and Android apps failed every name lookup with `ERR_NAME_NOT_RESOLVED` despite the guest itself being online. `L+` unconditionally replaces the empty file with the stub symlink (dnsmasq → `127.0.0.53` → resolved → `10.0.2.3` → slirp → host). See `docker/images/README.md`.
+
+- **Resolution changes are a host-side command**: `andler config set <id> display.resolution WxH` updates the instance config (persisted, takes effect on next boot via fw_cfg) and, on a running VM, pushes the new value into the guest over the QEMU guest agent — new `virtio-serial` port + `qemu-guest-agent` package in the base image, and a new `HypervisorBackend::set_guest_display_resolution`. Guest commands (file writes, `guest-exec`) are sent straight to the agent chardev socket (`*.qga.sock`), not through QMP: QEMU ≥9 no longer registers `guest-*` commands on the QMP monitor. Android restarts the waydroid compositor session in place (VM keeps running); Linux applies the mode to the active session (kscreen-doctor/gnome-randr/wlr-randr on Wayland, xrandr on X11). The old guest-side `andler-set-resolution WxH` remains for experiments but is no longer the intended path.
+- **Linux VM applies instance resolution at session start**: `andler-apply-resolution` (XDG autostart) switches the desktop output to the `display.resolution` from `/etc/andler/display.conf` via `kscreen-doctor` (Wayland) or `xrandr` (X11); Plasma remembers the mode in its kscreen config. `andler-set-resolution WxH` changes the resolution of a running Android VM on the fly (restarts the compositor session, not the VM; the change lasts until the next boot replay of fw_cfg).
+- **Android display resolution 1920x1080**: `andler-waydroid-compositor` now appends `[output] name=Virtual-1 mode=…` to the base weston.ini at startup, defaulting to `1920x1080` (verified present in the virtio-gpu EDID mode list). The generated config is written into the session's `XDG_RUNTIME_DIR` (the unit runs as `User=user`; `/run/andler` is root-only and a first attempt there failed every boot with `mkdir: Permission denied`, crashing the weston session in a restart loop). The instance config's `display.resolution` is passed into the VM as QEMU fw_cfg (`opt/andler/display-resolution`) and applied by a guest oneshot (`andler-display-resolution.service`) to `/etc/andler/display.conf`, which `waydroid-compositor.service` loads via `EnvironmentFile=` — so the resolution chosen at instance creation is what weston applies, and a static `RESOLUTION=WxH` in `/etc/andler/display.conf` overrides it. The Linux VM (KDE Plasma) exposes the same EDID modes; see `docker/images/README.md`.
+- **`rtkit` package added to the base image** — silences pipewire's boot-time `mod.rt: RTKit error: ServiceUnknown` spam; RTKit is D-Bus-activated on demand so realtime scheduling actually applies to the guest session.
+- **No more double session starts**: the pipewire units (`andler-pipewire.service`, `andler-pipewire-pulse.service`) now order themselves `After=systemd-user-sessions.service`. Their `PAMName=login` PAM stack includes pam_nologin, which rejects logins while `/run/nologin` exists — early in boot the units failed once ("System is booting up…"), `Restart=on-failure` bounced them, and since `waydroid-compositor.service` `Requires=` the pulse unit, the whole weston+waydroid session restarted mid-start (two westons, a second container start, and the composer@2.1-se abort inside the interrupted first boot). First start now succeeds.
+- **`andlerd` survives KDE logout**: the daemon is a per-user systemd unit (`scripts/install.sh`); with `loginctl enable-linger` it keeps running after the desktop session ends, so `andler list` keeps working. `install.sh` now resolves the binary to an absolute path (a relative one made systemd reject the unit with "bad unit file setting").
+- **`scripts/uninstall.sh`**: removes the per-user unit (stop + disable + delete + `daemon-reload`); `--purge` also deletes `~/.andler` data (with an explicit TTY confirmation, mirroring `andler remove --purge`) and the `/etc/sudoers.d/andler` rules. Never deletes the andlerd binary or touches other users.
+
+- **Android session compositor swapped: gamescope → Weston**: the Android session (`waydroid-compositor.service`) now runs Weston (DRM backend, kiosk shell) instead of gamescope. Gamescope presents exclusively through Vulkan, and on NVIDIA hosts the venus device exposes no DRM format modifiers for scanout formats, so every frame import into KMS failed (`Cannot import FB … not supported for scan-out`) and the instance booted to a black screen with a silent crash loop. Weston composites through GL (virgl) — the same path the Linux instance's KDE session uses — and presents on any host GPU. venus stays enabled on the virtio-gpu device for guest Vulkan apps. See `docker/images/README.md` for the full rationale.
 - **Snapshot metadata persistence** (`andler-store`): `snapshots` table with `ON DELETE CASCADE` from `instances`. Full CRUD for snapshot metadata.
 - **gRPC snapshot operations** (`andler-rpc`): `CreateSnapshot`, `RestoreSnapshot`, `DeleteSnapshot`, `ListSnapshots` RPCs with per-operation timeout support.
 - **gRPC metrics streaming** (`andler-rpc`): `StreamResourceMetrics` server-streaming RPC with `ResourceMetricsResponse` (all 9 optional fields including GPU).
 - **gRPC config editing** (`andler-rpc`): `UpdateInstanceConfig` RPC with `UpdateInstanceConfigRequest` mirroring `GetInstanceConfigResponse` fields.
 - **NVML integration** (`andler-firmware`): `nvml-wrapper` crate for NVIDIA GPU metrics (primary), with `nvidia-smi` CLI fallback.
 - **Hardware auto-detection** (`andler-firmware`): `detect_all()` returns `HardwareDefaults` — GPU render backend, display engine, audio server, ARM translator, OVMF paths, Venus support, passt availability.
-- **Network configuration service** (`andler-net`): `NetworkService` trait and `DefaultNetworkService` implementation for bridge and isolated network modes. Uses `iproute2` for host-side network setup.
-- **Guest image pipelines** (`docker/images/`): Automated Android/Linux base image builds with Waydroid. `base/Dockerfile` builds Arch Linux rootfs with CachyOS kernel, Mesa/Venus, waydroid, gamescope, UKI. `build.sh` orchestrates docker build + disk conversion. `build-disk.sh` converts rootfs to GPT-partitioned bootable qcow2 (ESP + ext4 + UKI). `fetch-waydroid-images.py` downloads system.img/vendor.img from SourceForge with MD5 verification and disk space pre-check. Supports Android 11 (LineageOS 18.1) and 13 (LineageOS 20.0), VANILLA/GAPPS variants.
+- **Network configuration service** (`andler-net`): `NetworkService` trait and `DefaultNetworkService` implementation for bridge network mode, using `iproute2` for host-side network setup. `NetworkMode::Isolated` is accepted by config but `setup_isolated` returns an explicit "not implemented yet" error (later documented in `services/andler-net/README.md`).
+- **Guest image pipelines** (`docker/images/`): Automated Android/Linux base image builds with Waydroid. `base/Dockerfile` builds Arch Linux rootfs with CachyOS kernel, Mesa/Venus, waydroid, weston, UKI. `build.sh` orchestrates docker build + disk conversion. `build-disk.sh` converts rootfs to GPT-partitioned bootable qcow2 (ESP + ext4 + UKI). `fetch-waydroid-images.py` downloads system.img/vendor.img from SourceForge with MD5 verification and disk space pre-check. Supports Android 11 (LineageOS 18.1) and 13 (LineageOS 20.0), VANILLA/GAPPS variants.
 - **Base image auto-discovery** (`andler-core`): `base_image::resolve()` scans `~/.andler/cache/base-images/` for `*.manifest.json` files, picks freshest match by (android_major, variant). Daemon uses it automatically when client omits `base_image_path`. Error message names the exact `docker/images/build.sh` invocation to produce a missing image.
 
 #### Daemon
@@ -101,7 +115,7 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 - **`disk resize --shrink`**: Explicit confirmation required for shrinking disks.
 - **Metrics display**: GPU columns (VRAM, GPU%) when AMD/NVIDIA/Intel data available. Human-readable byte formatting.
 - **Snapshot subcommands**: `create`, `restore`, `delete`, `list` under `andler snapshot`.
-- **Guest package management**: `andler guest install/remove/list` — install, remove, or list known packages (`spice-vdagent`, `qemu-guest-agent`, `spice-webdavd`) in guest OS. Auto-fallback: online via QMP `guest-exec` if VM running, offline via `qemu-nbd` + mount if stopped.
+- **Guest package management**: `andler guest install/remove/list` — install, remove, or list known packages (`spice-vdagent`, `qemu-guest-agent`, `spice-webdavd`) in guest OS. Auto-fallback: online via the guest agent socket (`*.qga.sock`) if VM running, offline via `qemu-nbd` + mount if stopped. `install libndk|libhoudini [--translator-dir <path>]` switches the ARM translator instead of using a package manager.
 - **`clone` and `export`**: Commands for LinuxVm + AndroidVm.
 - **Default paths**: Instance data stored under `~/.andler/` by default.
 - **`edit` command**: Open instance config in `$VISUAL`/`$EDITOR` as TOML, apply changes via gRPC.
@@ -142,7 +156,55 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 - **Resolution documentation**: Help text and doc comments note this isn't applied to SDL/GTK output yet.
 - **Instance config persistence**: `write_instance_toml` writes TOML alongside instance (SQLite remains source of truth for restore).
 
+#### CLI (`cli`)
+
+- **`--json` on `status` and `snapshot list`**: `andler status <id> --json` emits `{instance_id, state, detail, error_message}`; `andler snapshot --json list <id>` emits a JSON array. Other commands unchanged (list/metrics already had `--json`).
+- **Destructive-op confirmations**: `remove --purge` and `snapshot delete` ask for confirmation on interactive terminals (`n` → `Cancelled.`, nothing deleted). Scripted (non-TTY) runs keep the old silent behavior.
+- **Snapshot timestamps**: `created_at` shown as local `YYYY-MM-DD HH:MM:SS` instead of raw RFC3339.
+- **Wizard name validation**: instance names restricted to `[a-zA-Z0-9][a-zA-Z0-9_-]*` (names feed file paths).
+- **Wizard ISO validation**: path must end in `.iso` or `.img`.
+- **Wizard summary**: Linux VMs show `Firmware: UEFI/OVMF | Legacy BIOS`; network label `NAT/passt` → `NAT (passt)`; Android name placeholder `my-android-vm`.
+- **`guest list` ANSI colors**: colored status codes only when stdout is a TTY (was always emitted).
+- **Clap help texts**: doc-comment help on every subcommand and `--purge`/`--graceful`/`--quick`/`--dry-run`/`--verify`/`--json` flag help.
+- **`config edit` edits the real `instance.toml`**: opens the actual on-disk file in `$VISUAL`/`$EDITOR` (fallback `vi`/`vim`/`nano`) instead of a throwaway temp copy; invalid edits are rejected with the file path to fix, and nothing is applied.
+- **`disk create --size 0` rejected** and `--disk-size-gib 0` rejected by clap (`range(1..)`).
+- **`InstanceConfig::validate()`** (`andler-core`): cross-field sanity checks (nonzero cores/memory/disk, memory limits, GPU hostmem limits); CLI flag values enforce ranges up front.
+- **E2E smoke test**: negative checks added — `status` of a nonexistent instance must fail, `disk create --size 0` must be rejected, `create --disk-size-gib 0` must be rejected.
+
+#### gRPC (`andler-rpc`)
+
+- **`CdromBus` no longer defaults**: `CreateInstanceRequest.cdrom_bus = UNSPECIFIED` is rejected with `INVALID_ARGUMENT` (`ConvertError::MissingField("cdrom_bus")`) instead of silently falling back to `IDE`. Clients must set the field explicitly; the daemon→proto direction still maps stored configs (none predating the field exist in practice).
+
+#### Guest provisioning (offline + online)
+
+- **Chroot environment for offline package operations**: `bind_host_mounts` now prepares the mounted guest for real package-manager runs — the guest's `/etc/resolv.conf` is *written* with the host's nameservers via NOPASSWD `sudo chroot` (a bind-mount fails with ENOENT on the dangling `stub-resolv.conf` symlink Arch images ship), `/dev`, `/proc`, `/sys` are bind-mounted, and a fresh tmpfs is mounted on the guest's `/run` (pacman's gpg-agent otherwise fails with `GPGME error: Invalid crypto engine` — the on-disk `/run` is unwritable). All done inside `mount_partition`; failures degrade to warnings with `tracing::warn!`.
+- **Package index refresh before offline install**: `install_agent_offline_blocking` runs the manager's index update first (`apt-get update` / `dnf makecache` / `pacman -Sy`) so installs succeed on fresh images; on update failure the guest's `/etc/resolv.conf` content (or its absence) is logged for diagnosis and the error is reported (exit status + stderr).
+- **Online guest operations moved to the guest-agent chardev**: guest package install/remove and guest file writes now talk to QGA over the dedicated `*.qga.sock` chardev (`virtserialport name=org.qemu.guest_agent.0`, added by `cmdline::guest_agent_args`) — not the QMP monitor, because QEMU ≥ 9 no longer registers `guest-*` commands on QMP. `backend::guest_agent_client` connects lazily; `guest_exec_package` detects the package manager inside the guest with `command -v apt-get|dnf|pacman` and dispatches. Requires `qemu-guest-agent` running in the guest (base image ships it enabled).
+- **`andler guest install libndk|libhoudini <id> [--translator-dir <path>]`**: ARM-translator installs are special-cased to `SwitchArmTranslator` (offline disk staging) instead of the package-manager path; `--translator-dir` points at a local extracted cache to skip the download.
+- **ARM translator switch is atomic**: new files are staged into `system/.andler-translator-staging` first (with verification), the old translator is removed and the staged files renamed into place only after staging succeeds; `build.prop` is merged and written sorted.
+- **Android boot-mode switch via chroot symlink**: `switch_boot_mode` re-points the guest's `default.target` with `sudo -n chroot ln -sfn` (the guest filesystem is root-owned and the daemon is unprivileged; direct writes were `Permission denied`).
+
+#### Daemon
+
+- **`config set` key whitelist**: supported keys are `display.resolution` (any state), `name` and `arm_translator` (stopped instance). `display.resolution` accepts `WxH`; on a `Running`/`Paused` instance it is applied live through the guest agent (`set_guest_display_resolution` → guest-side `display.conf` + compositor/session apply) and persisted for the next boot via fw_cfg. Unknown keys are rejected with `InvalidConfigKey` (`INVALID_ARGUMENT`).
+- **Live display resolution change**: new `HypervisorBackend::set_guest_display_resolution` writes `/etc/andler/display.conf` in the guest via QGA `guest-file-*` and triggers the guest-side applier (`andler-set-resolution` on Android, session apply on Linux) — the VM keeps running.
+
 ### Fixed
+
+- **`arm_translator.rs` build break**: `for file in &info.files` iterated `&&[&str]` (not an iterator) — the workspace didn't compile. Fixed by dropping the `&`.
+- **`instance_file.rs` panics on missing fields**: `into_request()` used `.expect()` on `disk_path`/`iso_path` — a TOML file missing either field panicked. Now returns `InstanceFileError::MissingField` (`missing required field disk_path in instance file`).
+- **Unknown `android_version` silently downgraded**: a TOML `android_version = 12` (or anything but 11/13) was silently created as Android 13. Now rejected with `unsupported value for android_version: 12`.
+- **Wizard overlay size**: Android wizard took `overlay_size_bytes` from `disk_size_gib` (a 256 GiB disk → 256 GiB overlay). Now a fixed 20 GiB default, matching the TOML path.
+- **`ask_network_mode` ignored `prefilled`**: the network-mode prompt always started on NAT even when the prefilled value was Bridge/Isolated. Now honors the prefilled cursor position.
+- **`compact()` temp-file leak**: a failed `rename` of the temporary compacted disk left the temp file behind. Now removed on the error path.
+- **`guest_tools` ignored `apt-get update`/`dnf`/`pacman` failures**: a failed package-index update was treated as success. Now fails with the exit status and stderr.
+- **`is_agent_installed` masked I/O errors**: a failed `chroot`/binary check returned `false` (→ "install" path) instead of an error. Now returns `Result<bool, DiskError>`.
+- **`nbd_status` swallowed scan errors**: a missing/inaccessible `/sys/block` produced a silently empty status. Now returns `Result<NbdStatus, DiskError>`; `andler doctor` reports a failed scan with `Run: sudo modprobe nbd max_part=8`.
+- **Disk flag form ignored extra flags**: `andler disk --create --info ...` silently ran `--create`. Now rejects multiple actions (`disk: actions are mutually exclusive, got --create and --info`) and requires at least one.
+- **`parse_size("0")` accepted for disk create**: a 0-byte disk image was created. Now rejected (`disk: refusing to create a 0-byte disk image`).
+- **Metrics poller blocked the async runtime**: synchronous `/proc`/sysfs reads ran inline in the poller task. Now collected in `tokio::task::spawn_blocking`.
+- **`create` output lacked the instance name**: `Created instance <name> (<id>)` in all non-wizard modes.
+- **Duplicate help text in `ask_display_resolution`**: the "not yet applied to the actual display output" note was printed twice.
 
 - **`create_instance` (Linux) silently discarded `--ovmf-vars-template`**: the
   gRPC handler parsed the client's `firmware.ovmf_vars_path` into `InstanceConfig`
@@ -196,6 +258,10 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
   impls so a non-UTF-8 path can't turn an already-failing cleanup into a panic during unwind.
   Separately, found and fixed stray CJK characters embedded in Russian-language doc comments
   in `metrics.rs` — encoding/generation artifacts, not intentional text.
+
+- **gRPC client died with "h2 protocol error" on long error messages**: multi-KB package-manager stderr (e.g. `pacman -Sy` output) sent as the `grpc-message` header tripped tonic's h2 client (`internal error: h2 protocol error: http2 error`) on the trailers-only response path; short errors like "instance not found" worked. `status_message()` now replaces control characters (other than HTAB) with spaces and truncates the message to 384 chars before building the `Status`. Verified end-to-end: the same response that previously produced the h2 error now prints a readable message.
+- **Offline install DNS (`Could not resolve host`)**: the first fix attempt wrote the guest `/etc/resolv.conf` with bare IP addresses (`127.0.0.53`), which resolv.conf ignores — `host_nameservers()` now emits full `nameserver <ip>` directives (deduplicated, sourced from `/etc/resolv.conf` or `/run/systemd/resolve/stub-resolv.conf`). Offline `pacman -Sy` resolves mirrors correctly after this.
+- **`handler-disk find_live_clones` removed from the disk crate**: the live-clone scan moved to the daemon level (`Daemon::find_live_clones`, scanning registered instances for `config.disk.base_image == source`); the old module-level implementation was deleted, and `remove --purge` protection (`InstanceHasLiveClones`) is unchanged.
 
 ### Removed
 
