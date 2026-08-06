@@ -26,7 +26,24 @@ pub async fn switch_translator(
     let root_partition = nbd::find_root_partition(&partitions)?;
     let mount_guard = nbd::mount_partition(&root_partition)?;
 
-    let waydroid_dir = detect_waydroid_system_dir(mount_guard.path())?;
+    // andlerd runs unprivileged: even though the partition is mounted rw, the
+    // guest's root-owned directories reject raw std::fs writes with EPERM. All
+    // mutations go through `sudo -n` (same pattern as guest_tools.rs and
+    // boot_mode.rs); reads stay unprivileged.
+    let mount = mount_guard.path();
+    let waydroid_dir = match detect_waydroid_system_dir(mount)? {
+        Some(dir) => dir,
+        None => {
+            // A freshly created Android instance may have never booted, so
+            // `waydroid init` (which creates /var/lib/waydroid/overlay on first
+            // boot) has not run yet. The overlay upper dir is just a directory
+            // tree bind-mounted over /system by the waydroid container —
+            // creating it early is safe and lets installs work pre-first-boot.
+            let dir = mount.join("var/lib/waydroid/overlay");
+            sudo_mkdir_p(&dir.join("system"))?;
+            dir
+        }
+    };
     let system_dir = waydroid_dir.join("system");
 
     let current = detect_current_translator(&system_dir)?;
@@ -43,35 +60,20 @@ pub async fn switch_translator(
     // installed and no way to recover short of manual intervention.
     let staging_dir = system_dir.join(".andler-translator-staging");
     if staging_dir.exists() {
-        std::fs::remove_dir_all(&staging_dir).map_err(|e| {
-            DiskError::FileSystem(format!(
-                "failed to clear stale staging dir {staging_dir:?}: {e}"
-            ))
-        })?;
+        sudo_rm_rf(&staging_dir)?;
     }
-    std::fs::create_dir_all(&staging_dir).map_err(|e| {
-        DiskError::FileSystem(format!("failed to create staging dir {staging_dir:?}: {e}"))
-    })?;
+    sudo_mkdir_p(&staging_dir)?;
 
     for file in info.files {
         let src = translator_files.join(file);
         let staged = staging_dir.join(file);
         if src.exists() {
-            if src.is_dir() {
-                copy_dir_recursive(&src, &staged)?;
-            } else {
-                if let Some(parent) = staged.parent() {
-                    std::fs::create_dir_all(parent).map_err(|e| {
-                        DiskError::FileSystem(format!(
-                            "failed to create parent dir for {staged:?}: {e}"
-                        ))
-                    })?;
-                }
-                std::fs::copy(&src, &staged).map_err(|e| {
-                    DiskError::FileSystem(format!(
-                        "failed to stage translator file {src:?} -> {staged:?}: {e}"
-                    ))
-                })?;
+            if let Some(parent) = staged.parent() {
+                sudo_mkdir_p(parent)?;
+            }
+            sudo_cp_a(&src, &staged)?;
+            if file.split('/').any(|c| c == "bin") {
+                sudo_chmod(0o755, &staged)?;
             }
         }
     }
@@ -80,31 +82,13 @@ pub async fn switch_translator(
     if let Some(old) = current {
         let old_info = resolve(old);
         for file in old_info.files {
-            let path = system_dir.join(file);
-            if path.exists() {
-                if path.is_dir() {
-                    std::fs::remove_dir_all(&path).map_err(|e| {
-                        DiskError::FileSystem(format!(
-                            "failed to remove old translator dir {path:?}: {e}"
-                        ))
-                    })?;
-                } else {
-                    std::fs::remove_file(&path).map_err(|e| {
-                        DiskError::FileSystem(format!(
-                            "failed to remove old translator file {path:?}: {e}"
-                        ))
-                    })?;
-                }
-            }
+            sudo_rm_rf(&system_dir.join(file))?;
         }
-        let old_init_rc = system_dir
-            .join("etc/init")
-            .join(format!("{}.rc", dir_name(old)));
-        if old_init_rc.exists() {
-            std::fs::remove_file(&old_init_rc).map_err(|e| {
-                DiskError::FileSystem(format!("failed to remove old init.rc {old_init_rc:?}: {e}"))
-            })?;
-        }
+        sudo_rm_rf(
+            &system_dir
+                .join("etc/init")
+                .join(format!("{}.rc", dir_name(old))),
+        )?;
     }
 
     // Move the already-verified staged files into place. A rename on the same
@@ -115,40 +99,30 @@ pub async fn switch_translator(
         let dst = system_dir.join(file);
         if staged.exists() {
             if let Some(parent) = dst.parent() {
-                std::fs::create_dir_all(parent).map_err(|e| {
-                    DiskError::FileSystem(format!("failed to create parent dir for {dst:?}: {e}"))
-                })?;
+                sudo_mkdir_p(parent)?;
             }
             if dst.exists() {
-                if dst.is_dir() {
-                    std::fs::remove_dir_all(&dst).ok();
-                } else {
-                    std::fs::remove_file(&dst).ok();
-                }
+                sudo_rm_rf(&dst)?;
             }
-            std::fs::rename(&staged, &dst).map_err(|e| {
-                DiskError::FileSystem(format!(
-                    "failed to move staged file {staged:?} -> {dst:?}: {e}"
-                ))
-            })?;
+            sudo_mv(&staged, &dst)?;
         }
     }
-    let _ = std::fs::remove_dir_all(&staging_dir);
+    sudo_rm_rf(&staging_dir)?;
 
     let build_prop_path = system_dir.join("build.prop");
     let mut props = read_build_prop(&build_prop_path)?;
     for (key, value) in info.props {
         props.insert(key.to_string(), value.to_string());
     }
-    write_build_prop(&build_prop_path, &props)?;
+    sudo_write(&build_prop_path, build_prop_content(&props).as_bytes())?;
 
     if let Some(rc_content) = info.init_rc {
-        let init_rc_path = system_dir
-            .join("etc/init")
-            .join(format!("{}.rc", dir_name(translator)));
-        std::fs::write(&init_rc_path, rc_content).map_err(|e| {
-            DiskError::FileSystem(format!("failed to write init.rc for {translator:?}: {e}"))
-        })?;
+        sudo_write(
+            &system_dir
+                .join("etc/init")
+                .join(format!("{}.rc", dir_name(translator))),
+            rc_content.as_bytes(),
+        )?;
     }
 
     Ok(())
@@ -169,28 +143,18 @@ fn detect_current_translator(system_dir: &Path) -> Result<Option<ArmTranslator>,
     Ok(None)
 }
 
-fn detect_waydroid_system_dir(mount_point: &Path) -> Result<PathBuf, DiskError> {
+fn detect_waydroid_system_dir(mount_point: &Path) -> Result<Option<PathBuf>, DiskError> {
     let waydroid_overlay = mount_point.join("var/lib/waydroid/overlay");
     if waydroid_overlay.exists() {
-        return Ok(waydroid_overlay);
+        return Ok(Some(waydroid_overlay));
     }
 
     let alt_overlay = mount_point.join("overlay");
     if alt_overlay.join("system").exists() {
-        return Ok(alt_overlay);
+        return Ok(Some(alt_overlay));
     }
 
-    // A freshly created Android instance may have never booted, so `waydroid
-    // init` (which creates /var/lib/waydroid/overlay on first boot) has not
-    // run yet. The overlay upper dir is just a directory tree bind-mounted
-    // over /system by the waydroid container — creating it early is safe and
-    // lets translator installs work before the guest's first boot.
-    std::fs::create_dir_all(waydroid_overlay.join("system")).map_err(|e| {
-        DiskError::FileSystem(format!(
-            "failed to create waydroid overlay dir {waydroid_overlay:?}: {e}"
-        ))
-    })?;
-    Ok(waydroid_overlay)
+    Ok(None)
 }
 
 fn read_build_prop(path: &Path) -> Result<HashMap<String, String>, DiskError> {
@@ -209,49 +173,83 @@ fn read_build_prop(path: &Path) -> Result<HashMap<String, String>, DiskError> {
     Ok(props)
 }
 
-fn write_build_prop(path: &Path, props: &HashMap<String, String>) -> Result<(), DiskError> {
+fn build_prop_content(props: &HashMap<String, String>) -> String {
     let mut lines: Vec<String> = props.iter().map(|(k, v)| format!("{k}={v}")).collect();
     lines.sort();
-    let content = lines.join("\n") + "\n";
-    std::fs::write(path, content)
-        .map_err(|e| DiskError::FileSystem(format!("failed to write build.prop: {e}")))?;
+    lines.join("\n") + "\n"
+}
+
+fn sudo_output(args: &[&str]) -> Result<std::process::Output, DiskError> {
+    nbd::privileged_command(args[0])
+        .args(&args[1..])
+        .output()
+        .map_err(|e| DiskError::FileSystem(format!("failed to run sudo {}: {e}", args[0])))
+}
+
+fn sudo_ok(args: &[&str], what: &str) -> Result<(), DiskError> {
+    let output = sudo_output(args)?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(DiskError::FileSystem(format!(
+            "{what} failed ({}): {}",
+            output.status,
+            nbd::describe_sudo_failure(args[0], stderr.trim())
+        )));
+    }
     Ok(())
 }
 
-fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), DiskError> {
-    std::fs::create_dir_all(dst)
-        .map_err(|e| DiskError::FileSystem(format!("failed to create dir {dst:?}: {e}")))?;
-    for entry in std::fs::read_dir(src)
-        .map_err(|e| DiskError::FileSystem(format!("failed to read dir {src:?}: {e}")))?
-    {
-        let entry =
-            entry.map_err(|e| DiskError::FileSystem(format!("failed to read entry: {e}")))?;
-        let src_path = entry.path();
-        let dst_path = dst.join(entry.file_name());
-        if src_path.is_dir() {
-            copy_dir_recursive(&src_path, &dst_path)?;
-        } else {
-            std::fs::copy(&src_path, &dst_path)
-                .map_err(|e| DiskError::FileSystem(format!("failed to copy {src_path:?}: {e}")))?;
-            if dst_path.components().any(|c| c.as_os_str() == "bin") {
-                use std::os::unix::fs::PermissionsExt;
-                let mut perms = std::fs::metadata(&dst_path)
-                    .map_err(|e| {
-                        DiskError::FileSystem(format!(
-                            "failed to read permissions for {dst_path:?}: {e}"
-                        ))
-                    })?
-                    .permissions();
-                perms.set_mode(perms.mode() | 0o755);
-                std::fs::set_permissions(&dst_path, perms).map_err(|e| {
-                    DiskError::FileSystem(format!(
-                        "failed to set permissions for {dst_path:?}: {e}"
-                    ))
-                })?;
-            }
-        }
-    }
-    Ok(())
+fn sudo_mkdir_p(path: &Path) -> Result<(), DiskError> {
+    sudo_ok(
+        &["mkdir", "-p", &path.to_string_lossy()],
+        &format!("mkdir {}", path.display()),
+    )
+}
+
+fn sudo_cp_a(src: &Path, dst: &Path) -> Result<(), DiskError> {
+    sudo_ok(
+        &["cp", "-a", &src.to_string_lossy(), &dst.to_string_lossy()],
+        &format!("cp {} -> {}", src.display(), dst.display()),
+    )
+}
+
+fn sudo_mv(src: &Path, dst: &Path) -> Result<(), DiskError> {
+    sudo_ok(
+        &["mv", &src.to_string_lossy(), &dst.to_string_lossy()],
+        &format!("mv {} -> {}", src.display(), dst.display()),
+    )
+}
+
+fn sudo_rm_rf(path: &Path) -> Result<(), DiskError> {
+    sudo_ok(
+        &["rm", "-rf", &path.to_string_lossy()],
+        &format!("rm {}", path.display()),
+    )
+}
+
+fn sudo_chmod(mode: u32, path: &Path) -> Result<(), DiskError> {
+    sudo_ok(
+        &["chmod", &format!("{mode:o}"), &path.to_string_lossy()],
+        &format!("chmod {} {}", mode, path.display()),
+    )
+}
+
+fn sudo_write(path: &Path, content: &[u8]) -> Result<(), DiskError> {
+    // Write through a host-side temp file so sudo never has to read our content
+    // from stdin, then move it into the guest filesystem with cp.
+    let temp = std::env::temp_dir().join(format!(
+        "andler-translator-write-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or_default()
+    ));
+    std::fs::write(&temp, content)
+        .map_err(|e| DiskError::FileSystem(format!("failed to write temp file: {e}")))?;
+    let result = sudo_cp_a(&temp, path);
+    let _ = std::fs::remove_file(&temp);
+    result
 }
 
 #[cfg(test)]
@@ -268,7 +266,7 @@ mod tests {
     }
 
     #[test]
-    fn detect_waydroid_system_dir_creates_overlay_on_never_booted_image() {
+    fn detect_waydroid_system_dir_returns_none_on_never_booted_image() {
         let dir = std::env::temp_dir().join(format!(
             "andler_test_waydroid_{}_{}",
             std::process::id(),
@@ -278,13 +276,46 @@ mod tests {
                 .as_nanos()
         ));
         let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(detect_waydroid_system_dir(&dir).unwrap(), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn detect_waydroid_system_dir_prefers_standard_overlay_path() {
+        let dir = std::env::temp_dir().join(format!(
+            "andler_test_waydroid2_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(dir.join("var/lib/waydroid/overlay/system")).unwrap();
+        std::fs::create_dir_all(dir.join("overlay/system")).unwrap();
         let result = detect_waydroid_system_dir(&dir).unwrap();
-        assert!(
-            result.join("system").is_dir(),
-            "overlay/system must be created on a fresh image"
+        assert_eq!(
+            result,
+            Some(dir.join("var/lib/waydroid/overlay")),
+            "the standard waydroid overlay path must win over the legacy fallback"
         );
-        let again = detect_waydroid_system_dir(&dir).unwrap();
-        assert_eq!(result, again, "second call must reuse the existing overlay");
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn build_prop_content_sorts_keys_and_appends_newline() {
+        let mut props = HashMap::new();
+        props.insert(
+            "ro.dalvik.vm.native.bridge".to_string(),
+            "libndk_translation.so".to_string(),
+        );
+        props.insert("ro.enable.native.bridge.exec".to_string(), "1".to_string());
+        let content = build_prop_content(&props);
+        assert!(content.ends_with('\n'));
+        let lines: Vec<&str> = content.lines().collect();
+        assert_eq!(lines.len(), 2);
+        assert!(
+            lines.windows(2).all(|w| w[0] < w[1]),
+            "props must be sorted"
+        );
     }
 }
