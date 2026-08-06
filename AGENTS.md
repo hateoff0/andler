@@ -25,7 +25,6 @@ User → andler-cli (gRPC client) → andler-daemon (gRPC server) → andler-qem
 andler-core          (no workspace dependencies — bottom layer)
     ↑
     ├── andler-qemu     (depends on: core)
-    ├── andler-vmm      (depends on: core) [stub]
     ├── andler-disk     (depends on: core types only)
     ├── andler-net      (depends on: core)
     ├── andler-store    (depends on: core)
@@ -55,7 +54,6 @@ Any active state can transition to `Error` via `Fail(msg)`. `Stopped`/`Error` ac
 |-----------|---------|
 | `core/andler-core/` | Domain types, `HypervisorBackend` trait, config structs, FSM, error types. **No workspace dependencies** |
 | `backends/andler-qemu/` | QEMU backend: process management, QMP protocol, cmdline builder, `/proc`-based metrics |
-| `backends/andler-vmm/` | Cloud Hypervisor stub (all methods return `NotImplemented`) |
 | `services/andler-disk/` | `qemu-img`/`qemu-nbd` wrappers: disk create/clone/resize/compact, offline guest provisioning (guest tools, ARM translators), free-space pre-check |
 | `services/andler-net/` | Bridge/isolated network modes via `iproute2` |
 | `services/andler-firmware/` | Hardware auto-detection, GPU metrics (NVIDIA/AMD/Intel), firmware discovery |
@@ -67,6 +65,8 @@ Any active state can transition to `Error` via `Fail(msg)`. `Stopped`/`Error` ac
 | `docker/images/` | Guest base-image build pipelines (rootfs → bootable qcow2) |
 | `docs/` | Architecture, development guide, API reference, gRPC reference, changelog, roadmap |
 | `scripts/` | systemd service unit, installation script |
+
+Every crate directory has its own `README.md` with crate-local behavior and integration notes (e.g. QEMU wire schemas in `backends/andler-qemu/README.md`). Read the relevant crate README before modifying that crate's code.
 
 ## Development Commands
 
@@ -140,7 +140,9 @@ If the working environment cannot run a full build (e.g. no network access to cr
 
 Never assume a struct or enum's shape (field names, tuple vs. struct variant, etc.) from how you'd expect it to look — open the actual definition and check.
 
-**5. Commit policy**: the agent proposes commits (message + file list), the user makes them. Never run `git add`/`git commit` without explicit user approval; an unrequested commit is a workflow violation even when the change itself is good.
+**Commit policy**: the agent asks "may I commit?" with the message and file list, the user approves, then the agent runs `git add`/`git commit`. Never commit without explicit user approval; an unrequested commit is a workflow violation even when the change itself is good.
+
+**Done means**: all four gate steps pass, the docs describing the changed behavior are updated in the same commit (see Documentation Sync), and the commit has been made after explicit user approval.
 
 ## Code Conventions & Common Patterns
 
@@ -195,6 +197,16 @@ Never assume a struct or enum's shape (field names, tuple vs. struct variant, et
 - Environment variables: `ANDLERD_*` prefix (`ANDLERD_LISTEN_ADDR`, `ANDLERD_STORE_PATH`, `ANDLERD_LOG_FORMAT`)
 - CLI flags: `--daemon-addr`, `--kind`, `--file`, `--quick`, `--dry-run`, `--verify`, `--json`, `--full-id`
 
+**Adding or changing a config key/section** — the full chain, in one commit:
+1. `core/andler-core/src/config/<section>.rs` — the field's type
+2. `core/andler-core/src/config/instance.rs` — field on `InstanceConfig` + its default
+3. `core/andler-core/src/config/mod.rs` — re-export
+4. `services/andler-rpc/proto/andler.proto` — field on the `InstanceConfig` message
+5. `services/andler-rpc/src/convert.rs` — both conversion directions; required request fields → `ConvertError::MissingField`
+6. `cli/src/instance_file.rs` — TOML parsing (plus a `create.rs` flag or wizard step when user-facing)
+7. tests: core domain + conversion round-trip
+8. docs in the same commit: `docs/API.md` (TOML examples), `docs/GRPC_API.md`, `docs/CHANGELOG.md` (Unreleased); grep existing TOML examples for stale shapes
+
 ### Dependency Injection
 
 - `Daemon::new()` / `with_store()` / `restore()` — three construction paths
@@ -234,6 +246,26 @@ Docs drift is a bug, same severity as a failing test. Rules that keep the repo h
 - **AGENTS.md is an index, not a knowledge base.** Technical detail lives in the doc that owns it; AGENTS.md only points at the owner. Never copy content into AGENTS.md — duplicated knowledge drifts in one of the copies.
 - **No unverified numbers in docs.** Any count (variants, methods, tests, RPCs) must be checkable against the code at review time; prefer "count from the file" over a literal number. Pinned counts rot — test counts are already unpinned, and the same rule applies to `DaemonError` variants and `HypervisorBackend` methods.
 - **When fixing behavior, grep the docs that describe it** (error text, section headers, README feature lists) and fix them in the same commit — a doc claim that contradicts code is a bug report waiting to happen.
+- **Removing a component** (crate, RPC, CLI command, config key) is a behavior change too: update the owning docs and grep the whole repo for stale references — crate graphs (AGENTS.md, `docs/ARCHITECTURE.md`), README trees and crate-doc lists, `docs/GRPC_API.md` value tables, `docker/dev/Dockerfile.dev` COPY lines and stub loops, e2e scripts.
+
+### Docs map
+
+Where the living truths live — read the owner before writing the claim anywhere else:
+
+| Doc | Owns |
+|-----|------|
+| `README.md` | top-level feature list, quick start |
+| `docs/ARCHITECTURE.md` | architecture, FSM, snapshot mechanism |
+| `docs/API.md` | CLI reference, TOML config examples |
+| `docs/GRPC_API.md` | proto messages, gRPC status-code table |
+| `docs/DEVELOPMENT.md` | development workflow, crate layout |
+| `docs/CHANGELOG.md` | user-visible changes (Unreleased section) |
+| `docs/ROADMAP.md` | planned work |
+| `docker/dev/README.md` | docker build/test/e2e targets, containerized verification |
+| `backends/andler-qemu/README.md` | QEMU integration facts and Known Limitations |
+| other crate `README.md` | crate-local behavior |
+
+A new file in `docs/` must be registered here in the same commit.
 
 ## Important Files
 
@@ -249,7 +281,7 @@ Docs drift is a bug, same severity as a failing test. Rules that keep the repo h
 - `core/andler-core/src/android_profile.rs` — Android version/root/store profiles
 - `core/andler-core/src/clone.rs` — CloneMode and clone-type domain logic
 - `core/andler-core/src/fsm.rs` — `InstanceState` (7 states), `InstanceEvent` (7 events)
-- `core/andler-core/src/config/` — 9 config modules (instance, cpu, memory, disk, display, gpu, network, audio, input)
+- `core/andler-core/src/config/` — per-section config modules: 9-section `InstanceConfig` (cpu, memory, disk, display, gpu, network, audio, input, firmware) in `instance.rs`; `cdrom.rs` defines `CdromBus`
 - `core/andler-core/src/error.rs` — `BackendError`, `FsmError`
 - `core/andler-core/src/paths.rs` — Unified path resolution (`runtime_dir()`, `db_path()`)
 
@@ -260,11 +292,22 @@ Docs drift is a bug, same severity as a failing test. Rules that keep the repo h
 - `backends/andler-qemu/src/process.rs` — `QemuProcess` (spawn, logs, metrics)
 - `backends/andler-qemu/src/metrics.rs` — `/proc`-based per-VM metrics poller
 - `backends/andler-qemu/src/backend.rs` — QemuBackend: registry, spawn, QMP recovery (`diagnose_and_reset_qmp`)
+- `backends/andler-qemu/README.md` — crate-local behavior and the owning doc for QEMU integration facts (Known Limitations: non-migratable vmstate, chardev socket rules, QGA vs QMP). Read it before touching QMP/QGA/snapshot/process code.
 
 ### RPC & Protocol
 
-- `services/andler-rpc/proto/andler.proto` — 26 RPCs, all message/enum definitions
+- `services/andler-rpc/proto/andler.proto` — all RPCs and message/enum definitions (count from the file; the CLI is a thin 1:1 wrapper)
 - `services/andler-rpc/src/convert.rs` — Bidirectional proto↔domain conversions (1000+ lines)
+
+**Adding or changing an RPC** — the full chain, in one commit:
+1. `services/andler-rpc/proto/andler.proto` — message/enum + `rpc` stub
+2. build (prost via the crate's build.rs, requires `protoc`)
+3. `services/andler-rpc/src/convert.rs` — explicit `From`/`TryFrom`; request `UNSPECIFIED` → `ConvertError::MissingField` (never a silent default)
+4. `daemon/src/daemon/<ops>.rs` — the daemon method
+5. `daemon/src/service.rs` — `DaemonService` handler + `DaemonError` → `Status` mapping arm
+6. `cli/src/main.rs` enum + handler file (thin 1:1 request → print response)
+7. `daemon/src/grpc_roundtrip_test.rs` — round-trip test over real TCP
+8. docs in the same commit: `docs/GRPC_API.md`, `docs/API.md`, `docs/CHANGELOG.md` (Unreleased)
 
 ### Persistence
 
@@ -286,13 +329,15 @@ Docs drift is a bug, same severity as a failing test. Rules that keep the repo h
 ### CLI Commands
 
 - `cli/src/create.rs` — Create instance (TOML or CLI flags), `--dry-run`/`--verify`
+- `cli/src/clone.rs` — `Clone`/`Export` commands (`CloneInstanceRequest` with Linked/FullStandalone/SharedBase modes, `ExportInstanceDiskRequest`)
+- `cli/src/instance_file.rs` — TOML `InstanceFile` parsing for `create --file` (android_version, base_image_path, ovmf_vars_path, overlay/gapps/microg/libndk)
 - `cli/src/status.rs` — Status, List, Config, Logs, Metrics (`--json` on status/list/metrics)
 - `cli/src/disk.rs` — disk create/info/resize/compact (action flags mutually exclusive)
 - `cli/src/snapshot.rs` — snapshot create/restore/delete/list (`--json` before the subcommand)
 - `cli/src/guest.rs` — guest install/remove/list/boot-mode (online via QGA chardev `*.qga.sock`; offline qemu-nbd fallback)
 - `cli/src/doctor.rs` — environment checks (KVM/QEMU/OVMF/nbd/sudoers/daemon/base images)
 - `cli/src/lifecycle.rs` — start/stop/pause/resume/remove (remove `--purge` confirms on TTY)
-- `cli/src/edit.rs` — `config edit`: opens the real `instance.toml` in `$VISUAL`/`$EDITOR`
+- `cli/src/edit.rs` — `config view`/`edit` (opens the real `instance.toml` in `$VISUAL`/`$EDITOR`) and `config set` (whitelisted keys; `display.resolution` applies live via QGA, other keys → `InvalidConfigKey` — see `daemon::instance_ops::set_instance_config`)
 - `cli/src/preview.rs` — `--dry-run` client-side config/QEMU-cmdline resolution
 - `cli/src/verify.rs` — `--verify` pre-flight checks (paths, OVMF, disk size, GPU/CPU/memory)
 - `cli/src/wizard/` — Interactive wizard with hardware auto-detection
@@ -316,6 +361,43 @@ Docs drift is a bug, same severity as a failing test. Rules that keep the repo h
 - **Target platform**: Linux only (requires `/dev/kvm`, `kvm` group)
 - **User-mode**: All data under `~/.andler/` (no root required)
 - **systemd**: User service unit in `scripts/andlerd.service`
+
+### Environment Variables
+
+| Variable | Applies to | Purpose |
+|----------|-----------|---------|
+| `ANDLERD_LISTEN_ADDR` | daemon | Listen address (default `127.0.0.1:50051`) |
+| `ANDLERD_STORE_PATH` | daemon | SQLite database path (default `~/.andler/andlerd.db`) |
+| `ANDLERD_LOG_FORMAT=json` | daemon | Structured JSON logging (default human-readable) |
+| `ANDLERD_OVMF_CODE` | daemon | Override OVMF code path |
+| `ANDLERD_OVMF_VARS` | daemon | Override OVMF_VARS template path |
+| `ANDLERD_HEALTH_CHECK_INTERVAL_SECS` | daemon | Health-check interval (default 30s, `0` disables) |
+| `RUST_LOG` | daemon | tracing filter (overrides `-v`/`-vv` verbosity) |
+| `ANDLERD_ADDR` | cli | Daemon address (default `http://127.0.0.1:50051`); `--daemon-addr` flag overrides |
+| `ANDLER_HOME` | both | Root of all andler data (default `~/.andler`) |
+| `ANDLER_WIZARD_NOT_TTY` | cli | Test override: force non-TTY wizard behavior |
+
+### Runtime Paths
+
+| Path | Purpose |
+|------|---------|
+| `~/.andler/instances/<id>/` | Instance home: `instance.toml`, `disk.qcow2`, `VARS.fd`, `console.log`, `qemu.log` |
+| `~/.andler/cache/base-images/` | Android/Linux base images |
+| `~/.andler/andlerd.db` | Default SQLite store |
+| `$XDG_RUNTIME_DIR/andler/qmp/<id>.sock` | Per-instance QMP control socket |
+| `$XDG_RUNTIME_DIR/andler/qmp/<id>.qga.sock` | Per-instance guest-agent (QGA) chardev socket |
+
+### Working with a live daemon
+
+- **Test daemons run on a separate port** — e.g. `ANDLERD_LISTEN_ADDR=127.0.0.1:50052` with its own `ANDLERD_STORE_PATH`. Never share a store or interfere with the auto-started daemon on 50051; after a test, remove the test instance with `remove --purge` and stop the test daemon.
+- **`--daemon-addr` requires a scheme** — `http://127.0.0.1:50052`, not a bare `127.0.0.1:50052` (a bare address fails with "andlerd is not running").
+- **`ANDLERD_STORE_PATH` must live in a user-owned directory** — `ensure_private_dir` chmods the parent 0700 and fails with `PermissionDenied` on root-owned directories like `/tmp`.
+- **Never attach a second client to a live `qmp.sock`/`qga.sock`** — a QEMU chardev serves only the latest client, so a probe starves the daemon and hangs its operation (see Known Limitations in `backends/andler-qemu/README.md`).
+- **`config edit` spawns `$VISUAL`/`$EDITOR`** — the variable's value is executed as a command (e.g. `VISUAL="sed -i s/OldValue/NewValue/ /path/to/instance.toml"`); in scripted/agent environments the default (`true`) would fail, so always set it explicitly.
+- **A daemon restart loses live instances** — instances that were `Running` restore in `Error` state (backend handle gone); `start` is the documented recovery path and works from `Error`.
+- **Diagnosing a failed start**: read the tail of `~/.andler/instances/<id>/qemu.log` and `console.log` (QEMU stderr/stdout/serial); `andler logs <id>` streams the same.
+- **Instance stuck in `Error`**: the state message (from `andler status`) records why (health check, backend loss); after a daemon restart the `Error` record points at the original failure, and `start` retries.
+- **daemon tracing**: run andlerd with `RUST_LOG=debug` (or `ANDLERD_LOG_FORMAT=json`) for request-level diagnostics; the CLI `-v`/`-vv` flags affect the client only.
 
 ### Key Dependencies
 
@@ -346,7 +428,7 @@ Per-crate test counts are NOT pinned in this file or in `docs/` — they drift w
 
 Suites worth knowing about (no numbers):
 - `andler-core`: pure domain tests, no I/O, no QEMU — must stay fully testable offline
-- `andler-daemon`: unit tests across 12 modules in `daemon/src/daemon/tests/` + gRPC round-trip tests (real TCP, real tonic, no QEMU)
+- `andler-daemon`: unit tests across 11 test modules in `daemon/src/daemon/tests/` (+ `mod.rs`) + gRPC round-trip tests (real TCP, real tonic, no QEMU)
 - `andler-cli`: TOML parsing, helpers, wizard, create/status/disk/snapshot/guest commands
 - `andler-qemu`: cmdline reference-config comparison, QMP wire-schema tests, `/proc` metrics parsing
 - `andler-disk`: qemu-img parsing, NBD/mount helpers, translator staging (integration tests `#[ignore]`)
@@ -396,3 +478,4 @@ docker compose -f docker/dev/docker-compose.yml run --rm e2e
 - Domain logic (`andler-core`) must be fully testable without QEMU
 - gRPC changes require round-trip test additions
 - Integration tests (`#[ignore]`) for QEMU-dependent paths
+- Lifecycle/QMP/snapshot/guest-agent changes additionally require a live E2E against a test daemon (separate port, see "Working with a live daemon") — unit tests pin wire formats and parsing, not real QEMU behavior (precedent: vmstate snapshot blocking by non-migratable devices was only discoverable live)
