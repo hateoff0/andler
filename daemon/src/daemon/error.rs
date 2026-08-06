@@ -99,7 +99,7 @@ pub enum DaemonError {
     #[error("cannot change instance {0:?} disk path via edit; use `andler disk` commands instead")]
     ConfigDiskPathChanged(InstanceId),
 
-    #[error("instance reference {0:?} is not a valid UUID or hex prefix")]
+    #[error("instance reference {0:?} is not a valid ID (64 hex chars) or hex prefix")]
     MalformedInstanceRef(String),
 
     #[error("no instance found matching {0:?}")]

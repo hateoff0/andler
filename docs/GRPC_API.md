@@ -333,11 +333,11 @@ Response after instance creation.
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `instance_id` | `string` | Generated UUID of the new instance. |
+| `instance_id` | `string` | Generated 64-hex ID of the new instance. |
 
 ### `InstanceIdRequest`
 
-Simple request carrying an instance identifier (full UUID or prefix).
+Simple request carrying an instance identifier (full 64-hex ID or hex prefix).
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -392,7 +392,7 @@ Entry in the instance list (summary).
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `instance_id` | `string` | Instance UUID. |
+| `instance_id` | `string` | Instance ID. |
 | `name` | `string` | Instance name. |
 | `state` | `InstanceStateKind` | State. |
 | `error_message` | `string` | Error message (empty unless state == ERROR). |
@@ -429,7 +429,7 @@ Full configuration of an instance (read-only).
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `instance_id` | `string` | Instance UUID. |
+| `instance_id` | `string` | Instance ID. |
 | `name` | `string` | Instance name. |
 | `kind` | `InstanceKind` | VM type. |
 | `backend` | `BackendKind` | Hypervisor backend. |

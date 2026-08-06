@@ -28,7 +28,7 @@ pub(crate) fn resolve_linux(
 ) -> Result<Resolved, Box<dyn std::error::Error>> {
     let mut cfg = InstanceConfig::try_from(req.clone())?;
     let id = InstanceId::new();
-    let instance_dir = andler_core::paths::instances_root().join(id.0.to_string());
+    let instance_dir = andler_core::paths::instances_root().join(id.to_string());
 
     let detected = if cfg.firmware.ovmf_code_path.as_os_str().is_empty()
         || cfg.firmware.ovmf_vars_path.as_os_str().is_empty()
@@ -77,7 +77,7 @@ pub(crate) fn resolve_android(
     } else {
         PathBuf::from(&req.instances_root)
     };
-    let instance_dir = instances_root.join(id.0.to_string());
+    let instance_dir = instances_root.join(id.to_string());
 
     let base_image_path = if req.base_image_path.is_empty() {
         andler_core::base_image::resolve(&profile).unwrap_or_default()

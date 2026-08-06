@@ -113,7 +113,7 @@ Nine configuration sections, each in its own file:
 
 #### `config::instance` — Top-Level Config
 
-- **`InstanceId`**: Newtype wrapper around `Uuid` (v4). Unique per instance.
+- **`InstanceId`**: 32 random bytes; `Display` = 64 lowercase hex chars (docker-style). Any unique hex prefix resolves to the instance. Unique per instance.
 - **`BackendKind`**: `Qemu`.
 - **`InstanceKind`**: `LinuxVm { iso_path, cdrom_bus }` | `AndroidVm { android_profile }`.
 - **`InstanceConfig`**: The full configuration struct combining all sections:

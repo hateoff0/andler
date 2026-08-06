@@ -157,7 +157,7 @@ pub async fn handle_list(
             let id = if full_id {
                 entry.instance_id.as_str()
             } else {
-                short_id(&entry.instance_id)
+                crate::helpers::short_id(&entry.instance_id)
             };
             print!(
                 "{}  {}  {}",
@@ -172,10 +172,6 @@ pub async fn handle_list(
         }
     }
     Ok(())
-}
-
-fn short_id(full: &str) -> &str {
-    full.get(..8).unwrap_or(full)
 }
 
 pub async fn handle_config(
@@ -376,7 +372,10 @@ pub async fn handle_metrics(
 }
 
 fn print_instance_config(config: GetInstanceConfigResponse) {
-    println!("instance_id: {}", config.instance_id);
+    println!(
+        "instance_id: {}",
+        crate::helpers::short_id(&config.instance_id)
+    );
     println!("name: {}", config.name);
     println!(
         "backend: {}",
@@ -553,7 +552,7 @@ fn print_instance_config(config: GetInstanceConfigResponse) {
 
 #[cfg(test)]
 mod tests {
-    use super::{log_line_matches_filters, parse_state_filter, short_id, MetricsJson};
+    use super::{log_line_matches_filters, parse_state_filter, MetricsJson};
     use crate::CliLogSource;
     use andler_rpc::proto::{InstanceStateKind, LogLineResponse, LogStreamSource};
 
@@ -664,16 +663,5 @@ mod tests {
         assert!(json.contains("\"cpu_percent\":12.3"));
         assert!(json.contains("\"rss_bytes\":2254857830"));
         assert!(json.contains("\"vram_used_bytes\":null"));
-    }
-
-    #[test]
-    fn short_id_truncates_full_uuid_to_eight_chars() {
-        let full = "a1b2c3d4-e5f6-4789-a012-3456789abcde";
-        assert_eq!(short_id(full), "a1b2c3d4");
-    }
-
-    #[test]
-    fn short_id_returns_input_unchanged_if_shorter_than_eight() {
-        assert_eq!(short_id("abc"), "abc");
     }
 }

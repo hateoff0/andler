@@ -1,5 +1,7 @@
+use std::str::FromStr;
 use std::sync::Arc;
 
+use andler_core::InstanceId;
 use andler_rpc::proto::andler_service_client::AndlerServiceClient;
 use andler_rpc::proto::andler_service_server::AndlerServiceServer;
 use andler_rpc::proto::{
@@ -52,7 +54,7 @@ async fn spawn_server_and_connect() -> (
 #[tokio::test]
 async fn unknown_instance_round_trips_as_not_found_over_real_grpc() {
     let (mut client, server) = spawn_server_and_connect().await;
-    let unknown_id = uuid::Uuid::new_v4().to_string();
+    let unknown_id = "a".repeat(64);
 
     let status = client
         .get_instance_status(InstanceIdRequest {
@@ -212,8 +214,8 @@ async fn create_instance_round_trips_over_real_grpc_and_status_reports_created()
         .expect("a fully-populated CreateInstanceRequest must be accepted")
         .into_inner();
 
-    let id = uuid::Uuid::parse_str(&response.instance_id)
-        .expect("CreateInstanceResponse.instance_id must be a valid UUID");
+    let id = InstanceId::from_str(&response.instance_id)
+        .expect("CreateInstanceResponse.instance_id must be a valid 64-hex ID");
 
     let status = client
         .get_instance_status(InstanceIdRequest {
@@ -308,8 +310,8 @@ async fn create_instance_with_bridge_network_round_trips_over_real_grpc() {
         .await
         .expect("a request with NetworkMode::Bridge must be accepted")
         .into_inner();
-    uuid::Uuid::parse_str(&response.instance_id)
-        .expect("CreateInstanceResponse.instance_id must be a valid UUID");
+    InstanceId::from_str(&response.instance_id)
+        .expect("CreateInstanceResponse.instance_id must be a valid 64-hex ID");
 
     server.abort();
 }
@@ -468,7 +470,7 @@ async fn remove_unknown_instance_round_trips_as_not_found() {
 
     let status = client
         .remove_instance(RemoveInstanceRequest {
-            instance_id: uuid::Uuid::new_v4().to_string(),
+            instance_id: "a".repeat(64),
             purge: false,
         })
         .await
@@ -528,7 +530,7 @@ async fn get_instance_config_on_unknown_instance_round_trips_as_not_found() {
 
     let status = client
         .get_instance_config(InstanceIdRequest {
-            instance_id: uuid::Uuid::new_v4().to_string(),
+            instance_id: "a".repeat(64),
         })
         .await
         .expect_err("get_instance_config on an unregistered instance_id must fail");
@@ -572,7 +574,7 @@ async fn stream_instance_logs_on_unknown_instance_round_trips_as_not_found() {
 
     let status = client
         .stream_instance_logs(InstanceIdRequest {
-            instance_id: uuid::Uuid::new_v4().to_string(),
+            instance_id: "a".repeat(64),
         })
         .await
         .expect_err("streaming logs for an unregistered instance_id must fail");
@@ -602,7 +604,7 @@ async fn clone_instance_on_unknown_source_round_trips_as_not_found() {
 
     let status = client
         .clone_instance(CloneInstanceRequest {
-            source_instance_id: uuid::Uuid::new_v4().to_string(),
+            source_instance_id: "a".repeat(64),
             new_name: "clone".to_string(),
             instances_root: "/tmp/instances".to_string(),
             mode: CloneMode::Linked as i32,
@@ -633,9 +635,9 @@ async fn clone_instance_linux_vm_linked_with_qemu_img() {
         })
         .await
         .expect("cloning a LinuxVm with Linked should succeed when qemu-img is available");
-    let id = uuid::Uuid::parse_str(&response.into_inner().instance_id)
-        .expect("clone response must contain a valid UUID");
-    assert!(!id.is_nil());
+    let id = InstanceId::from_str(&response.into_inner().instance_id)
+        .expect("clone response must contain a valid 64-hex ID");
+    assert_eq!(id.to_string().len(), 64);
 
     server.abort();
 }
@@ -688,7 +690,7 @@ async fn export_instance_disk_on_unknown_source_round_trips_as_not_found() {
 
     let status = client
         .export_instance_disk(ExportInstanceDiskRequest {
-            source_instance_id: uuid::Uuid::new_v4().to_string(),
+            source_instance_id: "a".repeat(64),
             dest_path: "/tmp/export.qcow2".to_string(),
         })
         .await
@@ -739,9 +741,9 @@ async fn clone_instance_linux_vm_full_standalone_with_qemu_img() {
         })
         .await
         .expect("LinuxVm + FullStandalone should succeed when qemu-img is available");
-    let id = uuid::Uuid::parse_str(&response.into_inner().instance_id)
-        .expect("clone response must contain a valid UUID");
-    assert!(!id.is_nil());
+    let id = InstanceId::from_str(&response.into_inner().instance_id)
+        .expect("clone response must contain a valid 64-hex ID");
+    assert_eq!(id.to_string().len(), 64);
 
     server.abort();
 }
@@ -938,7 +940,7 @@ async fn list_guest_packages_instance_not_found() {
 
     let status = client
         .list_guest_packages(InstanceIdRequest {
-            instance_id: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee".to_string(),
+            instance_id: "b".repeat(64),
         })
         .await
         .expect_err("nonexistent instance must fail");

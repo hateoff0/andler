@@ -22,9 +22,10 @@ pub async fn resolve_echo(
 }
 
 fn print_echo(verb: &str, id: &str, name: Option<&str>) {
+    let short = crate::helpers::short_id(id);
     match name {
-        Some(name) => println!("{verb} {id} ({name})"),
-        None => println!("{verb} {id}"),
+        Some(name) => println!("{verb} {short} ({name})"),
+        None => println!("{verb} {short}"),
     }
 }
 
@@ -94,8 +95,8 @@ pub async fn handle_remove(
     let (id, name) = resolve_echo(client, &instance_id).await;
     if purge && std::io::stdin().is_terminal() {
         let label = match name.as_deref() {
-            Some(name) => format!("{id} ({name})"),
-            None => id.clone(),
+            Some(name) => format!("{} ({name})", crate::helpers::short_id(&id)),
+            None => crate::helpers::short_id(&id).to_string(),
         };
         let confirmed = inquire::Confirm::new(&format!(
             "This permanently deletes instance {label} and its disk image. Continue?"

@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
+use rand::RngExt;
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
 
 use super::{
     AudioConfig, CdromBus, CpuConfig, DiskConfig, DisplayConfig, FirmwareConfig, GpuConfig,
@@ -9,18 +9,71 @@ use super::{
 };
 use crate::android_profile::AndroidProfile;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct InstanceId(pub Uuid);
+pub const INSTANCE_ID_HEX_LEN: usize = 64;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct InstanceId([u8; 32]);
 
 impl std::fmt::Display for InstanceId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
+        for b in &self.0 {
+            write!(f, "{b:02x}")?;
+        }
+        Ok(())
     }
 }
 
 impl InstanceId {
     pub fn new() -> Self {
-        InstanceId(Uuid::new_v4())
+        let mut bytes = [0u8; 32];
+        rand::rng().fill(&mut bytes);
+        Self(bytes)
+    }
+}
+
+impl serde::Serialize for InstanceId {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(&self.to_string())
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for InstanceId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = String::deserialize(deserializer)?;
+        raw.parse().map_err(serde::de::Error::custom)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InvalidInstanceId;
+
+impl std::fmt::Display for InvalidInstanceId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "instance ID must be {INSTANCE_ID_HEX_LEN} hex chars")
+    }
+}
+
+impl std::str::FromStr for InstanceId {
+    type Err = InvalidInstanceId;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let bytes = s.as_bytes();
+        if bytes.len() != INSTANCE_ID_HEX_LEN {
+            return Err(InvalidInstanceId);
+        }
+        let mut out = [0u8; 32];
+        for (i, pair) in bytes.chunks_exact(2).enumerate() {
+            let hi = (pair[0] as char).to_digit(16).ok_or(InvalidInstanceId)?;
+            let lo = (pair[1] as char).to_digit(16).ok_or(InvalidInstanceId)?;
+            out[i] = ((hi as u8) << 4) | lo as u8;
+        }
+        Ok(Self(out))
     }
 }
 
@@ -103,6 +156,26 @@ mod tests {
         let a = InstanceId::new();
         let b = InstanceId::new();
         assert_ne!(a, b);
+    }
+
+    #[test]
+    fn instance_id_is_lowercase_hex_of_len_64() {
+        let id = InstanceId::new().to_string();
+        assert_eq!(id.len(), INSTANCE_ID_HEX_LEN);
+        assert!(id.bytes().all(|b| b.is_ascii_hexdigit()));
+        assert_eq!(id, id.to_lowercase());
+    }
+
+    #[test]
+    fn instance_id_parses_from_hex_string() {
+        let id = InstanceId::new();
+        let hex = id.to_string();
+        let parsed: InstanceId = hex.parse().expect("valid hex ID");
+        assert_eq!(parsed, id);
+        let upper: InstanceId = hex.to_uppercase().parse().expect("uppercase hex accepted");
+        assert_eq!(upper, id);
+        assert!("abc".parse::<InstanceId>().is_err());
+        assert!("zzzz".repeat(16).parse::<InstanceId>().is_err());
     }
 
     #[test]

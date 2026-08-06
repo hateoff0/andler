@@ -176,7 +176,7 @@ Overridable via:
 | `SnapshotOperationRequiresRunningInstance` | `FAILED_PRECONDITION` | Create/restore/delete requires `Running`/`Paused` (performed via QMP) |
 | `SnapshotLimitExceeded` | `FAILED_PRECONDITION` | Instance already has `MAX_SNAPSHOTS_PER_INSTANCE` — prevents unbounded internal snapshot growth |
 | `EmptyInstanceRef` | `INVALID_ARGUMENT` | Empty string passed as instance reference (distinct from `InstanceRefNotFound`) |
-| `MalformedInstanceRef` | `INVALID_ARGUMENT` | Reference string is neither valid UUID nor valid hex prefix |
+| `MalformedInstanceRef` | `INVALID_ARGUMENT` | Reference string is neither a valid 64-hex ID nor a hex prefix |
 | `InstanceRefNotFound` | `NOT_FOUND` | Prefix matched zero instances |
 | `AmbiguousInstanceId` | `INVALID_ARGUMENT` | Prefix matched multiple instances — candidates listed in message |
 | `ConfigIdMismatch` | `INVALID_ARGUMENT` | Config has different `InstanceId` than the one resolved from request |
@@ -243,7 +243,7 @@ Handles: `status`, `stream_instance_logs`, `stream_resource_metrics`, `list_inst
 Real TCP gRPC round-trip tests (no `qemu-img`/`/dev/kvm` required). Uses ephemeral `127.0.0.1` ports.
 
 **Categories**:
-- **Unknown/malformed instance ID**: status/start/pause/resume/remove on unknown → `NotFound`; non-UUID → `InvalidArgument`
+- **Unknown/malformed instance ID**: status/start/pause/resume/remove on unknown → `NotFound`; non-hex → `InvalidArgument`
 - **CreateInstance**: Full round-trip, missing required fields, Bridge network variant
 - **ListInstances**: Empty, reflects created instances, multiple instances
 - **RemoveInstance**: Happy path (create → start → fail → remove), unknown → `NotFound`
@@ -302,7 +302,7 @@ gRPC round-trip tests (integration, real TCP) covering the full gRPC round-trip 
 | `SnapshotOperationRequiresRunningInstance` | `InstanceId`, `InstanceState` | Create/restore/delete needs Running/Paused |
 | `SnapshotLimitExceeded` | `instance_id`, `current`, `limit` | Already has MAX_SNAPSHOTS_PER_INSTANCE |
 | `EmptyInstanceRef` | — | User passed empty string as instance reference |
-| `MalformedInstanceRef` | `String` | Not a valid UUID or hex prefix |
+| `MalformedInstanceRef` | `String` | Not a valid ID or hex prefix |
 | `InstanceRefNotFound` | `String` | Prefix matched zero instances |
 | `AmbiguousInstanceId` | `prefix`, `candidates` | Prefix matched multiple instances |
 | `ConfigIdMismatch` | `expected`, `actual` | Config has a different id |

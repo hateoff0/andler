@@ -47,11 +47,11 @@ dependencies = [
  "async-trait",
  "dirs",
  "futures-core",
+ "rand 0.10.2",
  "serde",
  "serde_json",
  "thiserror 1.0.69",
  "tokio",
- "uuid",
 ]
 
 [[package]]
@@ -120,7 +120,6 @@ dependencies = [
  "thiserror 1.0.69",
  "tonic",
  "tonic-build",
- "uuid",
 ]
 
 [[package]]
@@ -2745,7 +2744,6 @@ checksum = "bf80a72845275afea99e7f2b434723d3bc7e38470fcd1c7ed39a599c73319a53"
 dependencies = [
  "getrandom 0.4.3",
  "js-sys",
- "serde_core",
  "wasm-bindgen",
 ]
 

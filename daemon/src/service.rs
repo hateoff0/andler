@@ -138,7 +138,7 @@ impl AndlerService for DaemonService {
             )
             .await?;
         Ok(Response::new(CreateInstanceResponse {
-            instance_id: id.0.to_string(),
+            instance_id: id.to_string(),
         }))
     }
 
@@ -179,7 +179,7 @@ impl AndlerService for DaemonService {
             .await?;
 
         Ok(Response::new(CreateInstanceResponse {
-            instance_id: id.0.to_string(),
+            instance_id: id.to_string(),
         }))
     }
 
@@ -256,7 +256,7 @@ impl AndlerService for DaemonService {
             .map(|summary| {
                 let (state, error_message) = convert::instance_state_to_proto(&summary.state);
                 InstanceListEntry {
-                    instance_id: summary.id.0.to_string(),
+                    instance_id: summary.id.to_string(),
                     name: summary.name,
                     state: state as i32,
                     error_message,
@@ -352,7 +352,7 @@ impl AndlerService for DaemonService {
             .await?;
 
         Ok(Response::new(CreateInstanceResponse {
-            instance_id: id.0.to_string(),
+            instance_id: id.to_string(),
         }))
     }
 

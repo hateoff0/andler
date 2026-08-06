@@ -18,6 +18,6 @@ pub use display::{DisplayConfig, DisplayEngine, Resolution};
 pub use firmware::FirmwareConfig;
 pub use gpu::{GpuConfig, RenderBackend};
 pub use input::{InputConfig, PointerMode};
-pub use instance::{BackendKind, InstanceConfig, InstanceId, InstanceKind};
+pub use instance::{BackendKind, InstanceConfig, InstanceId, InstanceKind, INSTANCE_ID_HEX_LEN};
 pub use memory::MemoryConfig;
 pub use network::{NatBackend, NetworkConfig, NetworkMode};

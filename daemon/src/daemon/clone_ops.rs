@@ -21,7 +21,7 @@ impl Daemon {
         }
 
         let new_id = InstanceId::new();
-        let instance_dir = instances_root.join(new_id.0.to_string());
+        let instance_dir = instances_root.join(new_id.to_string());
         let mut dir_guard = super::types::InstanceDirGuard::new(instance_dir.clone());
 
         andler_core::paths::ensure_private_dir(&instance_dir)

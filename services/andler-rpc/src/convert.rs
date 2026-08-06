@@ -15,8 +15,8 @@ pub enum ConvertError {
     MissingAndroidVersion,
     #[error("missing instance_id")]
     MissingInstanceId,
-    #[error("invalid instance_id {0:?}: {1}")]
-    InvalidInstanceId(String, uuid::Error),
+    #[error("invalid instance_id {0:?}: expected 64 hex chars")]
+    InvalidInstanceId(String),
     #[error("missing or unspecified cpu_priority")]
     MissingCpuPriority,
     #[error("missing or unspecified disk_format")]
@@ -725,7 +725,7 @@ impl From<InstanceKind> for proto::InstanceKind {
 impl From<InstanceConfig> for proto::GetInstanceConfigResponse {
     fn from(value: InstanceConfig) -> Self {
         proto::GetInstanceConfigResponse {
-            instance_id: value.id.0.to_string(),
+            instance_id: value.id.to_string(),
             name: value.name,
             kind: Some(value.kind.into()),
             backend: proto::BackendKind::from(value.backend) as i32,
@@ -914,9 +914,8 @@ pub fn parse_instance_id(raw: &str) -> Result<andler_core::InstanceId, ConvertEr
     if raw.is_empty() {
         return Err(ConvertError::MissingInstanceId);
     }
-    uuid::Uuid::parse_str(raw)
-        .map(andler_core::InstanceId)
-        .map_err(|source| ConvertError::InvalidInstanceId(raw.to_string(), source))
+    raw.parse()
+        .map_err(|_| ConvertError::InvalidInstanceId(raw.to_string()))
 }
 
 pub fn instance_state_to_proto(state: &InstanceState) -> (proto::InstanceStateKind, String) {
@@ -1104,13 +1103,13 @@ mod tests {
     #[test]
     fn parse_instance_id_rejects_garbage() {
         let err = parse_instance_id("not-a-uuid").unwrap_err();
-        assert!(matches!(err, ConvertError::InvalidInstanceId(_, _)));
+        assert!(matches!(err, ConvertError::InvalidInstanceId(_)));
     }
 
     #[test]
-    fn parse_instance_id_accepts_valid_uuid() {
+    fn parse_instance_id_accepts_valid_hex_id() {
         let id = andler_core::InstanceId::new();
-        let parsed = parse_instance_id(&id.0.to_string()).unwrap();
+        let parsed = parse_instance_id(&id.to_string()).unwrap();
         assert_eq!(parsed, id);
     }
 
@@ -1346,7 +1345,7 @@ mod tests {
         let id = cfg.id;
         let response: proto::GetInstanceConfigResponse = cfg.into();
 
-        assert_eq!(response.instance_id, id.0.to_string());
+        assert_eq!(response.instance_id, id.to_string());
         assert_eq!(response.name, "test-vm");
         assert_eq!(response.backend(), proto::BackendKind::Qemu);
 
@@ -1606,7 +1605,7 @@ mod tests {
     #[test]
     fn update_request_round_trips_to_instance_config_with_given_id() {
         let cfg = sample_instance_config();
-        let req = instance_config_to_update_request(cfg.clone(), cfg.id.0.to_string());
+        let req = instance_config_to_update_request(cfg.clone(), cfg.id.to_string());
         let back = update_request_to_instance_config(cfg.id, req).unwrap();
         assert_eq!(cfg, back);
     }
@@ -1624,7 +1623,7 @@ mod tests {
     #[test]
     fn update_request_missing_disk_is_rejected() {
         let cfg = sample_instance_config();
-        let mut req = instance_config_to_update_request(cfg.clone(), cfg.id.0.to_string());
+        let mut req = instance_config_to_update_request(cfg.clone(), cfg.id.to_string());
         req.disk = None;
         let err = update_request_to_instance_config(cfg.id, req).unwrap_err();
         assert!(matches!(err, ConvertError::MissingField("disk")));

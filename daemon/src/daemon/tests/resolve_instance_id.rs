@@ -2,14 +2,14 @@ use super::common::*;
 use super::*;
 
 #[tokio::test]
-async fn full_uuid_resolves_without_needing_registration() {
+async fn full_id_resolves_without_needing_registration() {
     let daemon = Daemon::new();
     let random_id = InstanceId::new();
 
     let resolved = daemon
-        .resolve_instance_id(&random_id.0.to_string())
+        .resolve_instance_id(&random_id.to_string())
         .await
-        .expect("full UUID must resolve");
+        .expect("full ID must resolve");
 
     assert_eq!(resolved, random_id);
 }
@@ -40,8 +40,8 @@ async fn unique_prefix_resolves_to_the_matching_instance() {
     let id = cfg.id;
     daemon.create_instance(cfg).await.expect("create instance");
 
-    let full = id.0.to_string();
-    let prefix = &full[..8];
+    let full = id.to_string();
+    let prefix = &full[..12];
 
     let resolved = daemon
         .resolve_instance_id(prefix)
@@ -60,10 +60,11 @@ async fn unique_prefix_resolves_to_the_matching_instance() {
 async fn ambiguous_prefix_lists_every_candidate() {
     let daemon = Daemon::new();
 
-    let shared_prefix_hex = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
-    let id_a = InstanceId(uuid::Uuid::parse_str(shared_prefix_hex).unwrap());
-    let shared_prefix_hex_b = "aaaaaaaa-aaaa-4aaa-8aaa-bbbbbbbbbbbb";
-    let id_b = InstanceId(uuid::Uuid::parse_str(shared_prefix_hex_b).unwrap());
+    let id_a = "a".repeat(64).parse::<InstanceId>().expect("valid hex");
+    let id_b = format!("{}bb", "a".repeat(62))
+        .parse::<InstanceId>()
+        .expect("valid hex");
+    assert_ne!(id_a, id_b);
 
     let mut cfg_a = sample_config();
     cfg_a.id = id_a;
@@ -73,14 +74,12 @@ async fn ambiguous_prefix_lists_every_candidate() {
     cfg_b.id = id_b;
     daemon.create_instance(cfg_b).await.expect("create b");
 
-    let err = daemon
-        .resolve_instance_id("aaaaaaaa-aaaa-4aaa-8aaa-")
-        .await
-        .unwrap_err();
+    let prefix = "a".repeat(20);
+    let err = daemon.resolve_instance_id(&prefix).await.unwrap_err();
 
     match err {
         DaemonError::AmbiguousInstanceId { prefix, candidates } => {
-            assert_eq!(prefix, "aaaaaaaa-aaaa-4aaa-8aaa-");
+            assert_eq!(prefix, "a".repeat(20));
             assert_eq!(candidates.len(), 2);
             assert!(candidates.contains(&id_a));
             assert!(candidates.contains(&id_b));

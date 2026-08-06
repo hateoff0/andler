@@ -122,6 +122,7 @@ pub fn resolve(profile: &AndroidProfile) -> Result<PathBuf, BaseImageError> {
 mod tests {
     use super::*;
     use crate::android_profile::{AndroidVersion, ArmTranslator};
+    use crate::config::InstanceId;
     use crate::paths::ANDLER_HOME_ENV;
     use std::sync::Mutex;
 
@@ -162,8 +163,8 @@ mod tests {
     impl EnvGuard {
         fn new() -> (Self, PathBuf) {
             let lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-            let base = std::env::temp_dir()
-                .join(format!("andler-base-image-test-{}", uuid::Uuid::new_v4()));
+            let base =
+                std::env::temp_dir().join(format!("andler-base-image-test-{}", InstanceId::new()));
             let cache_dir = base.join("cache").join("base-images");
             fs::create_dir_all(&cache_dir).unwrap();
             std::env::set_var(ANDLER_HOME_ENV, &base);

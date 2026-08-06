@@ -20,7 +20,10 @@ pub async fn handle_clone(
         })
         .await?
         .into_inner();
-    println!("cloned instance_id={}", response.instance_id);
+    println!(
+        "cloned instance_id={}",
+        crate::helpers::short_id(&response.instance_id)
+    );
     Ok(())
 }
 

@@ -121,7 +121,7 @@ Orchestrates all operations. Holds backend registry, instance state, optional pe
 - Instance lifecycle via FSM transitions
 - `InstanceDirGuard` RAII for cleanup on partial failure
 - `create_linux_instance()` / `create_android_instance()` — high-level resource creation + registration
-- `resolve_instance_id()` — Docker-style partial ID resolution (8-char hex prefix)
+- `resolve_instance_id()` — Docker-style partial ID resolution (12-char hex prefix)
 - `update_instance_config()` — Edit config via gRPC, protects id/kind/disk.path
 - `DaemonService` — thin gRPC wrapper, one method per Daemon method
 - Error mapping: `DaemonError` (29 variants) → gRPC status codes

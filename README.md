@@ -368,7 +368,7 @@ All data under `~/.andler/`:
 ~/.andler/
 ├── andlerd.db                   SQLite state store
 ├── instances/
-│   └── <uuid>/
+│   └── <id>/
 │       ├── instance.toml       Instance configuration
 │       ├── disk.qcow2          Instance disk (or overlay)
 │       └── VARS.fd             Per-instance OVMF vars copy

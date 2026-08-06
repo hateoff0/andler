@@ -49,11 +49,11 @@ impl QemuBackend {
     }
 
     fn handle_for(cfg: &InstanceConfig) -> BackendHandle {
-        BackendHandle(format!("qemu:{}", cfg.id.0))
+        BackendHandle(format!("qemu:{}", cfg.id))
     }
 
     fn qmp_socket_path_for(cfg: &InstanceConfig) -> PathBuf {
-        qmp_socket_dir().join(format!("{}.sock", cfg.id.0))
+        qmp_socket_dir().join(format!("{}.sock", cfg.id))
     }
 
     async fn ensure_qmp_connected(instance: &mut RunningInstance) -> Result<(), QmpError> {
@@ -315,7 +315,7 @@ impl HypervisorBackend for QemuBackend {
 
         let network_info = match &cfg.network.mode {
             NetworkMode::Bridge { interface: bridge } => {
-                let tap_iface = format!("tap{}", cfg.id.0);
+                let tap_iface = format!("tap{}", cfg.id);
                 self.network_service
                     .setup_bridge(bridge, &tap_iface)
                     .await
@@ -945,7 +945,7 @@ mod tests {
             let path = std::env::temp_dir().join(format!(
                 "andler-qemu-test-{}-{}",
                 std::process::id(),
-                InstanceId::new().0
+                InstanceId::new().to_string()
             ));
             std::fs::create_dir_all(&path).expect("create test temp dir");
             TestTempDir(path)

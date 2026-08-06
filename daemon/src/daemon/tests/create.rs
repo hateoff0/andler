@@ -55,7 +55,7 @@ async fn create_linux_instance_places_disk_inside_own_instance_dir() {
         .await
         .unwrap();
 
-    let instance_dir = instances_root.join(id.0.to_string());
+    let instance_dir = instances_root.join(id.to_string());
     let expected_disk_path = instance_dir.join("my-vm-disk.qcow2");
     assert!(expected_disk_path.exists());
     assert!(instance_dir.join("VARS.fd").exists());
@@ -113,7 +113,7 @@ async fn create_android_instance_resolves_profile_and_creates_overlay() {
     let status = daemon.status(id).await.unwrap();
     assert_eq!(status.state, InstanceState::Created);
 
-    let instance_dir = instances_root.join(id.0.to_string());
+    let instance_dir = instances_root.join(id.to_string());
     assert!(instance_dir.join("disk.qcow2").exists());
     assert!(instance_dir.join("VARS.fd").exists());
 

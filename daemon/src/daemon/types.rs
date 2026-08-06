@@ -46,7 +46,7 @@ pub(crate) async fn write_instance_toml(instance_dir: &std::path::Path, cfg: &In
         Ok(s) => s,
         Err(err) => {
             tracing::error!(
-                instance_id = %cfg.id.0,
+                instance_id = %cfg.id,
                 error = %err,
                 "failed to serialize instance.toml (instance was still created successfully)"
             );
@@ -57,7 +57,7 @@ pub(crate) async fn write_instance_toml(instance_dir: &std::path::Path, cfg: &In
     let path = instance_dir.join("instance.toml");
     if let Err(err) = tokio::fs::write(&path, toml_string).await {
         tracing::error!(
-            instance_id = %cfg.id.0,
+            instance_id = %cfg.id,
             path = %path.display(),
             error = %err,
             "failed to write instance.toml (instance was still created successfully)"
@@ -68,7 +68,7 @@ pub(crate) async fn write_instance_toml(instance_dir: &std::path::Path, cfg: &In
 pub(crate) async fn purge_instance_files(id: InstanceId, config: &InstanceConfig) {
     if let Err(err) = tokio::fs::remove_file(&config.disk.path).await {
         tracing::error!(
-            instance_id = %id.0,
+            instance_id = %id,
             path = %config.disk.path.display(),
             error = %err,
             "purge: failed to remove instance disk file"
@@ -77,7 +77,7 @@ pub(crate) async fn purge_instance_files(id: InstanceId, config: &InstanceConfig
 
     if let Err(err) = tokio::fs::remove_file(&config.firmware.ovmf_vars_path).await {
         tracing::error!(
-            instance_id = %id.0,
+            instance_id = %id,
             path = %config.firmware.ovmf_vars_path.display(),
             error = %err,
             "purge: failed to remove instance OVMF_VARS file"
@@ -87,12 +87,12 @@ pub(crate) async fn purge_instance_files(id: InstanceId, config: &InstanceConfig
     if let Some(parent) = config.disk.path.parent() {
         let is_instance_dir = parent
             .file_name()
-            .is_some_and(|name| name.to_string_lossy() == id.0.to_string());
+            .is_some_and(|name| name.to_string_lossy() == id.to_string());
 
         if is_instance_dir {
             if let Err(err) = tokio::fs::remove_dir_all(parent).await {
                 tracing::error!(
-                    instance_id = %id.0,
+                    instance_id = %id,
                     path = %parent.display(),
                     error = %err,
                     "purge: failed to remove instance directory"

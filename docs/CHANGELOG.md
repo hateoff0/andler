@@ -34,6 +34,7 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 #### CLI
 
 - **GApps prompt moved earlier in wizard**: Base image variant selection (VANILLA vs GApps) now happens before base image choice, so the wizard uses it to filter available images. Forwarded through quick-mode.
+- **Docker-style instance IDs**: Instance IDs are 64 lowercase hex chars (formatted like docker/SHA IDs) instead of UUIDv4. Human output (`create`, `clone`, `start`/`stop`/`pause`/`resume`, `remove`, `list`, `config`) shows the 12-char short ID; the full ID is available via `list --full-id`, `list --json`, and the `~/.andler/instances/<id>/` directory name. Instance references resolve by any unique hex prefix (existing behavior, now hex-only). Old UUID-named instance data is not migrated — remove and recreate.
 
 ### Added
 

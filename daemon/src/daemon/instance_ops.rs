@@ -5,7 +5,7 @@ use super::types::{write_instance_toml, InstanceDirGuard, InstanceRecord};
 use super::Daemon;
 use andler_core::{
     BackendError, DiskFormat, InstanceConfig, InstanceEvent, InstanceId, InstanceKind,
-    InstanceState, Resolution,
+    InstanceState, Resolution, INSTANCE_ID_HEX_LEN,
 };
 
 /// Checks that the files this instance needs to boot are still present on disk.
@@ -37,19 +37,21 @@ impl Daemon {
             return Err(DaemonError::EmptyInstanceRef);
         }
 
-        if let Ok(uuid) = uuid::Uuid::parse_str(raw) {
-            return Ok(InstanceId(uuid));
-        }
-
-        if !raw.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-') {
+        let needle = raw.to_ascii_lowercase();
+        if !needle.bytes().all(|b| b.is_ascii_hexdigit()) {
             return Err(DaemonError::MalformedInstanceRef(raw.to_string()));
         }
 
-        let needle = raw.to_ascii_lowercase();
+        if needle.len() == INSTANCE_ID_HEX_LEN {
+            return needle
+                .parse()
+                .map_err(|_| DaemonError::MalformedInstanceRef(raw.to_string()));
+        }
+
         let instances = self.instances.read().await;
         let matches: Vec<InstanceId> = instances
             .keys()
-            .filter(|id| id.0.to_string().starts_with(&needle))
+            .filter(|id| id.to_string().starts_with(&needle))
             .copied()
             .collect();
 
@@ -89,14 +91,14 @@ impl Daemon {
             // the real failure instead of claiming success.
             self.instances.write().await.remove(&id);
             tracing::error!(
-                instance_id = %id.0,
+                instance_id = %id,
                 error = %err,
                 "instance creation rolled back: failed to persist to store"
             );
             return Err(err);
         }
 
-        tracing::info!(instance_id = %id.0, name = %cfg.name, "instance created");
+        tracing::info!(instance_id = %id, name = %cfg.name, "instance created");
         Ok(id)
     }
 
@@ -112,7 +114,7 @@ impl Daemon {
         linked_overlay: bool,
     ) -> Result<InstanceId, DaemonError> {
         let id = InstanceId::new();
-        let instance_dir = instances_root.join(id.0.to_string());
+        let instance_dir = instances_root.join(id.to_string());
         let mut dir_guard = InstanceDirGuard::new(instance_dir.clone());
 
         andler_core::paths::ensure_private_dir(&instance_dir)
@@ -192,7 +194,7 @@ impl Daemon {
         ovmf_vars_template: PathBuf,
     ) -> Result<InstanceId, DaemonError> {
         let id = InstanceId::new();
-        let instance_dir = instances_root.join(id.0.to_string());
+        let instance_dir = instances_root.join(id.to_string());
         let mut dir_guard = InstanceDirGuard::new(instance_dir.clone());
 
         andler_core::paths::ensure_private_dir(&instance_dir)
@@ -286,9 +288,9 @@ impl Daemon {
         self.persist_state(id, &final_state).await;
 
         match &result {
-            Ok(()) => tracing::info!(instance_id = %id.0, "instance started"),
+            Ok(()) => tracing::info!(instance_id = %id, "instance started"),
             Err(err) => {
-                tracing::error!(instance_id = %id.0, error = %err, "instance failed to start")
+                tracing::error!(instance_id = %id, error = %err, "instance failed to start")
             }
         }
 
@@ -307,7 +309,7 @@ impl Daemon {
             }
 
             let handle = record.handle.clone().ok_or_else(|| {
-                DaemonError::Backend(BackendError::HandleNotFound(id.0.to_string()))
+                DaemonError::Backend(BackendError::HandleNotFound(id.to_string()))
             })?;
 
             record.state = record.state.clone().apply(InstanceEvent::Stop)?;
@@ -345,9 +347,9 @@ impl Daemon {
         self.persist_state(id, &final_state).await;
 
         match &result {
-            Ok(()) => tracing::info!(instance_id = %id.0, graceful, "instance stopped"),
+            Ok(()) => tracing::info!(instance_id = %id, graceful, "instance stopped"),
             Err(err) => {
-                tracing::error!(instance_id = %id.0, error = %err, "instance failed to stop")
+                tracing::error!(instance_id = %id, error = %err, "instance failed to stop")
             }
         }
 
@@ -363,11 +365,11 @@ impl Daemon {
         let result = backend.pause(&handle).await.map_err(DaemonError::Backend);
         match &result {
             Ok(()) => {
-                tracing::info!(instance_id = %id.0, "instance paused");
+                tracing::info!(instance_id = %id, "instance paused");
                 self.apply_event_and_persist(id, InstanceEvent::Pause).await;
             }
             Err(err) => {
-                tracing::error!(instance_id = %id.0, error = %err, "instance failed to pause")
+                tracing::error!(instance_id = %id, error = %err, "instance failed to pause")
             }
         }
         result
@@ -378,12 +380,12 @@ impl Daemon {
         let result = backend.resume(&handle).await.map_err(DaemonError::Backend);
         match &result {
             Ok(()) => {
-                tracing::info!(instance_id = %id.0, "instance resumed");
+                tracing::info!(instance_id = %id, "instance resumed");
                 self.apply_event_and_persist(id, InstanceEvent::Resume)
                     .await;
             }
             Err(err) => {
-                tracing::error!(instance_id = %id.0, error = %err, "instance failed to resume")
+                tracing::error!(instance_id = %id, error = %err, "instance failed to resume")
             }
         }
         result
@@ -417,7 +419,7 @@ impl Daemon {
         if let Some(store) = &self.store {
             if let Err(err) = store.delete_instance(id).await {
                 tracing::error!(
-                    instance_id = %id.0,
+                    instance_id = %id,
                     error = %err,
                     "failed to delete instance from store after in-memory removal"
                 );
@@ -430,7 +432,7 @@ impl Daemon {
             }
         }
 
-        tracing::info!(instance_id = %id.0, purge, "instance removed");
+        tracing::info!(instance_id = %id, purge, "instance removed");
         Ok(())
     }
 
@@ -473,7 +475,7 @@ impl Daemon {
 
                 backend.guest_exec_install(&handle, &package).await?;
                 tracing::info!(
-                    instance_id = %id.0,
+                    instance_id = %id,
                     package = %package,
                     "package installed via online guest-exec"
                 );
@@ -498,7 +500,7 @@ impl Daemon {
                     }
                 }
                 tracing::info!(
-                    instance_id = %id.0,
+                    instance_id = %id,
                     package = %package,
                     "package installed via offline qemu-nbd"
                 );
@@ -553,7 +555,7 @@ impl Daemon {
 
                 backend.guest_exec_remove(&handle, &package).await?;
                 tracing::info!(
-                    instance_id = %id.0,
+                    instance_id = %id,
                     package = %package,
                     "package removed via online guest-exec"
                 );
@@ -578,7 +580,7 @@ impl Daemon {
                     }
                 }
                 tracing::info!(
-                    instance_id = %id.0,
+                    instance_id = %id,
                     package = %package,
                     "package removed via offline qemu-nbd"
                 );
@@ -708,7 +710,7 @@ impl Daemon {
 
         andler_disk::boot_mode::switch_boot_mode(&overlay_path, mode).await?;
 
-        tracing::info!(instance_id = %id.0, mode = ?mode, "android boot mode switched successfully");
+        tracing::info!(instance_id = %id, mode = ?mode, "android boot mode switched successfully");
         Ok(())
     }
 
@@ -777,7 +779,7 @@ impl Daemon {
         .await?;
 
         tracing::info!(
-            instance_id = %id.0,
+            instance_id = %id,
             translator = ?translator,
             "ARM translator switched successfully"
         );
@@ -900,7 +902,7 @@ fn spawn_compact_on_shutdown(id: InstanceId, disk: andler_core::DiskConfig) {
     }
     if disk.format != DiskFormat::Qcow2 {
         tracing::debug!(
-            instance_id = %id.0,
+            instance_id = %id,
             format = ?disk.format,
             "compact_on_shutdown is enabled but disk format is not qcow2 — skipping"
         );
@@ -910,21 +912,21 @@ fn spawn_compact_on_shutdown(id: InstanceId, disk: andler_core::DiskConfig) {
     let path = disk.path.clone();
     tokio::spawn(async move {
         tracing::info!(
-            instance_id = %id.0,
+            instance_id = %id,
             path = %path.display(),
             "compact_on_shutdown: starting automatic disk compaction"
         );
         match andler_disk::qcow2::compact(&path).await {
             Ok(()) => {
                 tracing::info!(
-                    instance_id = %id.0,
+                    instance_id = %id,
                     path = %path.display(),
                     "compact_on_shutdown: disk compaction finished"
                 );
             }
             Err(err) => {
                 tracing::error!(
-                    instance_id = %id.0,
+                    instance_id = %id,
                     path = %path.display(),
                     error = %err,
                     "compact_on_shutdown: automatic disk compaction failed"

@@ -412,7 +412,7 @@ A new file in `docs/` must be registered here in the same commit.
 | `rusqlite` | SQLite persistence |
 | `tracing` | Structured logging |
 | `nvml-wrapper` | NVIDIA GPU metrics |
-| `uuid` | Instance IDs (v4) |
+| `rand` | Instance ID generation (64-hex, docker-style) |
 
 ## Testing & QA
 
@@ -464,7 +464,7 @@ docker compose -f docker/dev/docker-compose.yml run --rm e2e
 
 `docker/dev/e2e_smoke.sh` runs full lifecycle:
 1. Start `andlerd` background process
-2. Create Android instance (extracts the UUID from the `Created instance <name> (<id>)` output)
+2. Create Android instance (extracts the short ID from the `Created instance <name> (<id>)` output)
 3. Negative checks: `status` of a nonexistent instance fails with "not found"; `disk create --size 0` is rejected; `create --disk-size-gib 0` is rejected by clap's range
 4. Start instance
 5. Stream metrics for 5 seconds

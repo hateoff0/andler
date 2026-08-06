@@ -126,7 +126,7 @@ Lists all registered instances. Supports filtering by state and name (regex, cas
 | `--name <REGEX>` | Filter by instance name (regular expression, case-insensitive) |
 | `--sort <FIELD>` | Sort by: `none` (default), `name`, `state` |
 | `--json` | Output as JSON array |
-| `--full-id` / `-q` | Show full UUID instead of 8-char short ID |
+| `--full-id` / `-q` | Show the full 64-char ID instead of the 12-char short ID |
 
 ### `config`
 

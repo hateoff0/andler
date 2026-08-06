@@ -9,7 +9,6 @@ andler-core = { path = "../../core/andler-core" }
 tonic = { workspace = true }
 prost = { workspace = true }
 thiserror = { workspace = true }
-uuid = { version = "1", features = ["v4"] }
 
 [build-dependencies]
 tonic-build = { workspace = true }

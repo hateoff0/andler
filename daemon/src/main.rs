@@ -61,10 +61,10 @@ async fn shutdown_signal(daemon: Arc<Daemon>) {
     };
 
     for id in running_ids {
-        tracing::info!(instance_id = %id.0, "stopping instance on shutdown");
+        tracing::info!(instance_id = %id, "stopping instance on shutdown");
         if let Err(error) = daemon.stop_instance(id, true).await {
             tracing::warn!(
-                instance_id = %id.0,
+                instance_id = %id,
                 %error,
                 "failed to stop instance on shutdown"
             );

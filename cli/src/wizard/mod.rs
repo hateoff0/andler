@@ -576,8 +576,9 @@ pub async fn send_result(
     match result {
         WizardResult::Linux(req, _) => {
             let id = client.create_instance(req).await?.into_inner().instance_id;
-            println!("✓ VM created: {id}");
-            println!("  andler start {id}");
+            let short = crate::helpers::short_id(&id);
+            println!("✓ VM created: {short}");
+            println!("  andler start {short}");
         }
         WizardResult::Android(req) => {
             let id = client
@@ -585,8 +586,9 @@ pub async fn send_result(
                 .await?
                 .into_inner()
                 .instance_id;
-            println!("✓ Android VM created: {id}");
-            println!("  andler start {id}");
+            let short = crate::helpers::short_id(&id);
+            println!("✓ Android VM created: {short}");
+            println!("  andler start {short}");
         }
     }
     Ok(())

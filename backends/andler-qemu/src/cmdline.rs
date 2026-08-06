@@ -291,7 +291,7 @@ fn network_args(cfg: &InstanceConfig) -> Vec<String> {
             ],
         },
         NetworkMode::Bridge { interface: bridge } => {
-            let tap_iface = format!("tap{}", cfg.id.0);
+            let tap_iface = format!("tap{}", cfg.id);
             vec![
                 "-netdev".to_string(),
                 format!(
@@ -664,7 +664,7 @@ mod tests {
                 "-netdev".to_string(),
                 format!(
                     "tap,id=net0,ifname=tap{},bridge=br0,script=no,downscript=no",
-                    cfg.id.0
+                    cfg.id
                 ),
                 "-device".to_string(),
                 format!("{},netdev=net0", cfg.network.device_model),

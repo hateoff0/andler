@@ -3,7 +3,6 @@ use std::sync::{Arc, Mutex};
 
 use andler_core::{InstanceConfig, InstanceId, InstanceState};
 use rusqlite::Connection;
-use uuid::Uuid;
 
 use crate::error::StoreError;
 
@@ -85,7 +84,7 @@ impl Store {
             conn.execute(
                 "INSERT OR REPLACE INTO instances (id, config_json, state_json) \
                  VALUES (?1, ?2, ?3)",
-                (id.0.to_string(), config_json, state_json),
+                (id.to_string(), config_json, state_json),
             )?;
             Ok(())
         })
@@ -103,7 +102,7 @@ impl Store {
             .run_blocking(move |conn| {
                 let rows = conn.execute(
                     "UPDATE instances SET state_json = ?1 WHERE id = ?2",
-                    (state_json, id.0.to_string()),
+                    (state_json, id.to_string()),
                 )?;
                 Ok(rows)
             })
@@ -121,7 +120,7 @@ impl Store {
             let row = conn
                 .query_row(
                     "SELECT config_json, state_json FROM instances WHERE id = ?1",
-                    [id.0.to_string()],
+                    [id.to_string()],
                     |row| {
                         let config_json: String = row.get(0)?;
                         let state_json: String = row.get(1)?;
@@ -158,7 +157,7 @@ impl Store {
 
     pub async fn delete_instance(&self, id: InstanceId) -> Result<(), StoreError> {
         self.run_blocking(move |conn| {
-            conn.execute("DELETE FROM instances WHERE id = ?1", [id.0.to_string()])?;
+            conn.execute("DELETE FROM instances WHERE id = ?1", [id.to_string()])?;
             Ok(())
         })
         .await
@@ -166,7 +165,7 @@ impl Store {
 
     pub async fn save_snapshot(&self, snapshot: &StoredSnapshot) -> Result<(), StoreError> {
         let id = snapshot.id.to_string();
-        let instance_id = snapshot.instance_id.0.to_string();
+        let instance_id = snapshot.instance_id.to_string();
         let tag = snapshot.tag.clone();
         let description = snapshot.description.clone();
         let created_at = snapshot.created_at.clone();
@@ -186,7 +185,7 @@ impl Store {
         &self,
         instance_id: InstanceId,
     ) -> Result<Vec<StoredSnapshot>, StoreError> {
-        let instance_id_str = instance_id.0.to_string();
+        let instance_id_str = instance_id.to_string();
 
         self.run_blocking(move |conn| {
             let mut stmt = conn.prepare(
@@ -209,7 +208,7 @@ impl Store {
         instance_id: InstanceId,
         tag: &str,
     ) -> Result<Option<StoredSnapshot>, StoreError> {
-        let instance_id_str = instance_id.0.to_string();
+        let instance_id_str = instance_id.to_string();
         let tag = tag.to_string();
 
         self.run_blocking(move |conn| {
@@ -234,7 +233,7 @@ impl Store {
         instance_id: InstanceId,
         tag: &str,
     ) -> Result<(), StoreError> {
-        let instance_id_str = instance_id.0.to_string();
+        let instance_id_str = instance_id.to_string();
         let tag = tag.to_string();
 
         self.run_blocking(move |conn| {
@@ -260,10 +259,10 @@ fn row_to_stored_snapshot(row: &rusqlite::Row<'_>) -> Result<StoredSnapshot, rus
     Ok(StoredSnapshot {
         id: uuid::Uuid::parse_str(row.get::<_, String>(0)?.as_str())
             .map_err(|e| rusqlite::Error::InvalidParameterName(e.to_string()))?,
-        instance_id: InstanceId(
-            uuid::Uuid::parse_str(row.get::<_, String>(1)?.as_str())
-                .map_err(|e| rusqlite::Error::InvalidParameterName(e.to_string()))?,
-        ),
+        instance_id: row
+            .get::<_, String>(1)?
+            .parse::<InstanceId>()
+            .map_err(|_| rusqlite::Error::InvalidParameterName("instance_id".into()))?,
         tag: row.get(2)?,
         description: row.get(3)?,
         created_at: row.get(4)?,
@@ -291,11 +290,6 @@ fn apply_schema(conn: &Connection) -> Result<(), StoreError> {
             ON snapshots(instance_id, tag);",
     )?;
     Ok(())
-}
-
-#[allow(dead_code)] // test utility; production code uses daemon's resolve_instance_id
-fn parse_instance_id(raw: &str) -> Result<InstanceId, uuid::Error> {
-    Uuid::parse_str(raw).map(InstanceId)
 }
 
 #[cfg(test)]
@@ -467,18 +461,6 @@ mod tests {
         store.save_instance(&cfg, &error_state).await.unwrap();
         let loaded = store.load_instance(id).await.unwrap();
         assert_eq!(loaded.state, error_state);
-    }
-
-    #[test]
-    fn parse_instance_id_round_trips_with_display() {
-        let id = InstanceId::new();
-        let parsed = parse_instance_id(&id.0.to_string()).unwrap();
-        assert_eq!(parsed, id);
-    }
-
-    #[test]
-    fn parse_instance_id_rejects_garbage() {
-        assert!(parse_instance_id("not-a-uuid").is_err());
     }
 
     #[tokio::test]

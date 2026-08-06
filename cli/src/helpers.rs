@@ -170,9 +170,25 @@ pub fn format_timestamp(rfc3339: &str) -> String {
     }
 }
 
+/// Docker-style short display ID: first 12 hex chars of the 64-char full ID.
+pub fn short_id(full: &str) -> &str {
+    full.get(..12).unwrap_or(full)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn short_id_truncates_full_id_to_twelve_chars() {
+        let full = "a1b2c3d4e5f6a7b8c9d0a1b2c3d4e5f6a7b8c9d0a1b2c3d4e5f6a7b8c9d0a1b2";
+        assert_eq!(short_id(full), "a1b2c3d4e5f6");
+    }
+
+    #[test]
+    fn short_id_returns_input_unchanged_if_shorter_than_twelve() {
+        assert_eq!(short_id("abc"), "abc");
+    }
 
     #[test]
     fn colorize_status_returns_plain_text_when_not_a_tty() {

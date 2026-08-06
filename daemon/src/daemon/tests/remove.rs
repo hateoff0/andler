@@ -201,7 +201,7 @@ async fn remove_instance_with_purge_keeps_non_empty_parent_directory() {
 async fn remove_instance_with_purge_recursively_deletes_own_instance_directory() {
     let root = TestTempDir::new();
     let id = InstanceId::new();
-    let instance_dir = root.path().join(id.0.to_string());
+    let instance_dir = root.path().join(id.to_string());
     tokio::fs::create_dir_all(&instance_dir).await.unwrap();
 
     let disk_path = instance_dir.join("disk.qcow2");

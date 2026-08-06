@@ -57,7 +57,7 @@ impl Daemon {
                 | InstanceState::Paused
                 | InstanceState::Stopping) => {
                     tracing::warn!(
-                        instance_id = %id.0,
+                        instance_id = %id,
                         previous_state = ?lost_state,
                         "restored instance was not in a terminal state before restart; \
                          backend handle cannot be recovered, marking as Error"
@@ -125,7 +125,7 @@ impl Daemon {
         let new_state = {
             let mut instances = self.instances.write().await;
             let Some(record) = instances.get_mut(&id) else {
-                tracing::error!(instance_id = %id.0, ?event, "instance vanished before FSM event could be applied");
+                tracing::error!(instance_id = %id, ?event, "instance vanished before FSM event could be applied");
                 return;
             };
             match record.state.clone().apply(event.clone()) {
@@ -134,7 +134,7 @@ impl Daemon {
                     state
                 }
                 Err(err) => {
-                    tracing::error!(instance_id = %id.0, ?event, error = %err, "failed to apply FSM event");
+                    tracing::error!(instance_id = %id, ?event, error = %err, "failed to apply FSM event");
                     return;
                 }
             }
@@ -156,7 +156,7 @@ impl Daemon {
         let handle = record
             .handle
             .clone()
-            .ok_or_else(|| DaemonError::Backend(BackendError::HandleNotFound(id.0.to_string())))?;
+            .ok_or_else(|| DaemonError::Backend(BackendError::HandleNotFound(id.to_string())))?;
         let backend = self.backend_for(record.config.backend)?.clone();
 
         Ok((backend, handle))
@@ -183,7 +183,7 @@ impl Daemon {
         let handle = record
             .handle
             .clone()
-            .ok_or_else(|| DaemonError::Backend(BackendError::HandleNotFound(id.0.to_string())))?;
+            .ok_or_else(|| DaemonError::Backend(BackendError::HandleNotFound(id.to_string())))?;
         let backend = self.backend_for(record.config.backend)?.clone();
 
         Ok((backend, handle))
@@ -199,7 +199,7 @@ impl Daemon {
         };
         store.save_instance(cfg, state).await.map_err(|err| {
             tracing::error!(
-                instance_id = %cfg.id.0,
+                instance_id = %cfg.id,
                 error = %err,
                 "failed to persist new instance to store"
             );
@@ -217,7 +217,7 @@ impl Daemon {
         };
         if let Err(err) = store.save_instance(cfg, state).await {
             tracing::error!(
-                instance_id = %cfg.id.0,
+                instance_id = %cfg.id,
                 error = %err,
                 "failed to persist updated instance config to store"
             );

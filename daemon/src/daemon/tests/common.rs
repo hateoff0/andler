@@ -13,7 +13,7 @@ impl TestTempDir {
         let path = std::env::temp_dir().join(format!(
             "andler-daemon-test-{}-{}",
             std::process::id(),
-            InstanceId::new().0
+            InstanceId::new().to_string()
         ));
         std::fs::create_dir_all(&path).expect("create test temp dir");
         TestTempDir(path)

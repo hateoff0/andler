@@ -26,7 +26,7 @@ impl Daemon {
                 Ok(backend) => backend.clone(),
                 Err(err) => {
                     tracing::warn!(
-                        instance_id = %id.0,
+                        instance_id = %id,
                         error = %err,
                         "health check: no backend registered, skipping"
                     );
@@ -38,7 +38,7 @@ impl Daemon {
                 Ok(status) => status,
                 Err(err) => {
                     tracing::warn!(
-                        instance_id = %id.0,
+                        instance_id = %id,
                         error = %err,
                         "health check: status query failed, will retry next cycle"
                     );
@@ -60,13 +60,13 @@ impl Daemon {
 
             if status.clean_shutdown {
                 tracing::info!(
-                    instance_id = %id.0,
+                    instance_id = %id,
                     reason = %reason,
                     "instance health check: guest shut down cleanly — marking Stopped"
                 );
                 if let Err(err) = self.mark_instance_stopped_cleanly(id).await {
                     tracing::error!(
-                        instance_id = %id.0,
+                        instance_id = %id,
                         error = %err,
                         "health check: failed to record clean shutdown in FSM"
                     );
@@ -75,7 +75,7 @@ impl Daemon {
             }
 
             tracing::error!(
-                instance_id = %id.0,
+                instance_id = %id,
                 reason = %reason,
                 "instance health check: process is no longer running (was Running) \
                  — marking Error. Restart it manually with `andler start`."
@@ -83,7 +83,7 @@ impl Daemon {
 
             if let Err(err) = self.mark_instance_crashed(id, reason).await {
                 tracing::error!(
-                    instance_id = %id.0,
+                    instance_id = %id,
                     error = %err,
                     "health check: failed to record crash in FSM"
                 );

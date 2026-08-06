@@ -266,7 +266,9 @@ SHARED_BASE_CLONE_ID="$(andler clone "$SOURCE_ANDROID_ID" \
     --instances-root "$ANDROID_INSTANCES_ROOT" \
     --mode shared-base | sed -n 's/^cloned instance_id=//p')"
 [[ -n "$SHARED_BASE_CLONE_ID" ]] || { echo "FAIL: empty instance_id from clone --mode shared-base"; exit 1; }
-SHARED_BASE_CLONE_DISK="$ANDROID_INSTANCES_ROOT/$SHARED_BASE_CLONE_ID/disk.qcow2"
+SHARED_BASE_CLONE_DIR="$(ls -d "$ANDROID_INSTANCES_ROOT"/"$SHARED_BASE_CLONE_ID"* 2>/dev/null | head -1)"
+[[ -n "$SHARED_BASE_CLONE_DIR" ]] || { echo "FAIL: shared-base clone dir missing"; exit 1; }
+SHARED_BASE_CLONE_DISK="$SHARED_BASE_CLONE_DIR/disk.qcow2"
 [[ -e "$SHARED_BASE_CLONE_DISK" ]] || { echo "FAIL: shared-base clone disk file missing"; exit 1; }
 
 echo "==> andler export (standalone file, no new instance registered)"

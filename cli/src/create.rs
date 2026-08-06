@@ -84,7 +84,10 @@ pub async fn handle(
                 let created_name = req.name.clone();
                 let response = client.create_instance(req).await?;
                 let id = response.into_inner().instance_id;
-                println!("Created instance {created_name} ({id})");
+                println!(
+                    "Created instance {created_name} ({})",
+                    crate::helpers::short_id(&id)
+                );
             }
             InstanceFileResult::Android(req) => {
                 if dry_run {
@@ -96,7 +99,10 @@ pub async fn handle(
                 let created_name = req.name.clone();
                 let response = client.create_android_instance(req).await?;
                 let id = response.into_inner().instance_id;
-                println!("Created instance {created_name} ({id})");
+                println!(
+                    "Created instance {created_name} ({})",
+                    crate::helpers::short_id(&id)
+                );
             }
         }
         return Ok(());
@@ -187,7 +193,10 @@ pub async fn handle(
             }
             let response = client.create_instance(req).await?;
             let id = response.into_inner().instance_id;
-            println!("Created instance {name} ({id})");
+            println!(
+                "Created instance {name} ({})",
+                crate::helpers::short_id(&id)
+            );
         }
         CliKind::Android => {
             let av = android_version.ok_or("--android-version is required for --kind android")?;
@@ -220,7 +229,10 @@ pub async fn handle(
             }
             let response = client.create_android_instance(req).await?;
             let id = response.into_inner().instance_id;
-            println!("Created instance {name} ({id})");
+            println!(
+                "Created instance {name} ({})",
+                crate::helpers::short_id(&id)
+            );
         }
     }
 
