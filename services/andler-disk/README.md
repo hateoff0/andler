@@ -58,13 +58,13 @@ Checks and manages packages in guest OS filesystems via `qemu-nbd` + mount + chr
 | `is_agent_installed` | `(mount_point: &Path, pm: PackageManager, package: &str) -> Result<bool, DiskError>` | Check installation via the manager's query (`dpkg -l` / `rpm -q` / `pacman -Q`), run inside the chroot through `sudo -n` |
 | `install_agent_offline` | `(disk_path: &Path, package: &str) -> Result<(), DiskError>` | Install package offline (NBD connect → mount → index refresh → chroot install). Wrapped in `spawn_blocking`. |
 | `remove_agent_offline` | `(disk_path: &Path, package: &str) -> Result<(), DiskError>` | Remove package offline (NBD connect → mount → chroot remove). Wrapped in `spawn_blocking`. |
-| `check_package_status_offline` | `(mount_point: &Path, binary_check: &str) -> PackageStatus` | Check binary presence in mounted filesystem |
+| `check_package_status_offline` | `(mount_point: &Path, binary_checks: &[&str]) -> PackageStatus` | Check binary presence in mounted filesystem — any candidate path (`/usr/bin/...` and `/usr/sbin/...`) marks the package installed |
 | `check_all_packages_offline` | `(mount_point: &Path) -> Vec<(&GuestPackage, PackageStatus)>` | Check all KNOWN_PACKAGES in mounted filesystem |
 | `check_all_packages_offline_with_disk` | `(disk_path: &Path) -> Result<Vec<(&GuestPackage, PackageStatus)>, DiskError>` | Full offline check: NBD connect + mount + check + unmount |
 | `check_android_packages_offline_with_disk` | `(disk_path: &Path) -> Result<Vec<(&GuestPackage, PackageStatus)>, DiskError>` | Full offline check for Android packages: NBD connect + mount + check + unmount |
 | `available_packages` | `(kind: &InstanceKind) -> &'static [GuestPackage]` | Return package list for instance kind: `ANDROID_PACKAGES` for Android, `KNOWN_PACKAGES` for Linux |
 
-**`PackageManager`**: `Apt` | `Dnf` | `Pacman`, with `binary_name()`, `install_args(pkg)`, `remove_args(pkg)`, `check_installed_args(pkg)` helpers.
+**`PackageManager`**: `Apt` | `Dnf` | `Pacman`, with `binary_name()`, `install_args(pkg)`, `remove_args(pkg)`, `check_installed_command(pkg)` helpers.
 
 **`PackageStatus`**: `Installed` | `NotInstalled` | `Unknown` (the check scripts can exit non-zero for reasons other than "not installed").
 

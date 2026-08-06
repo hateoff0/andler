@@ -38,11 +38,14 @@ impl PackageManager {
         }
     }
 
-    pub fn check_installed_args<'a>(&self, package: &'a str) -> Vec<&'a str> {
+    pub fn check_installed_command<'a>(&self, package: &'a str) -> (&'static str, Vec<&'a str>) {
         match self {
-            PackageManager::Apt => vec!["dpkg", "-l", package],
-            PackageManager::Dnf => vec!["rpm", "-q", package],
-            PackageManager::Pacman => vec!["-Qi", package],
+            // The query binary is not the package manager itself: `apt-get`
+            // has no `dpkg` subcommand, so the check runs `dpkg`/`rpm`
+            // directly inside the chroot.
+            PackageManager::Apt => ("dpkg", vec!["-l", package]),
+            PackageManager::Dnf => ("rpm", vec!["-q", package]),
+            PackageManager::Pacman => ("pacman", vec!["-Qi", package]),
         }
     }
 }
@@ -68,11 +71,11 @@ pub fn is_agent_installed(
     pkg_manager: PackageManager,
     package: &str,
 ) -> Result<bool, DiskError> {
-    let cmd_args = pkg_manager.check_installed_args(package);
+    let (query_binary, cmd_args) = pkg_manager.check_installed_command(package);
 
     let output = nbd::privileged_command("chroot")
         .arg(mount_point)
-        .arg(pkg_manager.binary_name())
+        .arg(query_binary)
         .args(cmd_args)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -244,24 +247,27 @@ pub struct GuestPackage {
     pub name: &'static str,
     pub description: &'static str,
 
-    pub binary_check: &'static str,
+    /// Candidate binary paths, checked in order — distributions differ in
+    /// where they install the same tool (e.g. `/usr/bin/qemu-ga` on Arch,
+    /// `/usr/sbin/qemu-ga` on Debian/Ubuntu).
+    pub binary_checks: &'static [&'static str],
 }
 
 pub const KNOWN_PACKAGES: &[GuestPackage] = &[
     GuestPackage {
         name: "spice-vdagent",
         description: "Shared clipboard & copy/paste between host and guest",
-        binary_check: "/usr/bin/spice-vdagentd",
+        binary_checks: &["/usr/bin/spice-vdagentd", "/usr/sbin/spice-vdagentd"],
     },
     GuestPackage {
         name: "qemu-guest-agent",
         description: "Host-guest communication (guest-exec, freeze/thaw)",
-        binary_check: "/usr/bin/qemu-ga",
+        binary_checks: &["/usr/bin/qemu-ga", "/usr/sbin/qemu-ga"],
     },
     GuestPackage {
         name: "spice-webdavd",
         description: "Shared folders via SPICE webdav",
-        binary_check: "/usr/bin/spice-webdavd",
+        binary_checks: &["/usr/bin/spice-webdavd"],
     },
 ];
 
@@ -269,12 +275,12 @@ pub const ANDROID_PACKAGES: &[GuestPackage] = &[
     GuestPackage {
         name: "libndk",
         description: "ARM translation (Google NDK, for AMD CPUs)",
-        binary_check: "var/lib/waydroid/overlay/system/lib/libndk_translation.so",
+        binary_checks: &["var/lib/waydroid/overlay/system/lib/libndk_translation.so"],
     },
     GuestPackage {
         name: "libhoudini",
         description: "ARM translation (Intel Houdini)",
-        binary_check: "var/lib/waydroid/overlay/system/lib/libhoudini.so",
+        binary_checks: &["var/lib/waydroid/overlay/system/lib/libhoudini.so"],
     },
 ];
 
@@ -292,9 +298,11 @@ pub enum PackageStatus {
     Unknown,
 }
 
-pub fn check_package_status_offline(mount_point: &Path, binary_check: &str) -> PackageStatus {
-    let full_path = mount_point.join(binary_check.strip_prefix('/').unwrap_or(binary_check));
-    if full_path.exists() {
+pub fn check_package_status_offline(mount_point: &Path, binary_checks: &[&str]) -> PackageStatus {
+    if binary_checks.iter().any(|binary_check| {
+        let full_path = mount_point.join(binary_check.strip_prefix('/').unwrap_or(binary_check));
+        full_path.exists()
+    }) {
         PackageStatus::Installed
     } else {
         PackageStatus::NotInstalled
@@ -307,7 +315,7 @@ pub fn check_all_packages_offline(
     KNOWN_PACKAGES
         .iter()
         .map(|pkg| {
-            let status = check_package_status_offline(mount_point, pkg.binary_check);
+            let status = check_package_status_offline(mount_point, pkg.binary_checks);
             (pkg, status)
         })
         .collect()
@@ -336,7 +344,7 @@ pub fn check_android_packages_offline_with_disk(
     let results = ANDROID_PACKAGES
         .iter()
         .map(|pkg| {
-            let status = check_package_status_offline(mount_guard.path(), pkg.binary_check);
+            let status = check_package_status_offline(mount_guard.path(), pkg.binary_checks);
             (pkg, status)
         })
         .collect();
@@ -423,13 +431,32 @@ mod tests {
     }
 
     #[test]
+    fn package_manager_check_installed_command_runs_the_query_binary() {
+        // Regression: the check must run `dpkg`/`rpm` directly — invoking
+        // `apt-get dpkg -l …` fails with "unknown command", which made
+        // every offline `guest remove` report "package is not installed".
+        assert_eq!(
+            PackageManager::Apt.check_installed_command("qemu-guest-agent"),
+            ("dpkg", vec!["-l", "qemu-guest-agent"])
+        );
+        assert_eq!(
+            PackageManager::Dnf.check_installed_command("qemu-guest-agent"),
+            ("rpm", vec!["-q", "qemu-guest-agent"])
+        );
+        assert_eq!(
+            PackageManager::Pacman.check_installed_command("qemu-guest-agent"),
+            ("pacman", vec!["-Qi", "qemu-guest-agent"])
+        );
+    }
+
+    #[test]
     fn check_package_status_offline_returns_installed_when_binary_exists() {
         let dir = std::env::temp_dir().join("andler-test-check-installed");
         let _ = std::fs::create_dir_all(dir.join("usr/bin"));
         let _ = std::fs::write(dir.join("usr/bin/spice-vdagentd"), b"");
 
         assert_eq!(
-            check_package_status_offline(&dir, "/usr/bin/spice-vdagentd"),
+            check_package_status_offline(&dir, &["/usr/bin/spice-vdagentd"]),
             PackageStatus::Installed
         );
 
@@ -442,8 +469,24 @@ mod tests {
         let _ = std::fs::create_dir_all(&dir);
 
         assert_eq!(
-            check_package_status_offline(&dir, "/usr/bin/spice-vdagentd"),
+            check_package_status_offline(&dir, &["/usr/bin/spice-vdagentd"]),
             PackageStatus::NotInstalled
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn check_package_status_offline_tries_all_candidate_paths() {
+        // Debian-style guests install qemu-ga in /usr/sbin, Arch-style in
+        // /usr/bin — the check must accept either location.
+        let dir = std::env::temp_dir().join("andler-test-check-sbin");
+        let _ = std::fs::create_dir_all(dir.join("usr/sbin"));
+        let _ = std::fs::write(dir.join("usr/sbin/qemu-ga"), b"");
+
+        assert_eq!(
+            check_package_status_offline(&dir, &["/usr/bin/qemu-ga", "/usr/sbin/qemu-ga"]),
+            PackageStatus::Installed
         );
 
         let _ = std::fs::remove_dir_all(&dir);

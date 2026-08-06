@@ -632,10 +632,17 @@ impl Daemon {
                     andler_disk::guest_tools::KNOWN_PACKAGES
                 };
                 for pkg in packages {
-                    let installed = backend
-                        .guest_check_binary_installed(&handle, pkg.binary_check)
-                        .await
-                        .unwrap_or(false);
+                    let mut installed = false;
+                    for binary in pkg.binary_checks {
+                        if backend
+                            .guest_check_binary_installed(&handle, binary)
+                            .await
+                            .unwrap_or(false)
+                        {
+                            installed = true;
+                            break;
+                        }
+                    }
                     results.push((
                         pkg.name.to_string(),
                         pkg.description.to_string(),
