@@ -15,6 +15,10 @@
 *.profraw
 *.profdata
 
+# Python
+__pycache__/
+*.pyc
+
 # Editors
 .idea/
 .zed/
@@ -36,7 +40,3 @@ Desktop.ini
 *.log
 *.tmp
 *.bak
-
-# Python
-__pycache__/
-*.pyc
