@@ -123,7 +123,9 @@ pub enum DaemonError {
     #[error("instance {0:?} is not an Android VM")]
     NotAndroid(InstanceId),
 
-    #[error("instance {0:?} must be stopped (currently {1:?}) to change config")]
+    #[error(
+        "instance {0:?} must be stopped (currently {1:?}) to perform this operation; stop it first"
+    )]
     InstanceMustBeStopped(InstanceId, InstanceState),
 
     #[error("Android requires UEFI/OVMF. Provide an OVMF_VARS template.")]

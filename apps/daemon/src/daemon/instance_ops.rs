@@ -473,12 +473,19 @@ impl Daemon {
                 let backend = self.backend_for(backend_kind)?;
 
                 if !backend.is_guest_agent_available(&handle).await? {
-                    return Err(DaemonError::GuestAgentUnavailable {
-                        instance_id: id,
-                        message: format!(
+                    let hint = match &state {
+                        InstanceState::Paused => {
+                            "VM is paused, so the guest agent cannot respond; \
+                             resume the VM or stop it first to install `{package}` offline"
+                        }
+                        _ => {
                             "VM is running but guest agent is not available; \
                              stop the VM first to install `{package}` offline"
-                        ),
+                        }
+                    };
+                    return Err(DaemonError::GuestAgentUnavailable {
+                        instance_id: id,
+                        message: hint.to_string(),
                     });
                 }
 
@@ -553,12 +560,19 @@ impl Daemon {
                 let backend = self.backend_for(backend_kind)?;
 
                 if !backend.is_guest_agent_available(&handle).await? {
-                    return Err(DaemonError::GuestAgentUnavailable {
-                        instance_id: id,
-                        message: format!(
+                    let hint = match &state {
+                        InstanceState::Paused => {
+                            "VM is paused, so the guest agent cannot respond; \
+                             resume the VM or stop it first to remove `{package}` offline"
+                        }
+                        _ => {
                             "VM is running but guest agent is not available; \
                              stop the VM first to remove `{package}` offline"
-                        ),
+                        }
+                    };
+                    return Err(DaemonError::GuestAgentUnavailable {
+                        instance_id: id,
+                        message: hint.to_string(),
                     });
                 }
 

@@ -290,6 +290,15 @@ The flag form (`andler disk --create --path <p> --size <s>`, `--info`, `--resize
 
 Guest package management — install, remove, or list packages in the guest OS. Auto-fallback: if VM is running and guest agent is available → online via the guest agent socket (`guest-exec`); if VM is stopped → offline via `qemu-nbd` + mount.
 
+Mode selection by instance state:
+
+| State | Behavior |
+|-------|----------|
+| `Running` | Online via the guest agent. If `qemu-guest-agent` is not installed/responding, the command fails with a hint to stop the VM first (offline path) — no silent fallback. |
+| `Paused` | Treated like online, but the frozen guest agent cannot respond, so the command fails with a hint to resume or stop the VM. |
+| `Created` / `Stopped` / `Error` | Offline via `qemu-nbd` + mount + `chroot` (requires the `nbd` kernel module, `qemu-utils`, and passwordless `sudo -n` for `qemu-nbd`/`umount`/`chroot` — see `andler doctor`). |
+| `Starting` / `Stopping` | Rejected. |
+
 ```bash
 # Install a package
 andler guest install spice-vdagent <instance-id>
@@ -306,7 +315,7 @@ andler guest boot-mode <instance-id> [android|linux]
 
 Known packages: `spice-vdagent` (shared folders), `qemu-guest-agent` (host-guest communication), `spice-webdavd` (webdav shared folders).
 
-**ARM translators**: `install libndk <id>` / `install libhoudini <id>` are special-cased — they go through `SwitchArmTranslator` (offline disk staging) instead of the package-manager path. Optional `--translator-dir <path>` points at a local cache directory with the extracted translator instead of downloading it.
+**ARM translators**: `install libndk <id>` / `install libhoudini <id>` are special-cased — they go through `SwitchArmTranslator` (offline disk staging) instead of the package-manager path. There is **no online path**: the translator is written into the stopped VM's disk overlay, so `Running`/`Paused` instances are rejected with "must be stopped … stop it first". Optional `--translator-dir <path>` points at a local cache directory with the extracted translator instead of downloading it. Without it, the daemon downloads the translator zip (~18 MiB) from GitHub on first use, caches it in `~/.andler/cache/arm-translators/`, and verifies its MD5; the download has a 15 s connect timeout and a 5 min total timeout — a broken/slow connection fails with a clear error pointing at `--translator-dir` instead of hanging forever. Daemon logs (`andler logs` / `RUST_LOG=info`) report each stage (download → md5 → extract).
 
 | Command | Description |
 |---------|-------------|

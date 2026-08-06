@@ -116,6 +116,14 @@ pub async fn handle(
                     .as_ref()
                     .map(|p| p.to_string_lossy().into_owned())
                     .unwrap_or_default();
+                match &translator_dir {
+                    Some(dir) => {
+                        println!("Installing ARM translator `{package}` from {} …", dir.display())
+                    }
+                    None => println!(
+                        "Installing ARM translator `{package}` (downloads ~18 MiB on first run; this can take a while) …"
+                    ),
+                }
                 let request = SwitchArmTranslatorRequest {
                     instance_ref: resolved_id,
                     translator: translator.into(),

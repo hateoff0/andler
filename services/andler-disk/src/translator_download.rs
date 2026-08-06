@@ -27,17 +27,46 @@ pub async fn ensure_translator(
             ))
         })?;
 
+    tracing::info!(
+        translator = ?translator,
+        android_version,
+        url,
+        "downloading ARM translator into {}",
+        cache_path.display()
+    );
     let bytes = download_file(url).await?;
+    tracing::info!(translator = ?translator, bytes = bytes.len(), "translator download complete, verifying md5");
     verify_md5(&bytes, expected_md5)?;
+    tracing::info!(translator = ?translator, "translator md5 verified, extracting");
     extract_zip(&bytes, &cache_path)?;
 
     Ok(cache_path)
 }
 
+const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+const TOTAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+
 async fn download_file(url: &str) -> Result<Vec<u8>, DiskError> {
-    let response = reqwest::get(url)
-        .await
-        .map_err(|e| DiskError::NbdSetupFailed(format!("failed to download {url}: {e}")))?;
+    download_file_with_timeouts(url, CONNECT_TIMEOUT, TOTAL_TIMEOUT).await
+}
+
+async fn download_file_with_timeouts(
+    url: &str,
+    connect_timeout: std::time::Duration,
+    total_timeout: std::time::Duration,
+) -> Result<Vec<u8>, DiskError> {
+    let client = reqwest::Client::builder()
+        .connect_timeout(connect_timeout)
+        .timeout(total_timeout)
+        .build()
+        .map_err(|e| DiskError::NbdSetupFailed(format!("failed to build http client: {e}")))?;
+
+    let response = client.get(url).send().await.map_err(|e| {
+        DiskError::NbdSetupFailed(format!(
+            "failed to download {url}: {e}; check your network connection or \
+                 pass --translator-dir <path> with a local copy of the translator"
+        ))
+    })?;
 
     if !response.status().is_success() {
         return Err(DiskError::NbdSetupFailed(format!(
@@ -51,6 +80,73 @@ async fn download_file(url: &str) -> Result<Vec<u8>, DiskError> {
         .await
         .map_err(|e| DiskError::NbdSetupFailed(format!("failed to read download: {e}")))
         .map(|b| b.to_vec())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn silent_server() -> (std::net::SocketAddr, tokio::sync::oneshot::Sender<()>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+        let addr = listener.local_addr().expect("bound addr");
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        tokio::task::spawn_blocking(move || {
+            let (mut _stream, _) = listener.accept().expect("accept");
+            let _ = rx.blocking_recv();
+        });
+        (addr, tx)
+    }
+
+    #[tokio::test]
+    async fn download_times_out_on_silent_server_instead_of_hanging_forever() {
+        let (addr, release) = silent_server().await;
+        let url = format!("http://{addr}/translator.zip");
+        let started = std::time::Instant::now();
+        let err = download_file_with_timeouts(
+            &url,
+            std::time::Duration::from_secs(1),
+            std::time::Duration::from_secs(1),
+        )
+        .await
+        .unwrap_err();
+        let _ = release.send(());
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "download must fail fast on a silent server, took {:?}",
+            started.elapsed()
+        );
+        assert!(
+            err.to_string().contains("--translator-dir"),
+            "error must point at the --translator-dir workaround: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn download_reports_http_error_status() {
+        use std::io::{Read, Write};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+        let addr = listener.local_addr().expect("bound addr");
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        tokio::task::spawn_blocking(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let mut buf = [0u8; 4096];
+            let _ = stream.read(&mut buf);
+            let _ = stream.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n");
+            let _ = stream.flush();
+            let _ = rx.blocking_recv();
+        });
+        let url = format!("http://{addr}/missing.zip");
+        let err = download_file_with_timeouts(
+            &url,
+            std::time::Duration::from_secs(1),
+            std::time::Duration::from_secs(5),
+        )
+        .await
+        .unwrap_err();
+        let _ = tx.send(());
+        assert!(err.to_string().contains("404"), "got: {err}");
+    }
 }
 
 fn verify_md5(bytes: &[u8], expected: &str) -> Result<(), DiskError> {

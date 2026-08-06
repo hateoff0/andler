@@ -53,7 +53,13 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 
 #### Services (`andler-disk`)
 
+- **ARM translator download could hang forever**: `translator_download` used `reqwest::get` with no timeouts — against a slow or silently-dropping connection (GitHub unreachable, filtered network) `andler guest install libndk|libhoudini` sat indefinitely with no output and no daemon log line. The download now has a 15 s connect timeout and a 5 min total timeout, logs each stage (download → md5 → extract), and its error points at `--translator-dir <path>` as the offline workaround. The CLI prints a progress line before starting. Regression-covered by two local tests (silent-server timeout, HTTP error status).
 - **Offline `guest remove` was refused even after a successful install**: `is_agent_installed` ran `chroot <mount> <manager> dpkg -l <pkg>` with the query binary passed as an *argument* to the manager — `apt-get dpkg` is not a valid invocation ("unknown command"), so the package was always reported as not installed and removal was refused. The install-state query now uses the manager's own query command (`dpkg -l` for Apt, `rpm -q` for Dnf, `pacman -Qi` for Pacman) via `PackageManager::check_installed_command`; the online QGA probe checks every candidate binary path too.
+
+#### Daemon
+
+- **Misleading "to change config" error on disk-touching guest ops**: `InstanceMustBeStopped` said "must be stopped … to change config", which was wrong for `guest install/remove libndk|libhoudini` and `guest boot-mode` (disk-staging operations, not config edits). The message is now operation-neutral: "must be stopped … to perform this operation; stop it first".
+- **Paused instances got a "VM is running" hint when the guest agent can't respond**: `guest install/remove <pkg>` on a `Paused` VM now explains that the frozen guest can't answer and suggests resuming or stopping instead of claiming the VM is running.
 
 ### Added
 
