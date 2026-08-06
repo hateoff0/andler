@@ -67,6 +67,11 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 #### Core (`andler-core`)
 
 - **Unified `create` command**: Single `create` command with `--kind linux`/`--kind android` flag to select VM type. TOML mode auto-detects type from content.
+- **Base image cache subdirectories**: `docker/images/build.sh` now writes images into `cache/base-images/android<version>-<variant>/` (one-level subdirectories); discovery (`base_image::list_matching`/`resolve`) scans both the new layout and the legacy flat root, so pre-existing images keep working without migration. New `base_image::list_all()` powers `andler doctor`'s base-image check. Covered by `resolve_finds_image_in_version_variant_subdirectory`, `resolve_prefers_freshest_across_root_and_subdirectory`, `list_all_includes_flat_and_subdirectory_images`, the gRPC round-trip auto-resolve test, and E2E suite `10_base_images.sh`.
+
+#### CLI
+
+- **Android overlay default raised to 128 GiB**: `--overlay-size-gib`, the TOML `overlay_size_gib` default, and the wizard's fixed default all changed from 20 GiB to 128 GiB — the overlay's virtual size, thin-provisioned qcow2, so it costs no disk up front; users can shrink via `--overlay-size-gib` or grow later.
 - **Hotplugged devices in `InstanceConfig`**: `extra_disks: Vec<DiskConfig>` and `extra_networks: Vec<NetworkConfig>` (serde-defaulted for existing `instance.toml` files); new `HypervisorBackend` methods `attach_disk`/`detach_disk`/`attach_network`/`detach_network` (default `NotImplemented`).
 
 #### RPC (`andler-rpc`)

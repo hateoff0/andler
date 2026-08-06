@@ -26,7 +26,7 @@ The following flags define how instance configuration is provided — they are *
 
 **Linux CLI mode** (`--kind linux`): `--name`, `--iso-path`, `--disk-path` required. Optional: `--disk-size-gib` (≥1, default 256), `--compact-on-shutdown`, `--cdrom-bus <auto|virtio|ide>` (default auto), `--no-uefi`, `--ovmf-vars-template` (auto-detected when omitted).
 
-**Android CLI mode** (`--kind android`): `--name`, `--android-version <11|13>` required. Optional: `--base-image-path` (omitted → daemon auto-discovers in `~/.andler/cache/base-images/`), `--gapps`, `--microg`, `--arm-translator <none|libndk|libhoudini>`, `--overlay-size-gib` (≥1, default 20), `--linked-overlay`, `--instances-root`, `--ovmf-vars-template`.
+**Android CLI mode** (`--kind android`): `--name`, `--android-version <11|13>` required. Optional: `--base-image-path` (omitted → daemon auto-discovers in `~/.andler/cache/base-images/`), `--gapps`, `--microg`, `--arm-translator <none|libndk|libhoudini>`, `--overlay-size-gib` (≥1, default 128), `--linked-overlay`, `--instances-root`, `--ovmf-vars-template`.
 
 **Validation flags** (both modes):
 - `--dry-run`: Validate and preview the resolved config + QEMU command line without creating (doesn't contact the daemon)
@@ -141,7 +141,7 @@ android_version = 13
 base_image_path = "/path/to/base.qcow2"
 ovmf_vars_path = "/path/to/VARS.fd"
 
-overlay_size_gib = 20
+overlay_size_gib = 128
 gapps = false
 microg = false
 arm_translator = "libndk"

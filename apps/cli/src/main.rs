@@ -227,7 +227,7 @@ enum Command {
         #[arg(long, default_value_t = default_instances_root())]
         instances_root: String,
 
-        #[arg(long, default_value_t = 20, value_parser = clap::value_parser!(u64).range(1..))]
+        #[arg(long, default_value_t = 128, value_parser = clap::value_parser!(u64).range(1..))]
         overlay_size_gib: u64,
 
         #[arg(long)]

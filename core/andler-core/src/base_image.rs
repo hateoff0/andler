@@ -54,26 +54,38 @@ impl AndroidProfile {
 }
 
 pub fn list_matching(profile: &AndroidProfile) -> Result<Vec<BaseImageInfo>, BaseImageError> {
-    let dir = base_images_dir();
-    let entries = match fs::read_dir(&dir) {
-        Ok(entries) => entries,
-        Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(source) => return Err(BaseImageError::ReadDir { path: dir, source }),
-    };
-
     let wanted_major = profile.android_version.to_string();
     let wanted_variant = profile.variant_label();
 
     let mut found = Vec::new();
-    for entry in entries.flatten() {
-        let manifest_path = entry.path();
+    for info in collect_images()? {
+        if info.android_major == wanted_major && info.android_variant == wanted_variant {
+            found.push(info);
+        }
+    }
+
+    // ISO-8601 UTC timestamps sort lexicographically in chronological order.
+    found.sort_by(|a, b| b.built_at.cmp(&a.built_at));
+    Ok(found)
+}
+
+/// Every valid base image in the cache (all versions/variants), for tooling
+/// like `andler doctor` that reports what is available.
+pub fn list_all() -> Result<Vec<BaseImageInfo>, BaseImageError> {
+    collect_images()
+}
+
+/// Parses every `*.manifest.json` with a matching qcow2 next to it, regardless
+/// of the requested profile.
+fn collect_images() -> Result<Vec<BaseImageInfo>, BaseImageError> {
+    let mut found = Vec::new();
+    for manifest_path in collect_manifest_paths()? {
         let Some(file_name) = manifest_path.file_name().and_then(|f| f.to_str()) else {
             continue;
         };
         let Some(stem) = file_name.strip_suffix(".manifest.json") else {
             continue;
         };
-
         let raw = match fs::read_to_string(&manifest_path) {
             Ok(raw) => raw,
             Err(_) => continue,
@@ -82,16 +94,10 @@ pub fn list_matching(profile: &AndroidProfile) -> Result<Vec<BaseImageInfo>, Bas
             Ok(manifest) => manifest,
             Err(_) => continue,
         };
-
-        if manifest.android_major != wanted_major || manifest.android_variant != wanted_variant {
-            continue;
-        }
-
         let qcow2_path = manifest_path.with_file_name(format!("{stem}.qcow2"));
         if !qcow2_path.exists() {
             continue;
         }
-
         found.push(BaseImageInfo {
             qcow2_path,
             manifest_path,
@@ -100,10 +106,49 @@ pub fn list_matching(profile: &AndroidProfile) -> Result<Vec<BaseImageInfo>, Bas
             built_at: manifest.built_at,
         });
     }
-
-    // ISO-8601 UTC timestamps sort lexicographically in chronological order.
-    found.sort_by(|a, b| b.built_at.cmp(&a.built_at));
     Ok(found)
+}
+
+/// `*.manifest.json` files in the cache root and in one-level subdirectories
+/// (e.g. `cache/base-images/android13-vanilla/`). The flat root is kept working
+/// so images built before subdirectories existed are still discovered; never
+/// recurse deeper than one level — build outputs land exactly one level down.
+fn collect_manifest_paths() -> Result<Vec<PathBuf>, BaseImageError> {
+    let dir = base_images_dir();
+    let entries = match fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(source) => return Err(BaseImageError::ReadDir { path: dir, source }),
+    };
+
+    let mut manifests = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|f| f.to_str()) else {
+            continue;
+        };
+        if name.ends_with(".manifest.json") {
+            manifests.push(path);
+            continue;
+        }
+        if !path.is_dir() {
+            continue;
+        }
+        let Ok(sub_entries) = fs::read_dir(&path) else {
+            continue;
+        };
+        for sub_entry in sub_entries.flatten() {
+            let sub_path = sub_entry.path();
+            if sub_path
+                .file_name()
+                .and_then(|f| f.to_str())
+                .is_some_and(|n| n.ends_with(".manifest.json"))
+            {
+                manifests.push(sub_path);
+            }
+        }
+    }
+    Ok(manifests)
 }
 
 pub fn resolve(profile: &AndroidProfile) -> Result<PathBuf, BaseImageError> {
@@ -124,10 +169,7 @@ mod tests {
     use crate::android_profile::{AndroidVersion, ArmTranslator};
     use crate::config::InstanceId;
     use crate::paths::ANDLER_HOME_ENV;
-    use std::sync::Mutex;
-
-    // andler_home() reads a process-wide env var; serialize tests touching it.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    use crate::test_lock::ENV_LOCK;
 
     fn profile(version: AndroidVersion, gapps: bool) -> AndroidProfile {
         AndroidProfile {
@@ -236,6 +278,54 @@ mod tests {
 
         let resolved = resolve(&profile(AndroidVersion::Android13, false)).unwrap();
         assert_eq!(resolved, dir.join("good.qcow2"));
+    }
+
+    #[test]
+    fn resolve_finds_image_in_version_variant_subdirectory() {
+        let (_guard, dir) = EnvGuard::new();
+        let subdir = dir.join("android13-vanilla");
+        fs::create_dir_all(&subdir).unwrap();
+        write_manifest(&subdir, "img", "13", "VANILLA", "2026-06-01T00:00:00Z");
+
+        let resolved = resolve(&profile(AndroidVersion::Android13, false)).unwrap();
+        assert_eq!(resolved, subdir.join("img.qcow2"));
+    }
+
+    #[test]
+    fn resolve_prefers_freshest_across_root_and_subdirectory() {
+        let (_guard, dir) = EnvGuard::new();
+        let subdir = dir.join("android13-vanilla");
+        fs::create_dir_all(&subdir).unwrap();
+        write_manifest(&dir, "flat-old", "13", "VANILLA", "2026-01-01T00:00:00Z");
+        write_manifest(
+            &subdir,
+            "subdir-new",
+            "13",
+            "VANILLA",
+            "2026-06-01T00:00:00Z",
+        );
+
+        let resolved = resolve(&profile(AndroidVersion::Android13, false)).unwrap();
+        assert_eq!(resolved, subdir.join("subdir-new.qcow2"));
+    }
+
+    #[test]
+    fn list_all_includes_flat_and_subdirectory_images() {
+        let (_guard, dir) = EnvGuard::new();
+        let subdir = dir.join("android11-gapps");
+        fs::create_dir_all(&subdir).unwrap();
+        write_manifest(&dir, "flat", "13", "VANILLA", "2026-01-01T00:00:00Z");
+        write_manifest(&subdir, "nested", "11", "GAPPS", "2026-02-01T00:00:00Z");
+
+        let mut paths: Vec<_> = list_all()
+            .unwrap()
+            .into_iter()
+            .map(|i| i.qcow2_path)
+            .collect();
+        paths.sort();
+        let mut expected = vec![dir.join("flat.qcow2"), subdir.join("nested.qcow2")];
+        expected.sort();
+        assert_eq!(paths, expected);
     }
 
     #[test]

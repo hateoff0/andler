@@ -405,7 +405,7 @@ pub(crate) fn build_android_request(
         profile: Some(profile),
         base_image_path: basic.base_image.clone(),
         instances_root: basic.instances_root.clone(),
-        overlay_size_bytes: 20_u64
+        overlay_size_bytes: 128_u64
             .checked_mul(andler_core::DiskConfig::GIB)
             .ok_or_else(|| WizardError::Inquire("overlay size overflow".into()))?,
         ovmf_vars_template: ovmf_vars_template(detected),
@@ -732,8 +732,8 @@ mod tests {
         assert_eq!(req.name, "android");
         assert_eq!(
             req.overlay_size_bytes,
-            20 * andler_core::DiskConfig::GIB,
-            "overlay size must be the fixed 20 GiB default, not derived from disk size"
+            128 * andler_core::DiskConfig::GIB,
+            "overlay size must be the fixed 128 GiB default, not derived from disk size"
         );
         let profile = req.profile.expect("profile");
         assert_eq!(profile.arm_translator(), ProtoArmTranslator::Libndk);

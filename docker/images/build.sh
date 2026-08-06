@@ -58,7 +58,9 @@ parse_args() {
 
     VARIANT_LOWER="$(tr '[:upper:]' '[:lower:]' <<< "$ANDROID_VARIANT")"
     IMAGE_TAG="andler-base-rootfs:android${ANDROID_MAJOR}-${VARIANT_LOWER}-${GIT_REV}"
-    OUTPUT_QCOW2="${3:-$HOME/.andler/cache/base-images/linux-waydroid-android${ANDROID_MAJOR}-${VARIANT_LOWER}-${GIT_REV}.qcow2}"
+    # Images land in a per-version-variant subdirectory of the cache; discovery
+    # scans both this layout and the legacy flat cache root.
+    OUTPUT_QCOW2="${3:-$HOME/.andler/cache/base-images/android${ANDROID_MAJOR}-${VARIANT_LOWER}/linux-waydroid-android${ANDROID_MAJOR}-${VARIANT_LOWER}-${GIT_REV}.qcow2}"
     DISK_SIZE="${4:-16G}"
 
     if [[ "$ANDROID_MAJOR" == "11" ]]; then

@@ -420,7 +420,7 @@ A new file in `docs/` must be registered here in the same commit.
 | Path | Purpose |
 |------|---------|
 | `~/.andler/instances/<id>/` | Instance home: `instance.toml`, `disk.qcow2`, `VARS.fd`, `console.log`, `qemu.log` |
-| `~/.andler/cache/base-images/` | Android/Linux base images |
+| `~/.andler/cache/base-images/` | Android/Linux base images (flat root or `android<version>-<variant>/` subdirs; manifest.json + qcow2 pairs) |
 | `~/.andler/andlerd.db` | Default SQLite store |
 | `$XDG_RUNTIME_DIR/andler/qmp/<id>.sock` | Per-instance QMP control socket |
 | `$XDG_RUNTIME_DIR/andler/qmp/<id>.qga.sock` | Per-instance guest-agent (QGA) chardev socket |

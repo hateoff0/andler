@@ -57,11 +57,11 @@ andler create \
 | `--cdrom-bus <bus>` | No | CD-ROM bus: `auto` (default), `virtio`, `ide` (Linux only) |
 | `--compact-on-shutdown` | No | Auto-compact disk after shutdown (Linux only) |
 | `--android-version <ver>` | Yes**** | Android version: `11` or `13` (****required for `--kind android`) |
-| `--base-image-path <path>` | No | Android base image qcow2; when omitted the daemon auto-discovers the freshest matching image in `~/.andler/cache/base-images/` |
+| `--base-image-path <path>` | No | Android base image qcow2; when omitted the daemon auto-discovers the freshest matching image in `~/.andler/cache/base-images/` (flat cache root or `android<version>-<variant>/` subdirectories) |
 | `--gapps` | No | Include Google Apps |
 | `--microg` | No | Include microG |
 | `--arm-translator <mode>` | No | ARM→x86 translation: `none` (default), `libndk`, `libhoudini` |
-| `--overlay-size-gib <size>` | No | Overlay disk size in GiB (default: 20, Android only) |
+| `--overlay-size-gib <size>` | No | Overlay disk size in GiB (default: 128, Android only) |
 | `--linked-overlay` | No | Use a linked (backing-file) overlay instead of a standalone copy (Android only) |
 | `--instances-root <path>` | No | Instance directory root (default: `~/.andler/instances`) |
 
@@ -440,7 +440,7 @@ base_image_path = "/path/to/base.qcow2"
 ovmf_vars_path = "/path/to/VARS.fd"
 
 # Optional
-overlay_size_gib = 20
+overlay_size_gib = 128
 gapps = false
 microg = false
 arm_translator = "none"   # or "libndk" / "libhoudini"

@@ -798,6 +798,20 @@ async fn create_android_instance_auto_resolves_base_image_when_omitted() {
     )
     .expect("write fake manifest");
 
+    // A fresher image in the per-version-variant subdirectory must win over the
+    // flat-root legacy layout (discovery scans both).
+    let subdir = base_images_dir.join("android13-vanilla");
+    std::fs::create_dir_all(&subdir).expect("create fake subdir");
+    let subdir_qcow2 = subdir.join("linux-waydroid-android13-vanilla-new.qcow2");
+    andler_disk::qcow2::create(&subdir_qcow2, 1024 * 1024 * 1024)
+        .await
+        .expect("create fake subdir base qcow2");
+    std::fs::write(
+        subdir.join("linux-waydroid-android13-vanilla-new.manifest.json"),
+        r#"{"schema_version":1,"android_major":"13","android_variant":"VANILLA","built_at":"2026-06-01T00:00:00Z"}"#,
+    )
+    .expect("write fake subdir manifest");
+
     let instances_root = std::env::temp_dir().join(format!(
         "andler-grpc-test-android-instances-{}",
         uuid::Uuid::new_v4()
@@ -838,8 +852,8 @@ async fn create_android_instance_auto_resolves_base_image_when_omitted() {
         .into_inner();
     assert_eq!(
         config.disk.expect("disk must be set").base_image,
-        fake_qcow2.to_string_lossy().into_owned(),
-        "auto-resolved base image must be the one matching manifest found in base_images_dir()"
+        subdir_qcow2.to_string_lossy().into_owned(),
+        "auto-resolved base image must be the freshest match, including subdirectory layout"
     );
 
     let mut unmatched_profile = ProtoAndroidProfile::default();

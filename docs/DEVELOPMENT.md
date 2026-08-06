@@ -90,7 +90,7 @@ All instance data lives under `~/.andler/`:
 │       ├── console.log         # QEMU serial console output
 │       └── qemu.log            # QEMU stdout/stderr (log history for `andler logs`)
 └── cache/
-    ├── base-images/            # Android base images (*.manifest.json + qcow2)
+    ├── base-images/            # Android base images (flat or android<N>-<variant>/ subdirs: manifest.json + qcow2)
     └── arm-translators/        # Downloaded ARM translators (libndk/libhoudini)
 ```
 

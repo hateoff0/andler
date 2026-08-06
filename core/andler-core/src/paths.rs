@@ -69,9 +69,7 @@ pub fn ensure_private_dir_sync(dir: &std::path::Path) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
-
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    use crate::test_lock::ENV_LOCK;
 
     #[test]
     fn andler_home_respects_env_override() {

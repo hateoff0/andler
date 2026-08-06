@@ -237,13 +237,8 @@ async fn daemon_check(addr: &str) -> Check {
 
 fn base_image_check() -> Check {
     let dir = andler_core::paths::base_images_dir();
-    let images: Vec<_> = std::fs::read_dir(&dir)
-        .map(|entries| {
-            entries
-                .flatten()
-                .filter(|e| e.path().extension().is_some_and(|ext| ext == "qcow2"))
-                .collect()
-        })
+    let images: Vec<_> = andler_core::base_image::list_all()
+        .map(|infos| infos.into_iter().map(|i| i.qcow2_path).collect())
         .unwrap_or_default();
 
     if images.is_empty() {
@@ -255,7 +250,7 @@ fn base_image_check() -> Check {
     } else {
         let total_bytes: u64 = images
             .iter()
-            .filter_map(|e| e.metadata().ok())
+            .filter_map(|p| p.metadata().ok())
             .map(|m| m.len())
             .sum();
         ok(

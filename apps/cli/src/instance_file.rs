@@ -274,11 +274,11 @@ impl InstanceFile {
 
         let overlay_size_bytes = self
             .overlay_size_gib
-            .unwrap_or(20)
+            .unwrap_or(128)
             .checked_mul(1024 * 1024 * 1024)
             .ok_or(InstanceFileError::UnsupportedValue {
                 field: "overlay_size_gib",
-                value: self.overlay_size_gib.unwrap_or(20).to_string(),
+                value: self.overlay_size_gib.unwrap_or(128).to_string(),
             })?;
 
         let instances_root = self.instances_root.unwrap_or_else(default_instances_root);
@@ -465,6 +465,11 @@ mod tests {
             InstanceFileResult::Android(req) => {
                 assert_eq!(req.name, "test-android");
                 assert_eq!(req.base_image_path, "/tmp/base.qcow2");
+                assert_eq!(
+                    req.overlay_size_bytes,
+                    128 * 1024 * 1024 * 1024,
+                    "overlay default must be 128 GiB when overlay_size_gib is omitted"
+                );
                 assert!(req.profile.is_some());
                 let profile = req.profile.unwrap();
                 assert_eq!(

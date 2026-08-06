@@ -375,8 +375,12 @@ docker buildx build --load \
     --build-arg ANDROID_MAJOR=13 --build-arg ANDROID_VARIANT=VANILLA \
     -t andler-base-rootfs:android13-vanilla docker/images/base
 sudo docker/images/build-disk.sh andler-base-rootfs:android13-vanilla \
-    ~/.andler/cache/base-images/linux-waydroid-android13-vanilla-dev.qcow2 16G
+    ~/.andler/cache/base-images/android13-vanilla/linux-waydroid-android13-vanilla-dev.qcow2 16G
 ```
+
+`build.sh` writes into a per-version-variant subdirectory of the cache by
+default (`~/.andler/cache/base-images/android13-vanilla/`); the manual
+`build-disk.sh` invocation above takes any path ending in `.qcow2`.
 
 The result is a `.qcow2` file plus a `.manifest.json` next to it (size,
 sha256, build date, git revision, android_major/android_variant labels,
@@ -388,7 +392,9 @@ mechanism of `andler-disk`.
 
 `core/andler-core/src/base_image.rs` scans `base_images_dir()`
 (`~/.andler/cache/base-images/`, or `$ANDLER_HOME/cache/base-images/` if
-`ANDLER_HOME` is set) for `*.manifest.json` files and picks the freshest one
+`ANDLER_HOME` is set) for `*.manifest.json` files — both directly in the
+cache root (legacy layout) and in one-level subdirectories such as
+`android13-vanilla/` (the `build.sh` default) — and picks the freshest one
 (by `built_at`) matching a requested `AndroidProfile`'s Android version and
 GApps/vanilla variant. `apps/daemon/src/service.rs::create_android_instance`
 uses this automatically whenever the client leaves `base_image_path` empty —
