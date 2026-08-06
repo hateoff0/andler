@@ -56,7 +56,6 @@ pub fn backend_kind_name(kind: BackendKind) -> &'static str {
     match kind {
         BackendKind::Unspecified => "UNSPECIFIED",
         BackendKind::Qemu => "Qemu",
-        BackendKind::Vmm => "Vmm",
     }
 }
 

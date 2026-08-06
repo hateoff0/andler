@@ -413,7 +413,6 @@ Hypervisor backend type.
 |-------|-------------|
 | `BACKEND_KIND_UNSPECIFIED` (0) | Unspecified (invalid). |
 | `QEMU` (1) | QEMU hypervisor. |
-| `VMM` (2) | Cloud Hypervisor (stub). |
 
 ### `InstanceKind`
 

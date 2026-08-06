@@ -199,8 +199,6 @@ andler/
 │   │       ├── qmp.rs            # QMP client (pause, resume, snapshots)
 │   │       ├── backend.rs        # QemuBackend (HypervisorBackend impl)
 │   │       └── metrics.rs        # /proc-based per-VM metrics poller (spawn_blocking)
-│   │
-│   └── andler-vmm/               # Stub — future Cloud Hypervisor
 │
 ├── services/                      # Infrastructure services
 │   ├── andler-disk/

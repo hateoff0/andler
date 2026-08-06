@@ -61,7 +61,6 @@ Venus and VirGL provide **paravirtualized 3D acceleration** — the guest sees a
 
 - **`HypervisorBackend` trait** — pluggable backend architecture
 - **QEMU backend** — full implementation with QMP control, snapshot API, metrics
-- **Cloud Hypervisor stub** — reserved for future `rust-vmm` integration
 
 ## Quick Start
 
@@ -307,7 +306,6 @@ andler/
 │   │   ├── qmp.rs                 QMP protocol client
 │   │   ├── backend.rs             HypervisorBackend implementation
 │   │   └── metrics.rs             /proc-based per-VM resource metrics
-│   └── andler-vmm/                Stub for future Cloud Hypervisor
 │
 ├── services/                      Infrastructure services
 │   ├── andler-disk/               qemu-img wrapper + guest tools offline provisioning
@@ -417,7 +415,6 @@ Each crate has its own README with detailed API reference:
 
 - [`core/andler-core/README.md`](core/andler-core/README.md) — Domain types, ~30 public types, ~50 tests
 - [`backends/andler-qemu/README.md`](backends/andler-qemu/README.md) — QEMU backend, ~80 tests
-- [`backends/andler-vmm/README.md`](backends/andler-vmm/README.md) — Cloud Hypervisor stub
 - [`services/andler-disk/README.md`](services/andler-disk/README.md) — Disk ops + guest tools provisioning
 - [`services/andler-store/README.md`](services/andler-store/README.md) — SQLite persistence
 - [`services/andler-net/README.md`](services/andler-net/README.md) — Bridge/NAT networking via iproute2 (isolated: config-only)

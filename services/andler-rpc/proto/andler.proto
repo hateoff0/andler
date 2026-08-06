@@ -286,7 +286,6 @@ message ListInstancesResponse {
 enum BackendKind {
     BACKEND_KIND_UNSPECIFIED = 0;
     QEMU = 1;
-    VMM = 2;
 }
 
 message InstanceKind {

@@ -22,7 +22,7 @@ daemon/
 ├── tests/          →  unit test modules (11 files, no network)
 └── query_ops.rs    →  status, list_instances, get_instance_config, update_instance_config, stream logs/metrics
                ↓
-           HypervisorBackend trait → QemuBackend / VmmBackend
+           HypervisorBackend trait → QemuBackend
 ```
 
 ## Modules

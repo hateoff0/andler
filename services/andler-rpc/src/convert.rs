@@ -692,7 +692,6 @@ impl From<BackendKind> for proto::BackendKind {
     fn from(value: BackendKind) -> Self {
         match value {
             BackendKind::Qemu => proto::BackendKind::Qemu,
-            BackendKind::Vmm => proto::BackendKind::Vmm,
         }
     }
 }
@@ -804,7 +803,6 @@ impl TryFrom<proto::BackendKind> for BackendKind {
     fn try_from(value: proto::BackendKind) -> Result<Self, Self::Error> {
         match value {
             proto::BackendKind::Qemu => Ok(BackendKind::Qemu),
-            proto::BackendKind::Vmm => Ok(BackendKind::Vmm),
             proto::BackendKind::Unspecified => Err(ConvertError::MissingBackendKind),
         }
     }

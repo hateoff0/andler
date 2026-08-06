@@ -114,7 +114,7 @@ Nine configuration sections, each in its own file:
 #### `config::instance` — Top-Level Config
 
 - **`InstanceId`**: Newtype wrapper around `Uuid` (v4). Unique per instance.
-- **`BackendKind`**: `Qemu` | `Vmm` (Vmm is registered but returns `NotImplemented`).
+- **`BackendKind`**: `Qemu`.
 - **`InstanceKind`**: `LinuxVm { iso_path, cdrom_bus }` | `AndroidVm { android_profile }`.
 - **`InstanceConfig`**: The full configuration struct combining all sections:
 

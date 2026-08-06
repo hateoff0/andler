@@ -33,8 +33,6 @@ impl Default for InstanceId {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum BackendKind {
     Qemu,
-
-    Vmm,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

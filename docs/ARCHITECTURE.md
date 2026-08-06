@@ -17,7 +17,6 @@ ANDLER (**ANDLER** = *Android Linux Emulator & Runtime*) is a Rust monorepo for 
 andler-core          (no workspace dependencies — bottom layer)
     ↑
     ├── andler-qemu     (depends on: core)
-    ├── andler-vmm      (depends on: core)
     ├── andler-disk     (depends on: core types only via error, mostly standalone)
     ├── andler-net      (depends on: core)
     ├── andler-store    (depends on: core)
@@ -61,10 +60,6 @@ Implements `HypervisorBackend` for QEMU via process management, QMP communicatio
 - `metrics.rs`: Background poller reading `/proc/<pid>/stat`, `/proc/<pid>/status`, `/sys/block/*/stat`, `/proc/<net/dev` (per-VM); calls into `andler-firmware::metrics` for the GPU fields (host-level, not per-VM — moved there to sit next to GPU vendor detection). Sample collection runs in `tokio::task::spawn_blocking` — the `/proc` and sysfs reads are synchronous I/O and must not block the async runtime.
 
 **Tests**: unit + integration, across `cmdline`/`process`/`qmp`/`backend`/`metrics` (GPU metrics tests moved to `services/andler-firmware`).
-
-### `backends/andler-vmm` — Cloud Hypervisor (Stub)
-
-Empty stub. Returns `NotImplemented` for all methods. Reserved for future `rust-vmm` / Cloud Hypervisor integration.
 
 ### `services/andler-disk` — Disk Operations
 
@@ -270,7 +265,6 @@ GPU vendor detection priority: AMD → NVIDIA → Intel (first found wins). AMD 
 ## Future Directions
 - **Bridge network mode**: Implemented in `andler-net` using `iproute2` for bridge creation and network configuration. Isolated mode is config-representable but not yet implemented (`setup_isolated` returns an explicit error)
 - **GPU passthrough**: VFIO-based `RenderBackend::Passthrough`
-- **Cloud Hypervisor backend**: `andler-vmm` with `rust-vmm` crates
 - **GUI**: Tauri-based client (planned, not started)
 - **Guest image pipelines**: Automated Android image builds with Waydroid
 
