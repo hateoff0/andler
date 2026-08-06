@@ -180,9 +180,17 @@ fn detect_waydroid_system_dir(mount_point: &Path) -> Result<PathBuf, DiskError> 
         return Ok(alt_overlay);
     }
 
-    Err(DiskError::FileSystem(
-        "Waydroid overlay directory not found in guest filesystem".to_string(),
-    ))
+    // A freshly created Android instance may have never booted, so `waydroid
+    // init` (which creates /var/lib/waydroid/overlay on first boot) has not
+    // run yet. The overlay upper dir is just a directory tree bind-mounted
+    // over /system by the waydroid container — creating it early is safe and
+    // lets translator installs work before the guest's first boot.
+    std::fs::create_dir_all(waydroid_overlay.join("system")).map_err(|e| {
+        DiskError::FileSystem(format!(
+            "failed to create waydroid overlay dir {waydroid_overlay:?}: {e}"
+        ))
+    })?;
+    Ok(waydroid_overlay)
 }
 
 fn read_build_prop(path: &Path) -> Result<HashMap<String, String>, DiskError> {
@@ -256,6 +264,27 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let result = detect_current_translator(&dir).unwrap();
         assert!(result.is_none());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn detect_waydroid_system_dir_creates_overlay_on_never_booted_image() {
+        let dir = std::env::temp_dir().join(format!(
+            "andler_test_waydroid_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let result = detect_waydroid_system_dir(&dir).unwrap();
+        assert!(
+            result.join("system").is_dir(),
+            "overlay/system must be created on a fresh image"
+        );
+        let again = detect_waydroid_system_dir(&dir).unwrap();
+        assert_eq!(result, again, "second call must reuse the existing overlay");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

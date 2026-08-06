@@ -60,6 +60,7 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 
 - **Misleading "to change config" error on disk-touching guest ops**: `InstanceMustBeStopped` said "must be stopped … to change config", which was wrong for `guest install/remove libndk|libhoudini` and `guest boot-mode` (disk-staging operations, not config edits). The message is now operation-neutral: "must be stopped … to perform this operation; stop it first".
 - **Paused instances got a "VM is running" hint when the guest agent can't respond**: `guest install/remove <pkg>` on a `Paused` VM now explains that the frozen guest can't answer and suggests resuming or stopping instead of claiming the VM is running.
+- **ARM translator install failed on never-booted Android instances**: `waydroid init` creates `/var/lib/waydroid/overlay` only on the guest's first boot, so `guest install libndk|libhoudini` on a fresh instance failed with "Waydroid overlay directory not found in guest filesystem". The overlay upper dir is just a directory tree bind-mounted over `/system`, so the daemon now creates `overlay/system` itself when missing — translator installs work before the first boot. Regression-covered by `detect_waydroid_system_dir_creates_overlay_on_never_booted_image`.
 
 ### Added
 
