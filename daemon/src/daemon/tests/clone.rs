@@ -1,8 +1,7 @@
 use super::common::*;
 use super::*;
-use std::path::PathBuf;
 use andler_core::{AndroidProfile, ArmTranslator, CloneMode};
-
+use std::path::PathBuf;
 
 #[tokio::test]
 async fn clone_on_unknown_instance_returns_instance_not_found() {
@@ -35,17 +34,16 @@ async fn clone_rejects_linux_vm_with_shared_base() {
         )
         .await
         .unwrap_err();
-    assert!(matches!(err, DaemonError::SharedBaseNotSupportedForLinuxVm(returned_id) if returned_id == id));
+    assert!(
+        matches!(err, DaemonError::SharedBaseNotSupportedForLinuxVm(returned_id) if returned_id == id)
+    );
 }
 
 #[tokio::test]
 async fn clone_rejects_non_terminal_source_state() {
     let dir = TestTempDir::new();
     let daemon = Daemon::new();
-    let cfg = sample_android_config(
-        dir.path().join("disk.qcow2"),
-        dir.path().join("base.qcow2"),
-    );
+    let cfg = sample_android_config(dir.path().join("disk.qcow2"), dir.path().join("base.qcow2"));
     let id = cfg.id;
     daemon.create_instance(cfg).await.unwrap();
 
@@ -71,11 +69,13 @@ async fn clone_rejects_non_terminal_source_state() {
     ));
 }
 
-
 #[tokio::test]
 async fn find_live_clones_on_unknown_instance_returns_instance_not_found() {
     let daemon = Daemon::new();
-    let err = daemon.find_live_clones(InstanceId::new()).await.unwrap_err();
+    let err = daemon
+        .find_live_clones(InstanceId::new())
+        .await
+        .unwrap_err();
     assert!(matches!(err, DaemonError::InstanceNotFound(_)));
 }
 
@@ -83,10 +83,7 @@ async fn find_live_clones_on_unknown_instance_returns_instance_not_found() {
 async fn find_live_clones_is_empty_when_nothing_references_the_disk() {
     let dir = TestTempDir::new();
     let daemon = Daemon::new();
-    let cfg = sample_android_config(
-        dir.path().join("disk.qcow2"),
-        dir.path().join("base.qcow2"),
-    );
+    let cfg = sample_android_config(dir.path().join("disk.qcow2"), dir.path().join("base.qcow2"));
     let id = cfg.id;
     daemon.create_instance(cfg).await.unwrap();
 
@@ -100,13 +97,14 @@ async fn find_live_clones_finds_instance_whose_base_image_is_the_source_disk() {
     let daemon = Daemon::new();
 
     let source_disk = dir.path().join("source").join("disk.qcow2");
-    let source_cfg =
-        sample_android_config(source_disk.clone(), dir.path().join("base.qcow2"));
+    let source_cfg = sample_android_config(source_disk.clone(), dir.path().join("base.qcow2"));
     let source_id = source_cfg.id;
     daemon.create_instance(source_cfg).await.unwrap();
 
-    let linked_clone_cfg =
-        sample_android_config(dir.path().join("clone").join("disk.qcow2"), source_disk.clone());
+    let linked_clone_cfg = sample_android_config(
+        dir.path().join("clone").join("disk.qcow2"),
+        source_disk.clone(),
+    );
     let clone_id = linked_clone_cfg.id;
     daemon.create_instance(linked_clone_cfg).await.unwrap();
 
@@ -149,14 +147,15 @@ async fn remove_instance_with_purge_rejects_when_live_linked_clone_exists() {
     tokio::fs::write(&vars_path, b"vars").await.unwrap();
 
     let daemon = Daemon::new();
-    let mut source_cfg =
-        sample_android_config(disk_path.clone(), dir.path().join("base.qcow2"));
+    let mut source_cfg = sample_android_config(disk_path.clone(), dir.path().join("base.qcow2"));
     source_cfg.firmware.ovmf_vars_path = vars_path.clone();
     let source_id = source_cfg.id;
     daemon.create_instance(source_cfg).await.unwrap();
 
-    let clone_cfg =
-        sample_android_config(dir.path().join("clone").join("disk.qcow2"), disk_path.clone());
+    let clone_cfg = sample_android_config(
+        dir.path().join("clone").join("disk.qcow2"),
+        disk_path.clone(),
+    );
     let clone_id = clone_cfg.id;
     daemon.create_instance(clone_cfg).await.unwrap();
 
@@ -184,14 +183,15 @@ async fn remove_instance_with_purge_succeeds_when_clone_is_full_standalone() {
     tokio::fs::write(&vars_path, b"vars").await.unwrap();
 
     let daemon = Daemon::new();
-    let mut source_cfg =
-        sample_android_config(disk_path.clone(), dir.path().join("base.qcow2"));
+    let mut source_cfg = sample_android_config(disk_path.clone(), dir.path().join("base.qcow2"));
     source_cfg.firmware.ovmf_vars_path = vars_path.clone();
     let source_id = source_cfg.id;
     daemon.create_instance(source_cfg).await.unwrap();
 
-    let mut standalone_clone_cfg =
-        sample_android_config(dir.path().join("clone").join("disk.qcow2"), disk_path.clone());
+    let mut standalone_clone_cfg = sample_android_config(
+        dir.path().join("clone").join("disk.qcow2"),
+        disk_path.clone(),
+    );
     standalone_clone_cfg.disk.base_image = None;
     daemon.create_instance(standalone_clone_cfg).await.unwrap();
 
@@ -200,7 +200,6 @@ async fn remove_instance_with_purge_succeeds_when_clone_is_full_standalone() {
     assert!(!disk_path.exists());
     assert!(!vars_path.exists());
 }
-
 
 #[tokio::test]
 async fn clone_linux_vm_linked_mode_is_allowed() {
@@ -226,10 +225,7 @@ async fn clone_linux_vm_linked_mode_is_allowed() {
         .await
         .unwrap_err();
     assert!(
-        !matches!(
-            err,
-            DaemonError::SharedBaseNotSupportedForLinuxVm(_)
-        ),
+        !matches!(err, DaemonError::SharedBaseNotSupportedForLinuxVm(_)),
         "LinuxVm + Linked should not be blocked, got: {err:?}"
     );
 }
@@ -258,10 +254,7 @@ async fn clone_linux_vm_full_standalone_mode_is_allowed() {
         .await
         .unwrap_err();
     assert!(
-        !matches!(
-            err,
-            DaemonError::SharedBaseNotSupportedForLinuxVm(_)
-        ),
+        !matches!(err, DaemonError::SharedBaseNotSupportedForLinuxVm(_)),
         "LinuxVm + FullStandalone should not be blocked, got: {err:?}"
     );
 }
@@ -289,7 +282,9 @@ async fn clone_linux_vm_shared_base_mode_returns_shared_base_not_supported() {
         )
         .await
         .unwrap_err();
-    assert!(matches!(err, DaemonError::SharedBaseNotSupportedForLinuxVm(returned_id) if returned_id == id));
+    assert!(
+        matches!(err, DaemonError::SharedBaseNotSupportedForLinuxVm(returned_id) if returned_id == id)
+    );
 }
 
 #[tokio::test]
@@ -311,10 +306,7 @@ async fn export_linux_vm_disk_does_not_block_on_instance_kind() {
         .await
         .unwrap_err();
     assert!(
-        !matches!(
-            err,
-            DaemonError::SharedBaseNotSupportedForLinuxVm(_)
-        ),
+        !matches!(err, DaemonError::SharedBaseNotSupportedForLinuxVm(_)),
         "LinuxVm export should not be blocked, got: {err:?}"
     );
 }
@@ -350,7 +342,6 @@ async fn clone_linux_vm_rejects_non_terminal_source_state() {
             if returned_id == id
     ));
 }
-
 
 #[tokio::test]
 #[ignore = "requires qemu-img binary, see docker/README.md integration-test target"]
@@ -390,7 +381,9 @@ async fn clone_instance_with_linked_mode_creates_overlay_pointing_at_source_disk
         .await
         .unwrap();
     let ovmf_template = dir.join("OVMF_VARS.template.fd");
-    tokio::fs::write(&ovmf_template, b"fake-ovmf-vars").await.unwrap();
+    tokio::fs::write(&ovmf_template, b"fake-ovmf-vars")
+        .await
+        .unwrap();
 
     let instances_root = dir.join("instances");
     let daemon = Daemon::new();
@@ -438,7 +431,12 @@ async fn clone_instance_with_linked_mode_creates_overlay_pointing_at_source_disk
     assert!(clone_cfg.firmware.ovmf_vars_path.exists());
     assert_ne!(
         clone_cfg.firmware.ovmf_vars_path,
-        daemon.get_instance_config(source_id).await.unwrap().firmware.ovmf_vars_path
+        daemon
+            .get_instance_config(source_id)
+            .await
+            .unwrap()
+            .firmware
+            .ovmf_vars_path
     );
 
     let err = daemon.remove_instance(source_id, true).await.unwrap_err();
@@ -458,7 +456,9 @@ async fn clone_instance_with_full_standalone_mode_has_no_base_image() {
         .await
         .unwrap();
     let ovmf_template = dir.join("OVMF_VARS.template.fd");
-    tokio::fs::write(&ovmf_template, b"fake-ovmf-vars").await.unwrap();
+    tokio::fs::write(&ovmf_template, b"fake-ovmf-vars")
+        .await
+        .unwrap();
 
     let instances_root = dir.join("instances");
     let daemon = Daemon::new();
@@ -512,7 +512,9 @@ async fn clone_instance_with_shared_base_mode_survives_source_purge() {
         .await
         .unwrap();
     let ovmf_template = dir.join("OVMF_VARS.template.fd");
-    tokio::fs::write(&ovmf_template, b"fake-ovmf-vars").await.unwrap();
+    tokio::fs::write(&ovmf_template, b"fake-ovmf-vars")
+        .await
+        .unwrap();
 
     let instances_root = dir.join("instances");
     let daemon = Daemon::new();
@@ -567,7 +569,9 @@ async fn clone_instance_of_a_clone_is_allowed() {
         .await
         .unwrap();
     let ovmf_template = dir.join("OVMF_VARS.template.fd");
-    tokio::fs::write(&ovmf_template, b"fake-ovmf-vars").await.unwrap();
+    tokio::fs::write(&ovmf_template, b"fake-ovmf-vars")
+        .await
+        .unwrap();
 
     let instances_root = dir.join("instances");
     let daemon = Daemon::new();
@@ -611,13 +615,20 @@ async fn clone_instance_of_a_clone_is_allowed() {
         .await
         .unwrap();
 
-    let clone_a_disk = daemon.get_instance_config(clone_a_id).await.unwrap().disk.path;
+    let clone_a_disk = daemon
+        .get_instance_config(clone_a_id)
+        .await
+        .unwrap()
+        .disk
+        .path;
     let clone_b_cfg = daemon.get_instance_config(clone_b_id).await.unwrap();
     assert_eq!(clone_b_cfg.disk.base_image, Some(clone_a_disk.clone()));
 
     let err = daemon.remove_instance(clone_a_id, true).await.unwrap_err();
-    assert!(matches!(err, DaemonError::InstanceHasLiveClones(returned_id, ref clones)
-        if returned_id == clone_a_id && clones == &vec![clone_b_id]));
+    assert!(
+        matches!(err, DaemonError::InstanceHasLiveClones(returned_id, ref clones)
+        if returned_id == clone_a_id && clones == &vec![clone_b_id])
+    );
 
     tokio::fs::remove_dir_all(&dir).await.ok();
 }
@@ -633,7 +644,9 @@ async fn export_instance_disk_creates_standalone_file_without_registering_instan
         .await
         .unwrap();
     let ovmf_template = dir.join("OVMF_VARS.template.fd");
-    tokio::fs::write(&ovmf_template, b"fake-ovmf-vars").await.unwrap();
+    tokio::fs::write(&ovmf_template, b"fake-ovmf-vars")
+        .await
+        .unwrap();
 
     let instances_root = dir.join("instances");
     let daemon = Daemon::new();

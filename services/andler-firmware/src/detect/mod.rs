@@ -1,5 +1,3 @@
-
-
 mod arm;
 mod audio;
 mod gpu;
@@ -7,8 +5,8 @@ mod network;
 mod ovmf;
 
 pub use ovmf::{
-    detect, detect_matched_pair, provision_vars, reset_vars, DetectedOvmf,
-    KNOWN_OVMF_CODE_PATHS, KNOWN_OVMF_VARS_PATHS,
+    detect, detect_matched_pair, provision_vars, reset_vars, DetectedOvmf, KNOWN_OVMF_CODE_PATHS,
+    KNOWN_OVMF_VARS_PATHS,
 };
 
 pub use audio::AudioServer;
@@ -17,10 +15,8 @@ use andler_core::{ArmTranslator, DisplayEngine, RenderBackend};
 
 use crate::error::FirmwareError;
 
-
 #[derive(Debug)]
 pub struct HardwareDefaults {
-
     pub ovmf: Result<DetectedOvmf, FirmwareError>,
 
     pub gpu_render: RenderBackend,
@@ -35,7 +31,6 @@ pub struct HardwareDefaults {
 
     pub passt_available: bool,
 }
-
 
 pub fn detect_all() -> HardwareDefaults {
     let ovmf = detect_matched_pair();
@@ -54,7 +49,9 @@ pub fn detect_all() -> HardwareDefaults {
     tracing::debug!(arm_translator = ?arm_translator, "ARM translator detected");
     tracing::debug!(passt_available, "passt availability detected");
     match &ovmf {
-        Ok(found) => tracing::debug!(code = ?found.code, vars = ?found.vars_template, "OVMF detected"),
+        Ok(found) => {
+            tracing::debug!(code = ?found.code, vars = ?found.vars_template, "OVMF detected")
+        }
         Err(err) => tracing::debug!(error = %err, "OVMF not found"),
     }
 

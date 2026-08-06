@@ -1,10 +1,6 @@
-
-
 use std::path::PathBuf;
 
-
 pub const ANDLER_HOME_ENV: &str = "ANDLER_HOME";
-
 
 pub fn andler_home() -> PathBuf {
     if let Ok(value) = std::env::var(ANDLER_HOME_ENV) {
@@ -17,26 +13,21 @@ pub fn andler_home() -> PathBuf {
         .join(".andler")
 }
 
-
 pub fn instances_root() -> PathBuf {
     andler_home().join("instances")
 }
-
 
 pub fn base_images_dir() -> PathBuf {
     andler_home().join("cache/base-images")
 }
 
-
 pub fn arm_translators_dir() -> PathBuf {
     andler_home().join("cache/arm-translators")
 }
 
-
 pub fn db_path() -> PathBuf {
     andler_home().join("andlerd.db")
 }
-
 
 pub fn runtime_dir() -> PathBuf {
     if let Ok(dir) = std::env::var("XDG_RUNTIME_DIR") {
@@ -53,7 +44,6 @@ pub fn runtime_dir() -> PathBuf {
     std::env::temp_dir()
 }
 
-
 pub fn current_uid() -> u32 {
     extern "C" {
         fn getuid() -> u32;
@@ -62,11 +52,9 @@ pub fn current_uid() -> u32 {
     unsafe { getuid() }
 }
 
-
 pub async fn ensure_private_dir(dir: &std::path::Path) -> std::io::Result<()> {
     ensure_private_dir_sync(dir)
 }
-
 
 pub fn ensure_private_dir_sync(dir: &std::path::Path) -> std::io::Result<()> {
     std::fs::create_dir_all(dir)?;
@@ -117,10 +105,7 @@ mod tests {
             arm_translators_dir(),
             PathBuf::from("/tmp/andler-test-home/cache/arm-translators")
         );
-        assert_eq!(
-            db_path(),
-            PathBuf::from("/tmp/andler-test-home/andlerd.db")
-        );
+        assert_eq!(db_path(), PathBuf::from("/tmp/andler-test-home/andlerd.db"));
         std::env::remove_var(ANDLER_HOME_ENV);
     }
 

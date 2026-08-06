@@ -1,20 +1,16 @@
-
-
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum CdromBus {
-
     VirtioScsi,
 
+    #[default]
     Ide,
 }
 
 impl CdromBus {
-
     pub fn description(&self) -> &'static str {
         match self {
             CdromBus::VirtioScsi => {
@@ -29,7 +25,6 @@ impl CdromBus {
             }
         }
     }
-
 
     const KNOWN_VIRTIO_FRIENDLY_DISTROS: &'static [&'static str] = &[
         "cachyos",
@@ -51,7 +46,6 @@ impl CdromBus {
         "nixos",
     ];
 
-
     pub fn recommended_for_iso_filename(iso_path: &Path) -> Self {
         let Some(file_name) = iso_path.file_name().and_then(|n| n.to_str()) else {
             return CdromBus::Ide;
@@ -66,13 +60,6 @@ impl CdromBus {
         } else {
             CdromBus::Ide
         }
-    }
-}
-
-impl Default for CdromBus {
-
-    fn default() -> Self {
-        CdromBus::Ide
     }
 }
 

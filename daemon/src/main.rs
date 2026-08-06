@@ -1,5 +1,3 @@
-
-
 mod daemon;
 mod firmware;
 mod service;
@@ -17,7 +15,6 @@ use service::DaemonService;
 use tonic::transport::Server;
 
 const DEFAULT_LISTEN_ADDR: &str = "127.0.0.1:50051";
-
 
 async fn shutdown_signal(daemon: Arc<Daemon>) {
     let ctrl_c = async {
@@ -77,7 +74,6 @@ async fn shutdown_signal(daemon: Arc<Daemon>) {
     tracing::info!("graceful shutdown complete");
 }
 
-
 const ANDLER_CRATE_TARGETS: &[&str] = &[
     "daemon",
     "andler_core",
@@ -88,11 +84,9 @@ const ANDLER_CRATE_TARGETS: &[&str] = &[
     "andler_rpc",
 ];
 
-
 fn verbosity_from_args() -> u8 {
     verbosity_from(std::env::args().skip(1))
 }
-
 
 fn verbosity_from<I, S>(args: I) -> u8
 where
@@ -148,7 +142,6 @@ mod verbosity_tests {
     }
 }
 
-
 fn init_tracing() {
     let json = std::env::var("ANDLERD_LOG_FORMAT")
         .map(|v| v.eq_ignore_ascii_case("json"))
@@ -173,7 +166,10 @@ fn init_tracing() {
     };
 
     if json {
-        tracing_subscriber::fmt().json().with_env_filter(filter).init();
+        tracing_subscriber::fmt()
+            .json()
+            .with_env_filter(filter)
+            .init();
     } else {
         tracing_subscriber::fmt().with_env_filter(filter).init();
     }
@@ -190,8 +186,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let addr: SocketAddr = std::env::var("ANDLERD_LISTEN_ADDR")
         .unwrap_or_else(|_| DEFAULT_LISTEN_ADDR.to_string())
         .parse()?;
-    let store_path =
-        std::env::var("ANDLERD_STORE_PATH").unwrap_or_else(|_| default_store_path());
+    let store_path = std::env::var("ANDLERD_STORE_PATH").unwrap_or_else(|_| default_store_path());
 
     let ovmf_code = std::env::var("ANDLERD_OVMF_CODE")
         .ok()
@@ -248,7 +243,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     Ok(())
 }
-
 
 fn spawn_health_check_task(daemon: Arc<Daemon>) {
     let interval_secs: u64 = std::env::var("ANDLERD_HEALTH_CHECK_INTERVAL_SECS")

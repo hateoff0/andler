@@ -1,11 +1,8 @@
-
-
 use std::ffi::CString;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
 use crate::error::DiskError;
-
 
 fn available_bytes(path: &Path) -> Result<u64, DiskError> {
     let mut probe: &Path = path;
@@ -46,7 +43,6 @@ fn available_bytes(path: &Path) -> Result<u64, DiskError> {
     Ok(stat.f_bavail as u64 * stat.f_frsize as u64)
 }
 
-
 pub fn check_available_space(path: &Path, required_bytes: u64) -> Result<(), DiskError> {
     let available = available_bytes(path)?;
     if available < required_bytes {
@@ -66,7 +62,10 @@ mod tests {
     #[test]
     fn available_bytes_on_temp_dir_is_nonzero() {
         let bytes = available_bytes(&std::env::temp_dir()).expect("statvfs must succeed");
-        assert!(bytes > 0, "a real filesystem should report nonzero free space");
+        assert!(
+            bytes > 0,
+            "a real filesystem should report nonzero free space"
+        );
     }
 
     #[test]

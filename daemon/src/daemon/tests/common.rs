@@ -1,9 +1,9 @@
 use super::*;
-use andler_core::{
-    AndroidProfile, ArmTranslator, AudioConfig, CdromBus, CpuConfig, DiskConfig, DisplayConfig, FirmwareConfig,
-    GpuConfig, InputConfig, InstanceKind, MemoryConfig, NetworkConfig,
-};
 pub(crate) use andler_core::AndroidVersion;
+use andler_core::{
+    AndroidProfile, ArmTranslator, AudioConfig, CdromBus, CpuConfig, DiskConfig, DisplayConfig,
+    FirmwareConfig, GpuConfig, InputConfig, InstanceKind, MemoryConfig, NetworkConfig,
+};
 use std::path::PathBuf;
 
 pub(crate) struct TestTempDir(PathBuf);

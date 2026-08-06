@@ -1,7 +1,7 @@
 use andler_rpc::proto::andler_service_client::AndlerServiceClient;
 use andler_rpc::proto::{InstanceIdRequest, RemoveInstanceRequest, StopInstanceRequest};
+use std::io::IsTerminal;
 use tonic::transport::Channel;
-
 
 pub async fn resolve_echo(
     client: &mut AndlerServiceClient<Channel>,
@@ -92,11 +92,24 @@ pub async fn handle_remove(
     purge: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (id, name) = resolve_echo(client, &instance_id).await;
+    if purge && std::io::stdin().is_terminal() {
+        let label = match name.as_deref() {
+            Some(name) => format!("{id} ({name})"),
+            None => id.clone(),
+        };
+        let confirmed = inquire::Confirm::new(&format!(
+            "This permanently deletes instance {label} and its disk image. Continue?"
+        ))
+        .with_default(false)
+        .prompt()
+        .map_err(|e| format!("remove aborted: {e}"))?;
+        if !confirmed {
+            println!("Cancelled.");
+            return Ok(());
+        }
+    }
     client
-        .remove_instance(RemoveInstanceRequest {
-            instance_id,
-            purge,
-        })
+        .remove_instance(RemoveInstanceRequest { instance_id, purge })
         .await?;
     print_echo("removed", &id, name.as_deref());
     Ok(())

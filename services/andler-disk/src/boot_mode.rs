@@ -35,15 +35,31 @@ pub async fn switch_boot_mode(overlay_path: &Path, mode: AndroidBootMode) -> Res
         )));
     }
 
-    let link = default_target_link(mount_guard.path());
-    if link.symlink_metadata().is_ok() {
-        std::fs::remove_file(&link).map_err(|e| {
-            DiskError::FileSystem(format!("failed to remove existing default.target symlink: {e}"))
-        })?;
+    // /etc/systemd/system is root:root 755 on the guest filesystem (as it is on any
+    // normal Linux system) — andlerd itself runs unprivileged, so a raw
+    // std::fs::remove_file/symlink here fails with EPERM even though the mount itself
+    // is rw. Route the actual mutation through the same privileged chroot pattern
+    // guest_tools.rs already uses for package installs: `ln -sfn` both removes the
+    // old symlink and creates the new one, so no separate privileged remove is needed.
+    let output = nbd::privileged_command("chroot")
+        .arg(mount_guard.path())
+        .args([
+            "ln",
+            "-sfn",
+            target_unit_path(mode),
+            "/etc/systemd/system/default.target",
+        ])
+        .output()
+        .map_err(|e| DiskError::FileSystem(format!("failed to run chroot: {e}")))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(DiskError::FileSystem(format!(
+            "failed to write default.target symlink (exit {}): {}",
+            output.status,
+            nbd::describe_sudo_failure("chroot", stderr.trim())
+        )));
     }
-    std::os::unix::fs::symlink(target_unit_path(mode), &link).map_err(|e| {
-        DiskError::FileSystem(format!("failed to write default.target symlink: {e}"))
-    })?;
 
     tracing::info!(mode = ?mode, path = %overlay_path.display(), "android instance boot mode switched offline");
     Ok(())
@@ -51,8 +67,9 @@ pub async fn switch_boot_mode(overlay_path: &Path, mode: AndroidBootMode) -> Res
 
 fn read_boot_mode(mount_point: &Path) -> Result<AndroidBootMode, DiskError> {
     let link = default_target_link(mount_point);
-    let target = std::fs::read_link(&link)
-        .map_err(|e| DiskError::FileSystem(format!("failed to read default.target symlink: {e}")))?;
+    let target = std::fs::read_link(&link).map_err(|e| {
+        DiskError::FileSystem(format!("failed to read default.target symlink: {e}"))
+    })?;
     if target.to_string_lossy().ends_with("android.target") {
         Ok(AndroidBootMode::Android)
     } else {

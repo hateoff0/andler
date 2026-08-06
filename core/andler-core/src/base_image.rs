@@ -45,7 +45,11 @@ pub enum BaseImageError {
 
 impl AndroidProfile {
     pub fn variant_label(&self) -> &'static str {
-        if self.gapps { "GAPPS" } else { "VANILLA" }
+        if self.gapps {
+            "GAPPS"
+        } else {
+            "VANILLA"
+        }
     }
 }
 
@@ -133,7 +137,13 @@ mod tests {
         }
     }
 
-    fn write_manifest(dir: &std::path::Path, name: &str, major: &str, variant: &str, built_at: &str) {
+    fn write_manifest(
+        dir: &std::path::Path,
+        name: &str,
+        major: &str,
+        variant: &str,
+        built_at: &str,
+    ) {
         fs::write(dir.join(format!("{name}.qcow2")), b"placeholder").unwrap();
         fs::write(
             dir.join(format!("{name}.manifest.json")),
@@ -171,7 +181,10 @@ mod tests {
     #[test]
     fn resolve_finds_no_match_when_directory_missing() {
         let lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        std::env::set_var(ANDLER_HOME_ENV, "/tmp/andler-base-image-test-nonexistent-home");
+        std::env::set_var(
+            ANDLER_HOME_ENV,
+            "/tmp/andler-base-image-test-nonexistent-home",
+        );
         let err = resolve(&profile(AndroidVersion::Android13, false)).unwrap_err();
         assert!(matches!(err, BaseImageError::NotFound { .. }));
         std::env::remove_var(ANDLER_HOME_ENV);
@@ -226,7 +239,13 @@ mod tests {
 
     #[test]
     fn variant_label_matches_docker_build_arg_values() {
-        assert_eq!(profile(AndroidVersion::Android13, true).variant_label(), "GAPPS");
-        assert_eq!(profile(AndroidVersion::Android13, false).variant_label(), "VANILLA");
+        assert_eq!(
+            profile(AndroidVersion::Android13, true).variant_label(),
+            "GAPPS"
+        );
+        assert_eq!(
+            profile(AndroidVersion::Android13, false).variant_label(),
+            "VANILLA"
+        );
     }
 }

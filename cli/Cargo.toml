@@ -29,3 +29,4 @@ toml = "0.8"
 # inquire provides exactly the needed UX without extra complexity.
 # Version locked — inquire API is unstable between minor versions.
 inquire = "0.7"
+chrono = { version = "0.4", features = ["serde"] }

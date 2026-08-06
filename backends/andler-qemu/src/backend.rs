@@ -1,14 +1,13 @@
-
-
-use std::sync::Arc;
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 
-use andler_net::{DefaultNetworkService, NetworkService};
 use andler_core::{
-    BackendError, BackendHandle, BackendStatus, HypervisorBackend, InstanceConfig, InstanceState,
-    LogLine, LogStreamSource, NetworkMode, RenderBackend, ResourceMetrics,
+    BackendError, BackendHandle, BackendStatus, HypervisorBackend, InstanceConfig, InstanceKind,
+    InstanceState, LogLine, LogStreamSource, NetworkMode, RenderBackend, Resolution,
+    ResourceMetrics,
 };
+use andler_net::{DefaultNetworkService, NetworkService};
 use async_trait::async_trait;
 use futures_core::stream::BoxStream;
 use futures_util::StreamExt;
@@ -18,11 +17,9 @@ use crate::cmdline;
 use crate::process::{ProcessError, QemuProcess};
 use crate::qmp::{QmpClient, QmpError, VmStatus};
 
-
 fn qmp_socket_dir() -> PathBuf {
     andler_core::paths::runtime_dir().join("andler/qmp")
 }
-
 
 struct RunningInstance {
     process: QemuProcess,
@@ -40,7 +37,6 @@ enum NetworkInfo {
     Nat,
 }
 
-
 pub struct QemuBackend {
     instances: Mutex<HashMap<BackendHandle, RunningInstance>>,
     network_service: Arc<DefaultNetworkService>,
@@ -54,7 +50,6 @@ impl QemuBackend {
         }
     }
 
-
     fn handle_for(cfg: &InstanceConfig) -> BackendHandle {
         BackendHandle(format!("qemu:{}", cfg.id.0))
     }
@@ -62,7 +57,6 @@ impl QemuBackend {
     fn qmp_socket_path_for(cfg: &InstanceConfig) -> PathBuf {
         qmp_socket_dir().join(format!("{}.sock", cfg.id.0))
     }
-
 
     async fn ensure_qmp_connected(instance: &mut RunningInstance) -> Result<(), QmpError> {
         if instance.qmp_client.is_some() {
@@ -74,6 +68,12 @@ impl QemuBackend {
         Ok(())
     }
 
+    async fn guest_agent_client(instance: &RunningInstance) -> Result<QmpClient, BackendError> {
+        let path = instance.process.qga_socket_path();
+        QmpClient::connect_agent(&path)
+            .await
+            .map_err(qmp_error_to_backend_error)
+    }
 
     async fn diagnose_and_reset_qmp(instance: &mut RunningInstance) -> Option<BackendError> {
         instance.qmp_client = None;
@@ -84,49 +84,6 @@ impl QemuBackend {
             Some(BackendError::ProcessNotRunning)
         }
     }
-
-
-    pub async fn is_guest_agent_available(
-        &self,
-        handle: &BackendHandle,
-    ) -> Result<bool, BackendError> {
-        let mut instances = self.instances.lock().await;
-        let instance = instances
-            .get_mut(handle)
-            .ok_or_else(|| BackendError::HandleNotFound(handle.0.clone()))?;
-
-        Self::ensure_qmp_connected(instance)
-            .await
-            .map_err(qmp_error_to_backend_error)?;
-
-        let available = instance
-            .qmp_client
-            .as_mut()
-            .unwrap()
-            .is_guest_agent_available()
-            .await;
-
-        Ok(available)
-    }
-
-
-    pub async fn guest_exec_install(
-        &self,
-        handle: &BackendHandle,
-        package: &str,
-    ) -> Result<(), BackendError> {
-        self.guest_exec_package(handle, package, true).await
-    }
-
-
-    pub async fn guest_exec_remove(
-        &self,
-        handle: &BackendHandle,
-        package: &str,
-    ) -> Result<(), BackendError> {
-        self.guest_exec_package(handle, package, false).await
-    }
-
 
     async fn guest_exec_package(
         &self,
@@ -139,27 +96,21 @@ impl QemuBackend {
             .get_mut(handle)
             .ok_or_else(|| BackendError::HandleNotFound(handle.0.clone()))?;
 
-        Self::ensure_qmp_connected(instance)
+        let mut qga = Self::guest_agent_client(instance).await?;
+
+        const DETECT_SCRIPT: &str = "\
+command -v apt-get >/dev/null 2>&1 && exit 0
+command -v dnf >/dev/null 2>&1 && exit 10
+command -v pacman >/dev/null 2>&1 && exit 20
+exit 30";
+        let pid = qga
+            .guest_exec("/bin/sh", &["-c", DETECT_SCRIPT])
             .await
             .map_err(qmp_error_to_backend_error)?;
 
-        let qmp = instance.qmp_client.as_mut().unwrap();
-
-        let detect_cmd = "/bin/sh";
-        let detect_args = vec!["-c", "which apt-get || which dnf || which pacman"];
-        let pid = qmp
-            .guest_exec(detect_cmd, &detect_args)
+        let pkg_bin = wait_for_detection_exit(&mut qga, pid, std::time::Duration::from_secs(10))
             .await
             .map_err(qmp_error_to_backend_error)?;
-
-        let manager = wait_for_guest_exec(qmp, pid, std::time::Duration::from_secs(10))
-            .await
-            .map_err(qmp_error_to_backend_error)?;
-
-        let pkg_bin = manager
-            .as_deref()
-            .unwrap_or("apt-get")
-            .trim();
 
         let cmd_args: Vec<&str> = if install {
             match pkg_bin {
@@ -177,12 +128,12 @@ impl QemuBackend {
             }
         };
 
-        let pid = qmp
+        let pid = qga
             .guest_exec(cmd_args[0], &cmd_args[1..])
             .await
             .map_err(qmp_error_to_backend_error)?;
 
-        let result = wait_for_guest_exec(qmp, pid, std::time::Duration::from_secs(60))
+        let result = wait_for_guest_exec(&mut qga, pid, std::time::Duration::from_secs(60))
             .await
             .map_err(qmp_error_to_backend_error)?;
 
@@ -205,16 +156,13 @@ impl Default for QemuBackend {
     }
 }
 
-
 fn process_error_to_backend_error(err: ProcessError) -> BackendError {
     BackendError::Io(err.to_string())
 }
 
-
 fn qmp_error_to_backend_error(err: QmpError) -> BackendError {
     BackendError::Io(err.to_string())
 }
-
 
 async fn wait_for_guest_exec(
     qmp: &mut QmpClient,
@@ -228,29 +176,27 @@ async fn wait_for_guest_exec(
         let status = qmp.guest_exec_status(pid).await?;
 
         if status.exited {
-            if status.exitcode != 0 {
-                let stderr = status.err_data.unwrap_or_default();
+            if status.exitcode.unwrap_or_default() != 0 {
+                let stderr =
+                    crate::qmp::decode_guest_exec_data(status.err_data).unwrap_or_default();
                 return Err(QmpError::CommandFailed {
                     command: format!("guest-exec pid={pid}"),
                     class: "GuestExecFailed".to_string(),
                     desc: format!(
                         "guest process exited with code {}: {}",
-                        status.exitcode,
+                        status.exitcode.unwrap_or_default(),
                         stderr.trim()
                     ),
                 });
             }
-            return Ok(status.out_data);
+            return Ok(crate::qmp::decode_guest_exec_data(status.out_data));
         }
 
         if start.elapsed() > timeout {
             return Err(QmpError::CommandFailed {
                 command: format!("guest-exec pid={pid}"),
                 class: "Timeout".to_string(),
-                desc: format!(
-                    "guest process did not exit within {:?}",
-                    timeout
-                ),
+                desc: format!("guest process did not exit within {:?}", timeout),
             });
         }
 
@@ -258,9 +204,42 @@ async fn wait_for_guest_exec(
     }
 }
 
+async fn wait_for_detection_exit(
+    qmp: &mut QmpClient,
+    pid: u64,
+    timeout: std::time::Duration,
+) -> Result<&'static str, QmpError> {
+    use std::time::Instant;
+    let start = Instant::now();
+    loop {
+        let status = qmp.guest_exec_status(pid).await?;
+        if status.exited {
+            return match status.exitcode.unwrap_or_default() {
+                0 => Ok("apt-get"),
+                10 => Ok("dnf"),
+                20 => Ok("pacman"),
+                code => Err(QmpError::CommandFailed {
+                    command: format!("guest-exec pid={pid}"),
+                    class: "GuestExecFailed".to_string(),
+                    desc: format!("no supported package manager found in guest (exit {code})"),
+                }),
+            };
+        }
+        if start.elapsed() > timeout {
+            return Err(QmpError::CommandFailed {
+                command: format!("guest-exec pid={pid}"),
+                class: "Timeout".to_string(),
+                desc: format!(
+                    "package manager detection did not finish within {:?}",
+                    timeout
+                ),
+            });
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+}
 
 const DISK_DEVICE: &str = "drive-disk0";
-
 
 async fn read_log_history(path: &std::path::Path) -> Vec<LogLine> {
     let content = match tokio::fs::read_to_string(path).await {
@@ -276,13 +255,11 @@ async fn read_log_history(path: &std::path::Path) -> Vec<LogLine> {
                     source: LogStreamSource::Stdout,
                     line: rest.to_string(),
                 })
-            } else if let Some(rest) = line.strip_prefix("[stderr] ") {
-                Some(LogLine {
+            } else {
+                line.strip_prefix("[stderr] ").map(|rest| LogLine {
                     source: LogStreamSource::Stderr,
                     line: rest.to_string(),
                 })
-            } else {
-                None
             }
         })
         .collect()
@@ -292,7 +269,8 @@ fn vm_status_to_instance_state(status: VmStatus) -> Option<InstanceState> {
     match status {
         VmStatus::Running => Some(InstanceState::Running),
         VmStatus::Paused => Some(InstanceState::Paused),
-        VmStatus::Shutdown | VmStatus::Other => None,
+        VmStatus::Shutdown => Some(InstanceState::Stopped),
+        VmStatus::Other => None,
     }
 }
 
@@ -335,11 +313,7 @@ impl HypervisorBackend for QemuBackend {
 
         let args = cmdline::build_args(cfg, &qmp_socket_path)?;
 
-        let log_file_path = cfg
-            .disk
-            .path
-            .parent()
-            .map(|dir| dir.join("qemu.log"));
+        let log_file_path = cfg.disk.path.parent().map(|dir| dir.join("qemu.log"));
 
         let network_info = match &cfg.network.mode {
             NetworkMode::Bridge { interface: bridge } => {
@@ -348,11 +322,15 @@ impl HypervisorBackend for QemuBackend {
                     .setup_bridge(bridge, &tap_iface)
                     .await
                     .map_err(|e| BackendError::Io(e.to_string()))?;
-                NetworkInfo::Bridge { bridge: bridge.clone(), tap_iface }
+                NetworkInfo::Bridge {
+                    bridge: bridge.clone(),
+                    tap_iface,
+                }
             }
             NetworkMode::Isolated => {
                 let vm_iface = "andler0";
-                let (host_veth, vm_veth) = self.network_service
+                let (host_veth, vm_veth) = self
+                    .network_service
                     .setup_isolated(vm_iface)
                     .await
                     .map_err(|e| BackendError::Io(e.to_string()))?;
@@ -364,10 +342,16 @@ impl HypervisorBackend for QemuBackend {
         if let Err(err) = process {
             match &network_info {
                 NetworkInfo::Bridge { bridge, tap_iface } => {
-                    let _ = self.network_service.teardown_bridge(bridge, tap_iface).await;
+                    let _ = self
+                        .network_service
+                        .teardown_bridge(bridge, tap_iface)
+                        .await;
                 }
                 NetworkInfo::Isolated { host_veth, vm_veth } => {
-                    let _ = self.network_service.teardown_isolated(host_veth, vm_veth).await;
+                    let _ = self
+                        .network_service
+                        .teardown_isolated(host_veth, vm_veth)
+                        .await;
                 }
                 NetworkInfo::Nat => {}
             }
@@ -410,7 +394,12 @@ impl HypervisorBackend for QemuBackend {
 
         match first_attempt {
             Ok(()) => Ok(()),
-            Err(err) if matches!(err, QmpError::CommandFailed { .. } | QmpError::ParseError(_)) => {
+            Err(err)
+                if matches!(
+                    err,
+                    QmpError::CommandFailed { .. } | QmpError::ParseError(_)
+                ) =>
+            {
                 Err(qmp_error_to_backend_error(err))
             }
             Err(_connection_level_err) => {
@@ -450,7 +439,12 @@ impl HypervisorBackend for QemuBackend {
 
         match first_attempt {
             Ok(()) => Ok(()),
-            Err(err) if matches!(err, QmpError::CommandFailed { .. } | QmpError::ParseError(_)) => {
+            Err(err)
+                if matches!(
+                    err,
+                    QmpError::CommandFailed { .. } | QmpError::ParseError(_)
+                ) =>
+            {
                 Err(qmp_error_to_backend_error(err))
             }
             Err(_connection_level_err) => {
@@ -529,6 +523,7 @@ impl HypervisorBackend for QemuBackend {
             return Ok(BackendStatus {
                 state: InstanceState::Stopped,
                 detail: Some("process is not running".to_string()),
+                clean_shutdown: false,
             });
         }
 
@@ -543,13 +538,26 @@ impl HypervisorBackend for QemuBackend {
 
                 match qmp_status {
                     Ok(vm_status) => match vm_status_to_instance_state(vm_status) {
-                        Some(state) => Ok(BackendStatus { state, detail: None }),
+                        Some(InstanceState::Stopped) => Ok(BackendStatus {
+                            state: InstanceState::Stopped,
+                            detail: Some(
+                                "guest shut down cleanly (QMP reports VM status Shutdown)"
+                                    .to_string(),
+                            ),
+                            clean_shutdown: true,
+                        }),
+                        Some(state) => Ok(BackendStatus {
+                            state,
+                            detail: None,
+                            clean_shutdown: false,
+                        }),
                         None => Ok(BackendStatus {
                             state: InstanceState::Running,
                             detail: Some(format!(
                                 "process is alive; QMP reports VM status {vm_status:?}, \
                                  which does not map directly to a HypervisorBackend state"
                             )),
+                            clean_shutdown: false,
                         }),
                     },
                     Err(qmp_err) => {
@@ -559,6 +567,7 @@ impl HypervisorBackend for QemuBackend {
                             detail: Some(format!(
                                 "process is alive but QMP query-status failed: {qmp_err}"
                             )),
+                            clean_shutdown: false,
                         })
                     }
                 }
@@ -568,6 +577,7 @@ impl HypervisorBackend for QemuBackend {
                 detail: Some(format!(
                     "process is alive but QMP connection failed: {qmp_err}"
                 )),
+                clean_shutdown: false,
             }),
         }
     }
@@ -689,61 +699,57 @@ impl HypervisorBackend for QemuBackend {
     }
 
     fn metrics_stream(&self, handle: &BackendHandle) -> BoxStream<'_, ResourceMetrics> {
-        let receiver = match self.instances.try_lock() {
-            Ok(mut instances) => {
-                instances.get_mut(handle).map(|i| i.process.subscribe_metrics())
+        let handle = handle.clone();
+        let stream = futures_util::stream::once(async move {
+            let mut instances = self.instances.lock().await;
+            match instances.get_mut(&handle) {
+                Some(i) => {
+                    let receiver = i.process.subscribe_metrics();
+                    Box::pin(
+                        tokio_stream::wrappers::BroadcastStream::new(receiver)
+                            .filter_map(|item| async move { item.ok() }),
+                    ) as BoxStream<'_, ResourceMetrics>
+                }
+                None => Box::pin(futures_util::stream::empty()) as BoxStream<'_, ResourceMetrics>,
             }
-            Err(_would_block) => None,
-        };
+        })
+        .flatten();
 
-        match receiver {
-            Some(receiver) => Box::pin(
-                tokio_stream::wrappers::BroadcastStream::new(receiver).filter_map(|item| async {
-                    match item {
-                        Ok(metrics) => Some(metrics),
-                        Err(tokio_stream::wrappers::errors::BroadcastStreamRecvError::Lagged(
-                            _,
-                        )) => None,
-                    }
-                }),
-            ),
-            None => Box::pin(futures_util::stream::empty()),
-        }
+        Box::pin(stream)
     }
 
     fn log_stream(&self, handle: &BackendHandle) -> BoxStream<'_, LogLine> {
-        let subscription = match self.instances.try_lock() {
-            Ok(mut instances) => instances
-                .get_mut(handle)
-                .map(|i| (i.process.log_file_path().map(PathBuf::from), i.process.subscribe_logs())),
-            Err(_would_block) => None,
-        };
+        let handle = handle.clone();
+        let stream = futures_util::stream::once(async move {
+            let mut instances = self.instances.lock().await;
+            let subscription = instances.get_mut(&handle).map(|i| {
+                (
+                    i.process.log_file_path().map(PathBuf::from),
+                    i.process.subscribe_logs(),
+                )
+            });
 
-        match subscription {
-            Some((log_file_path, receiver)) => {
-                let live = tokio_stream::wrappers::BroadcastStream::new(receiver).filter_map(
-                    |item| async {
-                        match item {
-                            Ok(line) => Some(line),
-                            Err(tokio_stream::wrappers::errors::BroadcastStreamRecvError::Lagged(
-                                _,
-                            )) => None,
+            match subscription {
+                Some((log_file_path, receiver)) => {
+                    let live = tokio_stream::wrappers::BroadcastStream::new(receiver)
+                        .filter_map(|item| async move { item.ok() });
+
+                    let history = futures_util::stream::once(async move {
+                        match log_file_path {
+                            Some(path) => read_log_history(&path).await,
+                            None => Vec::new(),
                         }
-                    },
-                );
+                    })
+                    .flat_map(futures_util::stream::iter);
 
-                let history = futures_util::stream::once(async move {
-                    match log_file_path {
-                        Some(path) => read_log_history(&path).await,
-                        None => Vec::new(),
-                    }
-                })
-                .flat_map(|history_lines| futures_util::stream::iter(history_lines));
-
-                Box::pin(history.chain(live))
+                    Box::pin(history.chain(live)) as BoxStream<'_, LogLine>
+                }
+                None => Box::pin(futures_util::stream::empty()) as BoxStream<'_, LogLine>,
             }
-            None => Box::pin(futures_util::stream::empty()),
-        }
+        })
+        .flatten();
+
+        Box::pin(stream)
     }
 
     async fn is_guest_agent_available(&self, handle: &BackendHandle) -> Result<bool, BackendError> {
@@ -752,18 +758,8 @@ impl HypervisorBackend for QemuBackend {
             .get_mut(handle)
             .ok_or_else(|| BackendError::HandleNotFound(handle.0.clone()))?;
 
-        Self::ensure_qmp_connected(instance)
-            .await
-            .map_err(qmp_error_to_backend_error)?;
-
-        let available = instance
-            .qmp_client
-            .as_mut()
-            .expect("qmp_client is Some after ensure_qmp_connected")
-            .is_guest_agent_available()
-            .await;
-
-        Ok(available)
+        let mut qga = Self::guest_agent_client(instance).await?;
+        Ok(qga.is_guest_agent_available().await)
     }
 
     async fn guest_exec_install(
@@ -782,6 +778,47 @@ impl HypervisorBackend for QemuBackend {
         self.guest_exec_package(handle, package, false).await
     }
 
+    async fn set_guest_display_resolution(
+        &self,
+        handle: &BackendHandle,
+        resolution: &Resolution,
+        kind: InstanceKind,
+    ) -> Result<(), BackendError> {
+        let mut instances = self.instances.lock().await;
+        let instance = instances
+            .get_mut(handle)
+            .ok_or_else(|| BackendError::HandleNotFound(handle.0.clone()))?;
+
+        let mut qga = Self::guest_agent_client(instance).await?;
+
+        let content = format!("RESOLUTION={}x{}\n", resolution.width, resolution.height);
+        qga.guest_file_write("/etc/andler/display.conf", &content)
+            .await
+            .map_err(qmp_error_to_backend_error)?;
+
+        let (cmd, args): (&str, &[&str]) = match kind {
+            InstanceKind::AndroidVm { .. } => {
+                ("systemctl", &["restart", "waydroid-compositor.service"])
+            }
+            InstanceKind::LinuxVm { .. } => ("/usr/local/bin/andler-apply-resolution", &[]),
+        };
+        let pid = qga
+            .guest_exec(cmd, args)
+            .await
+            .map_err(qmp_error_to_backend_error)?;
+        let output = wait_for_guest_exec(&mut qga, pid, std::time::Duration::from_secs(30))
+            .await
+            .map_err(qmp_error_to_backend_error)?;
+        if let Some(output) = output {
+            tracing::debug!(
+                resolution = %format!("{}x{}", resolution.width, resolution.height),
+                output = %output,
+                "guest display resolution applied"
+            );
+        }
+        Ok(())
+    }
+
     async fn guest_check_binary_installed(
         &self,
         handle: &BackendHandle,
@@ -792,15 +829,10 @@ impl HypervisorBackend for QemuBackend {
             .get_mut(handle)
             .ok_or_else(|| BackendError::HandleNotFound(handle.0.clone()))?;
 
-        Self::ensure_qmp_connected(instance)
-            .await
-            .map_err(qmp_error_to_backend_error)?;
+        let mut qga = Self::guest_agent_client(instance).await?;
 
-        let qmp = instance.qmp_client.as_mut().unwrap();
-
-        let cmd = format!("test -x {binary_path}");
-        let pid = qmp
-            .guest_exec("/bin/sh", &["-c", &cmd])
+        let pid = qga
+            .guest_exec("/usr/bin/test", &["-x", binary_path])
             .await
             .map_err(qmp_error_to_backend_error)?;
 
@@ -809,13 +841,13 @@ impl HypervisorBackend for QemuBackend {
         let timeout = std::time::Duration::from_secs(5);
 
         loop {
-            let status = qmp
+            let status = qga
                 .guest_exec_status(pid)
                 .await
                 .map_err(qmp_error_to_backend_error)?;
 
             if status.exited {
-                return Ok(status.exitcode == 0);
+                return Ok(status.exitcode.unwrap_or_default() == 0);
             }
 
             if start.elapsed() > timeout {
@@ -930,7 +962,6 @@ mod tests {
         assert!(stream.next().await.is_none());
     }
 
-
     #[tokio::test]
     async fn log_stream_on_unknown_handle_is_immediately_empty() {
         use futures_util::StreamExt;
@@ -1036,8 +1067,15 @@ mod tests {
     }
 
     #[test]
-    fn vm_status_does_not_map_shutdown_or_other_directly() {
-        assert_eq!(vm_status_to_instance_state(VmStatus::Shutdown), None);
+    fn vm_status_maps_shutdown_to_stopped() {
+        assert_eq!(
+            vm_status_to_instance_state(VmStatus::Shutdown),
+            Some(InstanceState::Stopped)
+        );
+    }
+
+    #[test]
+    fn vm_status_other_does_not_map_directly() {
         assert_eq!(vm_status_to_instance_state(VmStatus::Other), None);
     }
 
@@ -1077,7 +1115,6 @@ mod tests {
         backend.stop(&handle, false).await.unwrap();
     }
 
-
     #[ignore = "requires qemu-system-x86_64 binary, see docker/README.md integration-test target"]
     #[tokio::test]
     async fn pause_after_external_process_kill_returns_process_not_running() {
@@ -1112,7 +1149,6 @@ mod tests {
         );
     }
 
-
     #[tokio::test]
     #[ignore = "requires qemu-system-x86_64 binary, see docker/README.md integration-test target"]
     async fn log_stream_receives_real_process_output() {
@@ -1131,4 +1167,3 @@ mod tests {
         backend.stop(&handle, false).await.unwrap();
     }
 }
-

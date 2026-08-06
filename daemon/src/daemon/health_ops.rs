@@ -1,11 +1,8 @@
-
-
 use super::error::DaemonError;
 use super::Daemon;
 use andler_core::{InstanceEvent, InstanceId, InstanceState};
 
 impl Daemon {
-
     pub async fn run_health_check_once(&self) {
         let running: Vec<_> = {
             let instances = self.instances.read().await;
@@ -57,12 +54,26 @@ impl Daemon {
                 continue;
             }
 
-            let reason = status.detail.unwrap_or_else(|| {
-                format!(
-                    "backend now reports state {:?}, was Running",
-                    status.state
-                )
+            let reason = status.detail.clone().unwrap_or_else(|| {
+                format!("backend now reports state {:?}, was Running", status.state)
             });
+
+            if status.clean_shutdown {
+                tracing::info!(
+                    instance_id = %id.0,
+                    reason = %reason,
+                    "instance health check: guest shut down cleanly — marking Stopped"
+                );
+                if let Err(err) = self.mark_instance_stopped_cleanly(id).await {
+                    tracing::error!(
+                        instance_id = %id.0,
+                        error = %err,
+                        "health check: failed to record clean shutdown in FSM"
+                    );
+                }
+                continue;
+            }
+
             tracing::error!(
                 instance_id = %id.0,
                 reason = %reason,
@@ -92,6 +103,31 @@ impl Daemon {
                 .ok_or(DaemonError::InstanceNotFound(id))?;
             record.handle = None;
             record.state = record.state.clone().apply(InstanceEvent::Fail(reason))?;
+            record.state.clone()
+        };
+        self.persist_state(id, &final_state).await;
+        Ok(())
+    }
+
+    /// Like `mark_instance_crashed`, but for a backend-observed status that reflects
+    /// a genuine guest-initiated shutdown (see `BackendStatus::clean_shutdown`) rather
+    /// than the process disappearing unexpectedly — reaches `Stopped` through the
+    /// normal Stop+StopCompleted transitions instead of `Error`.
+    pub(crate) async fn mark_instance_stopped_cleanly(
+        &self,
+        id: InstanceId,
+    ) -> Result<(), DaemonError> {
+        let final_state = {
+            let mut instances = self.instances.write().await;
+            let record = instances
+                .get_mut(&id)
+                .ok_or(DaemonError::InstanceNotFound(id))?;
+            record.handle = None;
+            record.state = record
+                .state
+                .clone()
+                .apply(InstanceEvent::Stop)?
+                .apply(InstanceEvent::StopCompleted)?;
             record.state.clone()
         };
         self.persist_state(id, &final_state).await;

@@ -6,6 +6,9 @@ pub async fn handle(action: DiskAction) -> Result<(), Box<dyn std::error::Error>
     match action {
         DiskAction::Create { path, size } => {
             let bytes = parse_size(&size)?;
+            if bytes == 0 {
+                return Err("disk: refusing to create a 0-byte disk image".into());
+            }
             let path = ensure_qcow2_extension(&path);
             andler_disk::qcow2::create(&path, bytes).await?;
             println!("created {}", path.display());
@@ -30,11 +33,7 @@ pub async fn handle(action: DiskAction) -> Result<(), Box<dyn std::error::Error>
                 None => println!("backing_file: none"),
             }
         }
-        DiskAction::Resize {
-            path,
-            size,
-            shrink,
-        } => {
+        DiskAction::Resize { path, size, shrink } => {
             let bytes = parse_size(&size)?;
             match andler_disk::qcow2::resize(&path, bytes, shrink).await {
                 Ok(()) => {

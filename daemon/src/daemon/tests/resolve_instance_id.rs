@@ -28,10 +28,7 @@ async fn unmatched_prefix_is_not_found() {
     cfg.id = InstanceId::new();
     daemon.create_instance(cfg).await.expect("create instance");
 
-    let err = daemon
-        .resolve_instance_id("ffffffff")
-        .await
-        .unwrap_err();
+    let err = daemon.resolve_instance_id("ffffffff").await.unwrap_err();
     assert!(matches!(err, DaemonError::InstanceRefNotFound(prefix) if prefix == "ffffffff"));
 }
 

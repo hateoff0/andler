@@ -1,5 +1,3 @@
-
-
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Instant;
@@ -8,22 +6,15 @@ use andler_core::ResourceMetrics;
 
 use super::{read_sysfs_u64_plain, sorted_drm_cards};
 
-
 const INTEL_RC6_RESIDENCY_MS: &str = "device/power/rc6_residency_ms";
-
 
 static PREV_INTEL_SAMPLE: Mutex<Option<(u64, Instant)>> = Mutex::new(None);
 
-
 pub(super) fn find_intel_gpu_card() -> Option<PathBuf> {
-    for card_path in sorted_drm_cards() {
-        if card_path.join(INTEL_RC6_RESIDENCY_MS).exists() {
-            return Some(card_path);
-        }
-    }
-    None
+    sorted_drm_cards()
+        .into_iter()
+        .find(|card_path| card_path.join(INTEL_RC6_RESIDENCY_MS).exists())
 }
-
 
 pub(super) fn read_intel_metrics(card_path: &Path) -> ResourceMetrics {
     let current_rc6_ms = read_sysfs_u64_plain(&card_path.join(INTEL_RC6_RESIDENCY_MS));
@@ -34,7 +25,6 @@ pub(super) fn read_intel_metrics(card_path: &Path) -> ResourceMetrics {
         ..ResourceMetrics::default()
     }
 }
-
 
 fn compute_intel_gpu_load(current_rc6_ms: Option<u64>) -> Option<f32> {
     let current = current_rc6_ms?;
@@ -48,7 +38,6 @@ fn compute_intel_gpu_load(current_rc6_ms: Option<u64>) -> Option<f32> {
 
     intel_gpu_load_from_delta(current.saturating_sub(prev_rc6_ms), elapsed_ms)
 }
-
 
 fn intel_gpu_load_from_delta(idle_delta_ms: u64, elapsed_ms: f64) -> Option<f32> {
     if elapsed_ms <= 0.0 {
@@ -75,7 +64,6 @@ mod tests {
         assert!(!INTEL_RC6_RESIDENCY_MS.contains("busyiffies"));
         assert!(!INTEL_RC6_RESIDENCY_MS.contains("attrs"));
     }
-
 
     #[test]
     fn intel_gpu_load_from_delta_fully_idle_is_zero_load() {

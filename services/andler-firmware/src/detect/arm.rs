@@ -1,7 +1,4 @@
-
-
 use andler_core::ArmTranslator;
-
 
 pub(crate) fn detect_arm_translator() -> Option<ArmTranslator> {
     let cpuinfo = std::fs::read_to_string("/proc/cpuinfo").ok()?;
@@ -9,9 +6,7 @@ pub(crate) fn detect_arm_translator() -> Option<ArmTranslator> {
 }
 
 fn detect_arm_translator_from_cpuinfo(cpuinfo: &str) -> Option<ArmTranslator> {
-    let vendor_line = cpuinfo
-        .lines()
-        .find(|line| line.starts_with("vendor_id"))?;
+    let vendor_line = cpuinfo.lines().find(|line| line.starts_with("vendor_id"))?;
     let vendor = vendor_line.split(':').nth(1)?.trim();
 
     match vendor {

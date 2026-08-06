@@ -8,3 +8,4 @@ license.workspace = true
 andler-core = { path = "../../core/andler-core" }
 tokio = { workspace = true, features = ["process"] }
 thiserror = { workspace = true }
+async-trait = { workspace = true }

@@ -1,5 +1,3 @@
-
-
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
@@ -11,33 +9,25 @@ use tokio::process::{Child, Command};
 use tokio::sync::broadcast;
 use tokio::time::timeout;
 
-
 const QEMU_BINARY: &str = "qemu-system-x86_64";
-
 
 const GRACEFUL_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
 
-
 const LOG_CHANNEL_CAPACITY: usize = 256;
-
 
 const METRICS_CHANNEL_CAPACITY: usize = 64;
 
 #[derive(Debug, Error)]
 pub enum ProcessError {
-
     #[error("failed to spawn {QEMU_BINARY}: {0}")]
     SpawnFailed(std::io::Error),
-
 
     #[error("process I/O error: {0}")]
     Io(std::io::Error),
 
-
     #[error("process did not exit within {0:?} after SIGTERM")]
     GracefulShutdownTimedOut(Duration),
 }
-
 
 pub struct QemuProcess {
     child: Child,
@@ -55,7 +45,6 @@ pub struct QemuProcess {
 }
 
 impl QemuProcess {
-
     pub async fn spawn(
         args: &[String],
         qmp_socket_path: PathBuf,
@@ -70,9 +59,7 @@ impl QemuProcess {
             .spawn()
             .map_err(ProcessError::SpawnFailed)?;
 
-        let pid = child
-            .id()
-            .expect("freshly spawned child must have a pid");
+        let pid = child.id().expect("freshly spawned child must have a pid");
 
         let (log_sender, _) = broadcast::channel(LOG_CHANNEL_CAPACITY);
 
@@ -118,7 +105,6 @@ impl QemuProcess {
         })
     }
 
-
     async fn open_log_file(path: Option<&std::path::Path>) -> Option<tokio::fs::File> {
         let path = path?;
         match tokio::fs::OpenOptions::new()
@@ -139,15 +125,13 @@ impl QemuProcess {
         }
     }
 
-
     async fn drain_to_tracing<R>(
         reader: R,
         pid: u32,
         source: LogStreamSource,
         sender: broadcast::Sender<LogLine>,
         mut log_file: Option<tokio::fs::File>,
-    )
-    where
+    ) where
         R: tokio::io::AsyncRead + Unpin,
     {
         let stream_name = match source {
@@ -176,11 +160,9 @@ impl QemuProcess {
         }
     }
 
-
     pub fn subscribe_logs(&self) -> broadcast::Receiver<LogLine> {
         self.log_sender.subscribe()
     }
-
 
     pub fn subscribe_metrics(&self) -> broadcast::Receiver<ResourceMetrics> {
         self.metrics_sender.subscribe()
@@ -194,11 +176,13 @@ impl QemuProcess {
         &self.qmp_socket_path
     }
 
+    pub fn qga_socket_path(&self) -> PathBuf {
+        self.qmp_socket_path.with_extension("qga.sock")
+    }
 
     pub fn log_file_path(&self) -> Option<&Path> {
         self.log_file_path.as_deref()
     }
-
 
     pub async fn is_alive(&mut self) -> Result<bool, ProcessError> {
         match self.child.try_wait().map_err(ProcessError::Io)? {
@@ -206,7 +190,6 @@ impl QemuProcess {
             None => Ok(true),
         }
     }
-
 
     pub async fn terminate(&mut self) -> Result<(), ProcessError> {
         // SAFETY: PID is from our own spawned child process; SIGTERM is a standard signal.
@@ -224,7 +207,6 @@ impl QemuProcess {
         }
     }
 
-
     pub async fn force_kill(&mut self) -> Result<(), ProcessError> {
         self.child.kill().await.map_err(ProcessError::Io)
     }
@@ -233,7 +215,6 @@ impl QemuProcess {
 #[cfg(test)]
 mod tests {
     use super::*;
-
 
     #[tokio::test]
     #[ignore = "requires qemu-system-x86_64 binary, see docker/README.md integration-test target"]
@@ -276,7 +257,6 @@ mod tests {
         assert!(matches!(result, Err(ProcessError::SpawnFailed(_))));
     }
 
-
     #[tokio::test]
     async fn drain_to_tracing_publishes_lines_to_subscriber() {
         let (sender, mut receiver) = broadcast::channel(LOG_CHANNEL_CAPACITY);
@@ -295,7 +275,6 @@ mod tests {
         assert!(receiver.try_recv().is_err(), "no more lines after EOF");
     }
 
-
     #[tokio::test]
     async fn drain_to_tracing_tolerates_no_subscribers() {
         let (sender, _) = broadcast::channel::<LogLine>(LOG_CHANNEL_CAPACITY);
@@ -303,7 +282,6 @@ mod tests {
 
         QemuProcess::drain_to_tracing(reader, 1, LogStreamSource::Stderr, sender, None).await;
     }
-
 
     #[tokio::test]
     async fn multiple_subscribers_each_receive_the_same_line() {

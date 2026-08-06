@@ -1,10 +1,7 @@
-
-
 use std::sync::OnceLock;
 
 use andler_core::ResourceMetrics;
 use nvml_wrapper::Nvml;
-
 
 fn nvml() -> Option<&'static Nvml> {
     static NVML: OnceLock<Option<Nvml>> = OnceLock::new();
@@ -18,11 +15,9 @@ fn nvml() -> Option<&'static Nvml> {
     .as_ref()
 }
 
-
 pub(super) fn is_nvidia_available() -> bool {
     nvml().is_some() || nvidia_smi_available()
 }
-
 
 pub(super) fn read_nvidia_metrics() -> Option<ResourceMetrics> {
     if let Some(nvml) = nvml() {
@@ -32,7 +27,6 @@ pub(super) fn read_nvidia_metrics() -> Option<ResourceMetrics> {
     }
     read_via_nvidia_smi()
 }
-
 
 fn read_via_nvml(nvml: &Nvml) -> Option<ResourceMetrics> {
     let device = nvml.device_by_index(0).ok()?;
@@ -47,7 +41,6 @@ fn read_via_nvml(nvml: &Nvml) -> Option<ResourceMetrics> {
     })
 }
 
-
 fn nvidia_smi_available() -> bool {
     std::process::Command::new("nvidia-smi")
         .args(["--version"])
@@ -56,7 +49,6 @@ fn nvidia_smi_available() -> bool {
         .status()
         .is_ok()
 }
-
 
 fn read_via_nvidia_smi() -> Option<ResourceMetrics> {
     let output = std::process::Command::new("nvidia-smi")

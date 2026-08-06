@@ -1,24 +1,26 @@
-
-
 use async_trait::async_trait;
 use futures_core::stream::BoxStream;
 
-use crate::config::InstanceConfig;
+use crate::config::{InstanceConfig, Resolution};
 use crate::error::BackendError;
 use crate::fsm::InstanceState;
-
+use crate::InstanceKind;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct BackendHandle(pub String);
-
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BackendStatus {
     pub state: InstanceState,
 
     pub detail: Option<String>,
-}
 
+    /// True when this status reflects a guest-initiated, orderly shutdown (e.g. QMP
+    /// reporting VmStatus::Shutdown) rather than the backend process disappearing
+    /// unexpectedly. Consumers (see health_ops.rs) use this to route to a clean
+    /// `Stopped` transition instead of treating it as a crash.
+    pub clean_shutdown: bool,
+}
 
 #[derive(Debug, Clone, Default)]
 pub struct ResourceMetrics {
@@ -36,20 +38,17 @@ pub struct ResourceMetrics {
     pub gpu_load_percent: Option<f32>,
 }
 
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LogStreamSource {
     Stdout,
     Stderr,
 }
 
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LogLine {
     pub source: LogStreamSource,
     pub line: String,
 }
-
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SnapshotInfo {
@@ -59,30 +58,21 @@ pub struct SnapshotInfo {
     pub created_at: Option<String>,
 }
 
-
 #[async_trait]
 pub trait HypervisorBackend: Send + Sync {
-
     fn name(&self) -> &'static str;
-
 
     fn supported_render_backends(&self) -> &[crate::config::RenderBackend];
 
-
     async fn spawn(&self, cfg: &InstanceConfig) -> Result<BackendHandle, BackendError>;
-
 
     async fn pause(&self, handle: &BackendHandle) -> Result<(), BackendError>;
 
-
     async fn resume(&self, handle: &BackendHandle) -> Result<(), BackendError>;
-
 
     async fn stop(&self, handle: &BackendHandle, graceful: bool) -> Result<(), BackendError>;
 
-
     async fn status(&self, handle: &BackendHandle) -> Result<BackendStatus, BackendError>;
-
 
     async fn snapshot(
         &self,
@@ -97,7 +87,6 @@ pub trait HypervisorBackend: Send + Sync {
         })
     }
 
-
     async fn snapshot_restore(
         &self,
         handle: &BackendHandle,
@@ -110,7 +99,6 @@ pub trait HypervisorBackend: Send + Sync {
             operation: "snapshot_restore",
         })
     }
-
 
     async fn snapshot_delete(
         &self,
@@ -125,8 +113,10 @@ pub trait HypervisorBackend: Send + Sync {
         })
     }
 
-
-    async fn snapshot_list(&self, handle: &BackendHandle) -> Result<Vec<SnapshotInfo>, BackendError> {
+    async fn snapshot_list(
+        &self,
+        handle: &BackendHandle,
+    ) -> Result<Vec<SnapshotInfo>, BackendError> {
         let _ = handle;
         Err(BackendError::NotImplemented {
             backend: self.name(),
@@ -134,19 +124,27 @@ pub trait HypervisorBackend: Send + Sync {
         })
     }
 
-
     fn metrics_stream(&self, handle: &BackendHandle) -> BoxStream<'_, ResourceMetrics>;
 
-
     fn log_stream(&self, handle: &BackendHandle) -> BoxStream<'_, LogLine>;
-
-
 
     async fn is_guest_agent_available(&self, handle: &BackendHandle) -> Result<bool, BackendError> {
         let _ = handle;
         Ok(false)
     }
 
+    async fn set_guest_display_resolution(
+        &self,
+        handle: &BackendHandle,
+        resolution: &Resolution,
+        kind: InstanceKind,
+    ) -> Result<(), BackendError> {
+        let _ = (handle, resolution, kind);
+        Err(BackendError::NotImplemented {
+            backend: self.name(),
+            operation: "set_guest_display_resolution",
+        })
+    }
 
     async fn guest_exec_install(
         &self,
@@ -160,7 +158,6 @@ pub trait HypervisorBackend: Send + Sync {
         })
     }
 
-
     async fn guest_exec_remove(
         &self,
         handle: &BackendHandle,
@@ -172,7 +169,6 @@ pub trait HypervisorBackend: Send + Sync {
             operation: "guest_exec_remove",
         })
     }
-
 
     async fn guest_check_binary_installed(
         &self,

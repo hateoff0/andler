@@ -135,7 +135,7 @@ Used by the interactive wizard to pre-fill defaults.
 
 ## Tests
 
-47 tests across `detect/` and `metrics/`:
+~50 tests across `detect/` and `metrics/`:
 
 | Module | Tests |
 |--------|-------|

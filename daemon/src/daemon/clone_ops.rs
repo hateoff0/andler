@@ -1,13 +1,10 @@
 use std::path::PathBuf;
 
-use super::Daemon;
 use super::error::DaemonError;
-use andler_core::{
-    CloneMode, InstanceConfig, InstanceId, InstanceKind, InstanceState,
-};
+use super::Daemon;
+use andler_core::{CloneMode, InstanceConfig, InstanceId, InstanceKind, InstanceState};
 
 impl Daemon {
-
     pub async fn clone_instance(
         &self,
         source_id: InstanceId,
@@ -57,15 +54,18 @@ impl Daemon {
                     .await?
             }
             CloneMode::SharedBase => {
-                let base_image = source_config.disk.base_image.clone().ok_or_else(|| {
-                    DaemonError::Io {
-                        path: source_config.disk.path.clone(),
-                        source: std::io::Error::new(
-                            std::io::ErrorKind::InvalidInput,
-                            "SharedBase clone requires a source disk with base_image set",
-                        ),
-                    }
-                })?;
+                let base_image =
+                    source_config
+                        .disk
+                        .base_image
+                        .clone()
+                        .ok_or_else(|| DaemonError::Io {
+                            path: source_config.disk.path.clone(),
+                            source: std::io::Error::new(
+                                std::io::ErrorKind::InvalidInput,
+                                "SharedBase clone requires a source disk with base_image set",
+                            ),
+                        })?;
                 andler_disk::clone::shared_base_clone(
                     &source_config.disk.path,
                     &new_disk_path,
@@ -90,7 +90,6 @@ impl Daemon {
         Ok(registered_id)
     }
 
-
     pub async fn export_instance_disk(
         &self,
         source_id: InstanceId,
@@ -103,13 +102,14 @@ impl Daemon {
         Ok(())
     }
 
-
     async fn terminal_clonable_instance_config(
         &self,
         id: InstanceId,
     ) -> Result<InstanceConfig, DaemonError> {
         let instances = self.instances.read().await;
-        let record = instances.get(&id).ok_or(DaemonError::InstanceNotFound(id))?;
+        let record = instances
+            .get(&id)
+            .ok_or(DaemonError::InstanceNotFound(id))?;
 
         let clonable = matches!(
             record.state,
@@ -122,7 +122,6 @@ impl Daemon {
         Ok(record.config.clone())
     }
 
-
     pub async fn find_live_clones(&self, id: InstanceId) -> Result<Vec<InstanceId>, DaemonError> {
         let instances = self.instances.read().await;
         let target_disk_path = instances
@@ -133,7 +132,8 @@ impl Daemon {
         let clones = instances
             .iter()
             .filter(|(other_id, record)| {
-                **other_id != id && record.config.disk.base_image.as_deref() == Some(target_disk_path.as_path())
+                **other_id != id
+                    && record.config.disk.base_image.as_deref() == Some(target_disk_path.as_path())
             })
             .map(|(other_id, _)| *other_id)
             .collect();

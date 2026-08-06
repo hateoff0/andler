@@ -1,12 +1,11 @@
-use super::Daemon;
 use super::error::DaemonError;
 use super::types::InstanceSummary;
+use super::Daemon;
 use andler_core::{BackendStatus, InstanceConfig, InstanceId, LogLine, ResourceMetrics};
 use futures_core::stream::BoxStream;
 use futures_util::StreamExt;
 
 impl Daemon {
-
     pub async fn status(&self, id: InstanceId) -> Result<BackendStatus, DaemonError> {
         let instances = self.instances.read().await;
         let record = instances
@@ -21,10 +20,10 @@ impl Daemon {
             None => Ok(BackendStatus {
                 state: record.state.clone(),
                 detail: Some("instance has no running backend handle".to_string()),
+                clean_shutdown: false,
             }),
         }
     }
-
 
     pub async fn stream_instance_logs(
         &self,
@@ -49,7 +48,6 @@ impl Daemon {
         }))
     }
 
-
     pub async fn stream_resource_metrics(
         &self,
         id: InstanceId,
@@ -73,7 +71,6 @@ impl Daemon {
         }))
     }
 
-
     pub async fn list_instances(&self) -> Vec<InstanceSummary> {
         let instances = self.instances.read().await;
         instances
@@ -86,7 +83,6 @@ impl Daemon {
             .collect()
     }
 
-
     pub async fn get_instance_config(&self, id: InstanceId) -> Result<InstanceConfig, DaemonError> {
         let instances = self.instances.read().await;
         instances
@@ -94,7 +90,6 @@ impl Daemon {
             .map(|record| record.config.clone())
             .ok_or(DaemonError::InstanceNotFound(id))
     }
-
 
     pub async fn update_instance_config(
         &self,
@@ -107,10 +102,17 @@ impl Daemon {
                 actual: new_config.id,
             });
         }
+        new_config.validate().map_err(DaemonError::InvalidConfig)?;
 
         let (cfg_snapshot, state_snapshot) = {
             let mut instances = self.instances.write().await;
-            let record = instances.get_mut(&id).ok_or(DaemonError::InstanceNotFound(id))?;
+            let record = instances
+                .get_mut(&id)
+                .ok_or(DaemonError::InstanceNotFound(id))?;
+
+            if !record.state.is_disk_idle() {
+                return Err(DaemonError::InstanceMustBeStopped(id, record.state.clone()));
+            }
 
             let kind_changed = std::mem::discriminant(&record.config.kind)
                 != std::mem::discriminant(&new_config.kind);
@@ -125,7 +127,8 @@ impl Daemon {
             (record.config.clone(), record.state.clone())
         };
 
-        self.persist_config_update(&cfg_snapshot, &state_snapshot).await;
+        self.persist_config_update(&cfg_snapshot, &state_snapshot)
+            .await;
 
         Ok(())
     }

@@ -1,13 +1,11 @@
-use super::Daemon;
 use super::error::DaemonError;
-use super::types::{SnapshotRecord};
+use super::types::SnapshotRecord;
+use super::Daemon;
 use andler_core::InstanceId;
-
 
 const MAX_SNAPSHOTS_PER_INSTANCE: usize = 20;
 
 impl Daemon {
-
     pub async fn create_snapshot(
         &self,
         id: InstanceId,
@@ -61,7 +59,6 @@ impl Daemon {
         Ok(record)
     }
 
-
     pub async fn restore_snapshot(
         &self,
         id: InstanceId,
@@ -74,7 +71,6 @@ impl Daemon {
         backend.snapshot_restore(&handle, &tag, timeout).await?;
         Ok(())
     }
-
 
     pub async fn delete_snapshot(
         &self,
@@ -96,11 +92,7 @@ impl Daemon {
         Ok(())
     }
 
-
-    pub async fn list_snapshots(
-        &self,
-        id: InstanceId,
-    ) -> Result<Vec<SnapshotRecord>, DaemonError> {
+    pub async fn list_snapshots(&self, id: InstanceId) -> Result<Vec<SnapshotRecord>, DaemonError> {
         let instances = self.instances.read().await;
         let record = instances
             .get(&id)
@@ -157,7 +149,6 @@ impl Daemon {
     }
 }
 
-
 fn check_snapshot_limit(
     instance_id: InstanceId,
     current: usize,
@@ -181,7 +172,12 @@ mod snapshot_limit_tests {
     fn below_limit_is_allowed() {
         let id = InstanceId::new();
         assert!(check_snapshot_limit(id, 0, MAX_SNAPSHOTS_PER_INSTANCE).is_ok());
-        assert!(check_snapshot_limit(id, MAX_SNAPSHOTS_PER_INSTANCE - 1, MAX_SNAPSHOTS_PER_INSTANCE).is_ok());
+        assert!(check_snapshot_limit(
+            id,
+            MAX_SNAPSHOTS_PER_INSTANCE - 1,
+            MAX_SNAPSHOTS_PER_INSTANCE
+        )
+        .is_ok());
     }
 
     #[test]
@@ -206,6 +202,11 @@ mod snapshot_limit_tests {
     #[test]
     fn above_limit_is_rejected() {
         let id = InstanceId::new();
-        assert!(check_snapshot_limit(id, MAX_SNAPSHOTS_PER_INSTANCE + 1, MAX_SNAPSHOTS_PER_INSTANCE).is_err());
+        assert!(check_snapshot_limit(
+            id,
+            MAX_SNAPSHOTS_PER_INSTANCE + 1,
+            MAX_SNAPSHOTS_PER_INSTANCE
+        )
+        .is_err());
     }
 }

@@ -1,13 +1,9 @@
-
-
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FirmwareConfig {
-
     #[serde(default = "default_true")]
     pub enable_uefi: bool,
 
@@ -21,7 +17,6 @@ fn default_true() -> bool {
 }
 
 impl FirmwareConfig {
-
     pub fn reference_default(ovmf_vars_path: PathBuf) -> Self {
         FirmwareConfig {
             enable_uefi: true,

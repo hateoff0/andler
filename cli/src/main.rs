@@ -1,5 +1,3 @@
-
-
 mod clone;
 mod create;
 mod disk;
@@ -39,14 +37,12 @@ fn default_instances_root() -> String {
                    Set ANDLERD_ADDR env var or use --daemon-addr to override."
 )]
 struct Cli {
-
     #[arg(long, global = true)]
     daemon_addr: Option<String>,
 
     #[command(subcommand)]
     command: Option<Command>,
 }
-
 
 macro_rules! dual_id_args {
     ($name:ident $(, $($extra:tt)*)?) => {
@@ -80,15 +76,18 @@ macro_rules! dual_id_args {
 dual_id_args!(StartArgs);
 dual_id_args!(PauseArgs);
 dual_id_args!(ResumeArgs);
-dual_id_args!(StatusArgs);
+dual_id_args!(StatusArgs,
+    #[arg(long)]
+    pub json: bool,
+);
 
 dual_id_args!(StopArgs,
-    #[arg(long)]
+    #[arg(long, help = "SIGTERM the guest OS (default: immediate SIGKILL)")]
     pub graceful: bool,
 );
 
 dual_id_args!(RemoveArgs,
-    #[arg(long)]
+    #[arg(long, help = "Also delete the disk image and instance directory")]
     pub purge: bool,
 );
 
@@ -111,22 +110,17 @@ dual_id_args!(MetricsArgs,
     pub json: bool,
 );
 
-
 #[derive(Subcommand)]
 pub enum ConfigCommand {
-
     View {
-
         instance_id: Option<String>,
     },
 
     Edit {
-
         instance_id: Option<String>,
     },
 
     Set {
-
         instance_id: String,
 
         key: String,
@@ -137,7 +131,6 @@ pub enum ConfigCommand {
 
 #[derive(Args)]
 pub struct ConfigFlags {
-
     #[arg(long, short)]
     pub instance: Option<String>,
 
@@ -148,10 +141,8 @@ pub struct ConfigFlags {
     pub file: Option<PathBuf>,
 }
 
-
 #[derive(Args)]
 pub struct DiskFlags {
-
     #[arg(long, short = 'c')]
     pub create: bool,
 
@@ -174,12 +165,10 @@ pub struct DiskFlags {
     pub shrink: bool,
 }
 
-
 #[derive(Subcommand)]
 enum Command {
-
+    /// Create a new VM instance (from a TOML file, CLI flags, or the interactive wizard)
     Create {
-
         #[arg(long)]
         file: Option<PathBuf>,
 
@@ -198,7 +187,7 @@ enum Command {
         #[arg(long)]
         disk_path: Option<String>,
 
-        #[arg(long)]
+        #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
         disk_size_gib: Option<u64>,
 
         #[arg(long)]
@@ -210,13 +199,13 @@ enum Command {
         #[arg(long)]
         no_uefi: bool,
 
-        #[arg(long)]
+        #[arg(long, help = "Skip prompts and use wizard defaults (requires --kind)")]
         quick: bool,
 
-        #[arg(long)]
+        #[arg(long, help = "Print the request that would be sent, without creating")]
         dry_run: bool,
 
-        #[arg(long)]
+        #[arg(long, help = "Validate the configuration and exit without creating")]
         verify: bool,
 
         #[arg(long, value_enum)]
@@ -237,25 +226,30 @@ enum Command {
         #[arg(long, default_value_t = default_instances_root())]
         instances_root: String,
 
-        #[arg(long, default_value_t = 20)]
+        #[arg(long, default_value_t = 20, value_parser = clap::value_parser!(u64).range(1..))]
         overlay_size_gib: u64,
 
         #[arg(long)]
         linked_overlay: bool,
     },
 
+    /// Start a stopped instance (boots QEMU)
     Start(StartArgs),
 
+    /// Stop a running instance (SIGTERM, or SIGKILL after a grace period with --graceful)
     Stop(StopArgs),
 
+    /// Pause a running instance (freezes the vCPU)
     Pause(PauseArgs),
 
+    /// Resume a paused instance
     Resume(ResumeArgs),
 
+    /// Show the current state of an instance
     Status(StatusArgs),
 
+    /// List all instances
     List {
-
         #[arg(long = "full-id", short = 'q')]
         full_id: bool,
 
@@ -272,8 +266,10 @@ enum Command {
         json: bool,
     },
 
+    /// Remove an instance (with --purge also deletes its disk image and instance directory)
     Remove(RemoveArgs),
 
+    /// View or modify an instance's configuration
     Config {
         #[command(subcommand)]
         action: Option<ConfigCommand>,
@@ -281,10 +277,13 @@ enum Command {
         flags: ConfigFlags,
     },
 
+    /// Stream an instance's QEMU stdout/stderr
     Logs(LogsArgs),
 
+    /// Stream per-instance metrics (CPU, memory, disk, network, GPU)
     Metrics(MetricsArgs),
 
+    /// Clone an existing Android instance (linked, full-standalone, or shared-base)
     Clone {
         source_instance_id: String,
 
@@ -298,16 +297,22 @@ enum Command {
         mode: CliCloneMode,
     },
 
+    /// Export an instance's disk image to a standalone file
     Export {
         source_instance_id: String,
         dest_path: String,
     },
 
+    /// Manage QEMU snapshots (create, restore, delete, list)
     Snapshot {
         #[command(subcommand)]
         action: SnapshotAction,
+
+        #[arg(long)]
+        json: bool,
     },
 
+    /// Create, inspect, resize, or compact disk images
     Disk {
         #[command(subcommand)]
         action: Option<DiskAction>,
@@ -315,13 +320,16 @@ enum Command {
         flags: DiskFlags,
     },
 
+    /// Manage guest packages and Android boot mode (requires the andlerd daemon)
     Guest {
         #[command(subcommand)]
         action: guest::GuestAction,
     },
 
+    /// Interactive configuration wizard (hardware auto-detection)
     Wizard {},
 
+    /// Check the host environment for andler prerequisites
     Doctor {
         /// Offer to write missing passwordless-sudo rules to /etc/sudoers.d/andler
         /// (asks for confirmation and validates with `visudo -c` before writing).
@@ -329,12 +337,9 @@ enum Command {
         fix: bool,
     },
 
-    Completions {
-
-        shell: clap_complete::Shell,
-    },
+    /// Generate shell completion scripts
+    Completions { shell: clap_complete::Shell },
 }
-
 
 #[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum CliLogSource {
@@ -342,10 +347,8 @@ enum CliLogSource {
     Stderr,
 }
 
-
 #[derive(Clone, Copy, PartialEq, Eq, Default, ValueEnum)]
 enum ListSortKey {
-
     #[default]
     None,
     Name,
@@ -354,16 +357,13 @@ enum ListSortKey {
 
 #[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum CliKind {
-
     Linux,
 
     Android,
 }
 
-
 #[derive(Clone, Copy, PartialEq, Eq, Default, ValueEnum)]
 enum CliCdromBus {
-
     #[default]
     Auto,
 
@@ -372,12 +372,9 @@ enum CliCdromBus {
     Ide,
 }
 
-
 #[derive(Subcommand)]
 enum SnapshotAction {
-
     Create {
-
         instance_id: String,
 
         #[arg(long)]
@@ -391,7 +388,6 @@ enum SnapshotAction {
     },
 
     Restore {
-
         instance_id: String,
         #[arg(long)]
         tag: String,
@@ -401,7 +397,6 @@ enum SnapshotAction {
     },
 
     Delete {
-
         instance_id: String,
         #[arg(long)]
         tag: String,
@@ -411,17 +406,13 @@ enum SnapshotAction {
     },
 
     List {
-
         instance_id: String,
     },
 }
 
-
 #[derive(Subcommand)]
 enum DiskAction {
-
     Create {
-
         path: PathBuf,
 
         #[arg(long)]
@@ -429,12 +420,10 @@ enum DiskAction {
     },
 
     Info {
-
         path: PathBuf,
     },
 
     Resize {
-
         path: PathBuf,
 
         #[arg(long)]
@@ -445,15 +434,12 @@ enum DiskAction {
     },
 
     Compact {
-
         path: PathBuf,
     },
 }
 
-
 #[derive(Clone, Copy, ValueEnum)]
 enum CliCloneMode {
-
     Linked,
 
     #[value(name = "full-standalone")]
@@ -526,12 +512,6 @@ impl From<CliArmTranslator> for andler_core::ArmTranslator {
     }
 }
 
-fn err_exit(msg: &str) -> ! {
-    eprintln!("{msg}");
-    std::process::exit(2);
-}
-
-
 fn format_grpc_error(err: &tonic::Status) -> String {
     let msg = err.message().trim_matches('"');
     match err.code() {
@@ -544,7 +524,6 @@ fn format_grpc_error(err: &tonic::Status) -> String {
         _ => format!("error: {msg}"),
     }
 }
-
 
 fn looks_like_daemon_not_running(err: &(dyn std::error::Error + 'static)) -> bool {
     let mut current: Option<&(dyn std::error::Error + 'static)> = Some(err);
@@ -640,12 +619,30 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             linked_overlay,
         }) => {
             create::handle(
-                &mut client, file, kind, name, ovmf_vars_template,
-                iso_path, disk_path, disk_size_gib, compact_on_shutdown, cdrom_bus,
-                no_uefi, quick, dry_run, verify,
-                android_version, base_image_path, gapps, microg, arm_translator,
-                instances_root, overlay_size_gib, linked_overlay,
-            ).await?;
+                &mut client,
+                file,
+                kind,
+                name,
+                ovmf_vars_template,
+                iso_path,
+                disk_path,
+                disk_size_gib,
+                compact_on_shutdown,
+                cdrom_bus,
+                no_uefi,
+                quick,
+                dry_run,
+                verify,
+                android_version,
+                base_image_path,
+                gapps,
+                microg,
+                arm_translator,
+                instances_root,
+                overlay_size_gib,
+                linked_overlay,
+            )
+            .await?;
         }
         Some(Command::Start(args)) => {
             let id = args.resolve_id()?;
@@ -665,51 +662,64 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
         Some(Command::Status(args)) => {
             let id = args.resolve_id()?;
-            status::handle_status(&mut client, id.to_string()).await?;
+            status::handle_status(&mut client, id.to_string(), args.json).await?;
         }
-        Some(Command::List { full_id, state, name, sort, json }) => {
+        Some(Command::List {
+            full_id,
+            state,
+            name,
+            sort,
+            json,
+        }) => {
             status::handle_list(&mut client, full_id, state, name, sort, json).await?;
         }
         Some(Command::Remove(args)) => {
             let id = args.resolve_id()?;
             lifecycle::handle_remove(&mut client, id.to_string(), args.purge).await?;
         }
-        Some(Command::Config { action, flags }) => {
-            match action {
-                Some(ConfigCommand::View { instance_id }) => {
-                    let id = instance_id
-                        .as_deref()
-                        .or(flags.instance.as_deref())
-                        .ok_or("instance ID required")?;
+        Some(Command::Config { action, flags }) => match action {
+            Some(ConfigCommand::View { instance_id }) => {
+                let id = instance_id
+                    .as_deref()
+                    .or(flags.instance.as_deref())
+                    .ok_or("instance ID required")?;
+                status::handle_config(&mut client, id.to_string()).await?;
+            }
+            Some(ConfigCommand::Edit { instance_id }) => {
+                let id = instance_id
+                    .as_deref()
+                    .or(flags.instance.as_deref())
+                    .ok_or("instance ID required")?;
+                edit::handle(&mut client, id.to_string()).await?;
+            }
+            Some(ConfigCommand::Set {
+                instance_id,
+                key,
+                value,
+            }) => {
+                client
+                    .set_instance_config(andler_rpc::proto::SetInstanceConfigRequest {
+                        instance_ref: instance_id.clone(),
+                        key: key.clone(),
+                        value: value.clone(),
+                    })
+                    .await?;
+                println!("{instance_id}: {key} = {value}");
+            }
+            None => {
+                let id = flags
+                    .instance
+                    .as_deref()
+                    .ok_or("instance ID required: use --instance or a subcommand")?;
+                if flags.edit {
+                    edit::handle(&mut client, id.to_string()).await?;
+                } else if flags.file.is_some() {
+                    eprintln!("config --file not yet implemented");
+                } else {
                     status::handle_config(&mut client, id.to_string()).await?;
                 }
-                Some(ConfigCommand::Edit { instance_id }) => {
-                    let id = instance_id
-                        .as_deref()
-                        .or(flags.instance.as_deref())
-                        .ok_or("instance ID required")?;
-                    edit::handle(&mut client, id.to_string()).await?;
-                }
-                Some(ConfigCommand::Set { instance_id, key, value }) => {
-                    eprintln!(
-                        "config set {instance_id} {key}={value} — not yet implemented"
-                    );
-                }
-                None => {
-                    let id = flags
-                        .instance
-                        .as_deref()
-                        .ok_or("instance ID required: use --instance or a subcommand")?;
-                    if flags.edit {
-                        edit::handle(&mut client, id.to_string()).await?;
-                    } else if flags.file.is_some() {
-                        eprintln!("config --file not yet implemented");
-                    } else {
-                        status::handle_config(&mut client, id.to_string()).await?;
-                    }
-                }
             }
-        }
+        },
         Some(Command::Logs(args)) => {
             let id = args.resolve_id()?;
             status::handle_logs(
@@ -723,8 +733,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
         Some(Command::Metrics(args)) => {
             let id = args.resolve_id()?;
-            status::handle_metrics(&mut client, id.to_string(), args.once, args.json)
-                .await?;
+            status::handle_metrics(&mut client, id.to_string(), args.once, args.json).await?;
         }
         Some(Command::Clone {
             source_instance_id,
@@ -732,14 +741,8 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             instances_root,
             mode,
         }) => {
-            clone::handle_clone(
-                &mut client,
-                source_instance_id,
-                name,
-                instances_root,
-                mode,
-            )
-            .await?;
+            clone::handle_clone(&mut client, source_instance_id, name, instances_root, mode)
+                .await?;
         }
         Some(Command::Export {
             source_instance_id,
@@ -747,46 +750,64 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         }) => {
             clone::handle_export(&mut client, source_instance_id, dest_path).await?;
         }
-        Some(Command::Snapshot { action }) => {
+        Some(Command::Snapshot { action, json }) => {
             let instance_id = match &action {
                 SnapshotAction::Create { instance_id, .. } => instance_id.clone(),
                 SnapshotAction::Restore { instance_id, .. } => instance_id.clone(),
                 SnapshotAction::Delete { instance_id, .. } => instance_id.clone(),
                 SnapshotAction::List { instance_id } => instance_id.clone(),
             };
-            snapshot::handle(&mut client, instance_id, action).await?;
+            snapshot::handle(&mut client, instance_id, action, json).await?;
         }
         Some(Command::Disk { action, flags }) => {
             let resolved = match action {
                 Some(a) => a,
                 None => {
-                    let path = flags
-                        .path
-                        .ok_or("disk: --path is required in flag form")?;
+                    let path = flags.path.ok_or("disk: --path is required in flag form")?;
                     let path = std::path::PathBuf::from(path);
+
+                    let chosen: Vec<&str> = [
+                        (flags.create, "--create"),
+                        (flags.info, "--info"),
+                        (flags.resize, "--resize"),
+                        (flags.compact, "--compact"),
+                    ]
+                    .iter()
+                    .filter(|(picked, _)| *picked)
+                    .map(|(_, name)| *name)
+                    .collect();
+
+                    match chosen.len() {
+                        0 => {
+                            return Err(
+                                "disk: specify an action (--create, --info, --resize, --compact)"
+                                    .into(),
+                            );
+                        }
+                        1 => {}
+                        _ => {
+                            return Err(format!(
+                                "disk: actions are mutually exclusive, got {}",
+                                chosen.join(" and ")
+                            )
+                            .into());
+                        }
+                    }
+
                     if flags.create {
-                        let size = flags
-                            .size
-                            .ok_or("disk: --size is required for --create")?;
+                        let size = flags.size.ok_or("disk: --size is required for --create")?;
                         DiskAction::Create { path, size }
                     } else if flags.info {
                         DiskAction::Info { path }
                     } else if flags.resize {
-                        let size = flags
-                            .size
-                            .ok_or("disk: --size is required for --resize")?;
+                        let size = flags.size.ok_or("disk: --size is required for --resize")?;
                         DiskAction::Resize {
                             path,
                             size,
                             shrink: flags.shrink,
                         }
-                    } else if flags.compact {
-                        DiskAction::Compact { path }
                     } else {
-                        return Err(
-                            "disk: specify an action (--create, --info, --resize, --compact)"
-                                .into(),
-                        );
+                        DiskAction::Compact { path }
                     }
                 }
             };

@@ -1,16 +1,11 @@
-
-
 use std::path::PathBuf;
-
 
 #[derive(Debug, Clone)]
 pub struct OvmfPaths {
-
     pub code: PathBuf,
 
     pub vars_template: PathBuf,
 }
-
 
 pub fn resolve(
     ovmf_code: Option<PathBuf>,
@@ -23,12 +18,13 @@ pub fn resolve(
                 ovmf_vars_template = %vars_template.display(),
                 "using explicitly specified OVMF paths"
             );
-            Ok(OvmfPaths { code, vars_template })
+            Ok(OvmfPaths {
+                code,
+                vars_template,
+            })
         }
         (explicit_code, explicit_vars) => {
-            tracing::info!(
-                "OVMF paths not fully specified, running auto-detection"
-            );
+            tracing::info!("OVMF paths not fully specified, running auto-detection");
             let detected = andler_firmware::detect_matched_pair()?;
             let code = explicit_code.unwrap_or(detected.code);
             let vars_template = explicit_vars.unwrap_or(detected.vars_template);
@@ -37,7 +33,10 @@ pub fn resolve(
                 ovmf_vars_template = %vars_template.display(),
                 "OVMF paths resolved (auto-detected)"
             );
-            Ok(OvmfPaths { code, vars_template })
+            Ok(OvmfPaths {
+                code,
+                vars_template,
+            })
         }
     }
 }

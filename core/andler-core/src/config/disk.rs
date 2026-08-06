@@ -1,9 +1,6 @@
-
-
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
-
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DiskFormat {
@@ -12,10 +9,8 @@ pub enum DiskFormat {
     Vdi,
 }
 
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DiskConfig {
-
     pub path: PathBuf,
 
     pub size_bytes: u64,
@@ -35,7 +30,6 @@ pub struct DiskConfig {
 impl DiskConfig {
     pub const GIB: u64 = 1024 * 1024 * 1024;
 
-
     pub fn reference_default(path: PathBuf) -> Self {
         DiskConfig {
             path,
@@ -49,7 +43,6 @@ impl DiskConfig {
         }
     }
 
-
     pub fn overlay(path: PathBuf, base_image: PathBuf, size_bytes: u64) -> Self {
         DiskConfig {
             path,
@@ -62,7 +55,6 @@ impl DiskConfig {
             snapshot_timeout_secs: None,
         }
     }
-
 
     pub fn standalone(path: PathBuf, size_bytes: u64) -> Self {
         DiskConfig {

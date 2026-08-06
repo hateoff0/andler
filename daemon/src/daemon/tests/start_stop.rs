@@ -22,7 +22,6 @@ async fn start_instance_rejects_passthrough_via_backend_validation() {
     assert!(matches!(status.state, InstanceState::Error { .. }));
 }
 
-
 #[tokio::test]
 async fn start_instance_no_longer_rejected_by_fsm_when_stopped_or_errored() {
     for initial_state in [
@@ -143,5 +142,55 @@ async fn stop_after_crash_returns_already_stopped_not_raw_handle_error() {
         .unwrap();
 
     let err = daemon.stop_instance(id, true).await.unwrap_err();
-    assert!(matches!(err, DaemonError::InstanceAlreadyStopped(_, ref reason) if reason == "process is not running"));
+    assert!(
+        matches!(err, DaemonError::InstanceAlreadyStopped(_, ref reason) if reason == "process is not running")
+    );
+}
+
+#[tokio::test]
+async fn apply_event_and_persist_pause_transitions_running_to_paused() {
+    let daemon = Daemon::new();
+    let cfg = sample_config();
+    let id = cfg.id;
+    daemon.create_instance(cfg).await.unwrap();
+    daemon.instances.write().await.get_mut(&id).unwrap().state = InstanceState::Running;
+
+    daemon
+        .apply_event_and_persist(id, andler_core::InstanceEvent::Pause)
+        .await;
+
+    let status = daemon.status(id).await.unwrap();
+    assert_eq!(status.state, InstanceState::Paused);
+}
+
+#[tokio::test]
+async fn apply_event_and_persist_resume_transitions_paused_to_running() {
+    let daemon = Daemon::new();
+    let cfg = sample_config();
+    let id = cfg.id;
+    daemon.create_instance(cfg).await.unwrap();
+    daemon.instances.write().await.get_mut(&id).unwrap().state = InstanceState::Paused;
+
+    daemon
+        .apply_event_and_persist(id, andler_core::InstanceEvent::Resume)
+        .await;
+
+    let status = daemon.status(id).await.unwrap();
+    assert_eq!(status.state, InstanceState::Running);
+}
+
+#[tokio::test]
+async fn apply_event_and_persist_invalid_transition_does_not_panic_or_change_state() {
+    let daemon = Daemon::new();
+    let cfg = sample_config();
+    let id = cfg.id;
+    daemon.create_instance(cfg).await.unwrap();
+    // Fresh instance is Created; Pause is not a valid transition from Created.
+
+    daemon
+        .apply_event_and_persist(id, andler_core::InstanceEvent::Pause)
+        .await;
+
+    let status = daemon.status(id).await.unwrap();
+    assert_eq!(status.state, InstanceState::Created);
 }

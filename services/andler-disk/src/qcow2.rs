@@ -1,5 +1,3 @@
-
-
 use std::path::Path;
 use std::process::Stdio;
 
@@ -7,9 +5,7 @@ use tokio::process::Command;
 
 use crate::error::DiskError;
 
-
 pub struct DiskInfo {
-
     pub virtual_size: u64,
 
     pub actual_size: u64,
@@ -18,7 +14,6 @@ pub struct DiskInfo {
 
     pub backing_file: Option<String>,
 }
-
 
 pub async fn create(path: &Path, size_bytes: u64) -> Result<(), DiskError> {
     ensure_parent_dir_exists(path).await?;
@@ -32,7 +27,6 @@ pub async fn create(path: &Path, size_bytes: u64) -> Result<(), DiskError> {
     ])
     .await
 }
-
 
 pub async fn create_with_backing_file(
     path: &Path,
@@ -59,7 +53,6 @@ pub async fn create_with_backing_file(
     .await
 }
 
-
 pub async fn clone_full(source: &Path, dest: &Path) -> Result<(), DiskError> {
     ensure_parent_dir_exists(dest).await?;
 
@@ -74,7 +67,6 @@ pub async fn clone_full(source: &Path, dest: &Path) -> Result<(), DiskError> {
     ])
     .await
 }
-
 
 pub async fn resize(path: &Path, new_size_bytes: u64, allow_shrink: bool) -> Result<(), DiskError> {
     let current_size_bytes = virtual_size_bytes(path).await?;
@@ -99,7 +91,6 @@ pub async fn resize(path: &Path, new_size_bytes: u64, allow_shrink: bool) -> Res
     run_qemu_img(&args).await
 }
 
-
 pub async fn compact(path: &Path) -> Result<(), DiskError> {
     let disk_info = info(path).await?;
     if disk_info.format != "qcow2" {
@@ -122,46 +113,32 @@ pub async fn compact(path: &Path) -> Result<(), DiskError> {
     ])
     .await?;
 
-    tokio::fs::rename(&tmp_path, path)
-        .await
-        .map_err(|source| DiskError::Io {
-            path: path.to_path_buf(),
+    tokio::fs::rename(&tmp_path, path).await.map_err(|source| {
+        let _ = std::fs::remove_file(&tmp_path);
+        DiskError::Io {
+            path: tmp_path,
             source,
-        })
+        }
+    })
 }
 
-
 pub async fn virtual_size_bytes(path: &Path) -> Result<u64, DiskError> {
-    let output = run_qemu_img_capturing_stdout(&[
-        "info",
-        "--output=json",
-        &path.to_string_lossy(),
-    ])
-    .await?;
+    let output =
+        run_qemu_img_capturing_stdout(&["info", "--output=json", &path.to_string_lossy()]).await?;
 
     parse_json_u64_field(&output, "virtual-size")
 }
 
-
 pub async fn disk_usage_bytes(path: &Path) -> Result<u64, DiskError> {
-    let output = run_qemu_img_capturing_stdout(&[
-        "info",
-        "--output=json",
-        &path.to_string_lossy(),
-    ])
-    .await?;
+    let output =
+        run_qemu_img_capturing_stdout(&["info", "--output=json", &path.to_string_lossy()]).await?;
 
     parse_json_u64_field(&output, "actual-size")
 }
 
-
 pub async fn info(path: &Path) -> Result<DiskInfo, DiskError> {
-    let output = run_qemu_img_capturing_stdout(&[
-        "info",
-        "--output=json",
-        &path.to_string_lossy(),
-    ])
-    .await?;
+    let output =
+        run_qemu_img_capturing_stdout(&["info", "--output=json", &path.to_string_lossy()]).await?;
 
     let virtual_size = parse_json_u64_field(&output, "virtual-size")?;
     let actual_size = parse_json_u64_field(&output, "actual-size")?;
@@ -176,11 +153,9 @@ pub async fn info(path: &Path) -> Result<DiskInfo, DiskError> {
     })
 }
 
-
 async fn run_qemu_img(args: &[&str]) -> Result<(), DiskError> {
     run_qemu_img_capturing_stdout(args).await.map(|_| ())
 }
-
 
 async fn run_qemu_img_capturing_stdout(args: &[&str]) -> Result<String, DiskError> {
     let output = Command::new("qemu-img")
@@ -201,7 +176,6 @@ async fn run_qemu_img_capturing_stdout(args: &[&str]) -> Result<String, DiskErro
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
-
 async fn ensure_parent_dir_exists(path: &Path) -> Result<(), DiskError> {
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
@@ -216,18 +190,14 @@ async fn ensure_parent_dir_exists(path: &Path) -> Result<(), DiskError> {
     Ok(())
 }
 
-
 fn parse_json_u64_field(json: &str, field_name: &str) -> Result<u64, DiskError> {
-    let parsed: serde_json::Value = serde_json::from_str(json).map_err(|e| {
-        DiskError::ParseError(format!("invalid JSON from qemu-img: {e}"))
-    })?;
+    let parsed: serde_json::Value = serde_json::from_str(json)
+        .map_err(|e| DiskError::ParseError(format!("invalid JSON from qemu-img: {e}")))?;
 
     parsed
         .get(field_name)
         .ok_or_else(|| {
-            DiskError::ParseError(format!(
-                "field `{field_name}` not found in qemu-img output"
-            ))
+            DiskError::ParseError(format!("field `{field_name}` not found in qemu-img output"))
         })?
         .as_u64()
         .ok_or_else(|| {
@@ -237,18 +207,14 @@ fn parse_json_u64_field(json: &str, field_name: &str) -> Result<u64, DiskError> 
         })
 }
 
-
 fn parse_json_string_field(json: &str, field_name: &str) -> Result<String, DiskError> {
-    let parsed: serde_json::Value = serde_json::from_str(json).map_err(|e| {
-        DiskError::ParseError(format!("invalid JSON from qemu-img: {e}"))
-    })?;
+    let parsed: serde_json::Value = serde_json::from_str(json)
+        .map_err(|e| DiskError::ParseError(format!("invalid JSON from qemu-img: {e}")))?;
 
     let value = parsed
         .get(field_name)
         .ok_or_else(|| {
-            DiskError::ParseError(format!(
-                "field `{field_name}` not found in qemu-img output"
-            ))
+            DiskError::ParseError(format!("field `{field_name}` not found in qemu-img output"))
         })?
         .as_str()
         .ok_or_else(|| {
@@ -266,7 +232,6 @@ fn parse_json_string_field(json: &str, field_name: &str) -> Result<String, DiskE
     Ok(value.to_string())
 }
 
-
 fn parse_json_optional_string_field(json: &str, field_name: &str) -> Option<String> {
     parse_json_string_field(json, field_name).ok()
 }
@@ -275,18 +240,23 @@ fn parse_json_optional_string_field(json: &str, field_name: &str) -> Option<Stri
 mod tests {
     use super::*;
 
-
     #[test]
     fn parse_json_u64_field_extracts_value_compact() {
         let json = r#"{"virtual-size":42949672960,"actual-size":1234567}"#;
-        assert_eq!(parse_json_u64_field(json, "virtual-size").unwrap(), 42949672960);
+        assert_eq!(
+            parse_json_u64_field(json, "virtual-size").unwrap(),
+            42949672960
+        );
         assert_eq!(parse_json_u64_field(json, "actual-size").unwrap(), 1234567);
     }
 
     #[test]
     fn parse_json_u64_field_extracts_value_spaced() {
         let json = r#"{"virtual-size": 42949672960, "actual-size": 1234567}"#;
-        assert_eq!(parse_json_u64_field(json, "virtual-size").unwrap(), 42949672960);
+        assert_eq!(
+            parse_json_u64_field(json, "virtual-size").unwrap(),
+            42949672960
+        );
         assert_eq!(parse_json_u64_field(json, "actual-size").unwrap(), 1234567);
     }
 
@@ -312,7 +282,6 @@ mod tests {
             "must match the top-level field, not one nested inside `children`"
         );
     }
-
 
     #[test]
     fn parse_json_string_field_extracts_value_compact() {
@@ -355,7 +324,6 @@ mod tests {
         assert!(matches!(err, DiskError::ParseError(_)));
     }
 
-
     #[test]
     fn parse_json_optional_string_field_returns_value_compact() {
         let json = r#"{"backing-filename":"/path/to/base.qcow2"}"#;
@@ -392,7 +360,6 @@ mod tests {
         );
     }
 
-
     #[tokio::test]
     #[ignore = "requires qemu-img binary, see docker/README.md integration-test target"]
     async fn create_then_virtual_size_round_trips() {
@@ -415,9 +382,10 @@ mod tests {
         let overlay_path = dir.join("overlay.qcow2");
         let missing_backing = dir.join("does-not-exist.qcow2");
 
-        let err = create_with_backing_file(&overlay_path, &missing_backing, 10 * 1024 * 1024 * 1024)
-            .await
-            .unwrap_err();
+        let err =
+            create_with_backing_file(&overlay_path, &missing_backing, 10 * 1024 * 1024 * 1024)
+                .await
+                .unwrap_err();
         assert!(matches!(err, DiskError::BackingFileNotFound(_)));
 
         tokio::fs::remove_dir_all(&dir).await.ok();

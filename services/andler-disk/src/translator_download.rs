@@ -1,12 +1,9 @@
-
-
 use std::path::PathBuf;
 
 use andler_core::android_profile::ArmTranslator;
 
 use crate::error::DiskError;
 use crate::translator::{dir_name, resolve};
-
 
 pub async fn ensure_translator(
     translator: ArmTranslator,
@@ -37,7 +34,6 @@ pub async fn ensure_translator(
     Ok(cache_path)
 }
 
-
 async fn download_file(url: &str) -> Result<Vec<u8>, DiskError> {
     let response = reqwest::get(url)
         .await
@@ -57,7 +53,6 @@ async fn download_file(url: &str) -> Result<Vec<u8>, DiskError> {
         .map(|b| b.to_vec())
 }
 
-
 fn verify_md5(bytes: &[u8], expected: &str) -> Result<(), DiskError> {
     let result = format!("{:x}", md5::compute(bytes));
 
@@ -69,9 +64,7 @@ fn verify_md5(bytes: &[u8], expected: &str) -> Result<(), DiskError> {
     Ok(())
 }
 
-
 fn extract_zip(bytes: &[u8], target: &PathBuf) -> Result<(), DiskError> {
-
     let cursor = std::io::Cursor::new(bytes);
     let mut archive = zip::ZipArchive::new(cursor)
         .map_err(|e| DiskError::NbdSetupFailed(format!("failed to open zip: {e}")))?;
@@ -95,9 +88,8 @@ fn extract_zip(bytes: &[u8], target: &PathBuf) -> Result<(), DiskError> {
                     DiskError::NbdSetupFailed(format!("failed to create parent dir: {e}"))
                 })?;
             }
-            let mut out = std::fs::File::create(&outpath).map_err(|e| {
-                DiskError::NbdSetupFailed(format!("failed to create file: {e}"))
-            })?;
+            let mut out = std::fs::File::create(&outpath)
+                .map_err(|e| DiskError::NbdSetupFailed(format!("failed to create file: {e}")))?;
             std::io::copy(&mut file, &mut out)
                 .map_err(|e| DiskError::NbdSetupFailed(format!("failed to write file: {e}")))?;
         }

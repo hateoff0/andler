@@ -2,13 +2,11 @@ use std::path::PathBuf;
 
 use andler_core::{BackendHandle, InstanceConfig, InstanceId, InstanceState};
 
-
 pub(crate) struct InstanceRecord {
     pub(crate) config: InstanceConfig,
     pub(crate) state: InstanceState,
     pub(crate) handle: Option<BackendHandle>,
 }
-
 
 #[derive(Debug, Clone)]
 pub struct SnapshotRecord {
@@ -19,7 +17,6 @@ pub struct SnapshotRecord {
     pub created_at: String,
 }
 
-
 pub(crate) struct InstanceDirGuard {
     pub(crate) path: PathBuf,
     armed: bool,
@@ -29,7 +26,6 @@ impl InstanceDirGuard {
     pub fn new(path: PathBuf) -> Self {
         InstanceDirGuard { path, armed: true }
     }
-
 
     pub fn disarm(&mut self) {
         self.armed = false;
@@ -44,7 +40,6 @@ impl Drop for InstanceDirGuard {
         let _ = std::fs::remove_dir_all(&self.path);
     }
 }
-
 
 pub(crate) async fn write_instance_toml(instance_dir: &std::path::Path, cfg: &InstanceConfig) {
     let toml_string = match toml::to_string_pretty(cfg) {
@@ -69,7 +64,6 @@ pub(crate) async fn write_instance_toml(instance_dir: &std::path::Path, cfg: &In
         );
     }
 }
-
 
 pub(crate) async fn purge_instance_files(id: InstanceId, config: &InstanceConfig) {
     if let Err(err) = tokio::fs::remove_file(&config.disk.path).await {
@@ -109,7 +103,6 @@ pub(crate) async fn purge_instance_files(id: InstanceId, config: &InstanceConfig
         }
     }
 }
-
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InstanceSummary {

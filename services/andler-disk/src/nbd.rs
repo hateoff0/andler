@@ -1,8 +1,51 @@
+use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
+
 use crate::error::DiskError;
 
 fn mount_dir_base() -> PathBuf {
     andler_core::paths::runtime_dir().join("andler-mounts")
+}
+
+/// Path of the advisory lock file for a given disk image — colocated with the disk
+/// itself so it's easy to find/clean, and inherently unique per disk without needing
+/// a separate global lock registry.
+fn lock_path_for(disk_path: &Path) -> PathBuf {
+    let file_name = disk_path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "disk".to_string());
+    disk_path.with_file_name(format!(".{file_name}.andler-nbd.lock"))
+}
+
+/// Takes a blocking, exclusive advisory lock (flock) scoped to this disk image, so
+/// two andler processes (or two concurrent operations within the same one) can't
+/// both connect nbd devices to the same underlying qcow2 file at once — without
+/// this, concurrent offline operations (guest install, boot-mode switch, ...) on the
+/// same disk could corrupt it. The lock is released automatically when the returned
+/// `File` is dropped (closing the fd releases the flock — standard POSIX behavior),
+/// which is why `NbdGuard` holds onto it for its whole lifetime.
+fn acquire_disk_lock(disk_path: &Path) -> Result<std::fs::File, DiskError> {
+    let lock_path = lock_path_for(disk_path);
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&lock_path)
+        .map_err(|e| {
+            DiskError::NbdSetupFailed(format!("failed to open lock file {lock_path:?}: {e}"))
+        })?;
+
+    // Blocking: waits for any other andler operation on this same disk image to
+    // finish, rather than racing it or failing outright.
+    let ret = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
+    if ret != 0 {
+        return Err(DiskError::NbdSetupFailed(format!(
+            "failed to lock {lock_path:?}: {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+    Ok(file)
 }
 
 /// Builds a `sudo -n <program> ...` command. Connecting/disconnecting nbd devices and
@@ -34,15 +77,19 @@ pub(crate) fn describe_sudo_failure(program: &str, stderr: &str) -> String {
     }
 }
 
-
-
 pub struct NbdGuard {
     device_path: PathBuf,
+    /// Held for this guard's entire lifetime; releasing it (via Drop) is what lets
+    /// another process's NBD operation on the same disk proceed.
+    _disk_lock: std::fs::File,
 }
 
 impl NbdGuard {
-    pub fn new(device_path: PathBuf) -> Self {
-        NbdGuard { device_path }
+    pub fn new(device_path: PathBuf, disk_lock: std::fs::File) -> Self {
+        NbdGuard {
+            device_path,
+            _disk_lock: disk_lock,
+        }
     }
 
     pub fn path(&self) -> &Path {
@@ -79,7 +126,6 @@ impl Drop for NbdGuard {
         }
     }
 }
-
 
 pub struct MountGuard {
     mount_point: PathBuf,
@@ -131,8 +177,6 @@ impl Drop for MountGuard {
     }
 }
 
-
-
 fn scan_nbd_entries(sys_block: &Path) -> Result<Vec<std::fs::DirEntry>, DiskError> {
     let mut entries: Vec<_> = std::fs::read_dir(sys_block)
         .map_err(|e| DiskError::NbdSetupFailed(format!("read /sys/class/block: {e}")))?
@@ -140,7 +184,7 @@ fn scan_nbd_entries(sys_block: &Path) -> Result<Vec<std::fs::DirEntry>, DiskErro
         .filter(|e| {
             e.file_name()
                 .to_str()
-                .map_or(false, |name| name.starts_with("nbd"))
+                .is_some_and(|name| name.starts_with("nbd"))
         })
         .collect();
     entries.sort_by_key(|e| e.file_name());
@@ -183,10 +227,10 @@ pub struct NbdStatus {
 
 /// Read-only check: is the nbd module loaded, and how many devices are free right now?
 /// Never attempts to load the module itself — see `find_free_nbd_device` for that.
-pub fn nbd_status() -> NbdStatus {
+pub fn nbd_status() -> Result<NbdStatus, DiskError> {
     let sys_block = Path::new("/sys/class/block");
     let entries = if sys_block.exists() {
-        scan_nbd_entries(sys_block).unwrap_or_default()
+        scan_nbd_entries(sys_block)?
     } else {
         Vec::new()
     };
@@ -202,11 +246,11 @@ pub fn nbd_status() -> NbdStatus {
         })
         .count();
 
-    NbdStatus {
+    Ok(NbdStatus {
         loaded: total_devices > 0,
         free_devices,
         total_devices,
-    }
+    })
 }
 
 pub fn find_free_nbd_device() -> Result<PathBuf, DiskError> {
@@ -269,21 +313,20 @@ pub fn find_free_nbd_device() -> Result<PathBuf, DiskError> {
     )))
 }
 
-
-
 pub fn connect_nbd(overlay_path: &Path) -> Result<NbdGuard, DiskError> {
+    // Locked before even picking a device — otherwise two processes could each
+    // grab a *different* free /dev/nbd* and still both end up connected to the
+    // same underlying disk image concurrently, which the lock is specifically
+    // meant to prevent.
+    let disk_lock = acquire_disk_lock(overlay_path)?;
+
     let device = find_free_nbd_device()?;
 
     let device_str = device.to_string_lossy().into_owned();
     let overlay_str = overlay_path.to_string_lossy().into_owned();
 
     let output = privileged_command("qemu-nbd")
-        .args([
-            "--connect",
-            &device_str,
-            &overlay_str,
-            "--format=qcow2",
-        ])
+        .args(["--connect", &device_str, &overlay_str, "--format=qcow2"])
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .output()
@@ -298,9 +341,8 @@ pub fn connect_nbd(overlay_path: &Path) -> Result<NbdGuard, DiskError> {
         )));
     }
 
-    Ok(NbdGuard::new(device))
+    Ok(NbdGuard::new(device, disk_lock))
 }
-
 
 pub fn wait_for_partitions(nbd_dev: &Path) -> Result<Vec<PathBuf>, DiskError> {
     let dev_name = nbd_dev
@@ -341,7 +383,6 @@ pub fn wait_for_partitions(nbd_dev: &Path) -> Result<Vec<PathBuf>, DiskError> {
     )))
 }
 
-
 /// Picks the ext4 root filesystem partition out of an nbd device's partitions.
 ///
 /// `build-disk.sh` always lays the disk out the same way (see its own `Disk layout`
@@ -357,12 +398,11 @@ pub fn wait_for_partitions(nbd_dev: &Path) -> Result<Vec<PathBuf>, DiskError> {
 /// to find ordinary root paths like `/etc/systemd/system/...`, since the ESP only
 /// holds the UKI/EFI boot files, not the OS.
 pub fn find_root_partition(partitions: &[PathBuf]) -> Result<PathBuf, DiskError> {
-    partitions.last().cloned().ok_or_else(|| {
-        DiskError::NbdSetupFailed("no partitions found in image".to_string())
-    })
+    partitions
+        .last()
+        .cloned()
+        .ok_or_else(|| DiskError::NbdSetupFailed("no partitions found in image".to_string()))
 }
-
-
 
 pub fn unique_mount_name() -> String {
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -375,6 +415,133 @@ pub fn unique_mount_name() -> String {
     format!("{}-{}-{}", std::process::id(), id, ts)
 }
 
+fn bind_host_mounts(mount_point: &Path) {
+    // Guest /etc/resolv.conf is often empty or a dangling symlink to
+    // /run/systemd/resolve/stub-resolv.conf (systemd-resolved generates it at
+    // boot), so package managers inside a chroot cannot resolve mirrors.
+    // Write the host nameservers into the guest file instead of bind-mounting:
+    // a bind target that is a dangling symlink makes mount(2) fail with ENOENT.
+    let guest_resolv = mount_point.join("etc").join("resolv.conf");
+    if guest_resolv.is_file() || guest_resolv.symlink_metadata().is_ok() {
+        match host_nameservers() {
+            Some(contents) => {
+                if let Err(e) = write_guest_resolv(mount_point, &contents) {
+                    tracing::warn!("failed to write guest /etc/resolv.conf for chroot: {}", e);
+                }
+            }
+            None => tracing::warn!(
+                "could not read host nameservers; guest chroot may fail to resolve mirrors"
+            ),
+        }
+    }
+    // gpg/pacman and dpkg need device nodes and proc inside the chroot;
+    // mirrors of arch-chroot: bind /dev, /proc and /sys.
+    for dir in ["/dev", "/proc", "/sys"] {
+        let guest_dir = mount_point.join(dir.trim_start_matches('/'));
+        if guest_dir.is_dir() {
+            bind_host_mount(Path::new(dir), &guest_dir);
+        }
+    }
+    // gpg-agent (used by pacman signature checks) creates sockets under
+    // /run; the guest image's /run is normally a boot-time tmpfs and may be
+    // unwritable on disk, which makes pacman fail with "GPGME error: Invalid
+    // crypto engine". Mirror arch-chroot: mount a fresh tmpfs there.
+    let guest_run = mount_point.join("run");
+    if guest_run.is_dir() {
+        let output = privileged_command("mount")
+            .args(["-t", "tmpfs", "tmpfs"])
+            .arg(&guest_run)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .output();
+        match output {
+            Ok(out) if out.status.success() => {}
+            Ok(out) => tracing::warn!(
+                "failed to mount tmpfs on guest /run for chroot: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            ),
+            Err(e) => tracing::warn!("failed to mount tmpfs on guest /run for chroot: {}", e),
+        }
+    }
+}
+
+fn host_nameservers() -> Option<String> {
+    let candidates = ["/etc/resolv.conf", "/run/systemd/resolve/stub-resolv.conf"];
+    for path in candidates {
+        let Ok(contents) = std::fs::read_to_string(path) else {
+            continue;
+        };
+        let mut nameservers: Vec<String> = contents
+            .lines()
+            .filter_map(|line| {
+                let mut parts = line.split_whitespace();
+                matches!(parts.next(), Some("nameserver"))
+                    .then(|| parts.next().map(|ip| format!("nameserver {ip}")))
+            })
+            .flatten()
+            .collect();
+        if !nameservers.is_empty() {
+            nameservers.dedup();
+            return Some(nameservers.join("\n") + "\n");
+        }
+    }
+    None
+}
+
+fn write_guest_resolv(mount_point: &Path, contents: &str) -> std::io::Result<()> {
+    // The guest filesystem is owned by root and the daemon runs unprivileged,
+    // so write through the NOPASSWD-authorized `chroot` instead of direct I/O.
+    // Replace a (possibly dangling) symlink first: a regular file is what the
+    // chrooted package manager expects.
+    let mut child = privileged_command("chroot")
+        .arg(mount_point)
+        .arg("/bin/sh")
+        .args(["-c", "rm -f /etc/resolv.conf && cat > /etc/resolv.conf"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()?;
+    use std::io::Write;
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(contents.as_bytes())?;
+    }
+    let output = child.wait_with_output()?;
+    if !output.status.success() {
+        return Err(std::io::Error::other(format!(
+            "chroot write failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    Ok(())
+}
+
+fn bind_host_mount(source: &Path, target: &Path) {
+    let output = privileged_command("mount")
+        .args([
+            "--bind",
+            &source.to_string_lossy(),
+            &target.to_string_lossy(),
+        ])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .output();
+    match output {
+        Ok(out) if out.status.success() => {}
+        Ok(out) => {
+            tracing::warn!(
+                "failed to bind-mount {} into guest chroot: {}",
+                source.display(),
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+        }
+        Err(e) => {
+            tracing::warn!(
+                "failed to bind-mount {} into guest chroot: {e}",
+                source.display()
+            );
+        }
+    }
+}
 
 pub fn mount_partition(partition: &Path) -> Result<MountGuard, DiskError> {
     let mount_point = mount_dir_base().join(unique_mount_name());
@@ -390,11 +557,7 @@ pub fn mount_partition(partition: &Path) -> Result<MountGuard, DiskError> {
     let mount_point_str = mount_point.to_string_lossy().into_owned();
 
     let output = privileged_command("mount")
-        .args([
-            "-o", "rw",
-            &partition_str,
-            &mount_point_str,
-        ])
+        .args(["-o", "rw", &partition_str, &mount_point_str])
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .output()
@@ -411,6 +574,8 @@ pub fn mount_partition(partition: &Path) -> Result<MountGuard, DiskError> {
         )));
     }
 
+    bind_host_mounts(&mount_point);
+
     Ok(MountGuard::new(mount_point))
 }
 
@@ -419,9 +584,68 @@ mod tests {
     use super::*;
 
     #[test]
-    fn find_free_nbd_device_returns_error_when_no_nbd_module() {
-        let result = find_free_nbd_device();
-        assert!(result.is_err());
+    fn lock_path_for_is_colocated_and_hidden() {
+        let disk = Path::new("/home/user/.andler/instances/abc/disk.qcow2");
+        let lock = lock_path_for(disk);
+        assert_eq!(
+            lock,
+            Path::new("/home/user/.andler/instances/abc/.disk.qcow2.andler-nbd.lock")
+        );
+    }
+
+    #[test]
+    fn acquire_disk_lock_succeeds_on_a_fresh_path() {
+        let dir = std::env::temp_dir().join(format!("andler-nbd-lock-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let disk_path = dir.join("disk.qcow2");
+
+        let _lock = acquire_disk_lock(&disk_path).expect("must acquire lock on fresh path");
+        assert!(lock_path_for(&disk_path).exists());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn acquire_disk_lock_is_reentrant_within_the_same_process() {
+        // flock is per-(process, open file description), not per-process alone, but
+        // re-opening and re-locking from the same process on Linux does not deadlock
+        // against itself the way a different process would block — this just
+        // confirms opening+locking twice in sequence (first dropped, then reacquired)
+        // works cleanly, i.e. the lock is properly released when the File is dropped.
+        let dir =
+            std::env::temp_dir().join(format!("andler-nbd-lock-test2-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let disk_path = dir.join("disk.qcow2");
+
+        {
+            let _first = acquire_disk_lock(&disk_path).expect("first lock must succeed");
+        }
+        let _second =
+            acquire_disk_lock(&disk_path).expect("lock must be free after first is dropped");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn find_free_nbd_device_returns_existing_device_or_explains_absence() {
+        // Environment-dependent by nature: on hosts with the nbd module loaded this
+        // returns a real device; without it, a helpful error. The old version pinned
+        // "no nbd module" and failed on any host that actually has nbd devices.
+        match find_free_nbd_device() {
+            Ok(dev) => {
+                assert!(
+                    dev.to_string_lossy().starts_with("/dev/nbd"),
+                    "free device must be an /dev/nbd* path, got {dev:?}"
+                );
+            }
+            Err(e) => {
+                let msg = e.to_string();
+                assert!(
+                    msg.to_lowercase().contains("nbd"),
+                    "error must explain the nbd situation, got: {msg}"
+                );
+            }
+        }
     }
 
     #[test]

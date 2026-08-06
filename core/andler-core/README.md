@@ -49,9 +49,10 @@ Defines the `HypervisorBackend` trait — the contract that all hypervisor imple
 | `snapshot_list` | `async fn(&self, handle: &BackendHandle) -> Result<Vec<SnapshotInfo>, BackendError>` | List snapshots (default: `NotImplemented`) |
 | `metrics_stream` | `fn(&self, handle: &BackendHandle) -> BoxStream<'_, ResourceMetrics>` | Real-time resource metrics (CPU%, RAM, disk, net, GPU) |
 | `log_stream` | `fn(&self, handle: &BackendHandle) -> BoxStream<'_, LogLine>` | Live-tail stdout/stderr of the hypervisor process |
-| `is_guest_agent_available` | `async fn(&self, handle: &BackendHandle) -> Result<bool, BackendError>` | Check if guest agent is reachable |
-| `guest_exec_install` | `async fn(&self, handle: &BackendHandle, package: &str) -> Result<(), BackendError>` | Install package in guest via QMP guest-exec |
-| `guest_exec_remove` | `async fn(&self, handle: &BackendHandle, package: &str) -> Result<(), BackendError>` | Remove package from guest via QMP guest-exec |
+| `is_guest_agent_available` | `async fn(&self, handle: &BackendHandle) -> Result<bool, BackendError>` | Check if guest agent is reachable (default: `false`) |
+| `set_guest_display_resolution` | `async fn(&self, handle: &BackendHandle, resolution: &Resolution, kind: InstanceKind) -> Result<(), BackendError>` | Apply a display resolution inside a running guest (default: `NotImplemented`) |
+| `guest_exec_install` | `async fn(&self, handle: &BackendHandle, package: &str) -> Result<(), BackendError>` | Install package in guest via the guest agent (`guest-exec`) |
+| `guest_exec_remove` | `async fn(&self, handle: &BackendHandle, package: &str) -> Result<(), BackendError>` | Remove package from guest via the guest agent (`guest-exec`) |
 | `guest_check_binary_installed` | `async fn(&self, handle: &BackendHandle, binary: &str) -> Result<bool, BackendError>` | Check if binary exists in guest filesystem |
 
 Any method not implemented by a specific backend must return `BackendError::NotImplemented` — never panic. Exception: `metrics_stream`/`log_stream` have signatures (`fn`, not `async fn`, no `Result`) that don't allow returning errors; "not implemented" or "no active stream" is expressed as an immediately-empty stream.
@@ -135,7 +136,7 @@ pub struct InstanceConfig {
 }
 ```
 
-Each sub-config has a `reference_default()` method that produces sensible defaults matching the original reference script (now removed).
+Each sub-config has a `reference_default()` method that produces sensible defaults.
 
 #### `config::cpu`
 
@@ -150,7 +151,7 @@ Each sub-config has a `reference_default()` method that produces sensible defaul
 #### `config::disk`
 
  - `DiskConfig`: `path`, `size_bytes`, `format` (`Qcow2` | `Raw` | `Vdi`), `base_image: Option<PathBuf>` (backing file for overlays), `thin_provisioning`, `trim_on_shutdown`, `snapshot_timeout_secs: Option<u64>` (per-instance snapshot job timeout, default: `None` — no timeout), `compact_on_shutdown: bool` (auto-compact after stop, default false).
-- `reference_default(path)`: **256 GiB** qcow2, no backing, thin, discard. This is not 40 GiB from the original reference script — 40 GiB was the lower bound for a typical Linux/Android installation at the time, but 256 GiB was chosen as the nominal upper limit. With thin-provisioned qcow2, this doesn't mean immediately-allocated space on the host, only the virtual ceiling.
+- `reference_default(path)`: **256 GiB** qcow2, no backing, thin, discard. With thin-provisioned qcow2, this doesn't mean immediately-allocated space on the host, only the virtual ceiling.
 - `overlay(path, base_image, size_bytes)`: Creates an overlay config with backing file.
 #### `config::gpu`
 
@@ -170,7 +171,7 @@ Each sub-config has a `reference_default()` method that produces sensible defaul
 - `NetworkMode`: `Nat` | `Bridge { interface }` | `Isolated`.
 - `NetworkConfig`: `mode`, `device_model` (virtio-net-pci), `nat_backend: NatBackend` (`Slirp` | `Passt`).
 
-- Default: NAT, virtio-net-pci, **Slirp** (not Passt by default). Passt requires the `passt` binary on the host — if not found, ANDLER falls back to Slirp rather than failing. Slirp is the original reference configuration and works everywhere without dependencies.
+- Default: NAT, virtio-net-pci, **Slirp** (not Passt by default). Passt requires the `passt` binary on the host — if not found, ANDLER falls back to Slirp rather than failing. Slirp works everywhere without dependencies.
 #### `config::firmware`
 
  - `FirmwareConfig`: `ovmf_code_path` (shared read-only OVMF_CODE), `ovmf_vars_path` (per-instance copy), `enable_uefi: bool` (whether to use UEFI boot, defaults to `true`).
@@ -219,7 +220,7 @@ Each sub-config has a `reference_default()` method that produces sensible defaul
 
 ## Tests
 
-49 unit tests across 16 test modules. Fully testable without QEMU or `/dev/kvm` — this is the whole point of extracting the domain into a separate crate. If a test in `andler-core` requires a real QEMU process, it's in the wrong crate.
+~50 unit tests across 16 test modules. Fully testable without QEMU or `/dev/kvm` — this is the whole point of extracting the domain into a separate crate. If a test in `andler-core` requires a real QEMU process, it's in the wrong crate.
 
 | Module | Tests |
 |--------|-------|

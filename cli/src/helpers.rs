@@ -1,5 +1,28 @@
 use andler_rpc::proto::{BackendKind, InstanceStateKind};
 
+/// Searches $PATH, then common sbin directories that are often missing from a
+/// regular (non-root) user's PATH but are exactly where `modprobe` and friends
+/// usually live. Returns the first match's full path.
+pub fn which(bin: &str) -> Option<std::path::PathBuf> {
+    let from_path = std::env::var_os("PATH").and_then(|paths| {
+        std::env::split_paths(&paths).find_map(|dir| {
+            let full = dir.join(bin);
+            if full.is_file() {
+                Some(full)
+            } else {
+                None
+            }
+        })
+    });
+
+    from_path.or_else(|| {
+        ["/usr/sbin", "/sbin", "/usr/local/sbin"]
+            .iter()
+            .map(|dir| std::path::Path::new(dir).join(bin))
+            .find(|full| full.is_file())
+    })
+}
+
 pub fn state_kind_name(kind: InstanceStateKind) -> &'static str {
     match kind {
         InstanceStateKind::InstanceStateUnspecified => "UNSPECIFIED",
@@ -13,17 +36,16 @@ pub fn state_kind_name(kind: InstanceStateKind) -> &'static str {
     }
 }
 
-
 pub fn colorize_status(kind: InstanceStateKind, is_tty: bool) -> String {
     let name = state_kind_name(kind);
     if !is_tty {
         return name.to_string();
     }
     let code = match kind {
-        InstanceStateKind::Running => "32",                    // green
+        InstanceStateKind::Running => "32", // green
         InstanceStateKind::Stopped | InstanceStateKind::Created => "2", // dim
-        InstanceStateKind::Error => "31",                       // red
-        InstanceStateKind::Paused => "33",                      // yellow
+        InstanceStateKind::Error => "31",   // red
+        InstanceStateKind::Paused => "33",  // yellow
         InstanceStateKind::Starting | InstanceStateKind::Stopping => "36", // cyan
         InstanceStateKind::InstanceStateUnspecified => return name.to_string(),
     };
@@ -74,9 +96,7 @@ pub fn parse_size(input: &str) -> Result<u64, String> {
         return Err(format!("missing number before `{unit_part}`"));
     }
     if unit_part.starts_with('.') {
-        return Err(format!(
-            "decimal sizes not supported (use e.g. 64GB, not 1.5GB)"
-        ));
+        return Err("decimal sizes not supported (use e.g. 64GB, not 1.5GB)".to_string());
     }
 
     let number: u64 = number_part
@@ -86,22 +106,27 @@ pub fn parse_size(input: &str) -> Result<u64, String> {
     let bytes = match unit_part {
         "" => number,
         "B" => number,
-        "KB" | "KIB" | "K" => number.checked_mul(1024)
+        "KB" | "KIB" | "K" => number
+            .checked_mul(1024)
             .ok_or_else(|| format!("size too large: {input}"))?,
-        "MB" | "MIB" | "M" => number.checked_mul(1024 * 1024)
+        "MB" | "MIB" | "M" => number
+            .checked_mul(1024 * 1024)
             .ok_or_else(|| format!("size too large: {input}"))?,
-        "GB" | "GIB" | "G" => number.checked_mul(1024 * 1024 * 1024)
+        "GB" | "GIB" | "G" => number
+            .checked_mul(1024 * 1024 * 1024)
             .ok_or_else(|| format!("size too large: {input}"))?,
-        "TB" | "TIB" | "T" => number.checked_mul(1024 * 1024 * 1024 * 1024)
+        "TB" | "TIB" | "T" => number
+            .checked_mul(1024 * 1024 * 1024 * 1024)
             .ok_or_else(|| format!("size too large: {input}"))?,
-        _ => return Err(format!(
-            "unknown unit `{unit_part}` (use B, KB/KiB, MB/MiB, GB/GiB, TB/TiB)"
-        )),
+        _ => {
+            return Err(format!(
+                "unknown unit `{unit_part}` (use B, KB/KiB, MB/MiB, GB/GiB, TB/TiB)"
+            ))
+        }
     };
 
     Ok(bytes)
 }
-
 
 pub fn ensure_qcow2_extension(path: &std::path::Path) -> std::path::PathBuf {
     if path.extension().is_some() {
@@ -117,11 +142,11 @@ pub fn format_size(bytes: u64) -> String {
     const MIB: u64 = 1024 * 1024;
     const KIB: u64 = 1024;
 
-    if bytes > 0 && bytes % TIB == 0 {
+    if bytes > 0 && bytes.is_multiple_of(TIB) {
         format!("{} TiB", bytes / TIB)
-    } else if bytes > 0 && bytes % GIB == 0 {
+    } else if bytes > 0 && bytes.is_multiple_of(GIB) {
         format!("{} GiB", bytes / GIB)
-    } else if bytes > 0 && bytes % MIB == 0 {
+    } else if bytes > 0 && bytes.is_multiple_of(MIB) {
         format!("{} MiB", bytes / MIB)
     } else if bytes >= GIB {
         format!("{:.1} GiB", bytes as f64 / GIB as f64)
@@ -134,10 +159,21 @@ pub fn format_size(bytes: u64) -> String {
     }
 }
 
+/// Formats an RFC3339 timestamp for display as local `2024-01-15 10:30:00`.
+/// Falls back to the raw string when it isn't parseable (e.g. older data).
+pub fn format_timestamp(rfc3339: &str) -> String {
+    match chrono::DateTime::parse_from_rfc3339(rfc3339) {
+        Ok(dt) => dt
+            .with_timezone(&chrono::Local)
+            .format("%Y-%m-%d %H:%M:%S")
+            .to_string(),
+        Err(_) => rfc3339.to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-
 
     #[test]
     fn colorize_status_returns_plain_text_when_not_a_tty() {
@@ -145,10 +181,7 @@ mod tests {
             colorize_status(InstanceStateKind::Running, false),
             "Running"
         );
-        assert_eq!(
-            colorize_status(InstanceStateKind::Error, false),
-            "Error"
-        );
+        assert_eq!(colorize_status(InstanceStateKind::Error, false), "Error");
     }
 
     #[test]
@@ -191,7 +224,6 @@ mod tests {
         );
     }
 
-
     #[test]
     fn ensure_qcow2_extension_adds_when_missing() {
         assert_eq!(
@@ -215,7 +247,6 @@ mod tests {
             std::path::PathBuf::from("/home/user/my-disk.qcow2")
         );
     }
-
 
     #[test]
     fn parse_size_plain_bytes() {
@@ -249,10 +280,7 @@ mod tests {
     #[test]
     fn parse_size_tb() {
         assert_eq!(parse_size("1TB").unwrap(), 1024u64 * 1024 * 1024 * 1024);
-        assert_eq!(
-            parse_size("1T").unwrap(),
-            1024u64 * 1024 * 1024 * 1024
-        );
+        assert_eq!(parse_size("1T").unwrap(), 1024u64 * 1024 * 1024 * 1024);
         assert_eq!(
             parse_size("2TiB").unwrap(),
             2 * 1024u64 * 1024 * 1024 * 1024
@@ -301,7 +329,6 @@ mod tests {
     fn parse_size_whitespace_trimmed() {
         assert_eq!(parse_size(" 64GB ").unwrap(), 64 * 1024 * 1024 * 1024);
     }
-
 
     #[test]
     fn format_size_bytes() {

@@ -1,6 +1,3 @@
-
-
-
 pub const DL_LINKS: &[(&str, &str, &str)] = &[
     (
         "11",
@@ -14,7 +11,6 @@ pub const DL_LINKS: &[(&str, &str, &str)] = &[
     ),
 ];
 
-
 pub const FILES: &[&str] = &[
     "bin/arm",
     "bin/arm64",
@@ -26,16 +22,12 @@ pub const FILES: &[&str] = &[
     "lib64/libndk*",
 ];
 
-
 pub const PROPS: &[(&str, &str)] = &[
     (
         "ro.product.cpu.abilist",
         "x86_64,x86,arm64-v8a,armeabi-v7a,armeabi",
     ),
-    (
-        "ro.product.cpu.abilist32",
-        "x86,armeabi-v7a,armeabi",
-    ),
+    ("ro.product.cpu.abilist32", "x86,armeabi-v7a,armeabi"),
     ("ro.product.cpu.abilist64", "x86_64,arm64-v8a"),
     ("ro.dalvik.vm.native.bridge", "libndk_translation.so"),
     ("ro.enable.native.bridge.exec", "1"),
@@ -46,8 +38,6 @@ pub const PROPS: &[(&str, &str)] = &[
     ("ro.dalvik.vm.isa.arm64", "x86_64"),
 ];
 
-
 pub const INIT_RC: Option<&str> = None;
-
 
 pub const DETECT_FILE: &str = "lib/libndk_translation.so";

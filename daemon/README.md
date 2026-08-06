@@ -41,6 +41,8 @@ Overridable via:
 - `ANDLERD_STORE_PATH` env var (for the database path)
 - `ANDLERD_OVMF_CODE` env var (override OVMF_CODE path)
 - `ANDLERD_OVMF_VARS` env var (override OVMF_VARS template path)
+- `ANDLERD_LOG_FORMAT=json` env var (structured JSON logging; default is human-readable)
+- `ANDLERD_HEALTH_CHECK_INTERVAL_SECS` env var (health-check interval, default 30s, `0` disables)
 - CLI flags: `-v`/`--verbose` (debug), `-vv`/`--trace` (trace)
 
 ### `daemon/mod.rs` — Core Daemon Logic
@@ -80,7 +82,8 @@ Overridable via:
 | `stream_instance_logs` | `async fn(InstanceId) -> Result<BoxStream<'static, LogLine>, DaemonError>` | Empty stream if no backend |
 | `stream_resource_metrics` | `async fn(InstanceId) -> Result<BoxStream<'static, ResourceMetrics>, DaemonError>` | Empty stream if not found |
 | `switch_arm_translator` | `async fn(InstanceId, ArmTranslator) -> Result<(), DaemonError>` | Switch ARM translator for Android, requires `is_disk_idle` |
-| `set_instance_config` | `async fn(InstanceId, InstanceConfig) -> Result<(), DaemonError>` | Partial config update with persistence, requires `is_disk_idle` |
+| `set_instance_config` | `async fn(InstanceId, key: &str, value: &str) -> Result<(), DaemonError>` | Partial config update by key with persistence. Whitelist: `display.resolution` (any state — applied live to a running guest via QGA and persisted for next boot via fw_cfg), `name`, `arm_translator` (both require `is_disk_idle`) |
+| `set_display_resolution` | `async fn(InstanceId, value: &str) -> Result<(), DaemonError>` | `display.resolution` path: parses `WxH`, pushes to a `Running`/`Paused` guest via `backend.set_guest_display_resolution`, persists the config |
 
 **Instance Configuration**:
 
@@ -111,8 +114,8 @@ Overridable via:
 | `list_guest_packages` | `async fn(InstanceId) -> Result<Vec<(String, String, String)>, DaemonError>` | List known packages with status |
 
 **Guest Agent Dual-Path**: The guest agent methods use a two-tier fallback strategy:
-- **Online path (QMP)**: If the instance is `Running` and QMP socket is accessible, the agent communicates directly with the guest via QMP (`guest.exec`). This requires the guest to be running with QEMU's guest agent (`qemu-ga`) active.
-- **Offline path (qemu-nbd)**: If QMP fails (instance not running or QEMU guest agent unavailable), the operation falls back to mounting the instance's disk image via `qemu-nbd` and performing the operation directly on the filesystem. This requires the disk to not be in use by another process.
+- **Online path (QGA)**: If the instance is `Running` and the guest agent responds, commands run inside the guest via the QEMU guest agent — `guest-exec`/`guest-exec-status` for package install/remove, `guest-file-*` for config writes (e.g. the resolution change flow). The agent is reached on the dedicated chardev socket `*.qga.sock` (`virtserialport name=org.qemu.guest_agent.0`), *not* the QMP monitor — QEMU ≥ 9 no longer registers `guest-*` commands on QMP. Requires `qemu-guest-agent` running inside the guest (base image ships it enabled).
+- **Offline path (qemu-nbd)**: If the instance is not running (or QGA is unavailable), the operation falls back to mounting the instance's disk image via `qemu-nbd` and running the package manager inside a `sudo -n chroot`. The chroot is prepared by `bind_host_mounts` (guest `/etc/resolv.conf` written with host nameservers, `/dev`/`/proc`/`/sys` bind-mounted, tmpfs on guest `/run`) and package indexes are refreshed before install.
 
 
 **Clone/Export Methods**:
@@ -180,11 +183,11 @@ Overridable via:
 | `ConfigKindChanged` | `INVALID_ARGUMENT` | Config changes guest kind (`LinuxVm` ↔ `AndroidVm`) — not supported, requires recreation |
 | `ConfigDiskPathChanged` | `INVALID_ARGUMENT` | Config changes `disk.path` — must use `andler disk` commands to safely move/relink |
 | `GuestAgentUnavailable` | `INTERNAL` | Guest agent binary unavailable or failed to start |
-| `InvalidConfigKey` | `INVALID_ARGUMENT` | Invalid or unknown configuration key for `update_instance_config` |
+| `InvalidConfigKey` | `INVALID_ARGUMENT` | Invalid or unknown configuration key for `set_instance_config` |
 | `NotAndroid` | `FAILED_PRECONDITION` | Operation requires Android instance (`switch_arm_translator`) |
 | `InstanceAlreadyStopped` | `FAILED_PRECONDITION` | `stop_instance` called when instance is already in `Stopped` or `Error` state — nothing to stop |
-| `InstanceMustBeStopped` | `FAILED_PRECONDITION` | Operation requires stopped instance (`set_instance_config`, `switch_arm_translator`) |
-| `MissingOvmfVarsTemplate` | `FAILED_PRECONDITION` | Android instance requires UEFI/OVMF but no `OVMF_VARS` template was provided |
+| `InstanceMustBeStopped` | `FAILED_PRECONDITION` | Operation requires stopped instance (`update_instance_config`, `set_instance_config` non-resolution keys, `switch_arm_translator`) |
+| `MissingOvmfVarsTemplate` | `INVALID_ARGUMENT` | Android instance requires UEFI/OVMF but no `OVMF_VARS` template was provided |
 
 ### `daemon/instance_ops.rs` — Instance Lifecycle
 
@@ -211,6 +214,8 @@ Handles: `status`, `stream_instance_logs`, `stream_resource_metrics`, `list_inst
 ### `service.rs` — gRPC Service
 
 **`DaemonService`**: Thin wrapper over `Daemon`. One `tonic::async_trait` method per `Daemon` method, no additional business logic.
+
+**`status_message()`**: every `DaemonError` is passed through `status_message()` before becoming a `Status`: control characters (other than HTAB) are replaced with spaces and the message is truncated to 384 chars. Rationale: multi-KB package-manager stderr as the `grpc-message` header trips tonic's h2 client (`internal error: h2 protocol error`) on trailers-only responses — see `MAX_MESSAGE_CHARS`.
 
 **`From<DaemonError> for tonic::Status`**: Maps domain errors to gRPC status codes:
 - `InstanceNotFound` → `NOT_FOUND`
@@ -249,22 +254,21 @@ Real TCP gRPC round-trip tests (no `qemu-img`/`/dev/kvm` required). Uses ephemer
 
 ## Tests
 
-86 tests across 10 modules:
+Unit tests across 12 modules (run `cargo test --workspace` for the current count):
 
-
-| Module | Focus | Tests |
-|--------|-------|-------|
-| `common.rs` | Test infrastructure (TestTempDir, sample configs) | — |
-| `create.rs` | Instance creation, Android overlay, TOML parsing | 6 |
-| `start_stop.rs` | Start, pause, resume, stop lifecycle | 9 |
-| `persistence.rs` | with_store, restore, without_store | 9 |
-| `remove.rs` | Remove, purge, file cleanup, clone protection | 14 |
-| `clone.rs` | Clone (3 modes), export, find_live_clones | 20 |
-| `list_config.rs` | list_instances, get_instance_config | 7 |
-| `status.rs` | Status queries, log/metrics streaming | 3 |
-| `resolve_instance_id.rs` | Partial ID resolution, ambiguity detection | 5 |
-| `health.rs`             | Health check unit tests | 4 |
-| `android_boot_mode.rs`  | Android boot mode switch/get operations | 6 |
+| Module | Focus |
+|--------|-------|
+| `common.rs` | Test infrastructure (TestTempDir, sample configs) |
+| `create.rs` | Instance creation, Android overlay, TOML parsing |
+| `start_stop.rs` | Start, pause, resume, stop lifecycle |
+| `persistence.rs` | with_store, restore, without_store |
+| `remove.rs` | Remove, purge, file cleanup, clone protection |
+| `clone.rs` | Clone (3 modes), export, find_live_clones |
+| `list_config.rs` | list_instances, get_instance_config |
+| `status.rs` | Status queries, log/metrics streaming |
+| `resolve_instance_id.rs` | Partial ID resolution, ambiguity detection |
+| `health.rs` | Health check unit tests |
+| `android_boot_mode.rs` | Android boot mode switch/get operations |
 
 - **Instance lifecycle**: create, start (with Passthrough validation), pause/resume before start, stop before start, double create overwrite
 - **Android instance creation**: Profile resolution, overlay creation (`#[ignore]`), missing base image (verifies `InstanceDirGuard` cleanup), missing OVMF template (verifies cleanup)
@@ -277,7 +281,7 @@ Real TCP gRPC round-trip tests (no `qemu-img`/`/dev/kvm` required). Uses ephemer
 
 ### `grpc_roundtrip_test.rs` (integration, real TCP)
 
-28 tests covering the full gRPC round-trip for all major operations.
+gRPC round-trip tests (integration, real TCP) covering the full gRPC round-trip for all major operations.
 
 | Variant | Fields | Description |
 |---------|--------|-------------|

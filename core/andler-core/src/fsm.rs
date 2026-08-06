@@ -1,13 +1,9 @@
-
-
 use serde::{Deserialize, Serialize};
 
 use crate::error::FsmError;
 
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum InstanceState {
-
     Created,
 
     Starting,
@@ -23,10 +19,8 @@ pub enum InstanceState {
     Error { message: String },
 }
 
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum InstanceEvent {
-
     Start,
 
     StartCompleted,
@@ -43,7 +37,6 @@ pub enum InstanceEvent {
 }
 
 impl InstanceState {
-
     pub fn apply(self, event: InstanceEvent) -> Result<InstanceState, FsmError> {
         use InstanceEvent as E;
         use InstanceState as S;
@@ -83,11 +76,9 @@ impl InstanceState {
         Ok(next)
     }
 
-
     pub fn is_terminal(&self) -> bool {
         matches!(self, InstanceState::Stopped | InstanceState::Error { .. })
     }
-
 
     pub fn is_disk_idle(&self) -> bool {
         matches!(
@@ -146,7 +137,9 @@ mod tests {
             InstanceState::Paused,
             InstanceState::Stopping,
         ] {
-            let result = state.apply(InstanceEvent::Fail("boom".to_string())).unwrap();
+            let result = state
+                .apply(InstanceEvent::Fail("boom".to_string()))
+                .unwrap();
             assert_eq!(
                 result,
                 InstanceState::Error {

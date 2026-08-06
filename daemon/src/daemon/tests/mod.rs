@@ -1,13 +1,13 @@
 use super::*;
 
+mod android_boot_mode;
+mod clone;
 mod common;
 mod create;
-mod status;
-mod start_stop;
+mod health;
+mod list_config;
 mod persistence;
 mod remove;
-mod clone;
-mod list_config;
 mod resolve_instance_id;
-mod health;
-mod android_boot_mode;
+mod start_stop;
+mod status;

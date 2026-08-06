@@ -1,11 +1,11 @@
 use std::path::PathBuf;
 
-use super::Daemon;
 use super::error::DaemonError;
-use super::types::{InstanceDirGuard, InstanceRecord, write_instance_toml};
+use super::types::{write_instance_toml, InstanceDirGuard, InstanceRecord};
+use super::Daemon;
 use andler_core::{
-    BackendError, DiskFormat, InstanceConfig, InstanceEvent, InstanceId,
-    InstanceKind, InstanceState,
+    BackendError, DiskFormat, InstanceConfig, InstanceEvent, InstanceId, InstanceKind,
+    InstanceState, Resolution,
 };
 
 /// Checks that the files this instance needs to boot are still present on disk.
@@ -64,6 +64,7 @@ impl Daemon {
     }
 
     pub async fn create_instance(&self, cfg: InstanceConfig) -> Result<InstanceId, DaemonError> {
+        cfg.validate().map_err(DaemonError::InvalidConfig)?;
         self.backend_for(cfg.backend)?;
 
         let id = cfg.id;
@@ -78,12 +79,28 @@ impl Daemon {
                 },
             );
         }
-        self.persist_new_instance(&cfg, &InstanceState::Created).await;
+
+        if let Err(err) = self
+            .persist_new_instance(&cfg, &InstanceState::Created)
+            .await
+        {
+            // Couldn't durably save it — don't leave it lingering in memory only to
+            // silently vanish the next time andlerd restarts. Roll back and report
+            // the real failure instead of claiming success.
+            self.instances.write().await.remove(&id);
+            tracing::error!(
+                instance_id = %id.0,
+                error = %err,
+                "instance creation rolled back: failed to persist to store"
+            );
+            return Err(err);
+        }
 
         tracing::info!(instance_id = %id.0, name = %cfg.name, "instance created");
         Ok(id)
     }
 
+    #[allow(clippy::too_many_arguments)] // mirrors the CreateAndroidInstanceRequest proto fields
     pub async fn create_android_instance(
         &self,
         profile: andler_core::AndroidProfile,
@@ -142,9 +159,11 @@ impl Daemon {
         // or the disk has no real partition table), log it and continue rather than blocking
         // instance creation entirely — the instance is still usable, just left on whatever
         // boot mode the base image defaults to, and can be fixed with `andler guest boot-mode`.
-        if let Err(e) =
-            andler_disk::boot_mode::switch_boot_mode(&disk.path, andler_core::AndroidBootMode::Android)
-                .await
+        if let Err(e) = andler_disk::boot_mode::switch_boot_mode(
+            &disk.path,
+            andler_core::AndroidBootMode::Android,
+        )
+        .await
         {
             tracing::error!(
                 error = %e,
@@ -156,6 +175,8 @@ impl Daemon {
 
         let mut cfg = profile.resolve(instance_name, disk, ovmf_vars_path);
         cfg.id = id;
+
+        write_instance_toml(&instance_dir, &cfg).await;
 
         let registered_id = self.create_instance(cfg).await?;
 
@@ -266,7 +287,9 @@ impl Daemon {
 
         match &result {
             Ok(()) => tracing::info!(instance_id = %id.0, "instance started"),
-            Err(err) => tracing::error!(instance_id = %id.0, error = %err, "instance failed to start"),
+            Err(err) => {
+                tracing::error!(instance_id = %id.0, error = %err, "instance failed to start")
+            }
         }
 
         result
@@ -323,7 +346,9 @@ impl Daemon {
 
         match &result {
             Ok(()) => tracing::info!(instance_id = %id.0, graceful, "instance stopped"),
-            Err(err) => tracing::error!(instance_id = %id.0, error = %err, "instance failed to stop"),
+            Err(err) => {
+                tracing::error!(instance_id = %id.0, error = %err, "instance failed to stop")
+            }
         }
 
         if result.is_ok() {
@@ -337,8 +362,13 @@ impl Daemon {
         let (backend, handle) = self.backend_and_handle(id).await?;
         let result = backend.pause(&handle).await.map_err(DaemonError::Backend);
         match &result {
-            Ok(()) => tracing::info!(instance_id = %id.0, "instance paused"),
-            Err(err) => tracing::error!(instance_id = %id.0, error = %err, "instance failed to pause"),
+            Ok(()) => {
+                tracing::info!(instance_id = %id.0, "instance paused");
+                self.apply_event_and_persist(id, InstanceEvent::Pause).await;
+            }
+            Err(err) => {
+                tracing::error!(instance_id = %id.0, error = %err, "instance failed to pause")
+            }
         }
         result
     }
@@ -347,8 +377,14 @@ impl Daemon {
         let (backend, handle) = self.backend_and_handle(id).await?;
         let result = backend.resume(&handle).await.map_err(DaemonError::Backend);
         match &result {
-            Ok(()) => tracing::info!(instance_id = %id.0, "instance resumed"),
-            Err(err) => tracing::error!(instance_id = %id.0, error = %err, "instance failed to resume"),
+            Ok(()) => {
+                tracing::info!(instance_id = %id.0, "instance resumed");
+                self.apply_event_and_persist(id, InstanceEvent::Resume)
+                    .await;
+            }
+            Err(err) => {
+                tracing::error!(instance_id = %id.0, error = %err, "instance failed to resume")
+            }
         }
         result
     }
@@ -418,11 +454,9 @@ impl Daemon {
 
         match &state {
             InstanceState::Running | InstanceState::Paused => {
-                let handle = handle.ok_or_else(|| {
-                    DaemonError::GuestAgentUnavailable {
-                        instance_id: id,
-                        message: "instance is running but has no backend handle".to_string(),
-                    }
+                let handle = handle.ok_or_else(|| DaemonError::GuestAgentUnavailable {
+                    instance_id: id,
+                    message: "instance is running but has no backend handle".to_string(),
                 })?;
 
                 let backend = self.backend_for(backend_kind)?;
@@ -452,10 +486,11 @@ impl Daemon {
 
                 match package.as_str() {
                     "libndk" | "libhoudini" => {
-                        return Err(DaemonError::InvalidConfigKey(format!(
+                        return Err(DaemonError::InvalidConfigKey(
                             "ARM translator packages must be installed via SwitchArmTranslator RPC, \
                              not InstallGuestAgent"
-                        )));
+                                .to_string(),
+                        ));
                     }
                     _ => {
                         andler_disk::guest_tools::install_agent_offline(&disk_path, &package)
@@ -499,11 +534,9 @@ impl Daemon {
 
         match &state {
             InstanceState::Running | InstanceState::Paused => {
-                let handle = handle.ok_or_else(|| {
-                    DaemonError::GuestAgentUnavailable {
-                        instance_id: id,
-                        message: "instance is running but has no backend handle".to_string(),
-                    }
+                let handle = handle.ok_or_else(|| DaemonError::GuestAgentUnavailable {
+                    instance_id: id,
+                    message: "instance is running but has no backend handle".to_string(),
                 })?;
 
                 let backend = self.backend_for(backend_kind)?;
@@ -533,10 +566,11 @@ impl Daemon {
 
                 match package.as_str() {
                     "libndk" | "libhoudini" => {
-                        return Err(DaemonError::InvalidConfigKey(format!(
+                        return Err(DaemonError::InvalidConfigKey(
                             "ARM translator packages must be removed via SwitchArmTranslator RPC, \
                              not RemoveGuestAgent"
-                        )));
+                                .to_string(),
+                        ));
                     }
                     _ => {
                         andler_disk::guest_tools::remove_agent_offline(&disk_path, &package)
@@ -582,19 +616,14 @@ impl Daemon {
 
         match &state {
             InstanceState::Running | InstanceState::Paused => {
-                let handle = handle.ok_or_else(|| {
-                    DaemonError::GuestAgentUnavailable {
-                        instance_id: id,
-                        message: "instance is running but has no backend handle".to_string(),
-                    }
+                let handle = handle.ok_or_else(|| DaemonError::GuestAgentUnavailable {
+                    instance_id: id,
+                    message: "instance is running but has no backend handle".to_string(),
                 })?;
 
                 let backend = self.backend_for(backend_kind)?;
 
-                let is_android = matches!(
-                    &config_kind,
-                    InstanceKind::AndroidVm { .. }
-                );
+                let is_android = matches!(&config_kind, InstanceKind::AndroidVm { .. });
                 let packages = if is_android {
                     andler_disk::guest_tools::ANDROID_PACKAGES
                 } else {
@@ -608,7 +637,12 @@ impl Daemon {
                     results.push((
                         pkg.name.to_string(),
                         pkg.description.to_string(),
-                        if installed { "installed" } else { "not_installed" }.to_string(),
+                        if installed {
+                            "installed"
+                        } else {
+                            "not_installed"
+                        }
+                        .to_string(),
                     ));
                 }
             }
@@ -617,10 +651,7 @@ impl Daemon {
                     return Err(DaemonError::InstanceNotFound(id));
                 }
 
-                let is_android = matches!(
-                    &config_kind,
-                    InstanceKind::AndroidVm { .. }
-                );
+                let is_android = matches!(&config_kind, InstanceKind::AndroidVm { .. });
                 let package_status = if is_android {
                     andler_disk::guest_tools::check_android_packages_offline_with_disk(&disk_path)?
                 } else {
@@ -632,18 +663,19 @@ impl Daemon {
                         pkg.description.to_string(),
                         match status {
                             andler_disk::guest_tools::PackageStatus::Installed => "installed",
-                            andler_disk::guest_tools::PackageStatus::NotInstalled => "not_installed",
+                            andler_disk::guest_tools::PackageStatus::NotInstalled => {
+                                "not_installed"
+                            }
                             andler_disk::guest_tools::PackageStatus::Unknown => "unknown",
-                        }.to_string(),
+                        }
+                        .to_string(),
                     ));
                 }
             }
             other => {
                 return Err(DaemonError::GuestAgentUnavailable {
                     instance_id: id,
-                    message: format!(
-                        "instance is in state {other:?}; cannot list packages"
-                    ),
+                    message: format!("instance is in state {other:?}; cannot list packages"),
                 });
             }
         }
@@ -668,10 +700,7 @@ impl Daemon {
             }
 
             if !record.state.is_disk_idle() {
-                return Err(DaemonError::InstanceMustBeStopped(
-                    id,
-                    record.state.clone(),
-                ));
+                return Err(DaemonError::InstanceMustBeStopped(id, record.state.clone()));
             }
 
             record.config.disk.path.clone()
@@ -699,10 +728,7 @@ impl Daemon {
             }
 
             if !record.state.is_disk_idle() {
-                return Err(DaemonError::InstanceMustBeStopped(
-                    id,
-                    record.state.clone(),
-                ));
+                return Err(DaemonError::InstanceMustBeStopped(id, record.state.clone()));
             }
 
             record.config.disk.path.clone()
@@ -729,10 +755,7 @@ impl Daemon {
             }
 
             if !record.state.is_disk_idle() {
-                return Err(DaemonError::InstanceMustBeStopped(
-                    id,
-                    record.state.clone(),
-                ));
+                return Err(DaemonError::InstanceMustBeStopped(id, record.state.clone()));
             }
 
             let android_version = match &record.config.kind {
@@ -742,10 +765,7 @@ impl Daemon {
                 _ => "13".to_string(),
             };
 
-            (
-                record.config.disk.path.clone(),
-                android_version,
-            )
+            (record.config.disk.path.clone(), android_version)
         };
 
         andler_disk::arm_translator::switch_translator(
@@ -769,6 +789,10 @@ impl Daemon {
         key: &str,
         value: &str,
     ) -> Result<(), DaemonError> {
+        if key == "display.resolution" {
+            return self.set_display_resolution(id, value).await;
+        }
+
         {
             let instances = self.instances.read().await;
             let record = instances
@@ -776,10 +800,7 @@ impl Daemon {
                 .ok_or(DaemonError::InstanceNotFound(id))?;
 
             if !record.state.is_disk_idle() {
-                return Err(DaemonError::InstanceMustBeStopped(
-                    id,
-                    record.state.clone(),
-                ));
+                return Err(DaemonError::InstanceMustBeStopped(id, record.state.clone()));
             }
         }
 
@@ -801,7 +822,9 @@ impl Daemon {
 
         let (cfg_snapshot, state_snapshot) = {
             let instances = self.instances.read().await;
-            let record = instances.get(&id).ok_or(DaemonError::InstanceNotFound(id))?;
+            let record = instances
+                .get(&id)
+                .ok_or(DaemonError::InstanceNotFound(id))?;
             (record.config.clone(), record.state.clone())
         };
         self.persist_config_update(&cfg_snapshot, &state_snapshot)
@@ -810,6 +833,65 @@ impl Daemon {
         Ok(())
     }
 
+    pub async fn set_display_resolution(
+        &self,
+        id: InstanceId,
+        value: &str,
+    ) -> Result<(), DaemonError> {
+        let (width, height) = value
+            .split_once('x')
+            .and_then(|(w, h)| Some((w.parse::<u32>().ok()?, h.parse::<u32>().ok()?)))
+            .filter(|(w, h)| *w > 0 && *h > 0)
+            .ok_or_else(|| {
+                DaemonError::InvalidConfigKey(
+                    "display.resolution expects WxH, e.g. 1920x1080".to_string(),
+                )
+            })?;
+        let resolution = Resolution::new(width, height);
+
+        let (state, handle, backend_kind, kind) = {
+            let instances = self.instances.read().await;
+            let record = instances
+                .get(&id)
+                .ok_or(DaemonError::InstanceNotFound(id))?;
+            (
+                record.state.clone(),
+                record.handle.clone(),
+                record.config.backend,
+                record.config.kind.clone(),
+            )
+        };
+
+        if matches!(state, InstanceState::Running | InstanceState::Paused) {
+            let handle = handle.ok_or_else(|| DaemonError::GuestAgentUnavailable {
+                instance_id: id,
+                message: "instance is running but has no backend handle".to_string(),
+            })?;
+            let backend = self.backend_for(backend_kind)?;
+            backend
+                .set_guest_display_resolution(&handle, &resolution, kind)
+                .await?;
+        }
+
+        {
+            let mut instances = self.instances.write().await;
+            if let Some(record) = instances.get_mut(&id) {
+                record.config.display.resolution = resolution;
+            }
+        }
+
+        let (cfg_snapshot, state_snapshot) = {
+            let instances = self.instances.read().await;
+            let record = instances
+                .get(&id)
+                .ok_or(DaemonError::InstanceNotFound(id))?;
+            (record.config.clone(), record.state.clone())
+        };
+        self.persist_config_update(&cfg_snapshot, &state_snapshot)
+            .await;
+
+        Ok(())
+    }
 }
 
 fn spawn_compact_on_shutdown(id: InstanceId, disk: andler_core::DiskConfig) {
@@ -822,7 +904,7 @@ fn spawn_compact_on_shutdown(id: InstanceId, disk: andler_core::DiskConfig) {
             format = ?disk.format,
             "compact_on_shutdown is enabled but disk format is not qcow2 — skipping"
         );
-         return;
+        return;
     }
 
     let path = disk.path.clone();

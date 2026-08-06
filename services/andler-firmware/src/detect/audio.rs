@@ -1,10 +1,6 @@
-
-
 use andler_core::AudioBackend;
 
-
 pub type AudioServer = AudioBackend;
-
 
 pub(crate) fn detect_audio_server() -> AudioServer {
     match runtime_dir() {
@@ -23,7 +19,6 @@ fn detect_from_runtime_dir(runtime_dir: &str) -> AudioServer {
     AudioServer::None
 }
 
-
 fn runtime_dir() -> Option<String> {
     if let Ok(dir) = std::env::var("XDG_RUNTIME_DIR") {
         if !dir.is_empty() {
@@ -39,7 +34,6 @@ fn runtime_dir() -> Option<String> {
         None
     }
 }
-
 
 fn current_uid() -> u32 {
     andler_core::paths::current_uid()
@@ -92,7 +86,10 @@ mod tests {
     #[test]
     fn returns_none_when_neither_socket_present() {
         let dir = temp_runtime_dir("empty");
-        assert_eq!(detect_from_runtime_dir(dir.to_str().unwrap()), AudioServer::None);
+        assert_eq!(
+            detect_from_runtime_dir(dir.to_str().unwrap()),
+            AudioServer::None
+        );
     }
 
     #[test]

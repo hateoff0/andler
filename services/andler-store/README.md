@@ -69,7 +69,7 @@ This crate does NOT contain business logic for state transitions — only persis
 
 ## Tests
 
-20 tests in `store::tests` using `Store::open_in_memory()`:
+~20 tests in `store::tests` using `Store::open_in_memory()`:
 
 - Round-trip config + state (including `InstanceState::Error { message }`)
 - Overwrite existing ID

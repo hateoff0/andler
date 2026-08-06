@@ -1,7 +1,4 @@
-
-
 use serde::{Deserialize, Serialize};
-
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum CpuPriority {
@@ -11,10 +8,8 @@ pub enum CpuPriority {
     High,
 }
 
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CpuConfig {
-
     pub cores: u32,
 
     pub sockets: u32,
@@ -27,7 +22,6 @@ pub struct CpuConfig {
 }
 
 impl CpuConfig {
-
     pub fn reference_default() -> Self {
         CpuConfig {
             cores: 4,

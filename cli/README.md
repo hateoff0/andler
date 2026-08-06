@@ -9,9 +9,8 @@ The `andler` binary — a thin gRPC client to `andlerd` via `andler-rpc`. No bus
 | Command | Description |
 |---------|-------------|
 | `andler create --file instance.toml` | Create LinuxVm or AndroidVm from TOML (auto-detected) |
-| `andler create --kind linux --name <name> --iso-path <path> --disk-path <path> --ovmf-vars-template <path>` | Create LinuxVm with CLI flags |
-| `andler create --kind android --name <name> --android-version <ver> --base-image-path <path> --ovmf-vars-template <path>` | Create AndroidVm with CLI flags |
-| `andler create --instance <path>` | Create from TOML file via `--instance` flag |
+| `andler create --kind linux --name <name> --iso-path <path> --disk-path <path>` | Create LinuxVm with CLI flags |
+| `andler create --kind android --name <name> --android-version <ver>` | Create AndroidVm with CLI flags (base image auto-discovered) |
 
 ### Create Flags (mutual exclusivity)
 
@@ -19,35 +18,25 @@ The following flags define how instance configuration is provided — they are *
 
 | Flags | Description |
 |-------|-------------|
-| `--file <path>` | Path to TOML instance file (shorthand for `--instance`) |
-| `--instance <path>` | Path to TOML instance file |
-| `--kind linux --name …` | All required LinuxVm fields (`--kind linux --name --iso-path --disk-path --ovmf-vars-template`) |
-| `--kind android --name …` | All required AndroidVm fields (`--kind android --name --android-version --base-image-path --ovmf-vars-template`) |
-| `--wizard` | Interactive wizard mode |
+| `--file <path>` | Path to TOML instance file (auto-detects LinuxVm/AndroidVm; mutually exclusive with `--kind`) |
+| `--kind <linux\|android>` | VM type for CLI-mode creation (requires the type's required flags below) |
+| `--quick` | Skip the wizard and create with defaults (requires `--kind`; mutually exclusive with `--file`) |
 
-**TOML-only flags** (require `--file`/`--instance`):
-- `--quick`: Skip wizard prompts, use defaults for optional fields
-- `--dry-run`: Validate and preview without creating
-- `--verify`: Run pre-flight checks (ISO/disk/OVMF existence, GPU memory, CPU/memory allocation)
-Exit code: 0 if all checks passed, 1 if any failed — scriptable (`andler create --verify ... && andler create ...`).
+**Mode selection**: exactly one of `--file`, `--kind`, or neither (bare `andler create` starts the interactive wizard).
 
-**CLI-only flags** (require `--kind`):
-- `--disk-size-gib <n>`: Initial disk size in GiB
-- `--compact-on-shutdown`: Enable automatic disk compaction on graceful shutdown
-- `--cdrom-bus <auto|virtio|ide>`: CD-ROM bus type
-- `--no-uefi`: Disable UEFI, use BIOS/CSM boot
-- `--overlay-size-gib <n>`: Disk size in GiB (Android only)
-- `--linked-overlay`: Link the disk to the base image as a thin overlay instead of making a full independent copy (Android only). Default: off — full copy.
-- `--gapps <true|false>`: Include Google Apps (Android only)
-- `--microg <true|false>`: Include microG (Android only)
-- `--arm-translator <libndk|libhoudini>`: ARM translation mode (Android only)
-- `--instances-root <path>`: Custom instances root directory (Android only)
+**Linux CLI mode** (`--kind linux`): `--name`, `--iso-path`, `--disk-path` required. Optional: `--disk-size-gib` (≥1, default 256), `--compact-on-shutdown`, `--cdrom-bus <auto|virtio|ide>` (default auto), `--no-uefi`, `--ovmf-vars-template` (auto-detected when omitted).
+
+**Android CLI mode** (`--kind android`): `--name`, `--android-version <11|13>` required. Optional: `--base-image-path` (omitted → daemon auto-discovers in `~/.andler/cache/base-images/`), `--gapps`, `--microg`, `--arm-translator <none|libndk|libhoudini>`, `--overlay-size-gib` (≥1, default 20), `--linked-overlay`, `--instances-root`, `--ovmf-vars-template`.
+
+**Validation flags** (both modes):
+- `--dry-run`: Validate and preview the resolved config + QEMU command line without creating (doesn't contact the daemon)
+- `--verify`: Run pre-flight checks (ISO/disk/OVMF existence, GPU memory, CPU/memory allocation). Exit code: 0 if all checks passed, 1 if any failed — scriptable (`andler create --verify ... && andler create ...`)
 
 | `andler start <instance-id>` | Start an instance |
 | `andler stop <instance-id> [--graceful]` | Stop an instance (default: force kill (SIGKILL); `--graceful`: graceful ACPI shutdown (SIGTERM)) |
 | `andler pause <instance-id>` | Pause a running instance |
 | `andler resume <instance-id>` | Resume a paused instance |
-| `andler status <instance-id>` | Print current status |
+| `andler status <instance-id> [--json]` | Print current state. `--json`: JSON object with state/detail/error_message |
 
 ### Information
 
@@ -55,13 +44,15 @@ Exit code: 0 if all checks passed, 1 if any failed — scriptable (`andler creat
 |---------|-------------|
 | `andler list [--full-id] [--state <state>] [--name <regex>] [--sort <key>] [--json]` | List instances. `--full-id`/`-q`: full UUID. `--state`: filter by state. `--name`: regex filter. `--sort`: `name`/`state`/`none` (default: `none`). `--json`: machine-readable. |
 Default: UUIDs truncated to 8 characters (matching `docker ps`). Use `--full-id` / `-q` for full UUID.
-| `andler config <instance-id>` | Print full instance configuration (all 9 sections) |
+| `andler config view <instance-id>` | Print full instance configuration (all 9 sections) |
+| `andler config edit <instance-id>` | Open the real `instance.toml` in `$VISUAL`/`$EDITOR` (fallback `vi`/`vim`/`nano`), apply edits via gRPC |
+| `andler config set <instance-id> <key> <value>` | Update a single config key. Whitelist: `display.resolution` (`WxH`, any state — applied live to a running guest and persisted via fw_cfg), `name` and `arm_translator` (stopped instance only) |
 
 ### Lifecycle Management
 
 | Command | Description |
 |---------|-------------|
-| `andler remove <instance-id> [--purge]` | Remove instance record. With `--purge`, also deletes disk + OVMF vars copy. |
+| `andler remove <instance-id> [--purge]` | Remove instance record. With `--purge`, also deletes disk + OVMF vars copy (confirms on TTY). |
 | `andler clone <source-id> --name <new-name> --mode <linked\|full-standalone\|shared-base>` | Clone an instance |
 | `andler export <source-id> <dest-path>` | Export instance disk as standalone file |
 
@@ -77,16 +68,17 @@ Default: UUIDs truncated to 8 characters (matching `docker ps`). Use `--full-id`
 
 | Command | Description |
 |---------|-------------|
-| `andler snapshot <id> create --tag <name> [--description <text>] [--timeout <secs>]` | Create snapshot (requires Running/Paused). `--timeout` overrides instance default. |
-| `andler snapshot <id> restore --tag <name> [--timeout <secs>]` | Restore from snapshot (requires Running/Paused). `--timeout` overrides instance default. |
-| `andler snapshot <id> delete --tag <name> [--timeout <secs>]` | Delete snapshot (requires Running/Paused). `--timeout` overrides instance default. |
-| `andler snapshot <id> list` | List all snapshots |
+| `andler snapshot create <id> --tag <name> [--description <text>] [--timeout <secs>]` | Create snapshot (requires Running/Paused). `--timeout` overrides instance default. |
+| `andler snapshot restore <id> --tag <name> [--timeout <secs>]` | Restore from snapshot (requires Running/Paused). `--timeout` overrides instance default. |
+| `andler snapshot delete <id> --tag <name> [--timeout <secs>]` | Delete snapshot (requires Running/Paused; confirms on TTY). `--timeout` overrides instance default. |
+| `andler snapshot list <id>` | List all snapshots (human-readable timestamps) |
+| `andler snapshot --json list <id>` | List all snapshots as a JSON array |
 
 ### Configuration & Editing
 
 | Command | Description |
 |---------|-------------|
-| `andler edit <instance-id>` | Edit instance config in `$VISUAL`/`$EDITOR` as TOML (falls back to `vi`) |
+| `andler config edit <instance-id>` | Open the real `instance.toml` in `$VISUAL`/`$EDITOR` (fallback `vi`/`vim`/`nano`) and apply edits via gRPC |
 | `andler wizard` | Launch interactive wizard (default when no subcommand given) |
 | `andler doctor` | Check the local environment (KVM, QEMU, OVMF, nbd, sudoers, andlerd reachability, base images) — read-only, works even if andlerd isn't running |
 | `andler completions <shell>` | Generate shell completion script (bash/zsh/fish) |
@@ -106,7 +98,7 @@ Size format: `64GB`, `128000MB`, `1T`, `512000` (bytes). Case-insensitive.
 
 | Command | Description |
 |---------|-------------|
-| `andler guest install <package> <instance-id>` | Install a package in the guest OS (auto-fallback: online via QMP if running, offline via qemu-nbd if stopped) |
+| `andler guest install <package> <instance-id>` | Install a package in the guest OS (auto-fallback: online via the QGA guest-agent socket if running, offline via qemu-nbd if stopped). Special case: `libndk`/`libhoudini` route to the ARM-translator switcher (`--translator-dir <path>` points at a local extracted cache) |
 | `andler guest remove <package> <instance-id>` | Remove a package from the guest OS (auto-fallback) |
 | `andler guest list <instance-id>` | List known packages and their status in the guest OS |
 | `andler guest boot-mode <instance-id> [android\|linux]` | Get (no argument) or switch the guest's boot target on an Android VM's unified base image. Requires a restart to apply. |
@@ -255,7 +247,7 @@ backend = "None"
 
 **Path canonicalization**: `InstanceFile::load()` canonicalizes all path fields (relative paths become absolute from the TOML file's directory). Paths are validated and must exist (for required files) or be creatable (for disk paths).
 
-**Legacy field precedence**: For Android VMs with `arm_translator`, the field accepts `libndk` as a legacy alias. When `arm_translator = "libndk"` is set, it maps to the Libndk translator. The valid values are `none`, `libndk`, and `libhoudini` — `hibridge` is not a valid value.
+**`arm_translator` values**: `none`, `libndk`, and `libhoudini` — `hibridge` is not a valid value. The field also accepts the bare `libndk` flag name as an alias for the Libndk translator.
 
 ### Tests
 

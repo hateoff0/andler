@@ -111,7 +111,7 @@ Bidirectional conversions between proto and domain types:
 
 ## Tests
 
-44 tests in `convert::tests`:
+~45 tests in `convert::tests`:
 
 - AndroidProfile round-trip through proto
 - Unspecified enum rejection (AndroidVersion, CpuPriority, DiskFormat, DisplayEngine, AudioBackend, CloneMode)

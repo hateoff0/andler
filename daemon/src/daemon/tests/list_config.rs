@@ -2,7 +2,6 @@ use super::common::*;
 use super::*;
 use andler_core::RenderBackend;
 
-
 #[tokio::test]
 async fn list_instances_on_empty_daemon_returns_empty_vec() {
     let daemon = Daemon::new();
@@ -63,7 +62,6 @@ async fn list_instances_after_restore_includes_restored_instances() {
     assert_eq!(summaries[0].name, cfg.name);
 }
 
-
 #[tokio::test]
 async fn get_instance_config_on_unknown_instance_returns_instance_not_found() {
     let daemon = Daemon::new();
@@ -96,4 +94,40 @@ async fn get_instance_config_reflects_current_record_not_a_stale_snapshot() {
 
     let fetched = daemon.get_instance_config(id).await.unwrap();
     assert_eq!(fetched.name, "renamed-vm");
+}
+
+#[tokio::test]
+async fn update_instance_config_succeeds_on_idle_instance() {
+    let daemon = Daemon::new();
+    let cfg = sample_config();
+    let id = daemon.create_instance(cfg.clone()).await.unwrap();
+
+    let mut new_cfg = cfg;
+    new_cfg.name = "updated-name".to_string();
+
+    daemon.update_instance_config(id, new_cfg).await.unwrap();
+
+    let fetched = daemon.get_instance_config(id).await.unwrap();
+    assert_eq!(fetched.name, "updated-name");
+}
+
+#[tokio::test]
+async fn update_instance_config_rejected_while_running() {
+    let daemon = Daemon::new();
+    let cfg = sample_config();
+    let id = daemon.create_instance(cfg.clone()).await.unwrap();
+    daemon.start_instance(id).await.unwrap();
+
+    let mut new_cfg = cfg;
+    new_cfg.name = "should-not-apply".to_string();
+
+    let err = daemon
+        .update_instance_config(id, new_cfg)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, DaemonError::InstanceMustBeStopped(_, _)));
+
+    // config on record must be untouched
+    let fetched = daemon.get_instance_config(id).await.unwrap();
+    assert_ne!(fetched.name, "should-not-apply");
 }

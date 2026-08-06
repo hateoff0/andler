@@ -7,7 +7,7 @@ use tonic::transport::Channel;
 
 use crate::instance_file::{InstanceFile, InstanceFileResult};
 use crate::wizard::{PartialArgs, WizardError, WizardKind};
-use crate::{err_exit, CliAndroidVersion, CliArmTranslator, CliCdromBus, CliKind};
+use crate::{CliAndroidVersion, CliArmTranslator, CliCdromBus, CliKind};
 
 #[allow(clippy::too_many_arguments)] // mirrors all create CLI flags; splitting adds indirection for no benefit
 pub async fn handle(
@@ -38,33 +38,42 @@ pub async fn handle(
     let has_kind = kind.is_some();
 
     if has_file && has_kind {
-        err_exit("error: --file and --kind are mutually exclusive");
+        return Err("--file and --kind are mutually exclusive".into());
     }
 
     if has_file && quick {
-        err_exit("error: --quick and --file are mutually exclusive — --file already provides all configuration");
+        return Err(
+            "--quick and --file are mutually exclusive — --file already provides all configuration"
+                .into(),
+        );
     }
 
     if quick && !has_kind {
-        err_exit("error: --quick requires --kind to specify VM type");
+        return Err("--quick requires --kind to specify VM type".into());
     }
 
     if dry_run && quick {
-        err_exit("error: --dry-run and --quick are mutually exclusive — --quick creates immediately, --dry-run never creates");
+        return Err(
+            "--dry-run and --quick are mutually exclusive — --quick creates immediately, --dry-run never creates"
+                .into(),
+        );
     }
 
     if verify && quick {
-        err_exit("error: --verify and --quick are mutually exclusive — --quick creates immediately, --verify never creates");
+        return Err(
+            "--verify and --quick are mutually exclusive — --quick creates immediately, --verify never creates"
+                .into(),
+        );
     }
 
     if dry_run && verify {
-        err_exit("error: --dry-run and --verify are mutually exclusive — pass one or the other");
+        return Err("--dry-run and --verify are mutually exclusive — pass one or the other".into());
     }
 
     if has_file {
         let file = file.unwrap();
         let instance_file = InstanceFile::load(&file)?;
-        match instance_file.into_result() {
+        match instance_file.into_result()? {
             InstanceFileResult::Linux(req) => {
                 if dry_run {
                     return crate::preview::print_linux_preview(&req);
@@ -72,8 +81,10 @@ pub async fn handle(
                 if verify {
                     return exit_on_verify_result(crate::verify::verify_linux(&req)?);
                 }
+                let created_name = req.name.clone();
                 let response = client.create_instance(req).await?;
-                println!("{}", response.into_inner().instance_id);
+                let id = response.into_inner().instance_id;
+                println!("Created instance {created_name} ({id})");
             }
             InstanceFileResult::Android(req) => {
                 if dry_run {
@@ -82,8 +93,10 @@ pub async fn handle(
                 if verify {
                     return exit_on_verify_result(crate::verify::verify_android(&req)?);
                 }
+                let created_name = req.name.clone();
                 let response = client.create_android_instance(req).await?;
-                println!("{}", response.into_inner().instance_id);
+                let id = response.into_inner().instance_id;
+                println!("Created instance {created_name} ({id})");
             }
         }
         return Ok(());
@@ -97,17 +110,19 @@ pub async fn handle(
 
     if needs_wizard {
         if dry_run {
-            err_exit(
-                "error: --dry-run requires --file or all CLI-mode flags for the chosen --kind \
+            return Err(
+                "--dry-run requires --file or all CLI-mode flags for the chosen --kind \
                  (the interactive wizard already shows a full summary before creating, so \
-                 --dry-run with a bare `andler create` isn't supported)",
+                 --dry-run with a bare `andler create` isn't supported)"
+                    .into(),
             );
         }
         if verify {
-            err_exit(
-                "error: --verify requires --file or all CLI-mode flags for the chosen --kind \
+            return Err(
+                "--verify requires --file or all CLI-mode flags for the chosen --kind \
                  (the interactive wizard already shows a full summary before creating, so \
-                 --verify with a bare `andler create` isn't supported)",
+                 --verify with a bare `andler create` isn't supported)"
+                    .into(),
             );
         }
 
@@ -146,18 +161,16 @@ pub async fn handle(
 
     match kind {
         CliKind::Linux => {
-            let iso = iso_path
-                .unwrap_or_else(|| err_exit("error: --iso-path is required for --kind linux"));
-            let disk = disk_path
-                .unwrap_or_else(|| err_exit("error: --disk-path is required for --kind linux"));
+            let iso = iso_path.ok_or("--iso-path is required for --kind linux")?;
+            let disk = disk_path.ok_or("--disk-path is required for --kind linux")?;
 
             let (iso, disk) = match validate_linux_paths(&iso, &disk) {
                 Ok(paths) => paths,
-                Err(msg) => err_exit(&format!("error: {msg}")),
+                Err(msg) => return Err(msg.into()),
             };
 
             let req = build_linux_request(
-                name,
+                name.clone(),
                 iso,
                 disk,
                 disk_size_gib,
@@ -173,23 +186,22 @@ pub async fn handle(
                 return exit_on_verify_result(crate::verify::verify_linux(&req)?);
             }
             let response = client.create_instance(req).await?;
-            println!("{}", response.into_inner().instance_id);
+            let id = response.into_inner().instance_id;
+            println!("Created instance {name} ({id})");
         }
         CliKind::Android => {
-            let av = android_version.unwrap_or_else(|| {
-                err_exit("error: --android-version is required for --kind android")
-            });
+            let av = android_version.ok_or("--android-version is required for --kind android")?;
             let arm_translator = arm_translator.unwrap_or(CliArmTranslator::None);
             let bip = match base_image_path {
                 Some(bip) => match validate_base_image_path(&bip) {
                     Ok(path) => path,
-                    Err(msg) => err_exit(&format!("error: {msg}")),
+                    Err(msg) => return Err(msg.into()),
                 },
                 None => String::new(),
             };
 
             let req = build_android_request(
-                name,
+                name.clone(),
                 av,
                 bip,
                 ovmf,
@@ -207,13 +219,13 @@ pub async fn handle(
                 return exit_on_verify_result(crate::verify::verify_android(&req)?);
             }
             let response = client.create_android_instance(req).await?;
-            println!("{}", response.into_inner().instance_id);
+            let id = response.into_inner().instance_id;
+            println!("Created instance {name} ({id})");
         }
     }
 
     Ok(())
 }
-
 
 fn exit_on_verify_result(all_passed: bool) -> Result<(), Box<dyn std::error::Error>> {
     if all_passed {
@@ -222,7 +234,6 @@ fn exit_on_verify_result(all_passed: bool) -> Result<(), Box<dyn std::error::Err
         std::process::exit(1);
     }
 }
-
 
 fn validate_linux_paths(iso_path: &str, disk_path: &str) -> Result<(String, String), String> {
     let canonical_iso = if iso_path.is_empty() {
@@ -253,10 +264,7 @@ fn validate_linux_paths(iso_path: &str, disk_path: &str) -> Result<(String, Stri
     Ok((canonical_iso, canonical_disk))
 }
 
-
-fn validate_base_image_path(
-    base_image_path: &str,
-) -> Result<String, String> {
+fn validate_base_image_path(base_image_path: &str) -> Result<String, String> {
     let canonical_base_image = std::fs::canonicalize(base_image_path)
         .map_err(|e| format!("base image not found: {base_image_path} ({e})"))?
         .to_string_lossy()
@@ -265,6 +273,7 @@ fn validate_base_image_path(
     Ok(canonical_base_image)
 }
 
+#[allow(clippy::too_many_arguments)] // mirrors the create CLI flags for Linux VMs
 fn build_linux_request(
     name: String,
     iso_path: String,
@@ -284,9 +293,9 @@ fn build_linux_request(
     disk.compact_on_shutdown = compact_on_shutdown;
 
     let resolved_cdrom_bus = match cdrom_bus {
-        CliCdromBus::Auto => andler_core::CdromBus::recommended_for_iso_filename(
-            std::path::Path::new(&iso_path),
-        ),
+        CliCdromBus::Auto => {
+            andler_core::CdromBus::recommended_for_iso_filename(std::path::Path::new(&iso_path))
+        }
         CliCdromBus::Virtio => andler_core::CdromBus::VirtioScsi,
         CliCdromBus::Ide => andler_core::CdromBus::Ide,
     };
@@ -316,6 +325,7 @@ fn build_linux_request(
     req
 }
 
+#[allow(clippy::too_many_arguments)] // mirrors the create CLI flags for Android VMs
 fn build_android_request(
     name: String,
     android_version: CliAndroidVersion,
@@ -366,8 +376,7 @@ mod tests {
 
     #[test]
     fn validate_linux_paths_missing_disk_directory_is_rejected() {
-        let err =
-            validate_linux_paths("", "/nonexistent/andler-test-dir/disk.qcow2").unwrap_err();
+        let err = validate_linux_paths("", "/nonexistent/andler-test-dir/disk.qcow2").unwrap_err();
         assert!(err.contains("disk directory does not exist"));
     }
 

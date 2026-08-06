@@ -1,14 +1,9 @@
-
-
 use andler_core::ResourceMetrics;
-
 
 pub const DEFAULT_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
 
-
 #[derive(Debug, Clone, Copy)]
 struct CpuSample {
-
     process_ticks: u64,
 
     uptime_secs: f64,
@@ -16,10 +11,8 @@ struct CpuSample {
     num_cpus: usize,
 }
 
-
 #[derive(Debug, Clone, Copy, Default)]
 struct IoSample {
-
     disk_read_bytes: u64,
 
     disk_write_bytes: u64,
@@ -28,8 +21,6 @@ struct IoSample {
 
     net_tx_bytes: u64,
 }
-
-
 
 fn read_proc_cpu(pid: u32) -> Option<CpuSample> {
     let stat_path = format!("/proc/{pid}/stat");
@@ -58,20 +49,18 @@ fn read_proc_cpu(pid: u32) -> Option<CpuSample> {
     })
 }
 
-
 fn read_proc_rss(pid: u32) -> Option<u64> {
     let status_path = format!("/proc/{pid}/status");
     let content = std::fs::read_to_string(&status_path).ok()?;
 
     for line in content.lines() {
         if let Some(rest) = line.strip_prefix("VmRSS:") {
-            let kb: u64 = rest.trim().split_whitespace().next()?.parse().ok()?;
+            let kb: u64 = rest.split_whitespace().next()?.parse().ok()?;
             return Some(kb * 1024);
         }
     }
     None
 }
-
 
 fn read_proc_io(pid: u32) -> Option<(u64, u64)> {
     let io_path = format!("/proc/{pid}/io");
@@ -93,7 +82,6 @@ fn read_proc_io(pid: u32) -> Option<(u64, u64)> {
 
     Some((read_bytes?, write_bytes?))
 }
-
 
 fn read_proc_net(pid: u32) -> Option<(u64, u64)> {
     let net_path = format!("/proc/{pid}/net/dev");
@@ -122,8 +110,6 @@ fn read_proc_net(pid: u32) -> Option<(u64, u64)> {
     None
 }
 
-
-
 fn compute_cpu_percent(prev: CpuSample, curr: CpuSample, ticks_per_sec: u64) -> Option<f32> {
     if ticks_per_sec == 0 {
         return None;
@@ -139,7 +125,6 @@ fn compute_cpu_percent(prev: CpuSample, curr: CpuSample, ticks_per_sec: u64) -> 
     Some(pct.clamp(0.0, 100.0 * curr.num_cpus as f32))
 }
 
-
 fn compute_io_rates(prev: IoSample, curr: IoSample, delta_secs: f64) -> (u64, u64, u64, u64) {
     if delta_secs <= 0.0 {
         return (0, 0, 0, 0);
@@ -150,27 +135,6 @@ fn compute_io_rates(prev: IoSample, curr: IoSample, delta_secs: f64) -> (u64, u6
     let net_tx = ((curr.net_tx_bytes - prev.net_tx_bytes) as f64 / delta_secs) as u64;
     (disk_read, disk_write, net_rx, net_tx)
 }
-
-
-
-pub fn read_metrics_sample(pid: u32) -> Option<ResourceMetrics> {
-    let _cpu = read_proc_cpu(pid)?;
-    let rss = read_proc_rss(pid);
-    let (disk_read, disk_write) = read_proc_io(pid).unwrap_or((0, 0));
-    let (net_rx, net_tx) = read_proc_net(pid).unwrap_or((0, 0));
-
-    Some(ResourceMetrics {
-        cpu_percent: None, // Computed on delta — raw data here
-        memory_used_bytes: rss,
-        disk_read_bytes_per_sec: Some(disk_read),
-        disk_write_bytes_per_sec: Some(disk_write),
-        net_rx_bytes_per_sec: Some(net_rx),
-        net_tx_bytes_per_sec: Some(net_tx),
-        ..ResourceMetrics::default()
-    })
-}
-
-
 
 pub fn spawn_metrics_poller(
     pid: u32,
@@ -192,17 +156,23 @@ pub fn spawn_metrics_poller(
                 break;
             }
 
-            if sender.receiver_count() == 0 {
-                tracing::debug!(pid, "metrics poller: no subscribers, stopping");
-                break;
-            }
-
             let now = std::time::Instant::now();
 
-            let cpu_sample = read_proc_cpu(pid);
-            let rss = read_proc_rss(pid);
-            let (disk_read, disk_write) = read_proc_io(pid).unwrap_or((0, 0));
-            let (net_rx, net_tx) = read_proc_net(pid).unwrap_or((0, 0));
+            // All /proc reads (plus the GPU metrics query) are blocking syscalls that
+            // must not run on the async runtime — collect them on a blocking thread.
+            let sample = tokio::task::spawn_blocking(move || {
+                let cpu_sample = read_proc_cpu(pid);
+                let rss = read_proc_rss(pid);
+                let (disk_read, disk_write) = read_proc_io(pid).unwrap_or((0, 0));
+                let (net_rx, net_tx) = read_proc_net(pid).unwrap_or((0, 0));
+                let gpu = andler_firmware::metrics::read_gpu_metrics();
+                (cpu_sample, rss, disk_read, disk_write, net_rx, net_tx, gpu)
+            })
+            .await;
+            let Ok((cpu_sample, rss, disk_read, disk_write, net_rx, net_tx, gpu)) = sample else {
+                tracing::warn!(pid, "metrics poller: sample task failed, skipping tick");
+                continue;
+            };
 
             let io_sample = IoSample {
                 disk_read_bytes: disk_read,
@@ -236,7 +206,6 @@ pub fn spawn_metrics_poller(
             };
 
             let mut metrics = metrics;
-            let gpu = andler_firmware::metrics::read_gpu_metrics();
             andler_firmware::metrics::merge_gpu_metrics(&mut metrics, &gpu);
 
             let _ = sender.send(metrics);
@@ -250,12 +219,10 @@ pub fn spawn_metrics_poller(
     })
 }
 
-
 pub fn ticks_per_second() -> u64 {
     // SAFETY: sysconf(_SC_CLK_TCK) is a pure POSIX call — no pointers, no mutable state.
     unsafe { libc::sysconf(libc::_SC_CLK_TCK) as u64 }
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -267,7 +234,7 @@ mod tests {
         let after_comm = stat.rfind(')').unwrap();
         let fields: Vec<&str> = stat[after_comm + 2..].split_whitespace().collect();
         assert_eq!(fields[11], "1000"); // utime
-        assert_eq!(fields[12], "500");  // stime
+        assert_eq!(fields[12], "500"); // stime
     }
 
     #[test]
@@ -311,10 +278,10 @@ mod tests {
             net_tx_bytes: 1800,
         };
         let (dr, dw, nr, nt) = compute_io_rates(prev, curr, 2.0);
-        assert_eq!(dr, 500);  // (2000-1000)/2
+        assert_eq!(dr, 500); // (2000-1000)/2
         assert_eq!(dw, 1000); // (4000-2000)/2
-        assert_eq!(nr, 500);  // (1500-500)/2
-        assert_eq!(nt, 600);  // (1800-600)/2
+        assert_eq!(nr, 500); // (1500-500)/2
+        assert_eq!(nt, 600); // (1800-600)/2
     }
 
     #[test]

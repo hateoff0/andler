@@ -1,20 +1,14 @@
-
-
 use serde::{Deserialize, Serialize};
-
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PointerMode {
-
     Tablet,
 
     Mouse,
 }
 
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InputConfig {
-
     #[serde(default = "default_pointer_mode")]
     pub pointer_mode: PointerMode,
 
@@ -28,7 +22,6 @@ fn default_pointer_mode() -> PointerMode {
 }
 
 impl InputConfig {
-
     pub fn reference_default() -> Self {
         InputConfig {
             pointer_mode: PointerMode::Tablet,

@@ -1,17 +1,13 @@
-
-
 use std::path::{Path, PathBuf};
 
 use crate::error::DiskError;
 use crate::qcow2;
-
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OverlayDisk {
     pub overlay_path: PathBuf,
     pub base_image_path: PathBuf,
 }
-
 
 pub async fn create_overlay(
     instance_dir: &Path,
@@ -27,7 +23,6 @@ pub async fn create_overlay(
         base_image_path: base_image_path.to_path_buf(),
     })
 }
-
 
 pub async fn factory_reset(
     instance_dir: &Path,
@@ -51,7 +46,6 @@ pub async fn factory_reset(
 #[cfg(test)]
 mod tests {
     use super::*;
-
 
     #[tokio::test]
     #[ignore = "requires qemu-img binary, see docker/README.md integration-test target"]

@@ -2,6 +2,8 @@ use std::path::{Path, PathBuf};
 
 use andler_rpc::proto::andler_service_client::AndlerServiceClient;
 
+use crate::helpers::which;
+
 enum Status {
     Ok(String),
     Warn(String),
@@ -63,24 +65,6 @@ fn fail(name: &'static str, detail: impl Into<String>, fix: impl Into<String>) -
     }
 }
 
-/// Search PATH, then common sbin directories that are often missing from a regular
-/// (non-root) user's PATH but are exactly where `modprobe` and friends usually live.
-fn which(bin: &str) -> Option<PathBuf> {
-    let from_path = std::env::var_os("PATH").and_then(|paths| {
-        std::env::split_paths(&paths).find_map(|dir| {
-            let full = dir.join(bin);
-            if full.is_file() { Some(full) } else { None }
-        })
-    });
-
-    from_path.or_else(|| {
-        ["/usr/sbin", "/sbin", "/usr/local/sbin"]
-            .iter()
-            .map(|dir| Path::new(dir).join(bin))
-            .find(|full| full.is_file())
-    })
-}
-
 /// Runs a program via `sudo -n <path> --version` to test, side-effect-free, whether
 /// passwordless sudo is configured for it — matches exactly what andlerd itself will
 /// invoke at runtime, without actually connecting/mounting/chrooting into anything.
@@ -98,14 +82,21 @@ fn check_passwordless_sudo(name: &'static str, path: &Path) -> Check {
 
     let check = match output {
         Ok(o) if o.status.success() => {
-            return ok(name, format!("passwordless sudo configured ({})", path.display()))
+            return ok(
+                name,
+                format!("passwordless sudo configured ({})", path.display()),
+            )
         }
         Ok(o) => {
             let stderr = String::from_utf8_lossy(&o.stderr);
             if stderr.contains("password is required") || stderr.contains("no tty present") {
                 fail(name, "passwordless sudo not configured", fix)
             } else {
-                warn(name, format!("sudo ran but exited unexpectedly: {}", stderr.trim()), fix)
+                warn(
+                    name,
+                    format!("sudo ran but exited unexpectedly: {}", stderr.trim()),
+                    fix,
+                )
             }
         }
         Err(e) => fail(name, format!("could not run sudo: {e}"), fix),
@@ -159,13 +150,21 @@ fn hypervisor_checks() -> Vec<Check> {
 
     checks.push(match which("qemu-img") {
         Some(p) => ok("qemu-img", p.display().to_string()),
-        None => fail("qemu-img", "not found in PATH", "install qemu-img (usually part of qemu-utils)"),
+        None => fail(
+            "qemu-img",
+            "not found in PATH",
+            "install qemu-img (usually part of qemu-utils)",
+        ),
     });
 
     checks.push(match andler_firmware::detect_matched_pair() {
         Ok(found) => ok(
             "OVMF/UEFI firmware",
-            format!("{} + {}", found.code.display(), found.vars_template.display()),
+            format!(
+                "{} + {}",
+                found.code.display(),
+                found.vars_template.display()
+            ),
         ),
         Err(e) => fail(
             "OVMF/UEFI firmware",
@@ -180,20 +179,31 @@ fn hypervisor_checks() -> Vec<Check> {
 fn nbd_checks() -> Vec<Check> {
     let mut checks = Vec::new();
 
-    let status = andler_disk::nbd::nbd_status();
-    checks.push(if status.loaded {
-        ok(
+    match andler_disk::nbd::nbd_status() {
+        Ok(status) => {
+            checks.push(if status.loaded {
+                ok(
+                    "nbd kernel module",
+                    format!(
+                        "loaded ({} of {} devices free)",
+                        status.free_devices, status.total_devices
+                    ),
+                )
+            } else {
+                warn(
+                    "nbd kernel module",
+                    "not loaded",
+                    "andlerd will try to load it automatically the first time it's needed \
+                     (requires the sudoers rule below); or load it now: sudo modprobe nbd max_part=8",
+                )
+            });
+        }
+        Err(e) => checks.push(fail(
             "nbd kernel module",
-            format!("loaded ({} of {} devices free)", status.free_devices, status.total_devices),
-        )
-    } else {
-        warn(
-            "nbd kernel module",
-            "not loaded",
-            "andlerd will try to load it automatically the first time it's needed \
-             (requires the sudoers rule below); or load it now: sudo modprobe nbd max_part=8",
-        )
-    });
+            format!("cannot inspect: {e}"),
+            "Run: sudo modprobe nbd max_part=8",
+        )),
+    }
 
     // modprobe's passwordless-sudo rule is what makes the "andlerd will try to load it
     // automatically" note above actually true — without it, try_autoload_nbd_module()
@@ -508,4 +518,3 @@ mod tests {
         assert!(which("andler-doctor-definitely-not-a-real-binary-xyz").is_none());
     }
 }
-

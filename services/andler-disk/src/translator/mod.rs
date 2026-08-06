@@ -1,10 +1,7 @@
-
-
 pub mod houdini;
 pub mod ndk;
 
 use andler_core::android_profile::ArmTranslator;
-
 
 pub struct TranslatorInfo {
     pub dl_links: &'static [(&'static str, &'static str, &'static str)],
@@ -13,7 +10,6 @@ pub struct TranslatorInfo {
     pub init_rc: Option<&'static str>,
     pub detect_file: &'static str,
 }
-
 
 pub fn resolve(translator: ArmTranslator) -> TranslatorInfo {
     match translator {
@@ -46,7 +42,6 @@ pub fn resolve(translator: ArmTranslator) -> TranslatorInfo {
         },
     }
 }
-
 
 pub fn dir_name(translator: ArmTranslator) -> &'static str {
     match translator {

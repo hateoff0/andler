@@ -1,10 +1,7 @@
-
-
 use std::path::{Path, PathBuf};
 
 use crate::error::DiskError;
 use crate::qcow2;
-
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClonedDisk {
@@ -12,7 +9,6 @@ pub struct ClonedDisk {
 
     pub backing_file: Option<PathBuf>,
 }
-
 
 pub async fn linked_clone(
     source_disk_path: &Path,
@@ -27,7 +23,6 @@ pub async fn linked_clone(
     })
 }
 
-
 pub async fn full_standalone_clone(
     source_disk_path: &Path,
     dest_path: &Path,
@@ -39,7 +34,6 @@ pub async fn full_standalone_clone(
         backing_file: None,
     })
 }
-
 
 pub async fn shared_base_clone(
     source_disk_path: &Path,
@@ -72,7 +66,6 @@ pub async fn shared_base_clone(
 mod tests {
     use super::*;
 
-
     #[tokio::test]
     #[ignore = "requires qemu-img binary, see docker/README.md integration-test target"]
     async fn linked_clone_points_at_source_instance_disk() {
@@ -85,7 +78,9 @@ mod tests {
             .unwrap();
 
         let source_instance_dir = dir.join("instance-a");
-        tokio::fs::create_dir_all(&source_instance_dir).await.unwrap();
+        tokio::fs::create_dir_all(&source_instance_dir)
+            .await
+            .unwrap();
         let source_disk = source_instance_dir.join("disk.qcow2");
         qcow2::create_with_backing_file(&source_disk, &base_image, 20 * 1024 * 1024 * 1024)
             .await
@@ -117,7 +112,9 @@ mod tests {
             .unwrap();
 
         let source_instance_dir = dir.join("instance-a");
-        tokio::fs::create_dir_all(&source_instance_dir).await.unwrap();
+        tokio::fs::create_dir_all(&source_instance_dir)
+            .await
+            .unwrap();
         let source_disk = source_instance_dir.join("disk.qcow2");
         qcow2::create_with_backing_file(&source_disk, &base_image, 20 * 1024 * 1024 * 1024)
             .await
@@ -125,7 +122,9 @@ mod tests {
 
         let dest_disk = dir.join("instance-b").join("disk.qcow2");
 
-        let result = full_standalone_clone(&source_disk, &dest_disk).await.unwrap();
+        let result = full_standalone_clone(&source_disk, &dest_disk)
+            .await
+            .unwrap();
 
         assert_eq!(result.backing_file, None);
         assert!(dest_disk.exists());
@@ -145,7 +144,9 @@ mod tests {
             .unwrap();
 
         let source_instance_dir = dir.join("instance-a");
-        tokio::fs::create_dir_all(&source_instance_dir).await.unwrap();
+        tokio::fs::create_dir_all(&source_instance_dir)
+            .await
+            .unwrap();
         let source_disk = source_instance_dir.join("disk.qcow2");
         qcow2::create_with_backing_file(&source_disk, &base_image, 20 * 1024 * 1024 * 1024)
             .await
@@ -160,7 +161,9 @@ mod tests {
         assert_eq!(result.backing_file, Some(base_image.clone()));
         assert!(dest_disk.exists());
 
-        tokio::fs::remove_dir_all(&source_instance_dir).await.unwrap();
+        tokio::fs::remove_dir_all(&source_instance_dir)
+            .await
+            .unwrap();
         assert!(dest_disk.exists());
         assert!(qcow2::virtual_size_bytes(&dest_disk).await.is_ok());
 

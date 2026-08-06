@@ -40,7 +40,9 @@ async fn create_linux_instance_places_disk_inside_own_instance_dir() {
     ));
     tokio::fs::create_dir_all(&dir).await.unwrap();
     let ovmf_template = dir.join("OVMF_VARS.template.fd");
-    tokio::fs::write(&ovmf_template, b"fake-ovmf-vars").await.unwrap();
+    tokio::fs::write(&ovmf_template, b"fake-ovmf-vars")
+        .await
+        .unwrap();
     let instances_root = dir.join("instances");
 
     let daemon = Daemon::new();

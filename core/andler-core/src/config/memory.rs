@@ -1,11 +1,7 @@
-
-
 use serde::{Deserialize, Serialize};
-
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MemoryConfig {
-
     pub size_bytes: u64,
 
     pub ballooning: bool,
@@ -16,9 +12,7 @@ pub struct MemoryConfig {
 }
 
 impl MemoryConfig {
-
     pub const GIB: u64 = 1024 * 1024 * 1024;
-
 
     pub fn reference_default() -> Self {
         MemoryConfig {

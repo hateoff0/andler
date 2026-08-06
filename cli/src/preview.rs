@@ -1,10 +1,7 @@
-
-
 use std::path::PathBuf;
 
 use andler_core::{AndroidProfile, DiskFormat, InstanceConfig, InstanceId, InstanceKind};
 use andler_rpc::proto::{CreateAndroidInstanceRequest, CreateInstanceRequest};
-
 
 pub(crate) struct Resolved {
     pub cfg: InstanceConfig,
@@ -26,8 +23,9 @@ pub fn print_android_preview(
     Ok(())
 }
 
-
-pub(crate) fn resolve_linux(req: &CreateInstanceRequest) -> Result<Resolved, Box<dyn std::error::Error>> {
+pub(crate) fn resolve_linux(
+    req: &CreateInstanceRequest,
+) -> Result<Resolved, Box<dyn std::error::Error>> {
     let mut cfg = InstanceConfig::try_from(req.clone())?;
     let id = InstanceId::new();
     let instance_dir = andler_core::paths::instances_root().join(id.0.to_string());
@@ -65,13 +63,11 @@ pub(crate) fn resolve_linux(req: &CreateInstanceRequest) -> Result<Resolved, Box
     })
 }
 
-
 pub(crate) fn resolve_android(
     req: &CreateAndroidInstanceRequest,
 ) -> Result<Resolved, Box<dyn std::error::Error>> {
     let profile_msg = req
         .profile
-        .clone()
         .ok_or("CreateAndroidInstanceRequest is missing `profile`")?;
     let profile = AndroidProfile::try_from(profile_msg)?;
 
@@ -115,7 +111,6 @@ pub(crate) fn resolve_android(
     })
 }
 
-
 fn relocate_fresh_disk(cfg: &mut InstanceConfig, instance_dir: &std::path::Path) {
     if cfg.disk.format == DiskFormat::Qcow2 && !cfg.disk.path.exists() {
         let disk_file_name = cfg
@@ -129,19 +124,29 @@ fn relocate_fresh_disk(cfg: &mut InstanceConfig, instance_dir: &std::path::Path)
 }
 
 fn print_preview(resolved: &Resolved) -> Result<(), Box<dyn std::error::Error>> {
-    let Resolved { cfg, instance_dir, ovmf_vars_template } = resolved;
+    let Resolved {
+        cfg,
+        instance_dir,
+        ovmf_vars_template,
+    } = resolved;
     let ovmf_vars_template = ovmf_vars_template.as_deref();
 
     println!("─── Dry run: this would create ───────────────────────────────");
     println!("Name:            {}", cfg.name);
 
     match &cfg.kind {
-        InstanceKind::LinuxVm { iso_path, cdrom_bus } => {
+        InstanceKind::LinuxVm {
+            iso_path,
+            cdrom_bus,
+        } => {
             println!("Type:            Linux VM");
             if iso_path.as_os_str().is_empty() {
                 println!("ISO:             (none — boots from disk)");
             } else {
-                println!("ISO:             {} (bus: {cdrom_bus:?})", iso_path.display());
+                println!(
+                    "ISO:             {} (bus: {cdrom_bus:?})",
+                    iso_path.display()
+                );
             }
         }
         InstanceKind::AndroidVm { android_profile } => {
@@ -189,7 +194,11 @@ fn print_preview(resolved: &Resolved) -> Result<(), Box<dyn std::error::Error>> 
         cfg.display.resolution.width,
         cfg.display.resolution.height,
         cfg.display.display_engine,
-        if cfg.display.fullscreen { ", fullscreen" } else { "" }
+        if cfg.display.fullscreen {
+            ", fullscreen"
+        } else {
+            ""
+        }
     );
     println!("Audio:           {:?}", cfg.audio.backend);
     println!(

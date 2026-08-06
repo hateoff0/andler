@@ -1,11 +1,7 @@
-
-
 use serde::{Deserialize, Serialize};
-
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RenderBackend {
-
     Venus,
 
     VirtioGpu,
@@ -18,12 +14,10 @@ pub enum RenderBackend {
 }
 
 impl RenderBackend {
-
     pub fn is_implemented(&self) -> bool {
         !matches!(self, RenderBackend::Passthrough { .. })
     }
 }
-
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GpuConfig {
@@ -38,7 +32,6 @@ pub struct GpuConfig {
 
 impl GpuConfig {
     pub const MIB: u64 = 1024 * 1024;
-
 
     pub fn reference_default() -> Self {
         GpuConfig {

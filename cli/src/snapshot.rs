@@ -9,7 +9,6 @@ use tonic::transport::Channel;
 
 use crate::SnapshotAction;
 
-
 fn spinner(message: &str) -> ProgressBar {
     if !std::io::stderr().is_terminal() {
         return ProgressBar::hidden();
@@ -27,9 +26,15 @@ pub async fn handle(
     client: &mut AndlerServiceClient<Channel>,
     instance_id: String,
     action: SnapshotAction,
+    json: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     match action {
-        SnapshotAction::Create { instance_id: _, tag, description, timeout } => {
+        SnapshotAction::Create {
+            instance_id: _,
+            tag,
+            description,
+            timeout,
+        } => {
             let pb = spinner(&format!("Creating snapshot \"{tag}\"..."));
             let result = client
                 .create_snapshot(CreateSnapshotRequest {
@@ -46,7 +51,11 @@ pub async fn handle(
                 response.tag, response.snapshot_id, response.created_at
             );
         }
-        SnapshotAction::Restore { instance_id: _, tag, timeout } => {
+        SnapshotAction::Restore {
+            instance_id: _,
+            tag,
+            timeout,
+        } => {
             let pb = spinner(&format!("Restoring snapshot \"{tag}\"..."));
             let result = client
                 .restore_snapshot(RestoreSnapshotRequest {
@@ -59,7 +68,23 @@ pub async fn handle(
             result?;
             println!("snapshot {tag} restored");
         }
-        SnapshotAction::Delete { instance_id: _, tag, timeout } => {
+        SnapshotAction::Delete {
+            instance_id: _,
+            tag,
+            timeout,
+        } => {
+            if std::io::stdin().is_terminal() {
+                let confirmed = inquire::Confirm::new(&format!(
+                    "This permanently deletes snapshot {tag:?} of instance {instance_id}. Continue?"
+                ))
+                .with_default(false)
+                .prompt()
+                .map_err(|e| format!("delete aborted: {e}"))?;
+                if !confirmed {
+                    println!("Cancelled.");
+                    return Ok(());
+                }
+            }
             let msg = format!("snapshot {tag} deleted");
             client
                 .delete_snapshot(DeleteSnapshotRequest {
@@ -75,6 +100,27 @@ pub async fn handle(
                 .list_snapshots(InstanceIdRequest { instance_id })
                 .await?
                 .into_inner();
+            if json {
+                #[derive(serde::Serialize)]
+                struct SnapshotJson<'a> {
+                    tag: &'a str,
+                    snapshot_id: &'a str,
+                    created_at: &'a str,
+                    description: &'a str,
+                }
+                let entries: Vec<SnapshotJson> = response
+                    .snapshots
+                    .iter()
+                    .map(|snap| SnapshotJson {
+                        tag: &snap.tag,
+                        snapshot_id: &snap.snapshot_id,
+                        created_at: &snap.created_at,
+                        description: &snap.description,
+                    })
+                    .collect();
+                println!("{}", serde_json::to_string(&entries)?);
+                return Ok(());
+            }
             if response.snapshots.is_empty() {
                 println!("no snapshots");
             } else {
@@ -83,7 +129,7 @@ pub async fn handle(
                         "tag={}, id={}, created_at={}, description={}",
                         snap.tag,
                         snap.snapshot_id,
-                        snap.created_at,
+                        crate::helpers::format_timestamp(&snap.created_at),
                         if snap.description.is_empty() {
                             "-"
                         } else {

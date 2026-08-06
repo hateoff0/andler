@@ -1,5 +1,3 @@
-
-
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
@@ -9,19 +7,16 @@ use uuid::Uuid;
 
 use crate::error::StoreError;
 
-
 #[derive(Clone)]
 pub struct Store {
     conn: Arc<Mutex<Connection>>,
 }
-
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoredInstance {
     pub config: InstanceConfig,
     pub state: InstanceState,
 }
-
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoredSnapshot {
@@ -33,7 +28,6 @@ pub struct StoredSnapshot {
 }
 
 impl Store {
-
     /// Runs `f` on a blocking thread with a lock on the shared connection, propagating
     /// both task-join failures and `f`'s own errors as a single `StoreError`.
     fn run_blocking<F, T>(&self, f: F) -> impl std::future::Future<Output = Result<T, StoreError>>
@@ -51,7 +45,6 @@ impl Store {
         }
     }
 
-
     pub async fn open(path: impl AsRef<Path>) -> Result<Self, StoreError> {
         let path = path.as_ref().to_path_buf();
         let conn = tokio::task::spawn_blocking(move || -> Result<Connection, StoreError> {
@@ -66,7 +59,6 @@ impl Store {
         })
     }
 
-
     pub async fn open_in_memory() -> Result<Self, StoreError> {
         let conn = tokio::task::spawn_blocking(|| -> Result<Connection, StoreError> {
             let conn = Connection::open_in_memory()?;
@@ -79,7 +71,6 @@ impl Store {
             conn: Arc::new(Mutex::new(conn)),
         })
     }
-
 
     pub async fn save_instance(
         &self,
@@ -100,7 +91,6 @@ impl Store {
         })
         .await
     }
-
 
     pub async fn save_state(
         &self,
@@ -126,7 +116,6 @@ impl Store {
         Ok(())
     }
 
-
     pub async fn load_instance(&self, id: InstanceId) -> Result<StoredInstance, StoreError> {
         self.run_blocking(move |conn| {
             let row = conn
@@ -149,7 +138,6 @@ impl Store {
         .await
     }
 
-
     pub async fn load_all(&self) -> Result<Vec<StoredInstance>, StoreError> {
         self.run_blocking(move |conn| {
             let mut stmt = conn.prepare("SELECT config_json, state_json FROM instances")?;
@@ -168,7 +156,6 @@ impl Store {
         .await
     }
 
-
     pub async fn delete_instance(&self, id: InstanceId) -> Result<(), StoreError> {
         self.run_blocking(move |conn| {
             conn.execute("DELETE FROM instances WHERE id = ?1", [id.0.to_string()])?;
@@ -176,8 +163,6 @@ impl Store {
         })
         .await
     }
-
-
 
     pub async fn save_snapshot(&self, snapshot: &StoredSnapshot) -> Result<(), StoreError> {
         let id = snapshot.id.to_string();
@@ -196,7 +181,6 @@ impl Store {
         })
         .await
     }
-
 
     pub async fn load_snapshots(
         &self,
@@ -219,7 +203,6 @@ impl Store {
         })
         .await
     }
-
 
     pub async fn get_snapshot(
         &self,
@@ -246,7 +229,6 @@ impl Store {
         .await
     }
 
-
     pub async fn delete_snapshot(
         &self,
         instance_id: InstanceId,
@@ -266,7 +248,6 @@ impl Store {
     }
 }
 
-
 fn row_to_stored_instance(
     (config_json, state_json): (String, String),
 ) -> Result<StoredInstance, StoreError> {
@@ -274,7 +255,6 @@ fn row_to_stored_instance(
     let state: InstanceState = serde_json::from_str(&state_json)?;
     Ok(StoredInstance { config, state })
 }
-
 
 fn row_to_stored_snapshot(row: &rusqlite::Row<'_>) -> Result<StoredSnapshot, rusqlite::Error> {
     Ok(StoredSnapshot {
@@ -289,7 +269,6 @@ fn row_to_stored_snapshot(row: &rusqlite::Row<'_>) -> Result<StoredSnapshot, rus
         created_at: row.get(4)?,
     })
 }
-
 
 fn apply_schema(conn: &Connection) -> Result<(), StoreError> {
     conn.execute_batch(
@@ -314,7 +293,6 @@ fn apply_schema(conn: &Connection) -> Result<(), StoreError> {
     Ok(())
 }
 
-
 #[allow(dead_code)] // test utility; production code uses daemon's resolve_instance_id
 fn parse_instance_id(raw: &str) -> Result<InstanceId, uuid::Error> {
     Uuid::parse_str(raw).map(InstanceId)
@@ -324,8 +302,8 @@ fn parse_instance_id(raw: &str) -> Result<InstanceId, uuid::Error> {
 mod tests {
     use super::*;
     use andler_core::{
-        AudioConfig, BackendKind, CpuConfig, DiskConfig, DisplayConfig, FirmwareConfig,
-        GpuConfig, InputConfig, InstanceKind, MemoryConfig, NetworkConfig,
+        AudioConfig, BackendKind, CpuConfig, DiskConfig, DisplayConfig, FirmwareConfig, GpuConfig,
+        InputConfig, InstanceKind, MemoryConfig, NetworkConfig,
     };
     use std::path::PathBuf;
 
@@ -405,10 +383,7 @@ mod tests {
             .await
             .unwrap();
 
-        store
-            .save_state(id, &InstanceState::Running)
-            .await
-            .unwrap();
+        store.save_state(id, &InstanceState::Running).await.unwrap();
 
         let loaded = store.load_instance(id).await.unwrap();
         assert_eq!(loaded.config, cfg);
@@ -506,7 +481,6 @@ mod tests {
         assert!(parse_instance_id("not-a-uuid").is_err());
     }
 
-
     #[tokio::test]
     async fn save_and_load_snapshot_round_trips() {
         let store = Store::open_in_memory().await.unwrap();
@@ -529,10 +503,7 @@ mod tests {
         let loaded = store.load_snapshots(instance_id).await.unwrap();
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].tag, "backup1");
-        assert_eq!(
-            loaded[0].description,
-            Some("Before update".to_string())
-        );
+        assert_eq!(loaded[0].description, Some("Before update".to_string()));
     }
 
     #[tokio::test]
@@ -592,7 +563,10 @@ mod tests {
         assert!(found.is_some());
         assert_eq!(found.unwrap().tag, "test-snap");
 
-        let not_found = store.get_snapshot(instance_id, "nonexistent").await.unwrap();
+        let not_found = store
+            .get_snapshot(instance_id, "nonexistent")
+            .await
+            .unwrap();
         assert!(not_found.is_none());
     }
 
@@ -615,7 +589,10 @@ mod tests {
         };
         store.save_snapshot(&snapshot).await.unwrap();
 
-        store.delete_snapshot(instance_id, "to-delete").await.unwrap();
+        store
+            .delete_snapshot(instance_id, "to-delete")
+            .await
+            .unwrap();
 
         let found = store.get_snapshot(instance_id, "to-delete").await.unwrap();
         assert!(found.is_none());

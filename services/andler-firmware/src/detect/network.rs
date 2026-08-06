@@ -1,6 +1,3 @@
-
-
-
 pub(crate) fn detect_passt_available() -> bool {
     ["/usr/bin/passt", "/usr/local/bin/passt"]
         .iter()

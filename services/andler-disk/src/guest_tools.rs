@@ -1,15 +1,11 @@
-
-
 use std::path::Path;
 
-use andler_core::config::InstanceKind;
 use crate::error::DiskError;
 use crate::nbd;
-
+use andler_core::config::InstanceKind;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PackageManager {
-
     Apt,
 
     Dnf,
@@ -18,7 +14,6 @@ pub enum PackageManager {
 }
 
 impl PackageManager {
-
     pub fn binary_name(&self) -> &'static str {
         match self {
             PackageManager::Apt => "apt-get",
@@ -26,7 +21,6 @@ impl PackageManager {
             PackageManager::Pacman => "pacman",
         }
     }
-
 
     pub fn install_args<'a>(&self, package: &'a str) -> Vec<&'a str> {
         match self {
@@ -36,7 +30,6 @@ impl PackageManager {
         }
     }
 
-
     pub fn remove_args<'a>(&self, package: &'a str) -> Vec<&'a str> {
         match self {
             PackageManager::Apt => vec!["remove", "-y", package],
@@ -44,7 +37,6 @@ impl PackageManager {
             PackageManager::Pacman => vec!["-R", "--noconfirm", package],
         }
     }
-
 
     pub fn check_installed_args<'a>(&self, package: &'a str) -> Vec<&'a str> {
         match self {
@@ -54,7 +46,6 @@ impl PackageManager {
         }
     }
 }
-
 
 pub fn detect_package_manager(mount_point: &Path) -> Option<PackageManager> {
     if mount_point.join("usr/bin/apt-get").exists() {
@@ -72,35 +63,30 @@ pub fn detect_package_manager(mount_point: &Path) -> Option<PackageManager> {
     None
 }
 
-
 pub fn is_agent_installed(
     mount_point: &Path,
     pkg_manager: PackageManager,
     package: &str,
-) -> bool {
-    let args = pkg_manager.check_installed_args(package);
-    let binary = &args[0];
-    let cmd_args = &args[1..];
+) -> Result<bool, DiskError> {
+    let cmd_args = pkg_manager.check_installed_args(package);
 
     let output = nbd::privileged_command("chroot")
         .arg(mount_point)
-        .arg(binary)
+        .arg(pkg_manager.binary_name())
         .args(cmd_args)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .output();
 
     match output {
-        Ok(o) => o.status.success(),
-        Err(_) => false,
+        Ok(o) => Ok(o.status.success()),
+        Err(e) => Err(DiskError::FileSystem(format!(
+            "failed to check for installed agent: {e}"
+        ))),
     }
 }
 
-
-pub async fn install_agent_offline(
-    disk_path: &Path,
-    package: &str,
-) -> Result<(), DiskError> {
+pub async fn install_agent_offline(disk_path: &Path, package: &str) -> Result<(), DiskError> {
     let disk_path = disk_path.to_path_buf();
     let package = package.to_string();
     tokio::task::spawn_blocking(move || install_agent_offline_blocking(&disk_path, &package))
@@ -128,7 +114,7 @@ fn install_agent_offline_blocking(disk_path: &Path, package: &str) -> Result<(),
         }
     })?;
 
-    if is_agent_installed(mount_guard.path(), pkg_manager, &package) {
+    if is_agent_installed(mount_guard.path(), pkg_manager, package)? {
         return Err(DiskError::AgentAlreadyInstalled {
             package: package.to_string(),
         });
@@ -140,21 +126,43 @@ fn install_agent_offline_blocking(disk_path: &Path, package: &str) -> Result<(),
         PackageManager::Pacman => vec!["-Sy"],
     };
 
-    let _ = nbd::privileged_command("chroot")
+    let update_output = nbd::privileged_command("chroot")
         .arg(mount_guard.path())
         .arg(pkg_manager.binary_name())
         .args(&update_args)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .output();
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .map_err(|e| {
+            DiskError::NbdSetupFailed(format!("failed to run chroot package update: {e}"))
+        })?;
 
-    let install_args = pkg_manager.install_args(&package);
-    let binary = &install_args[0];
-    let cmd_args = &install_args[1..];
+    if !update_output.status.success() {
+        let stderr = String::from_utf8_lossy(&update_output.stderr);
+        if let Ok(resolv) = std::fs::read_to_string(mount_guard.path().join("etc/resolv.conf")) {
+            tracing::info!("package update failed; guest resolv.conf = {:?}", resolv);
+        } else if let Ok(meta) =
+            std::fs::symlink_metadata(mount_guard.path().join("etc/resolv.conf"))
+        {
+            tracing::info!(
+                "package update failed; guest resolv.conf metadata = {:?}, no readable content",
+                meta.file_type()
+            );
+        } else {
+            tracing::info!("package update failed; guest resolv.conf missing");
+        }
+        return Err(DiskError::NbdSetupFailed(format!(
+            "failed to update package indexes in guest (exit {}): {}",
+            update_output.status,
+            nbd::describe_sudo_failure("chroot", stderr.trim())
+        )));
+    }
+
+    let cmd_args = pkg_manager.install_args(package);
 
     let output = nbd::privileged_command("chroot")
         .arg(mount_guard.path())
-        .arg(binary)
+        .arg(pkg_manager.binary_name())
         .args(cmd_args)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -174,11 +182,7 @@ fn install_agent_offline_blocking(disk_path: &Path, package: &str) -> Result<(),
     Ok(())
 }
 
-
-pub async fn remove_agent_offline(
-    disk_path: &Path,
-    package: &str,
-) -> Result<(), DiskError> {
+pub async fn remove_agent_offline(disk_path: &Path, package: &str) -> Result<(), DiskError> {
     let disk_path = disk_path.to_path_buf();
     let package = package.to_string();
     tokio::task::spawn_blocking(move || remove_agent_offline_blocking(&disk_path, &package))
@@ -206,19 +210,17 @@ fn remove_agent_offline_blocking(disk_path: &Path, package: &str) -> Result<(), 
         }
     })?;
 
-    if !is_agent_installed(mount_guard.path(), pkg_manager, &package) {
+    if !is_agent_installed(mount_guard.path(), pkg_manager, package)? {
         return Err(DiskError::AgentNotInstalled {
             package: package.to_string(),
         });
     }
 
-    let remove_args = pkg_manager.remove_args(&package);
-    let binary = &remove_args[0];
-    let cmd_args = &remove_args[1..];
+    let cmd_args = pkg_manager.remove_args(package);
 
     let output = nbd::privileged_command("chroot")
         .arg(mount_guard.path())
-        .arg(binary)
+        .arg(pkg_manager.binary_name())
         .args(cmd_args)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -238,15 +240,12 @@ fn remove_agent_offline_blocking(disk_path: &Path, package: &str) -> Result<(), 
     Ok(())
 }
 
-
-
 pub struct GuestPackage {
     pub name: &'static str,
     pub description: &'static str,
 
     pub binary_check: &'static str,
 }
-
 
 pub const KNOWN_PACKAGES: &[GuestPackage] = &[
     GuestPackage {
@@ -279,7 +278,6 @@ pub const ANDROID_PACKAGES: &[GuestPackage] = &[
     },
 ];
 
-
 pub fn available_packages(kind: &InstanceKind) -> &'static [GuestPackage] {
     match kind {
         InstanceKind::AndroidVm { .. } => ANDROID_PACKAGES,
@@ -287,14 +285,12 @@ pub fn available_packages(kind: &InstanceKind) -> &'static [GuestPackage] {
     }
 }
 
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PackageStatus {
     Installed,
     NotInstalled,
     Unknown,
 }
-
 
 pub fn check_package_status_offline(mount_point: &Path, binary_check: &str) -> PackageStatus {
     let full_path = mount_point.join(binary_check.strip_prefix('/').unwrap_or(binary_check));
@@ -305,8 +301,9 @@ pub fn check_package_status_offline(mount_point: &Path, binary_check: &str) -> P
     }
 }
 
-
-pub fn check_all_packages_offline(mount_point: &Path) -> Vec<(&'static GuestPackage, PackageStatus)> {
+pub fn check_all_packages_offline(
+    mount_point: &Path,
+) -> Vec<(&'static GuestPackage, PackageStatus)> {
     KNOWN_PACKAGES
         .iter()
         .map(|pkg| {
@@ -315,7 +312,6 @@ pub fn check_all_packages_offline(mount_point: &Path) -> Vec<(&'static GuestPack
         })
         .collect()
 }
-
 
 pub fn check_all_packages_offline_with_disk(
     disk_path: &Path,
@@ -328,7 +324,6 @@ pub fn check_all_packages_offline_with_disk(
     let results = check_all_packages_offline(mount_guard.path());
     Ok(results)
 }
-
 
 pub fn check_android_packages_offline_with_disk(
     disk_path: &Path,

@@ -1,17 +1,13 @@
-
-
 use std::path::PathBuf;
 
 use crate::proto;
 use andler_core::{
     AndroidBootMode, AndroidProfile, AndroidVersion, ArmTranslator, AudioBackend, AudioConfig,
-    AudioDevice, BackendKind, CdromBus, CloneMode, CpuConfig, CpuPriority, DiskConfig,
-    DiskFormat, DisplayConfig, DisplayEngine, FirmwareConfig, GpuConfig, InputConfig,
-    InstanceConfig, InstanceId, InstanceKind, InstanceState, LogLine, LogStreamSource,
-    MemoryConfig, NatBackend, NetworkConfig, NetworkMode, PointerMode, RenderBackend, Resolution,
-    ResourceMetrics,
+    AudioDevice, BackendKind, CdromBus, CloneMode, CpuConfig, CpuPriority, DiskConfig, DiskFormat,
+    DisplayConfig, DisplayEngine, FirmwareConfig, GpuConfig, InputConfig, InstanceConfig,
+    InstanceId, InstanceKind, InstanceState, LogLine, LogStreamSource, MemoryConfig, NatBackend,
+    NetworkConfig, NetworkMode, PointerMode, RenderBackend, Resolution, ResourceMetrics,
 };
-
 
 #[derive(Debug, thiserror::Error)]
 pub enum ConvertError {
@@ -75,7 +71,6 @@ impl TryFrom<proto::CloneMode> for CloneMode {
     }
 }
 
-
 impl From<proto::ArmTranslator> for ArmTranslator {
     fn from(value: proto::ArmTranslator) -> Self {
         match value {
@@ -121,7 +116,6 @@ impl From<AndroidProfile> for proto::AndroidProfile {
         msg
     }
 }
-
 
 impl TryFrom<proto::CpuPriority> for CpuPriority {
     type Error = ConvertError;
@@ -231,7 +225,6 @@ impl From<DiskFormat> for proto::DiskFormat {
 }
 
 impl From<proto::CdromBus> for CdromBus {
-
     fn from(value: proto::CdromBus) -> Self {
         match value {
             proto::CdromBus::VirtioScsi => CdromBus::VirtioScsi,
@@ -464,7 +457,6 @@ impl From<NetworkMode> for proto::NetworkMode {
     }
 }
 
-
 impl From<proto::NatBackend> for NatBackend {
     fn from(value: proto::NatBackend) -> Self {
         match value {
@@ -556,7 +548,6 @@ impl From<AudioBackend> for proto::AudioBackend {
     }
 }
 
-
 impl From<proto::AudioDevice> for AudioDevice {
     fn from(value: proto::AudioDevice) -> Self {
         match value {
@@ -596,7 +587,6 @@ impl From<AudioConfig> for proto::AudioConfig {
         msg
     }
 }
-
 
 impl From<proto::InputConfig> for InputConfig {
     fn from(value: proto::InputConfig) -> Self {
@@ -641,11 +631,13 @@ impl From<PointerMode> for proto::PointerMode {
     }
 }
 
-
 impl TryFrom<proto::CreateInstanceRequest> for InstanceConfig {
     type Error = ConvertError;
 
     fn try_from(value: proto::CreateInstanceRequest) -> Result<Self, Self::Error> {
+        if value.cdrom_bus() == proto::CdromBus::Unspecified {
+            return Err(ConvertError::MissingField("cdrom_bus"));
+        }
         let cdrom_bus = value.cdrom_bus().into();
         let iso_path = PathBuf::from(value.iso_path);
         Ok(InstanceConfig {
@@ -696,7 +688,6 @@ impl TryFrom<proto::CreateInstanceRequest> for InstanceConfig {
     }
 }
 
-
 impl From<BackendKind> for proto::BackendKind {
     fn from(value: BackendKind) -> Self {
         match value {
@@ -732,7 +723,6 @@ impl From<InstanceKind> for proto::InstanceKind {
     }
 }
 
-
 impl From<InstanceConfig> for proto::GetInstanceConfigResponse {
     fn from(value: InstanceConfig) -> Self {
         proto::GetInstanceConfigResponse {
@@ -753,7 +743,6 @@ impl From<InstanceConfig> for proto::GetInstanceConfigResponse {
     }
 }
 
-
 impl TryFrom<proto::GetInstanceConfigResponse> for InstanceConfig {
     type Error = ConvertError;
 
@@ -762,21 +751,52 @@ impl TryFrom<proto::GetInstanceConfigResponse> for InstanceConfig {
         Ok(InstanceConfig {
             id: parse_instance_id(&value.instance_id)?,
             name: value.name,
-            kind: value.kind.as_ref().ok_or(ConvertError::MissingField("kind"))?.clone().try_into()?,
+            kind: value
+                .kind
+                .as_ref()
+                .ok_or(ConvertError::MissingField("kind"))?
+                .clone()
+                .try_into()?,
             backend,
-            cpu: value.cpu.ok_or(ConvertError::MissingField("cpu"))?.try_into()?,
-            memory: value.memory.ok_or(ConvertError::MissingField("memory"))?.into(),
-            disk: value.disk.ok_or(ConvertError::MissingField("disk"))?.try_into()?,
-            display: value.display.ok_or(ConvertError::MissingField("display"))?.try_into()?,
-            gpu: value.gpu.ok_or(ConvertError::MissingField("gpu"))?.try_into()?,
-            network: value.network.ok_or(ConvertError::MissingField("network"))?.try_into()?,
-            firmware: value.firmware.ok_or(ConvertError::MissingField("firmware"))?.into(),
-            audio: value.audio.ok_or(ConvertError::MissingField("audio"))?.try_into()?,
-            input: value.input.ok_or(ConvertError::MissingField("input"))?.into(),
+            cpu: value
+                .cpu
+                .ok_or(ConvertError::MissingField("cpu"))?
+                .try_into()?,
+            memory: value
+                .memory
+                .ok_or(ConvertError::MissingField("memory"))?
+                .into(),
+            disk: value
+                .disk
+                .ok_or(ConvertError::MissingField("disk"))?
+                .try_into()?,
+            display: value
+                .display
+                .ok_or(ConvertError::MissingField("display"))?
+                .try_into()?,
+            gpu: value
+                .gpu
+                .ok_or(ConvertError::MissingField("gpu"))?
+                .try_into()?,
+            network: value
+                .network
+                .ok_or(ConvertError::MissingField("network"))?
+                .try_into()?,
+            firmware: value
+                .firmware
+                .ok_or(ConvertError::MissingField("firmware"))?
+                .into(),
+            audio: value
+                .audio
+                .ok_or(ConvertError::MissingField("audio"))?
+                .try_into()?,
+            input: value
+                .input
+                .ok_or(ConvertError::MissingField("input"))?
+                .into(),
         })
     }
 }
-
 
 impl TryFrom<proto::BackendKind> for BackendKind {
     type Error = ConvertError;
@@ -798,6 +818,9 @@ impl TryFrom<proto::InstanceKind> for InstanceKind {
 
         match value.kind.ok_or(ConvertError::MissingField("kind.kind"))? {
             Kind::LinuxVm(linux_vm) => {
+                if linux_vm.cdrom_bus() == proto::CdromBus::Unspecified {
+                    return Err(ConvertError::MissingField("kind.linux_vm.cdrom_bus"));
+                }
                 let cdrom_bus = linux_vm.cdrom_bus().into();
                 Ok(InstanceKind::LinuxVm {
                     iso_path: PathBuf::from(linux_vm.iso_path),
@@ -807,13 +830,14 @@ impl TryFrom<proto::InstanceKind> for InstanceKind {
             Kind::AndroidVm(android_vm) => Ok(InstanceKind::AndroidVm {
                 android_profile: android_vm
                     .android_profile
-                    .ok_or(ConvertError::MissingField("kind.android_vm.android_profile"))?
+                    .ok_or(ConvertError::MissingField(
+                        "kind.android_vm.android_profile",
+                    ))?
                     .try_into()?,
             }),
         }
     }
 }
-
 
 pub fn instance_config_to_update_request(
     cfg: InstanceConfig,
@@ -837,7 +861,6 @@ pub fn instance_config_to_update_request(
     }
 }
 
-
 pub fn update_request_to_instance_config(
     id: andler_core::InstanceId,
     req: proto::UpdateInstanceConfigRequest,
@@ -846,20 +869,48 @@ pub fn update_request_to_instance_config(
     Ok(InstanceConfig {
         id,
         name: req.name,
-        kind: req.kind.as_ref().ok_or(ConvertError::MissingField("kind"))?.clone().try_into()?,
+        kind: req
+            .kind
+            .as_ref()
+            .ok_or(ConvertError::MissingField("kind"))?
+            .clone()
+            .try_into()?,
         backend,
-        cpu: req.cpu.ok_or(ConvertError::MissingField("cpu"))?.try_into()?,
-        memory: req.memory.ok_or(ConvertError::MissingField("memory"))?.into(),
-        disk: req.disk.ok_or(ConvertError::MissingField("disk"))?.try_into()?,
-        display: req.display.ok_or(ConvertError::MissingField("display"))?.try_into()?,
-        gpu: req.gpu.ok_or(ConvertError::MissingField("gpu"))?.try_into()?,
-        network: req.network.ok_or(ConvertError::MissingField("network"))?.try_into()?,
-        firmware: req.firmware.ok_or(ConvertError::MissingField("firmware"))?.into(),
-        audio: req.audio.ok_or(ConvertError::MissingField("audio"))?.try_into()?,
+        cpu: req
+            .cpu
+            .ok_or(ConvertError::MissingField("cpu"))?
+            .try_into()?,
+        memory: req
+            .memory
+            .ok_or(ConvertError::MissingField("memory"))?
+            .into(),
+        disk: req
+            .disk
+            .ok_or(ConvertError::MissingField("disk"))?
+            .try_into()?,
+        display: req
+            .display
+            .ok_or(ConvertError::MissingField("display"))?
+            .try_into()?,
+        gpu: req
+            .gpu
+            .ok_or(ConvertError::MissingField("gpu"))?
+            .try_into()?,
+        network: req
+            .network
+            .ok_or(ConvertError::MissingField("network"))?
+            .try_into()?,
+        firmware: req
+            .firmware
+            .ok_or(ConvertError::MissingField("firmware"))?
+            .into(),
+        audio: req
+            .audio
+            .ok_or(ConvertError::MissingField("audio"))?
+            .try_into()?,
         input: req.input.ok_or(ConvertError::MissingField("input"))?.into(),
     })
 }
-
 
 pub fn parse_instance_id(raw: &str) -> Result<andler_core::InstanceId, ConvertError> {
     if raw.is_empty() {
@@ -870,7 +921,6 @@ pub fn parse_instance_id(raw: &str) -> Result<andler_core::InstanceId, ConvertEr
         .map_err(|source| ConvertError::InvalidInstanceId(raw.to_string(), source))
 }
 
-
 pub fn instance_state_to_proto(state: &InstanceState) -> (proto::InstanceStateKind, String) {
     match state {
         InstanceState::Created => (proto::InstanceStateKind::Created, String::new()),
@@ -879,12 +929,9 @@ pub fn instance_state_to_proto(state: &InstanceState) -> (proto::InstanceStateKi
         InstanceState::Paused => (proto::InstanceStateKind::Paused, String::new()),
         InstanceState::Stopping => (proto::InstanceStateKind::Stopping, String::new()),
         InstanceState::Stopped => (proto::InstanceStateKind::Stopped, String::new()),
-        InstanceState::Error { message } => {
-            (proto::InstanceStateKind::Error, message.clone())
-        }
+        InstanceState::Error { message } => (proto::InstanceStateKind::Error, message.clone()),
     }
 }
-
 
 impl From<ConvertError> for tonic::Status {
     fn from(err: ConvertError) -> Self {
@@ -900,7 +947,6 @@ impl From<LogStreamSource> for proto::LogStreamSource {
         }
     }
 }
-
 
 impl From<LogLine> for proto::LogLineResponse {
     fn from(value: LogLine) -> Self {
@@ -929,7 +975,6 @@ impl From<ResourceMetrics> for proto::ResourceMetricsResponse {
     }
 }
 
-
 pub struct SwitchArmTranslatorCmd {
     pub instance_ref: String,
     pub translator: ArmTranslator,
@@ -957,7 +1002,6 @@ impl TryFrom<proto::SwitchArmTranslatorRequest> for SwitchArmTranslatorCmd {
         })
     }
 }
-
 
 pub struct SwitchAndroidBootModeCmd {
     pub instance_ref: String,
@@ -990,7 +1034,6 @@ impl From<AndroidBootMode> for proto::AndroidBootMode {
         }
     }
 }
-
 
 pub struct SetInstanceConfigCmd {
     pub instance_ref: String,
@@ -1083,7 +1126,6 @@ mod tests {
         assert_eq!(message, "boom");
     }
 
-
     fn sample_instance_config() -> InstanceConfig {
         InstanceConfig {
             id: InstanceId::new(),
@@ -1104,7 +1146,6 @@ mod tests {
             input: InputConfig::reference_default(),
         }
     }
-
 
     fn instance_config_to_create_request(cfg: &InstanceConfig) -> proto::CreateInstanceRequest {
         let (iso_path, cdrom_bus) = match &cfg.kind {
@@ -1219,7 +1260,14 @@ mod tests {
     fn create_instance_request_missing_render_backend_kind_is_rejected() {
         let cfg = sample_instance_config();
         let mut request = instance_config_to_create_request(&cfg);
-        request.gpu.as_mut().unwrap().render_backend.as_mut().unwrap().kind = None;
+        request
+            .gpu
+            .as_mut()
+            .unwrap()
+            .render_backend
+            .as_mut()
+            .unwrap()
+            .kind = None;
 
         let err = InstanceConfig::try_from(request).unwrap_err();
         assert!(matches!(err, ConvertError::MissingRenderBackendKind));
@@ -1229,7 +1277,14 @@ mod tests {
     fn create_instance_request_missing_network_mode_kind_is_rejected() {
         let cfg = sample_instance_config();
         let mut request = instance_config_to_create_request(&cfg);
-        request.network.as_mut().unwrap().mode.as_mut().unwrap().kind = None;
+        request
+            .network
+            .as_mut()
+            .unwrap()
+            .mode
+            .as_mut()
+            .unwrap()
+            .kind = None;
 
         let err = InstanceConfig::try_from(request).unwrap_err();
         assert!(matches!(err, ConvertError::MissingNetworkModeKind));
@@ -1246,19 +1301,13 @@ mod tests {
     }
 
     #[test]
-    fn create_instance_request_unspecified_cdrom_bus_defaults_to_ide() {
+    fn create_instance_request_unspecified_cdrom_bus_is_rejected() {
         let cfg = sample_instance_config();
         let mut request = instance_config_to_create_request(&cfg);
         request.cdrom_bus = proto::CdromBus::Unspecified as i32;
 
-        let converted = InstanceConfig::try_from(request).unwrap();
-        match converted.kind {
-            InstanceKind::LinuxVm { cdrom_bus, .. } => {
-                assert_eq!(cdrom_bus, CdromBus::default());
-                assert_eq!(cdrom_bus, CdromBus::Ide);
-            }
-            other => panic!("expected LinuxVm, got {other:?}"),
-        }
+        let err = InstanceConfig::try_from(request).unwrap_err();
+        assert!(matches!(err, ConvertError::MissingField("cdrom_bus")));
     }
 
     #[test]
@@ -1292,7 +1341,6 @@ mod tests {
         let back = CpuConfig::try_from(msg).unwrap();
         assert_eq!(back.affinity, cfg.affinity);
     }
-
 
     #[test]
     fn get_instance_config_response_preserves_linux_vm_kind_and_id() {
@@ -1515,7 +1563,6 @@ mod tests {
         assert!(msg.gpu_load_percent.is_none());
     }
 
-
     #[test]
     fn get_instance_config_response_round_trips_back_to_instance_config() {
         let cfg = sample_instance_config();
@@ -1557,7 +1604,6 @@ mod tests {
         let err = InstanceConfig::try_from(response).unwrap_err();
         assert!(matches!(err, ConvertError::MissingBackendKind));
     }
-
 
     #[test]
     fn update_request_round_trips_to_instance_config_with_given_id() {

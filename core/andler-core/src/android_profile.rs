@@ -1,5 +1,3 @@
-
-
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -8,7 +6,6 @@ use crate::config::{
     AudioConfig, BackendKind, CpuConfig, DiskConfig, DisplayConfig, FirmwareConfig, GpuConfig,
     InputConfig, InstanceConfig, InstanceId, InstanceKind, MemoryConfig, NetworkConfig,
 };
-
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AndroidVersion {
@@ -25,10 +22,8 @@ impl std::fmt::Display for AndroidVersion {
     }
 }
 
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum ArmTranslator {
-
     #[default]
     None,
 
@@ -62,14 +57,12 @@ pub struct AndroidProfile {
 }
 
 impl AndroidProfile {
-
     pub fn cache_key(&self) -> String {
         format!(
             "{:?}-gapps_{}-microg_{}-arm_{:?}",
             self.android_version, self.gapps, self.microg, self.arm_translator
         )
     }
-
 
     pub fn resolve(
         &self,

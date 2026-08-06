@@ -1,9 +1,6 @@
-
-
 use std::process::Command;
 
 use andler_core::{DisplayEngine, RenderBackend};
-
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum GpuVendor {
@@ -13,7 +10,6 @@ enum GpuVendor {
     Unknown,
     None,
 }
-
 
 pub(crate) fn detect_gpu_defaults() -> (RenderBackend, DisplayEngine, bool) {
     let vendor = detect_gpu_vendor();
@@ -39,14 +35,12 @@ pub(crate) fn detect_gpu_defaults() -> (RenderBackend, DisplayEngine, bool) {
     (render_backend, display_engine, venus_supported)
 }
 
-
 fn detect_gpu_vendor() -> GpuVendor {
     if let Some(vendor) = detect_gpu_vendor_via_sysfs() {
         return vendor;
     }
     detect_gpu_vendor_via_lspci().unwrap_or(GpuVendor::None)
 }
-
 
 const PCI_VENDOR_AMD: &str = "0x1002";
 const PCI_VENDOR_NVIDIA: &str = "0x10de";
@@ -92,7 +86,10 @@ fn detect_gpu_vendor_via_lspci() -> Option<GpuVendor> {
         .filter(|l| l.contains("vga compatible controller") || l.contains("3d controller"))
         .collect();
 
-    if vga_lines.iter().any(|l| l.contains("amd") || l.contains("ati")) {
+    if vga_lines
+        .iter()
+        .any(|l| l.contains("amd") || l.contains("ati"))
+    {
         return Some(GpuVendor::Amd);
     }
     if vga_lines.iter().any(|l| l.contains("nvidia")) {
@@ -108,7 +105,6 @@ fn detect_gpu_vendor_via_lspci() -> Option<GpuVendor> {
     }
 }
 
-
 fn check_venus_requirements() -> bool {
     let Some(kernel) = kernel_version() else {
         return false;
@@ -121,7 +117,6 @@ fn check_venus_requirements() -> bool {
 
     venus_requirements_met(vendor, kernel, qemu, mesa)
 }
-
 
 fn venus_requirements_met(
     vendor: GpuVendor,
@@ -169,22 +164,29 @@ fn mesa_version() -> Option<(u32, u32, u32)> {
     parse_version(&line[mesa_marker + "Mesa ".len()..])
 }
 
-
 fn parse_version(text: &str) -> Option<(u32, u32, u32)> {
-    let token = text
-        .split(|c: char| c.is_whitespace())
-        .find(|tok| {
-            let mut parts = tok.split('.');
-            parts.next().is_some_and(|p| p.chars().all(|c| c.is_ascii_digit()) && !p.is_empty())
-                && parts.next().is_some_and(|p| p.chars().all(|c| c.is_ascii_digit()) && !p.is_empty())
-        })?;
+    let token = text.split(|c: char| c.is_whitespace()).find(|tok| {
+        let mut parts = tok.split('.');
+        parts
+            .next()
+            .is_some_and(|p| p.chars().all(|c| c.is_ascii_digit()) && !p.is_empty())
+            && parts
+                .next()
+                .is_some_and(|p| p.chars().all(|c| c.is_ascii_digit()) && !p.is_empty())
+    })?;
 
     let mut parts = token.split('.');
     let major: u32 = parts.next()?.parse().ok()?;
     let minor: u32 = parts.next()?.parse().ok()?;
     let patch: u32 = parts
         .next()
-        .and_then(|p| p.chars().take_while(|c| c.is_ascii_digit()).collect::<String>().parse().ok())
+        .and_then(|p| {
+            p.chars()
+                .take_while(|c| c.is_ascii_digit())
+                .collect::<String>()
+                .parse()
+                .ok()
+        })
         .unwrap_or(0);
 
     Some((major, minor, patch))
@@ -201,7 +203,10 @@ mod tests {
 
     #[test]
     fn parse_version_handles_two_components() {
-        assert_eq!(parse_version("QEMU emulator version 9.2.0"), Some((9, 2, 0)));
+        assert_eq!(
+            parse_version("QEMU emulator version 9.2.0"),
+            Some((9, 2, 0))
+        );
     }
 
     #[test]

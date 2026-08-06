@@ -86,6 +86,7 @@ name = "andler-net"
 version = "0.1.0"
 dependencies = [
  "andler-core",
+ "async-trait",
  "thiserror 1.0.69",
  "tokio",
 ]
@@ -98,6 +99,7 @@ dependencies = [
  "andler-firmware",
  "andler-net",
  "async-trait",
+ "base64",
  "futures-core",
  "futures-util",
  "libc",
@@ -485,6 +487,7 @@ dependencies = [
  "andler-firmware",
  "andler-qemu",
  "andler-rpc",
+ "chrono",
  "clap",
  "clap_complete",
  "indicatif",

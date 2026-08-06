@@ -1,9 +1,6 @@
-
-
 use std::path::{Path, PathBuf};
 
 use crate::error::FirmwareError;
-
 
 pub const KNOWN_OVMF_CODE_PATHS: &[&str] = &[
     "/usr/share/edk2/x64/OVMF_CODE.4m.fd",
@@ -13,7 +10,6 @@ pub const KNOWN_OVMF_CODE_PATHS: &[&str] = &[
     "/usr/share/edk2-ovmf/x64/OVMF_CODE.4m.fd",
 ];
 
-
 pub const KNOWN_OVMF_VARS_PATHS: &[&str] = &[
     "/usr/share/edk2/x64/OVMF_VARS.4m.fd",
     "/usr/share/OVMF/OVMF_VARS_4M.fd",
@@ -22,15 +18,12 @@ pub const KNOWN_OVMF_VARS_PATHS: &[&str] = &[
     "/usr/share/edk2-ovmf/x64/OVMF_VARS.4m.fd",
 ];
 
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DetectedOvmf {
-
     pub code: PathBuf,
 
     pub vars_template: PathBuf,
 }
-
 
 fn find_first_existing(candidates: &[&str]) -> Option<PathBuf> {
     candidates
@@ -40,13 +33,11 @@ fn find_first_existing(candidates: &[&str]) -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
-
 pub fn detect() -> Result<DetectedOvmf, FirmwareError> {
-    let code = find_first_existing(KNOWN_OVMF_CODE_PATHS)
-        .ok_or(FirmwareError::OvmfCodeNotFound)?;
+    let code = find_first_existing(KNOWN_OVMF_CODE_PATHS).ok_or(FirmwareError::OvmfCodeNotFound)?;
 
-    let vars_template = find_first_existing(KNOWN_OVMF_VARS_PATHS)
-        .ok_or(FirmwareError::OvmfVarsNotFound)?;
+    let vars_template =
+        find_first_existing(KNOWN_OVMF_VARS_PATHS).ok_or(FirmwareError::OvmfVarsNotFound)?;
 
     tracing::debug!(
         ovmf_code = %code.display(),
@@ -59,7 +50,6 @@ pub fn detect() -> Result<DetectedOvmf, FirmwareError> {
         vars_template,
     })
 }
-
 
 pub fn detect_matched_pair() -> Result<DetectedOvmf, FirmwareError> {
     debug_assert_eq!(
@@ -92,7 +82,6 @@ pub fn detect_matched_pair() -> Result<DetectedOvmf, FirmwareError> {
     detect()
 }
 
-
 pub async fn provision_vars(template: &Path, dest: &Path) -> Result<(), FirmwareError> {
     tokio::fs::copy(template, dest)
         .await
@@ -109,16 +98,15 @@ pub async fn provision_vars(template: &Path, dest: &Path) -> Result<(), Firmware
     Ok(())
 }
 
-
 pub async fn reset_vars(template: &Path, dest: &Path) -> Result<(), FirmwareError> {
     if dest.exists() {
-        tokio::fs::remove_file(dest).await.map_err(|source| {
-            FirmwareError::ProvisionFailed {
+        tokio::fs::remove_file(dest)
+            .await
+            .map_err(|source| FirmwareError::ProvisionFailed {
                 template: template.to_path_buf(),
                 dest: dest.to_path_buf(),
                 source,
-            }
-        })?;
+            })?;
     }
     provision_vars(template, dest).await
 }
@@ -164,9 +152,7 @@ mod tests {
 
     #[test]
     fn detect_returns_ovmf_code_not_found_on_empty_system() {
-        let fake_candidates: &[&str] = &[
-            "/this/path/definitely/does/not/exist/OVMF_CODE.fd",
-        ];
+        let fake_candidates: &[&str] = &["/this/path/definitely/does/not/exist/OVMF_CODE.fd"];
         let result = find_first_existing(fake_candidates);
         assert!(result.is_none());
     }

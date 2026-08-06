@@ -1,5 +1,3 @@
-
-
 use std::path::Path;
 
 use andler_core::{
@@ -7,30 +5,37 @@ use andler_core::{
     InstanceKind, NatBackend, PointerMode, RenderBackend,
 };
 
-
-pub fn build_args(cfg: &InstanceConfig, qmp_socket_path: &Path) -> Result<Vec<String>, BackendError> {
+pub fn build_args(
+    cfg: &InstanceConfig,
+    qmp_socket_path: &Path,
+) -> Result<Vec<String>, BackendError> {
     let mut args = Vec::new();
     args.extend(name_args(cfg));
     args.extend(machine_and_cpu_args(cfg));
     args.extend(memory_args(cfg));
     args.extend(firmware_args(cfg));
     args.extend(gpu_display_args(cfg)?);
+    if let Some(fwcfg_args) = display_resolution_fwcfg_args(cfg) {
+        args.extend(fwcfg_args);
+    }
     args.extend(disk_args(cfg));
     args.extend(input_args(cfg));
     args.extend(network_args(cfg));
     args.extend(audio_args(cfg));
     args.extend(qmp_args(qmp_socket_path));
+    args.extend(guest_agent_args(cfg, qmp_socket_path));
     args.extend(serial_args(cfg));
     args.push("-boot".to_string());
     args.push("menu=on".to_string());
     Ok(args)
 }
 
-
 fn name_args(cfg: &InstanceConfig) -> Vec<String> {
-    vec!["-name".to_string(), format!("{},process={}", cfg.name, cfg.name)]
+    vec![
+        "-name".to_string(),
+        format!("{},process={}", cfg.name, cfg.name),
+    ]
 }
-
 
 fn qmp_args(qmp_socket_path: &Path) -> Vec<String> {
     vec![
@@ -39,6 +44,25 @@ fn qmp_args(qmp_socket_path: &Path) -> Vec<String> {
     ]
 }
 
+fn guest_agent_args(cfg: &InstanceConfig, qmp_socket_path: &Path) -> Vec<String> {
+    let qga_socket_path = qmp_socket_path.with_extension("qga.sock");
+    let mut args = vec![
+        "-chardev".to_string(),
+        format!(
+            "socket,id=qga,path={},server=on,wait=off",
+            qga_socket_path.display()
+        ),
+    ];
+    // The clipboard path (input_args) already adds a virtio-serial-pci bus
+    // when clipboard_enabled; the agent port attaches to that one then.
+    if !cfg.input.clipboard_enabled {
+        args.push("-device".to_string());
+        args.push("virtio-serial-pci".to_string());
+    }
+    args.push("-device".to_string());
+    args.push("virtserialport,chardev=qga,id=qga,name=org.qemu.guest_agent.0".to_string());
+    args
+}
 
 fn serial_args(cfg: &InstanceConfig) -> Vec<String> {
     let Some(instance_dir) = cfg.disk.path.parent() else {
@@ -50,7 +74,6 @@ fn serial_args(cfg: &InstanceConfig) -> Vec<String> {
         format!("file:{}", console_log_path.display()),
     ]
 }
-
 
 fn machine_and_cpu_args(cfg: &InstanceConfig) -> Vec<String> {
     let cpu = &cfg.cpu;
@@ -67,7 +90,6 @@ fn machine_and_cpu_args(cfg: &InstanceConfig) -> Vec<String> {
     ]
 }
 
-
 fn memory_args(cfg: &InstanceConfig) -> Vec<String> {
     let size = qemu_size_suffix(cfg.memory.size_bytes);
     let share = if cfg.memory.ksm { "on" } else { "off" };
@@ -80,7 +102,6 @@ fn memory_args(cfg: &InstanceConfig) -> Vec<String> {
         "memory-backend=mem1".to_string(),
     ]
 }
-
 
 fn firmware_args(cfg: &InstanceConfig) -> Vec<String> {
     if !cfg.firmware.enable_uefi {
@@ -97,7 +118,6 @@ fn firmware_args(cfg: &InstanceConfig) -> Vec<String> {
         format!("if=pflash,format=raw,file={}", fw.ovmf_vars_path.display()),
     ]
 }
-
 
 fn gpu_display_args(cfg: &InstanceConfig) -> Result<Vec<String>, BackendError> {
     let gpu = &cfg.gpu;
@@ -142,7 +162,11 @@ fn gpu_display_args(cfg: &InstanceConfig) -> Result<Vec<String>, BackendError> {
         }
     }
 
-    let show_cursor = if cfg.input.hide_host_cursor { "off" } else { "on" };
+    let show_cursor = if cfg.input.hide_host_cursor {
+        "off"
+    } else {
+        "on"
+    };
     let display_str = match cfg.display.display_engine {
         DisplayEngine::Sdl => format!(
             "sdl,gl={},show-cursor={},window-close=off",
@@ -164,6 +188,18 @@ fn gpu_display_args(cfg: &InstanceConfig) -> Result<Vec<String>, BackendError> {
     Ok(args)
 }
 
+fn display_resolution_fwcfg_args(cfg: &InstanceConfig) -> Option<Vec<String>> {
+    let res = cfg.display.resolution;
+    (res.width > 0 && res.height > 0).then(|| {
+        vec![
+            "-fw_cfg".to_string(),
+            format!(
+                "name=opt/andler/display-resolution,string={}x{}",
+                res.width, res.height
+            ),
+        ]
+    })
+}
 
 fn disk_args(cfg: &InstanceConfig) -> Vec<String> {
     let disk = &cfg.disk;
@@ -184,7 +220,11 @@ fn disk_args(cfg: &InstanceConfig) -> Vec<String> {
         "virtio-blk-pci,drive=drive-disk0,id=disk0,bootindex=1,num-queues=4".to_string(),
     ];
 
-    if let InstanceKind::LinuxVm { iso_path, cdrom_bus } = &cfg.kind {
+    if let InstanceKind::LinuxVm {
+        iso_path,
+        cdrom_bus,
+    } = &cfg.kind
+    {
         args.push("-drive".to_string());
         args.push(format!(
             "file={},media=cdrom,if=none,id=drive-cd0",
@@ -199,16 +239,13 @@ fn disk_args(cfg: &InstanceConfig) -> Vec<String> {
                 args.push("-device".to_string());
                 args.push("virtio-scsi-pci,id=scsi0".to_string());
                 args.push("-device".to_string());
-                args.push(
-                    "scsi-cd,drive=drive-cd0,bus=scsi0.0,id=cd0,bootindex=2".to_string(),
-                );
+                args.push("scsi-cd,drive=drive-cd0,bus=scsi0.0,id=cd0,bootindex=2".to_string());
             }
         }
     }
 
     args
 }
-
 
 fn input_args(cfg: &InstanceConfig) -> Vec<String> {
     let input = &cfg.input;
@@ -237,7 +274,6 @@ fn input_args(cfg: &InstanceConfig) -> Vec<String> {
     args
 }
 
-
 fn network_args(cfg: &InstanceConfig) -> Vec<String> {
     use andler_core::NetworkMode;
 
@@ -258,11 +294,14 @@ fn network_args(cfg: &InstanceConfig) -> Vec<String> {
             let tap_iface = format!("tap{}", cfg.id.0);
             vec![
                 "-netdev".to_string(),
-                format!("tap,id=net0,ifname={},bridge={},script=no,downscript=no", tap_iface, bridge),
+                format!(
+                    "tap,id=net0,ifname={},bridge={},script=no,downscript=no",
+                    tap_iface, bridge
+                ),
                 "-device".to_string(),
                 format!("{},netdev=net0", cfg.network.device_model),
             ]
-        },
+        }
         NetworkMode::Isolated => {
             let vm_iface = "andler0";
             vec![
@@ -275,7 +314,6 @@ fn network_args(cfg: &InstanceConfig) -> Vec<String> {
     }
 }
 
-
 fn audio_args(cfg: &InstanceConfig) -> Vec<String> {
     match cfg.audio.backend {
         AudioBackend::None => Vec::new(),
@@ -285,10 +323,7 @@ fn audio_args(cfg: &InstanceConfig) -> Vec<String> {
                 AudioBackend::Pulseaudio => "pulseaudio",
                 AudioBackend::None => unreachable!(),
             };
-            let mut args = vec![
-                "-audiodev".to_string(),
-                format!("{backend_str},id=snd0"),
-            ];
+            let mut args = vec!["-audiodev".to_string(), format!("{backend_str},id=snd0")];
             match cfg.audio.device {
                 AudioDevice::VirtioSound => {
                     args.push("-device".to_string());
@@ -306,12 +341,11 @@ fn audio_args(cfg: &InstanceConfig) -> Vec<String> {
     }
 }
 
-
 fn qemu_size_suffix(bytes: u64) -> String {
     const GIB: u64 = 1024 * 1024 * 1024;
     const MIB: u64 = 1024 * 1024;
 
-    if bytes % GIB == 0 {
+    if bytes.is_multiple_of(GIB) {
         format!("{}G", bytes / GIB)
     } else {
         format!("{}M", bytes / MIB)
@@ -326,7 +360,6 @@ mod tests {
         InputConfig, InstanceConfig, InstanceId, MemoryConfig, NetworkConfig, NetworkMode,
     };
     use std::path::PathBuf;
-
 
     fn start_sh_equivalent_config() -> InstanceConfig {
         InstanceConfig {
@@ -472,7 +505,22 @@ mod tests {
             .iter()
             .position(|a| a == "-display")
             .expect("-display must be present");
-        assert_eq!(args[display_idx + 1], "gtk,gl=on,show-cursor=off,clipboard=on,window-close=off");
+        assert_eq!(
+            args[display_idx + 1],
+            "gtk,gl=on,show-cursor=off,clipboard=on,window-close=off"
+        );
+    }
+
+    #[test]
+    fn display_resolution_fwcfg_args_passes_resolution_string() {
+        let cfg = start_sh_equivalent_config();
+        assert_eq!(
+            display_resolution_fwcfg_args(&cfg),
+            Some(vec![
+                "-fw_cfg".to_string(),
+                "name=opt/andler/display-resolution,string=1920x1080".to_string(),
+            ])
+        );
     }
 
     #[test]
@@ -583,7 +631,10 @@ mod tests {
     #[test]
     fn network_args_match_start_sh() {
         let cfg = start_sh_equivalent_config();
-        assert_eq!(network_args(&cfg), vec!["-nic", "user,model=virtio-net-pci"]);
+        assert_eq!(
+            network_args(&cfg),
+            vec!["-nic", "user,model=virtio-net-pci"]
+        );
     }
 
     #[test]
@@ -611,7 +662,10 @@ mod tests {
             args,
             vec![
                 "-netdev".to_string(),
-                format!("tap,id=net0,ifname=tap{},bridge=br0,script=no,downscript=no", cfg.id.0),
+                format!(
+                    "tap,id=net0,ifname=tap{},bridge=br0,script=no,downscript=no",
+                    cfg.id.0
+                ),
                 "-device".to_string(),
                 format!("{},netdev=net0", cfg.network.device_model),
             ]
@@ -687,7 +741,10 @@ mod tests {
         let cfg = start_sh_equivalent_config();
         let qmp_path = PathBuf::from("/tmp/andler/linux/qmp.sock");
         let args = build_args(&cfg, &qmp_path).unwrap();
-        assert_eq!(&args[args.len() - 2..], &["-boot".to_string(), "menu=on".to_string()]);
+        assert_eq!(
+            &args[args.len() - 2..],
+            &["-boot".to_string(), "menu=on".to_string()]
+        );
     }
 
     #[test]
@@ -727,6 +784,38 @@ mod tests {
             vec![
                 "-qmp",
                 "unix:/run/andler/instance-abc/qmp.sock,server,nowait",
+            ]
+        );
+    }
+
+    #[test]
+    fn guest_agent_args_wire_agent_port_without_extra_bus_when_clipboard_on() {
+        let path = PathBuf::from("/run/andler/instance-abc/qmp.sock");
+
+        let mut cfg = start_sh_equivalent_config();
+        cfg.input.clipboard_enabled = true;
+        let args = guest_agent_args(&cfg, &path);
+        assert_eq!(
+            args,
+            vec![
+                "-chardev",
+                "socket,id=qga,path=/run/andler/instance-abc/qmp.qga.sock,server=on,wait=off",
+                "-device",
+                "virtserialport,chardev=qga,id=qga,name=org.qemu.guest_agent.0",
+            ]
+        );
+
+        cfg.input.clipboard_enabled = false;
+        let args = guest_agent_args(&cfg, &path);
+        assert_eq!(
+            args,
+            vec![
+                "-chardev",
+                "socket,id=qga,path=/run/andler/instance-abc/qmp.qga.sock,server=on,wait=off",
+                "-device",
+                "virtio-serial-pci",
+                "-device",
+                "virtserialport,chardev=qga,id=qga,name=org.qemu.guest_agent.0",
             ]
         );
     }

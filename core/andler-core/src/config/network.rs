@@ -1,27 +1,20 @@
-
-
 use serde::{Deserialize, Serialize};
-
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum NatBackend {
-
     Slirp,
 
     Passt,
 }
 
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum NetworkMode {
-
     Nat,
 
     Bridge { interface: String },
 
     Isolated,
 }
-
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NetworkConfig {
@@ -38,7 +31,6 @@ fn default_nat_backend() -> NatBackend {
 }
 
 impl NetworkConfig {
-
     pub fn reference_default() -> Self {
         NetworkConfig {
             mode: NetworkMode::Nat,

@@ -7,18 +7,44 @@ use andler_rpc::proto::{
 use std::io::IsTerminal;
 use tonic::transport::Channel;
 
-use crate::helpers::{colorize_status, format_bytes, format_bytes_per_sec, state_kind_name};
+use crate::helpers::{
+    colorize_status, format_bytes, format_bytes_per_sec, format_size, state_kind_name,
+};
 use crate::{CliLogSource, ListSortKey};
 
 pub async fn handle_status(
     client: &mut AndlerServiceClient<Channel>,
     instance_id: String,
+    json: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let response = client
-        .get_instance_status(InstanceIdRequest { instance_id })
+        .get_instance_status(InstanceIdRequest {
+            instance_id: instance_id.clone(),
+        })
         .await?
         .into_inner();
     let state = response.state();
+    if json {
+        #[derive(serde::Serialize)]
+        struct InstanceStatusJson<'a> {
+            instance_id: &'a str,
+            state: &'a str,
+            #[serde(skip_serializing_if = "str::is_empty")]
+            detail: &'a str,
+            #[serde(skip_serializing_if = "str::is_empty")]
+            error_message: &'a str,
+        }
+        println!(
+            "{}",
+            serde_json::to_string(&InstanceStatusJson {
+                instance_id: &instance_id,
+                state: state_kind_name(state),
+                detail: &response.detail,
+                error_message: &response.error_message,
+            })?
+        );
+        return Ok(());
+    }
     println!(
         "state: {}",
         colorize_status(state, std::io::stdout().is_terminal())
@@ -31,7 +57,6 @@ pub async fn handle_status(
     }
     Ok(())
 }
-
 
 fn parse_state_filter(s: &str) -> Option<InstanceStateKind> {
     [
@@ -47,12 +72,13 @@ fn parse_state_filter(s: &str) -> Option<InstanceStateKind> {
     .find(|&kind| state_kind_name(kind).eq_ignore_ascii_case(s))
 }
 
-
 #[derive(serde::Serialize)]
 struct InstanceListJson<'a> {
     id: &'a str,
     name: &'a str,
     state: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error_message: Option<&'a str>,
 }
 
 pub async fn handle_list(
@@ -94,7 +120,11 @@ pub async fn handle_list(
         .instances
         .into_iter()
         .filter(|entry| state_filter.is_none_or(|want| entry.state() == want))
-        .filter(|entry| name_filter.as_ref().is_none_or(|re| re.is_match(&entry.name)))
+        .filter(|entry| {
+            name_filter
+                .as_ref()
+                .is_none_or(|re| re.is_match(&entry.name))
+        })
         .collect();
 
     match sort {
@@ -112,6 +142,8 @@ pub async fn handle_list(
                 id: &entry.instance_id,
                 name: &entry.name,
                 state: state_kind_name(entry.state()),
+                error_message: (!entry.error_message.is_empty())
+                    .then_some(entry.error_message.as_str()),
             })
             .collect();
         println!("{}", serde_json::to_string(&entries)?);
@@ -127,17 +159,20 @@ pub async fn handle_list(
             } else {
                 short_id(&entry.instance_id)
             };
-            println!(
+            print!(
                 "{}  {}  {}",
                 id,
                 colorize_status(entry.state(), is_tty),
                 entry.name
             );
+            if entry.state() == InstanceStateKind::Error && !entry.error_message.is_empty() {
+                print!("  ({})", entry.error_message);
+            }
+            println!();
         }
     }
     Ok(())
 }
-
 
 fn short_id(full: &str) -> &str {
     full.get(..8).unwrap_or(full)
@@ -154,7 +189,6 @@ pub async fn handle_config(
     print_instance_config(response);
     Ok(())
 }
-
 
 fn log_line_matches_filters(
     line: &andler_rpc::proto::LogLineResponse,
@@ -247,7 +281,6 @@ pub async fn handle_logs(
     Ok(())
 }
 
-
 #[derive(serde::Serialize)]
 struct MetricsJson {
     cpu_percent: Option<f32>,
@@ -296,23 +329,23 @@ pub async fn handle_metrics(
                 .unwrap_or_else(|| "N/A".to_string());
             let rss = m
                 .memory_used_bytes
-                .map(|v| format_bytes(v))
+                .map(format_bytes)
                 .unwrap_or_else(|| "N/A".to_string());
             let dr = m
                 .disk_read_bytes_per_sec
-                .map(|v| format_bytes_per_sec(v))
+                .map(format_bytes_per_sec)
                 .unwrap_or_else(|| "N/A".to_string());
             let dw = m
                 .disk_write_bytes_per_sec
-                .map(|v| format_bytes_per_sec(v))
+                .map(format_bytes_per_sec)
                 .unwrap_or_else(|| "N/A".to_string());
             let nr = m
                 .net_rx_bytes_per_sec
-                .map(|v| format_bytes_per_sec(v))
+                .map(format_bytes_per_sec)
                 .unwrap_or_else(|| "N/A".to_string());
             let nt = m
                 .net_tx_bytes_per_sec
-                .map(|v| format_bytes_per_sec(v))
+                .map(format_bytes_per_sec)
                 .unwrap_or_else(|| "N/A".to_string());
             let vram = match (m.vram_used_bytes, m.vram_total_bytes) {
                 (Some(used), Some(total)) => {
@@ -337,9 +370,7 @@ pub async fn handle_metrics(
     }
 
     if !got_any_sample {
-        eprintln!(
-            "no metrics received (instance may have no running backend right now)"
-        );
+        eprintln!("no metrics received (instance may have no running backend right now)");
     }
     Ok(())
 }
@@ -347,7 +378,10 @@ pub async fn handle_metrics(
 fn print_instance_config(config: GetInstanceConfigResponse) {
     println!("instance_id: {}", config.instance_id);
     println!("name: {}", config.name);
-    println!("backend: {}", crate::helpers::backend_kind_name(config.backend()));
+    println!(
+        "backend: {}",
+        crate::helpers::backend_kind_name(config.backend())
+    );
 
     match config.kind.and_then(|k| k.kind) {
         Some(instance_kind::Kind::LinuxVm(linux_vm)) => {
@@ -386,7 +420,7 @@ fn print_instance_config(config: GetInstanceConfigResponse) {
 
     if let Some(memory) = config.memory {
         println!("[memory]");
-        println!("  size_bytes: {}", memory.size_bytes);
+        println!("  size_bytes: {}", format_size(memory.size_bytes));
         println!("  ballooning: {}", memory.ballooning);
         println!("  zram: {}", memory.zram);
         println!("  ksm: {}", memory.ksm);
@@ -395,7 +429,7 @@ fn print_instance_config(config: GetInstanceConfigResponse) {
     if let Some(disk) = config.disk {
         println!("[disk]");
         println!("  path: {}", disk.path);
-        println!("  size_bytes: {}", disk.size_bytes);
+        println!("  size_bytes: {}", format_size(disk.size_bytes));
         println!(
             "  format: {}",
             match disk.format() {
@@ -436,7 +470,7 @@ fn print_instance_config(config: GetInstanceConfigResponse) {
 
     if let Some(gpu) = config.gpu {
         println!("[gpu]");
-        println!("  hostmem_bytes: {}", gpu.hostmem_bytes);
+        println!("  hostmem_bytes: {}", format_size(gpu.hostmem_bytes));
         println!("  blob: {}", gpu.blob);
         println!("  gl: {}", gpu.gl);
         match gpu.render_backend.and_then(|rb| rb.kind) {
@@ -494,7 +528,8 @@ fn print_instance_config(config: GetInstanceConfigResponse) {
         println!(
             "  device: {}",
             match audio.device() {
-                andler_rpc::proto::AudioDevice::Unspecified => "UNSPECIFIED (defaults to virtio-sound)",
+                andler_rpc::proto::AudioDevice::Unspecified =>
+                    "UNSPECIFIED (defaults to virtio-sound)",
                 andler_rpc::proto::AudioDevice::VirtioSound => "virtio-sound",
                 andler_rpc::proto::AudioDevice::Ich9Hda => "ich9-hda",
             }
@@ -578,9 +613,18 @@ mod tests {
 
     #[test]
     fn parse_state_filter_is_case_insensitive() {
-        assert_eq!(parse_state_filter("running"), Some(InstanceStateKind::Running));
-        assert_eq!(parse_state_filter("RUNNING"), Some(InstanceStateKind::Running));
-        assert_eq!(parse_state_filter("Running"), Some(InstanceStateKind::Running));
+        assert_eq!(
+            parse_state_filter("running"),
+            Some(InstanceStateKind::Running)
+        );
+        assert_eq!(
+            parse_state_filter("RUNNING"),
+            Some(InstanceStateKind::Running)
+        );
+        assert_eq!(
+            parse_state_filter("Running"),
+            Some(InstanceStateKind::Running)
+        );
     }
 
     #[test]

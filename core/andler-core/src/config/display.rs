@@ -1,7 +1,4 @@
-
-
 use serde::{Deserialize, Serialize};
-
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Resolution {
@@ -15,10 +12,8 @@ impl Resolution {
     }
 }
 
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DisplayEngine {
-
     Sdl,
 
     Gtk,
@@ -30,10 +25,8 @@ pub enum DisplayEngine {
     None,
 }
 
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DisplayConfig {
-
     pub resolution: Resolution,
     pub dpi: u32,
 
@@ -43,9 +36,7 @@ pub struct DisplayConfig {
 }
 
 impl DisplayConfig {
-
     pub const FPS_UNLIMITED: u32 = 0;
-
 
     pub fn reference_default() -> Self {
         DisplayConfig {

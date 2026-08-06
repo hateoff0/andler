@@ -1,35 +1,28 @@
-
-
 mod advanced;
 mod basic;
 mod summary;
 
 use std::path::PathBuf;
 
-use andler_core::{
-    ArmTranslator, AudioBackend, DisplayEngine, NetworkMode, RenderBackend,
-};
+use andler_core::{ArmTranslator, AudioBackend, DisplayEngine, NetworkMode, RenderBackend};
 use andler_firmware::{FirmwareError, HardwareDefaults};
-use andler_rpc::proto::{
-    AndroidProfile, CreateAndroidInstanceRequest, CreateInstanceRequest,
-};
+use andler_rpc::proto::{AndroidProfile, CreateAndroidInstanceRequest, CreateInstanceRequest};
 use inquire::{InquireError, Select};
 
 use crate::helpers::ensure_qcow2_extension;
 use crate::{CliAndroidVersion, CliArmTranslator};
 
-pub use basic::{BasicResult, LinuxBasicResult, AndroidBasicResult};
 pub use advanced::AdvancedConfig;
+pub use basic::{AndroidBasicResult, BasicResult, LinuxBasicResult};
 pub use summary::SummaryAction;
-
 
 #[derive(Debug)]
 #[allow(dead_code)] // variants consumed by caller; Rust can't see cross-module call sites
+#[allow(clippy::large_enum_variant)] // carries full proto requests; boxing would complicate callers
 pub enum WizardResult {
     Linux(CreateInstanceRequest, String /* instances_root */),
     Android(CreateAndroidInstanceRequest),
 }
-
 
 #[derive(Default)]
 pub struct PartialArgs {
@@ -54,7 +47,6 @@ enum WizardMode {
     Advanced,
 }
 
-
 pub async fn run(partial: PartialArgs) -> Result<WizardResult, WizardError> {
     let detected = andler_firmware::detect_all();
 
@@ -68,7 +60,10 @@ pub async fn run(partial: PartialArgs) -> Result<WizardResult, WizardError> {
 
     if partial.kind == Some(WizardKind::Android) && detected.ovmf.is_err() {
         return Err(WizardError::Firmware(
-            detected.ovmf.err().unwrap_or(FirmwareError::OvmfVarsNotFound),
+            detected
+                .ovmf
+                .err()
+                .unwrap_or(FirmwareError::OvmfVarsNotFound),
         ));
     }
 
@@ -76,7 +71,7 @@ pub async fn run(partial: PartialArgs) -> Result<WizardResult, WizardError> {
 
     let mode = ask_wizard_mode()?;
     let kind = basic::ask_kind(partial.kind)?;
-    let name = basic::ask_name(partial.name)?;
+    let name = basic::ask_name(partial.name, kind)?;
 
     let mut basic_result = match kind {
         WizardKind::Linux => BasicResult::Linux(basic::run_linux(
@@ -112,7 +107,11 @@ pub async fn run(partial: PartialArgs) -> Result<WizardResult, WizardError> {
                         advanced::run_android(a, &detected, advanced_config.as_ref())?
                     }
                 });
-                reresolve_android_base_image(&mut basic_result, advanced_config.as_ref(), &detected);
+                reresolve_android_base_image(
+                    &mut basic_result,
+                    advanced_config.as_ref(),
+                    &detected,
+                );
             }
             SummaryAction::Cancel => return Err(WizardError::Cancelled),
         }
@@ -135,7 +134,6 @@ pub async fn run(partial: PartialArgs) -> Result<WizardResult, WizardError> {
         }
     }
 }
-
 
 fn reresolve_android_base_image(
     basic_result: &mut BasicResult,
@@ -238,15 +236,13 @@ fn build_quick(
     partial: PartialArgs,
     detected: &HardwareDefaults,
 ) -> Result<WizardResult, WizardError> {
-    let kind = partial
-        .kind
-        .ok_or_else(|| WizardError::Inquire("`--quick` requires `--kind` to specify VM type".into()))?;
+    let kind = partial.kind.ok_or_else(|| {
+        WizardError::Inquire("`--quick` requires `--kind` to specify VM type".into())
+    })?;
 
     match kind {
         WizardKind::Linux => {
-            let name = partial
-                .name
-                .unwrap_or_else(|| "quick-linux".to_string());
+            let name = partial.name.unwrap_or_else(|| "quick-linux".to_string());
             let iso = partial.iso_path.unwrap_or_default();
             let instances_root = partial
                 .instances_root
@@ -277,9 +273,7 @@ fn build_quick(
                 return Err(WizardError::Firmware(FirmwareError::OvmfVarsNotFound));
             }
 
-            let name = partial
-                .name
-                .unwrap_or_else(|| "quick-android".to_string());
+            let name = partial.name.unwrap_or_else(|| "quick-android".to_string());
             let base_image_auto_resolved = partial.base_image_path.is_none();
             let base_image = match partial.base_image_path {
                 Some(path) => {
@@ -328,12 +322,11 @@ pub(crate) fn build_linux_request(
     advanced: Option<&AdvancedConfig>,
     detected: &HardwareDefaults,
 ) -> Result<(CreateInstanceRequest, String), WizardError> {
-    let disk_name = format!("{}-disk", basic.name);
+    let disk_name = "disk".to_string();
     let disk_path = ensure_qcow2_extension(&PathBuf::from(&disk_name));
     let full_disk_path = PathBuf::from(&basic.instances_root).join(&disk_path);
 
-    let mut disk =
-        andler_core::DiskConfig::reference_default(full_disk_path);
+    let mut disk = andler_core::DiskConfig::reference_default(full_disk_path);
     disk.size_bytes = basic
         .disk_size_gib
         .checked_mul(andler_core::DiskConfig::GIB)
@@ -343,13 +336,11 @@ pub(crate) fn build_linux_request(
     let cdrom_bus = if basic.iso_path.is_empty() {
         andler_core::CdromBus::Ide
     } else {
-        advanced
-            .and_then(|a| a.cdrom_bus)
-            .unwrap_or_else(|| {
-                andler_core::CdromBus::recommended_for_iso_filename(std::path::Path::new(
-                    &basic.iso_path,
-                ))
-            })
+        advanced.and_then(|a| a.cdrom_bus).unwrap_or_else(|| {
+            andler_core::CdromBus::recommended_for_iso_filename(std::path::Path::new(
+                &basic.iso_path,
+            ))
+        })
     };
 
     let gpu = build_gpu_config(advanced, detected);
@@ -414,8 +405,7 @@ pub(crate) fn build_android_request(
         profile: Some(profile),
         base_image_path: basic.base_image.clone(),
         instances_root: basic.instances_root.clone(),
-        overlay_size_bytes: basic
-            .disk_size_gib
+        overlay_size_bytes: 20_u64
             .checked_mul(andler_core::DiskConfig::GIB)
             .ok_or_else(|| WizardError::Inquire("overlay size overflow".into()))?,
         ovmf_vars_template: ovmf_vars_template(detected),
@@ -470,17 +460,18 @@ fn build_audio_config(
     audio
 }
 
-fn build_network_config(advanced: Option<&AdvancedConfig>, detected: &HardwareDefaults) -> Result<andler_core::NetworkConfig, WizardError> {
+fn build_network_config(
+    advanced: Option<&AdvancedConfig>,
+    detected: &HardwareDefaults,
+) -> Result<andler_core::NetworkConfig, WizardError> {
     let mut network = andler_core::NetworkConfig::reference_default();
-    
+
     match advanced.map(|a| a.network_mode.clone()) {
         Some(NetworkMode::Bridge { .. }) => {
             network.mode = NetworkMode::Bridge {
-                interface: advanced
-                    .unwrap()
-                    .bridge_interface
-                    .clone()
-                    .ok_or(WizardError::InvalidConfig("Bridge mode requires bridge interface".to_string()))?,
+                interface: advanced.unwrap().bridge_interface.clone().ok_or(
+                    WizardError::InvalidConfig("Bridge mode requires bridge interface".to_string()),
+                )?,
             };
         }
         Some(NetworkMode::Isolated) => {
@@ -490,7 +481,7 @@ fn build_network_config(advanced: Option<&AdvancedConfig>, detected: &HardwareDe
             network.nat_backend = summary::format_nat_backend(detected.passt_available);
         }
     }
-    
+
     Ok(network)
 }
 fn build_input_config(advanced: Option<&AdvancedConfig>) -> andler_core::InputConfig {
@@ -528,11 +519,14 @@ fn resolve_arm_translator(
     if let Some(adv) = advanced.and_then(|a| a.arm_translator) {
         return adv;
     }
-    detected.arm_translator.map(|t| match t {
-        ArmTranslator::Libndk => CliArmTranslator::Libndk,
-        ArmTranslator::Libhoudini => CliArmTranslator::Libhoudini,
-        ArmTranslator::None => CliArmTranslator::None,
-    }).unwrap_or(CliArmTranslator::None)
+    detected
+        .arm_translator
+        .map(|t| match t {
+            ArmTranslator::Libndk => CliArmTranslator::Libndk,
+            ArmTranslator::Libhoudini => CliArmTranslator::Libhoudini,
+            ArmTranslator::None => CliArmTranslator::None,
+        })
+        .unwrap_or(CliArmTranslator::None)
 }
 
 fn ovmf_vars_template(detected: &HardwareDefaults) -> String {
@@ -547,7 +541,6 @@ fn default_instances_root() -> String {
         .to_string_lossy()
         .into_owned()
 }
-
 
 pub async fn handle_wizard(
     client: &mut andler_rpc::proto::andler_service_client::AndlerServiceClient<
@@ -573,7 +566,6 @@ pub async fn handle_wizard(
         Err(e) => Err(e.into()),
     }
 }
-
 
 pub async fn send_result(
     client: &mut andler_rpc::proto::andler_service_client::AndlerServiceClient<
@@ -736,6 +728,11 @@ mod tests {
         };
         let req = build_android_request(&basic, None, &sample_detected()).unwrap();
         assert_eq!(req.name, "android");
+        assert_eq!(
+            req.overlay_size_bytes,
+            20 * andler_core::DiskConfig::GIB,
+            "overlay size must be the fixed 20 GiB default, not derived from disk size"
+        );
         let profile = req.profile.expect("profile");
         assert_eq!(profile.arm_translator(), ProtoArmTranslator::Libndk);
     }
@@ -861,7 +858,6 @@ mod tests {
         }
     }
 
-
     #[test]
     fn test_quick_linux_ovmf_not_found() {
         let partial = PartialArgs {
@@ -928,7 +924,7 @@ mod tests {
     #[test]
     fn test_build_network_config() {
         let detected = sample_detected();
-        
+
         let advanced = AdvancedConfig {
             cdrom_bus: None,
             compact_on_shutdown: false,
@@ -950,7 +946,7 @@ mod tests {
         };
         let network = build_network_config(Some(&advanced), &detected).unwrap();
         assert!(matches!(network.mode, NetworkMode::Nat));
-        
+
         let advanced_bridge = AdvancedConfig {
             cdrom_bus: None,
             compact_on_shutdown: false,
@@ -966,13 +962,15 @@ mod tests {
             arm_translator: None,
             gapps: false,
             microg: false,
-            network_mode: NetworkMode::Bridge { interface: "br0".to_string() },
+            network_mode: NetworkMode::Bridge {
+                interface: "br0".to_string(),
+            },
             bridge_interface: Some("br0".to_string()),
             linked_overlay: false,
         };
         let network = build_network_config(Some(&advanced_bridge), &detected).unwrap();
         assert!(matches!(network.mode, NetworkMode::Bridge { .. }));
-        
+
         let advanced_isolated = AdvancedConfig {
             cdrom_bus: None,
             compact_on_shutdown: false,

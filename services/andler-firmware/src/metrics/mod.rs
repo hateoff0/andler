@@ -1,5 +1,3 @@
-
-
 mod gpu_amd;
 mod gpu_intel;
 mod gpu_nvidia;
@@ -8,27 +6,22 @@ use std::path::{Path, PathBuf};
 
 use andler_core::ResourceMetrics;
 
-
 const DRM_SYSFS_BASE: &str = "/sys/class/drm";
-
 
 fn read_sysfs_u64(base: &Path, relative: &str) -> Option<u64> {
     let content = std::fs::read_to_string(base.join(relative)).ok()?;
     content.trim().parse::<u64>().ok()
 }
 
-
 fn read_sysfs_f32(base: &Path, relative: &str) -> Option<f32> {
     let content = std::fs::read_to_string(base.join(relative)).ok()?;
     content.trim().parse::<f32>().ok()
 }
 
-
 fn read_sysfs_u64_plain(path: &Path) -> Option<u64> {
     let content = std::fs::read_to_string(path).ok()?;
     content.trim().parse::<u64>().ok()
 }
-
 
 fn sorted_drm_cards() -> Vec<PathBuf> {
     let drm_base = Path::new(DRM_SYSFS_BASE);
@@ -54,7 +47,6 @@ fn sorted_drm_cards() -> Vec<PathBuf> {
         .collect()
 }
 
-
 pub fn read_gpu_metrics() -> ResourceMetrics {
     if let Some(card_path) = gpu_amd::find_amd_gpu_card() {
         return gpu_amd::read_amd_metrics(&card_path);
@@ -72,7 +64,6 @@ pub fn read_gpu_metrics() -> ResourceMetrics {
 
     ResourceMetrics::default()
 }
-
 
 pub fn merge_gpu_metrics(base: &mut ResourceMetrics, gpu: &ResourceMetrics) {
     if base.vram_used_bytes.is_none() {

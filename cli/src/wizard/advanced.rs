@@ -1,8 +1,4 @@
-
-
-use andler_core::{
-    AudioBackend, CdromBus, NetworkMode, PointerMode, RenderBackend, Resolution,
-};
+use andler_core::{AudioBackend, CdromBus, NetworkMode, PointerMode, RenderBackend, Resolution};
 use andler_firmware::HardwareDefaults;
 use inquire::{Confirm, CustomType, Select, Text};
 
@@ -157,16 +153,13 @@ fn ask_cdrom_bus(
         vec![ide, virtio]
     };
 
-    let choice = Select::new(
-        &format!("Installation media detected. CD-ROM bus (auto: {rec_str}):"),
-        options,
-    )
-    .with_help_message(
-        "virtio-scsi — faster, modern distro initrds support it; \
+    let choice = Select::new(&format!("CD-ROM bus (auto: {rec_str}):"), options)
+        .with_help_message(
+            "virtio-scsi — faster, modern distro initrds support it; \
          ide — compatible with Windows and any unknown ISO",
-    )
-    .prompt()
-    .map_err(map_inquire_err)?;
+        )
+        .prompt()
+        .map_err(map_inquire_err)?;
 
     Ok(if choice.starts_with("virtio") {
         CdromBus::VirtioScsi
@@ -263,9 +256,7 @@ fn ask_display_resolution(prefilled: Option<Resolution>) -> Result<Resolution, W
         .with_help_message(
             "Initial screen resolution. Format: WIDTHxHEIGHT (e.g. 1920x1080, 2560x1440). \
              Note: not yet applied to the actual display output (QEMU's SDL/GTK backends \
-             don't take a resolution parameter) -- set it in the guest OS after boot for now. \
-             Note: not yet applied to the actual display output (QEMU's SDL/GTK backends \
-             don't take a resolution parameter) -- set it in the guest OS after boot for now."
+             don't take a resolution parameter) -- set it in the guest OS after boot for now.",
         )
         .with_validator(|s: &str| match parse_resolution(s) {
             Ok(_) => Ok(inquire::validator::Validation::Valid),
@@ -302,14 +293,12 @@ fn ask_audio_backend(
     };
 
     let choice = Select::new("Audio backend:", options)
-        .with_help_message(
-            "PipeWire — modern, recommended; PulseAudio — legacy; None — no audio",
-        )
+        .with_help_message("PipeWire — modern, recommended; PulseAudio — legacy; None — no audio")
         .with_starting_cursor(default_idx)
         .prompt()
         .map_err(map_inquire_err)?;
 
-    Ok(parse_audio_choice(&choice))
+    Ok(parse_audio_choice(choice))
 }
 
 fn ask_clipboard_enabled(prefilled: Option<bool>) -> Result<bool, WizardError> {
@@ -507,14 +496,8 @@ pub fn parse_resolution(s: &str) -> Result<Resolution, String> {
     let (w, h) = s
         .split_once('x')
         .ok_or_else(|| "Invalid format. Use WIDTHxHEIGHT, e.g. 1920x1080".to_string())?;
-    let width: u32 = w
-        .trim()
-        .parse()
-        .map_err(|_| "Invalid width".to_string())?;
-    let height: u32 = h
-        .trim()
-        .parse()
-        .map_err(|_| "Invalid height".to_string())?;
+    let width: u32 = w.trim().parse().map_err(|_| "Invalid width".to_string())?;
+    let height: u32 = h.trim().parse().map_err(|_| "Invalid height".to_string())?;
     if !(MIN_RESOLUTION..=MAX_RESOLUTION).contains(&width)
         || !(MIN_RESOLUTION..=MAX_RESOLUTION).contains(&height)
     {
@@ -537,21 +520,27 @@ pub fn parse_gpu_memory(s: &str) -> Result<u64, String> {
     }
 }
 
-
-fn ask_network_mode(_prefilled: Option<NetworkMode>) -> Result<NetworkMode, WizardError> {
-    let options = vec!["NAT (default)", "Bridge", "Isolated"];
+fn ask_network_mode(prefilled: Option<NetworkMode>) -> Result<NetworkMode, WizardError> {
+    let options = vec!["NAT (default)", "Bridge", "Isolated (not implemented yet)"];
     let selection = Select::new("Network mode:", options)
+        .with_starting_cursor(match prefilled {
+            Some(NetworkMode::Nat) => 0,
+            Some(NetworkMode::Bridge { .. }) => 1,
+            Some(NetworkMode::Isolated) => 2,
+            None => 0,
+        })
         .prompt()
         .map_err(map_inquire_err)?;
 
-    Ok(match &*selection {
+    Ok(match selection {
         "NAT (default)" | "NAT" => NetworkMode::Nat,
-        "Bridge" => NetworkMode::Bridge { interface: String::new() },
-        "Isolated" => NetworkMode::Isolated,
+        "Bridge" => NetworkMode::Bridge {
+            interface: String::new(),
+        },
+        "Isolated (not implemented yet)" | "Isolated" => NetworkMode::Isolated,
         _ => unreachable!(),
     })
 }
-
 
 fn ask_bridge_interface(prefilled: Option<String>) -> Result<Option<String>, WizardError> {
     let prompt = Text::new("Bridge interface name (e.g., br0):")

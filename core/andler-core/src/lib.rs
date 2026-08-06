@@ -1,5 +1,3 @@
-
-
 pub mod android_profile;
 pub mod backend;
 pub mod base_image;
@@ -19,8 +17,7 @@ pub use config::{
     AudioBackend, AudioConfig, AudioDevice, BackendKind, CdromBus, CpuConfig, CpuPriority,
     DiskConfig, DiskFormat, DisplayConfig, DisplayEngine, FirmwareConfig, GpuConfig, InputConfig,
     InstanceConfig, InstanceId, InstanceKind, MemoryConfig, NatBackend, NetworkConfig, NetworkMode,
-    PointerMode,
-    RenderBackend, Resolution,
+    PointerMode, RenderBackend, Resolution,
 };
 pub use error::{BackendError, FsmError};
 pub use fsm::{InstanceEvent, InstanceState};

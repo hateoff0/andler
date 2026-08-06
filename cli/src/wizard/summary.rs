@@ -1,7 +1,5 @@
-
-
 use andler_core::{
-    AudioBackend, CdromBus, DisplayEngine, NetworkMode, NatBackend, PointerMode, RenderBackend,
+    AudioBackend, CdromBus, DisplayEngine, NatBackend, NetworkMode, PointerMode, RenderBackend,
     Resolution,
 };
 use andler_firmware::HardwareDefaults;
@@ -87,7 +85,7 @@ fn print_summary(
         Some(NetworkMode::Isolated) => "Isolated",
         Some(NetworkMode::Nat) | None => {
             if detected.passt_available {
-                "NAT/passt"
+                "NAT (passt)"
             } else {
                 "NAT"
             }
@@ -105,17 +103,26 @@ fn print_summary(
                 println!("│  ISO:               (no ISO — boot from disk)");
             } else {
                 println!("│  ISO:               {}", l.iso_path);
-                let cdrom = advanced
-                    .and_then(|a| a.cdrom_bus)
-                    .unwrap_or_else(|| {
-                        CdromBus::recommended_for_iso_filename(std::path::Path::new(&l.iso_path))
-                    });
-                println!("│  CD-ROM bus:        {cdrom:?}{}", suffix(advanced.is_some()));
+                let cdrom = advanced.and_then(|a| a.cdrom_bus).unwrap_or_else(|| {
+                    CdromBus::recommended_for_iso_filename(std::path::Path::new(&l.iso_path))
+                });
+                println!(
+                    "│  CD-ROM bus:        {cdrom:?}{}",
+                    suffix(advanced.is_some())
+                );
             }
-            let disk_name = format!("{}-disk.qcow2", l.name);
+            let disk_name = "disk.qcow2";
             println!(
                 "│  Disk:              {}/<id>/{disk_name} ({} GiB, qcow2)",
                 l.instances_root, l.disk_size_gib
+            );
+            println!(
+                "│  Firmware:          {}",
+                if l.enable_uefi {
+                    "UEFI/OVMF"
+                } else {
+                    "Legacy BIOS"
+                }
             );
         }
         BasicResult::Android(a) => {
@@ -127,7 +134,7 @@ fn print_summary(
                 a.android_version,
                 if is_basic { " (recommended)" } else { "" }
             );
-            let disk_name = format!("{}-disk.qcow2", a.name);
+            let disk_name = "disk.qcow2";
             println!(
                 "│  Disk:              {}/<id>/{disk_name} ({} GiB, qcow2)",
                 a.instances_root, a.disk_size_gib
@@ -155,7 +162,10 @@ fn print_summary(
                 }
             );
             println!("│  GApps:             {gapps}{}", suffix(true));
-            println!("│  MicroG:            {microg}{}", suffix(advanced.is_some()));
+            println!(
+                "│  MicroG:            {microg}{}",
+                suffix(advanced.is_some())
+            );
 
             let linked_overlay = advanced.map(|adv| adv.linked_overlay).unwrap_or(false);
             let disk_mode = if linked_overlay {
@@ -189,14 +199,8 @@ fn print_summary(
         Err(_) => {}
     }
 
-    let gpu_suffix = if is_basic {
-        " (auto-detected)"
-    } else {
-        ""
-    };
-    println!(
-        "│  GPU:               {gpu_render:?}, {gpu_memory_mib} MiB{gpu_suffix}"
-    );
+    let gpu_suffix = if is_basic { " (auto-detected)" } else { "" };
+    println!("│  GPU:               {gpu_render:?}, {gpu_memory_mib} MiB{gpu_suffix}");
     let display_mode = if fullscreen { "fullscreen" } else { "windowed" };
     println!(
         "│  Display:           {}x{}, {display_mode}{}",
@@ -207,11 +211,7 @@ fn print_summary(
     let _ = display_engine;
     println!(
         "│  Audio:             {audio:?}{}",
-        if is_basic {
-            " (auto-detected)"
-        } else {
-            ""
-        }
+        if is_basic { " (auto-detected)" } else { "" }
     );
     println!(
         "│  Clipboard:         {}{}",

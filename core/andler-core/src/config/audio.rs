@@ -1,8 +1,4 @@
-
-
 use serde::{Deserialize, Serialize};
-
-
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AudioBackend {
@@ -12,15 +8,12 @@ pub enum AudioBackend {
     None,
 }
 
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AudioDevice {
-
     VirtioSound,
 
     Ich9Hda,
 }
-
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AudioConfig {
@@ -35,7 +28,6 @@ fn default_audio_device() -> AudioDevice {
 }
 
 impl AudioConfig {
-
     pub fn reference_default() -> Self {
         AudioConfig {
             backend: AudioBackend::Pipewire,

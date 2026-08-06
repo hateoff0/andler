@@ -1,7 +1,5 @@
-
-
-use std::pin::Pin;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use andler_core::{CloneMode, InstanceConfig};
@@ -36,77 +34,82 @@ impl DaemonService {
     }
 }
 
+fn status_message(err: &DaemonError) -> String {
+    // The gRPC "grpc-message" header must not contain control characters other
+    // than HTAB: h2 rejects them and clients surface "h2 protocol error"
+    // instead of the real error (e.g. multi-line package-manager stderr).
+    // Long messages (multi-KB package-manager stderr) also trip the h2 client
+    // (PROTOCOL_ERROR on oversized trailers), so truncate the details.
+    const MAX_MESSAGE_CHARS: usize = 384;
+    let s = err.to_string();
+    let cleaned: String = s
+        .chars()
+        .map(|c| if c.is_control() && c != '\t' { ' ' } else { c })
+        .collect();
+    cleaned.chars().take(MAX_MESSAGE_CHARS).collect()
+}
 
 impl From<DaemonError> for Status {
     fn from(err: DaemonError) -> Self {
+        let msg = status_message(&err);
         match &err {
-            DaemonError::InstanceNotFound(_) => Status::not_found(err.to_string()),
-            DaemonError::NoBackendRegistered(_) => Status::unimplemented(err.to_string()),
-            DaemonError::InvalidTransition(_) => Status::failed_precondition(err.to_string()),
-            DaemonError::InstanceNotRemovable(_, _) => {
-                Status::failed_precondition(err.to_string())
-            }
-            DaemonError::InstanceAlreadyStopped(_, _) => {
-                Status::failed_precondition(err.to_string())
-            }
-            DaemonError::InstanceNotClonable(_, _) => Status::failed_precondition(err.to_string()),
+            DaemonError::InvalidConfig(_) => Status::invalid_argument(msg.clone()),
+            DaemonError::InstanceNotFound(_) => Status::not_found(msg.clone()),
+            DaemonError::NoBackendRegistered(_) => Status::unimplemented(msg.clone()),
+            DaemonError::InvalidTransition(_) => Status::failed_precondition(msg.clone()),
+            DaemonError::InstanceNotRemovable(_, _) => Status::failed_precondition(msg.clone()),
+            DaemonError::InstanceAlreadyStopped(_, _) => Status::failed_precondition(msg.clone()),
+            DaemonError::InstanceNotClonable(_, _) => Status::failed_precondition(msg.clone()),
             DaemonError::SharedBaseNotSupportedForLinuxVm(_) => {
-                Status::failed_precondition(err.to_string())
+                Status::failed_precondition(msg.clone())
             }
-            DaemonError::InstanceHasLiveClones(_, _) => {
-                Status::failed_precondition(err.to_string())
-            }
-            DaemonError::SnapshotNotFound { .. } => Status::not_found(err.to_string()),
-            DaemonError::SnapshotAlreadyExists { .. } => Status::already_exists(err.to_string()),
+            DaemonError::InstanceHasLiveClones(_, _) => Status::failed_precondition(msg.clone()),
+            DaemonError::SnapshotNotFound { .. } => Status::not_found(msg.clone()),
+            DaemonError::SnapshotAlreadyExists { .. } => Status::already_exists(msg.clone()),
             DaemonError::SnapshotOperationRequiresRunningInstance(_, _) => {
-                Status::failed_precondition(err.to_string())
+                Status::failed_precondition(msg.clone())
             }
-            DaemonError::SnapshotLimitExceeded { .. } => {
-                Status::failed_precondition(err.to_string())
-            }
+            DaemonError::SnapshotLimitExceeded { .. } => Status::failed_precondition(msg.clone()),
             DaemonError::Backend(andler_core::BackendError::NotImplemented { .. }) => {
-                Status::unimplemented(err.to_string())
+                Status::unimplemented(msg.clone())
             }
             DaemonError::Backend(andler_core::BackendError::HandleNotFound(_)) => {
-                Status::failed_precondition(err.to_string())
+                Status::failed_precondition(msg.clone())
             }
             DaemonError::Backend(andler_core::BackendError::ProcessNotRunning) => {
-                Status::failed_precondition(err.to_string())
+                Status::failed_precondition(msg.clone())
             }
             DaemonError::Disk(andler_disk::DiskError::InsufficientDiskSpace { .. }) => {
-                Status::resource_exhausted(err.to_string())
+                Status::resource_exhausted(msg.clone())
             }
             DaemonError::Backend(_)
             | DaemonError::Disk(_)
             | DaemonError::Io { .. }
-            | DaemonError::Restore(_) => Status::internal(err.to_string()),
-            DaemonError::Firmware(_) => Status::internal(err.to_string()),
-            DaemonError::EmptyInstanceRef => Status::invalid_argument(err.to_string()),
-            DaemonError::MalformedInstanceRef(_) => Status::invalid_argument(err.to_string()),
-            DaemonError::InstanceRefNotFound(_) => Status::not_found(err.to_string()),
-            DaemonError::AmbiguousInstanceId { .. } => Status::invalid_argument(err.to_string()),
-            DaemonError::ConfigIdMismatch { .. } => Status::invalid_argument(err.to_string()),
-            DaemonError::ConfigKindChanged(_) => Status::invalid_argument(err.to_string()),
-            DaemonError::ConfigDiskPathChanged(_) => Status::invalid_argument(err.to_string()),
-            DaemonError::GuestAgentUnavailable { .. } => Status::failed_precondition(err.to_string()),
-            DaemonError::InvalidConfigKey(_) => Status::invalid_argument(err.to_string()),
-            DaemonError::NotAndroid(_) => Status::failed_precondition(err.to_string()),
-            DaemonError::InstanceMustBeStopped(_, _) => Status::failed_precondition(err.to_string()),
-            DaemonError::MissingOvmfVarsTemplate => Status::invalid_argument(err.to_string()),
+            | DaemonError::Store(_) => Status::internal(msg.clone()),
+            DaemonError::Firmware(_) => Status::internal(msg.clone()),
+            DaemonError::EmptyInstanceRef => Status::invalid_argument(msg.clone()),
+            DaemonError::MalformedInstanceRef(_) => Status::invalid_argument(msg.clone()),
+            DaemonError::InstanceRefNotFound(_) => Status::not_found(msg.clone()),
+            DaemonError::AmbiguousInstanceId { .. } => Status::invalid_argument(msg.clone()),
+            DaemonError::ConfigIdMismatch { .. } => Status::invalid_argument(msg.clone()),
+            DaemonError::ConfigKindChanged(_) => Status::invalid_argument(msg.clone()),
+            DaemonError::ConfigDiskPathChanged(_) => Status::invalid_argument(msg.clone()),
+            DaemonError::GuestAgentUnavailable { .. } => Status::failed_precondition(msg.clone()),
+            DaemonError::InvalidConfigKey(_) => Status::invalid_argument(msg.clone()),
+            DaemonError::NotAndroid(_) => Status::failed_precondition(msg.clone()),
+            DaemonError::InstanceMustBeStopped(_, _) => Status::failed_precondition(msg.clone()),
+            DaemonError::MissingOvmfVarsTemplate => Status::invalid_argument(msg.clone()),
         }
     }
 }
 
-
 #[tonic::async_trait]
 impl AndlerService for DaemonService {
-
     type StreamInstanceLogsStream =
         Pin<Box<dyn Stream<Item = Result<LogLineResponse, Status>> + Send + 'static>>;
 
     type StreamResourceMetricsStream =
         Pin<Box<dyn Stream<Item = Result<ResourceMetricsResponse, Status>> + Send + 'static>>;
-
 
     async fn create_instance(
         &self,
@@ -128,7 +131,11 @@ impl AndlerService for DaemonService {
 
         let id = self
             .daemon
-            .create_linux_instance(cfg, andler_core::paths::instances_root(), ovmf_vars_template)
+            .create_linux_instance(
+                cfg,
+                andler_core::paths::instances_root(),
+                ovmf_vars_template,
+            )
             .await?;
         Ok(Response::new(CreateInstanceResponse {
             instance_id: id.0.to_string(),
@@ -180,7 +187,10 @@ impl AndlerService for DaemonService {
         &self,
         request: Request<InstanceIdRequest>,
     ) -> Result<Response<Empty>, Status> {
-        let id = self.daemon.resolve_instance_id(&request.into_inner().instance_id).await?;
+        let id = self
+            .daemon
+            .resolve_instance_id(&request.into_inner().instance_id)
+            .await?;
         self.daemon.start_instance(id).await?;
         Ok(Response::new(Empty {}))
     }
@@ -199,7 +209,10 @@ impl AndlerService for DaemonService {
         &self,
         request: Request<InstanceIdRequest>,
     ) -> Result<Response<Empty>, Status> {
-        let id = self.daemon.resolve_instance_id(&request.into_inner().instance_id).await?;
+        let id = self
+            .daemon
+            .resolve_instance_id(&request.into_inner().instance_id)
+            .await?;
         self.daemon.pause_instance(id).await?;
         Ok(Response::new(Empty {}))
     }
@@ -208,7 +221,10 @@ impl AndlerService for DaemonService {
         &self,
         request: Request<InstanceIdRequest>,
     ) -> Result<Response<Empty>, Status> {
-        let id = self.daemon.resolve_instance_id(&request.into_inner().instance_id).await?;
+        let id = self
+            .daemon
+            .resolve_instance_id(&request.into_inner().instance_id)
+            .await?;
         self.daemon.resume_instance(id).await?;
         Ok(Response::new(Empty {}))
     }
@@ -217,7 +233,10 @@ impl AndlerService for DaemonService {
         &self,
         request: Request<InstanceIdRequest>,
     ) -> Result<Response<InstanceStatusResponse>, Status> {
-        let id = self.daemon.resolve_instance_id(&request.into_inner().instance_id).await?;
+        let id = self
+            .daemon
+            .resolve_instance_id(&request.into_inner().instance_id)
+            .await?;
         let status = self.daemon.status(id).await?;
         let (state, error_message) = convert::instance_state_to_proto(&status.state);
         Ok(Response::new(InstanceStatusResponse {
@@ -227,7 +246,6 @@ impl AndlerService for DaemonService {
         }))
     }
 
-
     async fn list_instances(
         &self,
         _request: Request<Empty>,
@@ -236,11 +254,12 @@ impl AndlerService for DaemonService {
         let instances = summaries
             .into_iter()
             .map(|summary| {
-                let (state, _error_message) = convert::instance_state_to_proto(&summary.state);
+                let (state, error_message) = convert::instance_state_to_proto(&summary.state);
                 InstanceListEntry {
                     instance_id: summary.id.0.to_string(),
                     name: summary.name,
                     state: state as i32,
+                    error_message,
                 }
             })
             .collect();
@@ -253,21 +272,25 @@ impl AndlerService for DaemonService {
         request: Request<RemoveInstanceRequest>,
     ) -> Result<Response<Empty>, Status> {
         let request = request.into_inner();
-        let id = self.daemon.resolve_instance_id(&request.instance_id).await?;
+        let id = self
+            .daemon
+            .resolve_instance_id(&request.instance_id)
+            .await?;
         self.daemon.remove_instance(id, request.purge).await?;
         Ok(Response::new(Empty {}))
     }
-
 
     async fn get_instance_config(
         &self,
         request: Request<InstanceIdRequest>,
     ) -> Result<Response<GetInstanceConfigResponse>, Status> {
-        let id = self.daemon.resolve_instance_id(&request.into_inner().instance_id).await?;
+        let id = self
+            .daemon
+            .resolve_instance_id(&request.into_inner().instance_id)
+            .await?;
         let config = self.daemon.get_instance_config(id).await?;
         Ok(Response::new(config.into()))
     }
-
 
     async fn update_instance_config(
         &self,
@@ -280,35 +303,47 @@ impl AndlerService for DaemonService {
         Ok(Response::new(Empty {}))
     }
 
-
+    // tonic::Status in the stream error slot is required by the gRPC API — boxing it
+    // would add indirection for no gain, so silence the size lint here.
+    #[allow(clippy::result_large_err)]
     async fn stream_instance_logs(
         &self,
         request: Request<InstanceIdRequest>,
     ) -> Result<Response<Self::StreamInstanceLogsStream>, Status> {
-        let id = self.daemon.resolve_instance_id(&request.into_inner().instance_id).await?;
+        let id = self
+            .daemon
+            .resolve_instance_id(&request.into_inner().instance_id)
+            .await?;
         let inner = self.daemon.stream_instance_logs(id).await?;
         let mapped = inner.map(|line| Ok(LogLineResponse::from(line)));
         Ok(Response::new(Box::pin(mapped)))
     }
 
-
+    // tonic::Status in the stream error slot is required by the gRPC API — boxing it
+    // would add indirection for no gain, so silence the size lint here.
+    #[allow(clippy::result_large_err)]
     async fn stream_resource_metrics(
         &self,
         request: Request<InstanceIdRequest>,
     ) -> Result<Response<Self::StreamResourceMetricsStream>, Status> {
-        let id = self.daemon.resolve_instance_id(&request.into_inner().instance_id).await?;
+        let id = self
+            .daemon
+            .resolve_instance_id(&request.into_inner().instance_id)
+            .await?;
         let inner = self.daemon.stream_resource_metrics(id).await?;
         let mapped = inner.map(|m| Ok(ResourceMetricsResponse::from(m)));
         Ok(Response::new(Box::pin(mapped)))
     }
-
 
     async fn clone_instance(
         &self,
         request: Request<CloneInstanceRequest>,
     ) -> Result<Response<CreateInstanceResponse>, Status> {
         let req = request.into_inner();
-        let source_id = self.daemon.resolve_instance_id(&req.source_instance_id).await?;
+        let source_id = self
+            .daemon
+            .resolve_instance_id(&req.source_instance_id)
+            .await?;
         let mode = CloneMode::try_from(req.mode())?;
 
         let id = self
@@ -321,13 +356,15 @@ impl AndlerService for DaemonService {
         }))
     }
 
-
     async fn export_instance_disk(
         &self,
         request: Request<ExportInstanceDiskRequest>,
     ) -> Result<Response<ExportInstanceDiskResponse>, Status> {
         let req = request.into_inner();
-        let source_id = self.daemon.resolve_instance_id(&req.source_instance_id).await?;
+        let source_id = self
+            .daemon
+            .resolve_instance_id(&req.source_instance_id)
+            .await?;
 
         self.daemon
             .export_instance_disk(source_id, req.dest_path.clone().into())
@@ -337,7 +374,6 @@ impl AndlerService for DaemonService {
             dest_path: req.dest_path,
         }))
     }
-
 
     async fn create_snapshot(
         &self,
@@ -370,7 +406,9 @@ impl AndlerService for DaemonService {
         let req = request.into_inner();
         let id = self.daemon.resolve_instance_id(&req.instance_id).await?;
 
-        self.daemon.restore_snapshot(id, req.tag, req.timeout_secs).await?;
+        self.daemon
+            .restore_snapshot(id, req.tag, req.timeout_secs)
+            .await?;
 
         Ok(Response::new(Empty {}))
     }
@@ -382,7 +420,9 @@ impl AndlerService for DaemonService {
         let req = request.into_inner();
         let id = self.daemon.resolve_instance_id(&req.instance_id).await?;
 
-        self.daemon.delete_snapshot(id, req.tag, req.timeout_secs).await?;
+        self.daemon
+            .delete_snapshot(id, req.tag, req.timeout_secs)
+            .await?;
 
         Ok(Response::new(Empty {}))
     }
@@ -391,7 +431,10 @@ impl AndlerService for DaemonService {
         &self,
         request: Request<InstanceIdRequest>,
     ) -> Result<Response<ListSnapshotsResponse>, Status> {
-        let id = self.daemon.resolve_instance_id(&request.into_inner().instance_id).await?;
+        let id = self
+            .daemon
+            .resolve_instance_id(&request.into_inner().instance_id)
+            .await?;
 
         let records = self.daemon.list_snapshots(id).await?;
 
@@ -450,7 +493,9 @@ impl AndlerService for DaemonService {
             })
             .collect();
 
-        Ok(Response::new(ListGuestPackagesResponse { packages: entries }))
+        Ok(Response::new(ListGuestPackagesResponse {
+            packages: entries,
+        }))
     }
 
     async fn switch_arm_translator(
@@ -498,5 +543,4 @@ impl AndlerService for DaemonService {
             mode: andler_rpc::proto::AndroidBootMode::from(mode) as i32,
         }))
     }
-
 }

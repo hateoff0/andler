@@ -1,5 +1,3 @@
-
-
 use andler_core::InstanceKind;
 use andler_rpc::proto::{CreateAndroidInstanceRequest, CreateInstanceRequest};
 
@@ -9,7 +7,6 @@ struct Check {
     name: &'static str,
     result: Result<String, String>,
 }
-
 
 fn run_checks(resolved: &Resolved, checks: Vec<Check>) -> bool {
     println!("─── Verifying instance config ─────────────────────────────────");
@@ -53,7 +50,10 @@ fn check_disk(resolved: &Resolved) -> Check {
             )),
         }
     };
-    Check { name: "Disk", result }
+    Check {
+        name: "Disk",
+        result,
+    }
 }
 
 fn check_ovmf(resolved: &Resolved, kind_requires_uefi: bool) -> Check {
@@ -65,7 +65,10 @@ fn check_ovmf(resolved: &Resolved, kind_requires_uefi: bool) -> Check {
         }
         None => Ok("not found — will fall back to Legacy BIOS".to_string()),
     };
-    Check { name: "OVMF firmware", result }
+    Check {
+        name: "OVMF firmware",
+        result,
+    }
 }
 
 fn check_iso(resolved: &Resolved) -> Check {
@@ -79,17 +82,25 @@ fn check_iso(resolved: &Resolved) -> Check {
     } else {
         Err(format!("file not found: {}", iso_path.display()))
     };
-    Check { name: "ISO image", result }
+    Check {
+        name: "ISO image",
+        result,
+    }
 }
 
 fn check_gpu_memory(resolved: &Resolved) -> Check {
     let mib = resolved.cfg.gpu.hostmem_bytes / andler_core::GpuConfig::MIB;
     let result = if !(256..=16384).contains(&mib) {
-        Err(format!("{mib} MiB is outside the sane range (256-16384 MiB)"))
+        Err(format!(
+            "{mib} MiB is outside the sane range (256-16384 MiB)"
+        ))
     } else {
         Ok(format!("{mib} MiB"))
     };
-    Check { name: "GPU memory", result }
+    Check {
+        name: "GPU memory",
+        result,
+    }
 }
 
 fn check_cpu_memory(resolved: &Resolved) -> Check {
@@ -102,7 +113,10 @@ fn check_cpu_memory(resolved: &Resolved) -> Check {
     } else {
         Ok(format!("{cores} cores, {gib} GiB"))
     };
-    Check { name: "CPU/Memory", result }
+    Check {
+        name: "CPU/Memory",
+        result,
+    }
 }
 
 pub fn verify_linux(req: &CreateInstanceRequest) -> Result<bool, Box<dyn std::error::Error>> {
@@ -127,7 +141,7 @@ pub fn verify_android(
     let base_image_check = Check {
         name: "Base image",
         result: if req.base_image_path.is_empty() {
-            match req.profile.clone() {
+            match req.profile {
                 None => Err("missing profile".to_string()),
                 Some(profile_msg) => match andler_core::AndroidProfile::try_from(profile_msg) {
                     Err(e) => Err(e.to_string()),
@@ -171,7 +185,6 @@ mod tests {
         InputConfig, InstanceConfig, InstanceId, MemoryConfig, NetworkConfig,
     };
     use std::path::PathBuf;
-
 
     fn fixture_resolved(disk_path: PathBuf) -> Resolved {
         let cfg = InstanceConfig {
@@ -227,7 +240,10 @@ mod tests {
     fn check_ovmf_passes_when_none_and_not_required() {
         let resolved = fixture_resolved(std::env::temp_dir().join("disk.qcow2"));
         let check = check_ovmf(&resolved, false);
-        assert!(check.result.is_ok(), "Legacy BIOS fallback is a pass for Linux");
+        assert!(
+            check.result.is_ok(),
+            "Legacy BIOS fallback is a pass for Linux"
+        );
     }
 
     #[test]
@@ -318,8 +334,14 @@ mod tests {
     fn run_checks_returns_false_if_any_check_failed() {
         let resolved = fixture_resolved(std::env::temp_dir().join("disk.qcow2"));
         let checks = vec![
-            Check { name: "a", result: Ok("fine".to_string()) },
-            Check { name: "b", result: Err("broken".to_string()) },
+            Check {
+                name: "a",
+                result: Ok("fine".to_string()),
+            },
+            Check {
+                name: "b",
+                result: Err("broken".to_string()),
+            },
         ];
         assert!(!run_checks(&resolved, checks));
     }
@@ -328,8 +350,14 @@ mod tests {
     fn run_checks_returns_true_if_all_passed() {
         let resolved = fixture_resolved(std::env::temp_dir().join("disk.qcow2"));
         let checks = vec![
-            Check { name: "a", result: Ok("fine".to_string()) },
-            Check { name: "b", result: Ok("also fine".to_string()) },
+            Check {
+                name: "a",
+                result: Ok("fine".to_string()),
+            },
+            Check {
+                name: "b",
+                result: Ok("also fine".to_string()),
+            },
         ];
         assert!(run_checks(&resolved, checks));
     }

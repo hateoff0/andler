@@ -1,11 +1,11 @@
-
-
 use andler_rpc::proto::andler_service_client::AndlerServiceClient;
 use andler_rpc::proto::{
     AndroidBootMode as ProtoAndroidBootMode, InstallGuestAgentRequest, InstanceIdRequest,
     RemoveGuestAgentRequest, SwitchAndroidBootModeRequest, SwitchArmTranslatorRequest,
 };
 use tonic::transport::Channel;
+
+use std::io::IsTerminal;
 
 use crate::lifecycle;
 
@@ -26,14 +26,11 @@ impl From<CliBootMode> for ProtoAndroidBootMode {
 
 #[derive(Debug, Clone, clap::Subcommand)]
 pub enum GuestAction {
-
     List {
-
         instance_id: Option<String>,
     },
 
     Install {
-
         package: String,
 
         instance_id: String,
@@ -43,7 +40,6 @@ pub enum GuestAction {
     },
 
     Remove {
-
         package: String,
 
         instance_id: String,
@@ -81,21 +77,24 @@ pub async fn handle(
             if packages.is_empty() {
                 println!("No known packages.");
             } else {
-                println!(
-                    "{:<25} {:<45} {}",
-                    "Package", "Description", "Status"
-                );
+                let is_tty = std::io::stdout().is_terminal();
+                println!("{:<25} {:<45} Status", "Package", "Description");
                 println!("{}", "-".repeat(80));
                 for pkg in &packages {
-                    let status_str = match pkg.status.as_str() {
-                        "installed" => "\x1b[32minstalled\x1b[0m",
-                        "not_installed" => "\x1b[31mnot installed\x1b[0m",
-                        _ => "\x1b[33munknown\x1b[0m",
+                    let status_str = if is_tty {
+                        match pkg.status.as_str() {
+                            "installed" => "\x1b[32minstalled\x1b[0m",
+                            "not_installed" => "\x1b[31mnot installed\x1b[0m",
+                            _ => "\x1b[33munknown\x1b[0m",
+                        }
+                    } else {
+                        match pkg.status.as_str() {
+                            "installed" => "installed",
+                            "not_installed" => "not installed",
+                            _ => "unknown",
+                        }
                     };
-                    println!(
-                        "{:<25} {:<45} {}",
-                        pkg.name, pkg.description, status_str
-                    );
+                    println!("{:<25} {:<45} {}", pkg.name, pkg.description, status_str);
                 }
             }
         }
@@ -124,10 +123,9 @@ pub async fn handle(
                 };
                 client.switch_arm_translator(request).await?;
                 match &translator_dir {
-                    Some(dir) => println!(
-                        "Translator `{package}` installed from {}",
-                        dir.display()
-                    ),
+                    Some(dir) => {
+                        println!("Translator `{package}` installed from {}", dir.display())
+                    }
                     None => println!("Translator `{package}` installed (auto-download)"),
                 }
             } else {

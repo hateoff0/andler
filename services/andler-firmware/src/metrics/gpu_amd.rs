@@ -1,5 +1,3 @@
-
-
 use std::path::{Path, PathBuf};
 
 use andler_core::ResourceMetrics;
@@ -10,16 +8,11 @@ const AMD_VRAM_USED: &str = "device/mem_info_vram_used";
 const AMD_VRAM_TOTAL: &str = "device/mem_info_vram_total";
 const AMD_GPU_BUSY: &str = "device/gpu_busy_percent";
 
-
 pub(super) fn find_amd_gpu_card() -> Option<PathBuf> {
-    for card_path in sorted_drm_cards() {
-        if card_path.join(AMD_VRAM_USED).exists() {
-            return Some(card_path);
-        }
-    }
-    None
+    sorted_drm_cards()
+        .into_iter()
+        .find(|card_path| card_path.join(AMD_VRAM_USED).exists())
 }
-
 
 pub(super) fn read_amd_metrics(card_path: &Path) -> ResourceMetrics {
     ResourceMetrics {

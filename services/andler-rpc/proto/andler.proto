@@ -276,6 +276,7 @@ message InstanceListEntry {
     string instance_id = 1;
     string name = 2;
     InstanceStateKind state = 3;
+    string error_message = 4;
 }
 
 message ListInstancesResponse {

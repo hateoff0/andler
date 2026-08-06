@@ -1,5 +1,3 @@
-
-
 use std::sync::Arc;
 
 use andler_rpc::proto::andler_service_client::AndlerServiceClient;
@@ -8,7 +6,7 @@ use andler_rpc::proto::{
     AudioConfig, CloneInstanceRequest, CloneMode, CpuConfig, CreateInstanceRequest, DiskConfig,
     DisplayConfig, Empty, ExportInstanceDiskRequest, FirmwareConfig, GetInstanceConfigResponse,
     GpuConfig, InputConfig, InstanceIdRequest, InstanceStateKind, MemoryConfig, NetworkConfig,
-    RemoveInstanceRequest, Resolution,
+    RemoveInstanceRequest, Resolution, SetInstanceConfigRequest,
 };
 use tokio::net::TcpListener;
 use tokio_stream::wrappers::TcpListenerStream;
@@ -17,7 +15,6 @@ use tonic::transport::Server;
 use crate::daemon::Daemon;
 use crate::firmware::OvmfPaths;
 use crate::service::DaemonService;
-
 
 async fn spawn_server_and_connect() -> (
     AndlerServiceClient<tonic::transport::Channel>,
@@ -115,7 +112,6 @@ async fn malformed_instance_id_round_trips_as_invalid_argument_over_real_grpc() 
     server.abort();
 }
 
-
 fn sample_create_instance_request() -> CreateInstanceRequest {
     use andler_rpc::proto::{network_mode, render_backend};
 
@@ -202,7 +198,7 @@ fn sample_create_instance_request() -> CreateInstanceRequest {
         firmware: Some(firmware),
         audio: Some(audio),
         input: Some(input),
-        cdrom_bus: 0, // CdromBus::Ide (default)
+        cdrom_bus: andler_rpc::proto::CdromBus::Ide as i32,
     }
 }
 
@@ -259,7 +255,10 @@ async fn create_instance_honors_explicit_ovmf_vars_template() {
         .expect("freshly created instance must be found")
         .into_inner();
 
-    let provisioned_vars_path = config.firmware.expect("firmware must be set").ovmf_vars_path;
+    let provisioned_vars_path = config
+        .firmware
+        .expect("firmware must be set")
+        .ovmf_vars_path;
     let provisioned_content =
         std::fs::read_to_string(&provisioned_vars_path).expect("provisioned VARS.fd must exist");
     assert_eq!(
@@ -511,7 +510,11 @@ async fn get_instance_config_over_real_grpc_returns_what_was_created() {
     }
 
     let gpu = config.gpu.expect("gpu must be Some");
-    match gpu.render_backend.expect("render_backend must be Some").kind {
+    match gpu
+        .render_backend
+        .expect("render_backend must be Some")
+        .kind
+    {
         Some(andler_rpc::proto::render_backend::Kind::Venus(_)) => {}
         other => panic!("expected Venus render backend, got {other:?}"),
     }
@@ -533,7 +536,6 @@ async fn get_instance_config_on_unknown_instance_round_trips_as_not_found() {
 
     server.abort();
 }
-
 
 #[tokio::test]
 async fn stream_instance_logs_for_instance_without_backend_completes_immediately() {
@@ -611,7 +613,6 @@ async fn clone_instance_on_unknown_source_round_trips_as_not_found() {
 
     server.abort();
 }
-
 
 #[tokio::test]
 async fn clone_instance_linux_vm_linked_with_qemu_img() {
@@ -697,7 +698,6 @@ async fn export_instance_disk_on_unknown_source_round_trips_as_not_found() {
     server.abort();
 }
 
-
 #[tokio::test]
 async fn export_instance_disk_linux_vm_with_qemu_img() {
     let (mut client, server) = spawn_server_and_connect().await;
@@ -719,7 +719,6 @@ async fn export_instance_disk_linux_vm_with_qemu_img() {
 
     server.abort();
 }
-
 
 #[tokio::test]
 async fn clone_instance_linux_vm_full_standalone_with_qemu_img() {
@@ -746,7 +745,6 @@ async fn clone_instance_linux_vm_full_standalone_with_qemu_img() {
 
     server.abort();
 }
-
 
 #[tokio::test]
 async fn clone_instance_linux_vm_shared_base_rejected_as_failed_precondition() {
@@ -949,3 +947,60 @@ async fn list_guest_packages_instance_not_found() {
     server.abort();
 }
 
+#[tokio::test]
+async fn set_instance_config_display_resolution_updates_config_over_real_grpc() {
+    let (mut client, server) = spawn_server_and_connect().await;
+
+    let create_response = client
+        .create_instance(sample_create_instance_request())
+        .await
+        .expect("create_instance must succeed")
+        .into_inner();
+
+    client
+        .set_instance_config(SetInstanceConfigRequest {
+            instance_ref: create_response.instance_id.clone(),
+            key: "display.resolution".to_string(),
+            value: "1920x1200".to_string(),
+        })
+        .await
+        .expect("set display.resolution on a stopped instance must succeed");
+
+    let config = client
+        .get_instance_config(InstanceIdRequest {
+            instance_id: create_response.instance_id,
+        })
+        .await
+        .expect("get_instance_config must succeed")
+        .into_inner();
+    let display = config.display.expect("display must be Some");
+    assert_eq!(
+        display.resolution.as_ref().map(|r| (r.width, r.height)),
+        Some((1920, 1200))
+    );
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn set_instance_config_display_resolution_rejects_malformed_value() {
+    let (mut client, server) = spawn_server_and_connect().await;
+
+    let create_response = client
+        .create_instance(sample_create_instance_request())
+        .await
+        .expect("create_instance must succeed")
+        .into_inner();
+
+    let status = client
+        .set_instance_config(SetInstanceConfigRequest {
+            instance_ref: create_response.instance_id,
+            key: "display.resolution".to_string(),
+            value: "banana".to_string(),
+        })
+        .await
+        .expect_err("malformed resolution must fail");
+    assert_eq!(status.code(), tonic::Code::InvalidArgument);
+
+    server.abort();
+}

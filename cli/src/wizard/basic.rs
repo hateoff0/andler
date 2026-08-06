@@ -1,5 +1,3 @@
-
-
 use std::path::Path;
 
 use inquire::{CustomType, Select, Text};
@@ -126,12 +124,16 @@ pub fn ask_kind(prefilled: Option<WizardKind>) -> Result<WizardKind, WizardError
     })
 }
 
-pub fn ask_name(prefilled: Option<String>) -> Result<String, WizardError> {
+pub fn ask_name(prefilled: Option<String>, kind: WizardKind) -> Result<String, WizardError> {
     if let Some(n) = prefilled {
         return Ok(n);
     }
+    let placeholder = match kind {
+        WizardKind::Linux => "my-linux-vm",
+        WizardKind::Android => "my-android-vm",
+    };
     Text::new("VM name:")
-        .with_placeholder("my-linux-vm")
+        .with_placeholder(placeholder)
         .with_validator(|s: &str| validate_name(s))
         .prompt()
         .map_err(map_inquire_err)
@@ -228,9 +230,7 @@ pub fn ask_android_version() -> Result<CliAndroidVersion, WizardError> {
 pub fn ask_disk_size(default_gib: u64) -> Result<u64, WizardError> {
     CustomType::<u64>::new("Disk size (GiB):")
         .with_default(default_gib)
-        .with_help_message(
-            "Thin-provisioned qcow2 — nominal limit, not actual host usage",
-        )
+        .with_help_message("Thin-provisioned qcow2 — nominal limit, not actual host usage")
         .with_formatter(&|v: u64| format!("{v} GiB"))
         .with_error_message("Enter an integer between 1 and 65536, e.g. 256")
         .with_validator(|v: &u64| {
@@ -258,27 +258,45 @@ fn ask_enable_uefi() -> Result<bool, WizardError> {
 fn validate_name(
     s: &str,
 ) -> Result<inquire::validator::Validation, Box<dyn std::error::Error + Send + Sync>> {
-    if s.trim().is_empty() {
+    let trimmed = s.trim();
+    if trimmed.is_empty() {
         Ok(inquire::validator::Validation::Invalid(
             "Name cannot be empty".into(),
         ))
-    } else if s.contains('/') || s.contains('\\') {
+    } else if !is_valid_name(trimmed) {
         Ok(inquire::validator::Validation::Invalid(
-            "Name must not contain slashes".into(),
+            "Name must start with a letter or digit and contain only letters, digits, '_' and '-'"
+                .into(),
         ))
     } else {
         Ok(inquire::validator::Validation::Valid)
     }
 }
 
+fn is_valid_name(s: &str) -> bool {
+    let mut chars = s.chars();
+    matches!(chars.next(), Some(c) if c.is_ascii_alphanumeric())
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
 
 fn validate_iso_path(path: &str) -> Result<(), WizardError> {
     let trimmed = path.trim();
     if trimmed.is_empty() {
         return Ok(());
     }
+    let has_iso_extension = std::path::Path::new(trimmed)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("iso") || ext.eq_ignore_ascii_case("img"));
+    if !has_iso_extension {
+        return Err(WizardError::Inquire(format!(
+            "Not an ISO image: {trimmed} (expected a .iso or .img file)"
+        )));
+    }
     if !Path::new(trimmed).exists() {
-        return Err(WizardError::Inquire(format!("ISO file not found: {trimmed}")));
+        return Err(WizardError::Inquire(format!(
+            "ISO file not found: {trimmed}"
+        )));
     }
     Ok(())
 }
@@ -335,6 +353,44 @@ mod tests {
 
     #[test]
     fn validate_iso_path_existing_path_is_valid() {
-        assert!(validate_iso_path("/tmp").is_ok());
+        let iso = std::env::temp_dir().join("andler-validate-iso-test.iso");
+        std::fs::write(&iso, b"").unwrap();
+        assert!(validate_iso_path(iso.to_str().unwrap()).is_ok());
+        std::fs::remove_file(&iso).ok();
+    }
+
+    #[test]
+    fn validate_iso_path_without_iso_extension_is_rejected() {
+        let dir = std::env::temp_dir();
+        let err = validate_iso_path(dir.to_str().unwrap()).unwrap_err();
+        let msg = format!("{err:?}");
+        assert!(
+            matches!(&err, WizardError::Inquire(m) if m.contains(".iso")),
+            "path without .iso/.img extension must be rejected: {msg}"
+        );
+    }
+
+    #[test]
+    fn validate_name_accepts_safe_names() {
+        let valid = validate_name("my-vm_2").unwrap();
+        assert_eq!(valid, inquire::validator::Validation::Valid);
+    }
+
+    #[test]
+    fn validate_name_rejects_spaces_and_special_chars() {
+        for bad in [
+            "my vm",
+            "vm/name",
+            "vm\\name",
+            "-starts-with-dash",
+            ".hidden",
+            "ümlaut",
+        ] {
+            let result = validate_name(bad).unwrap();
+            assert!(
+                matches!(result, inquire::validator::Validation::Invalid(_)),
+                "name {bad:?} must be rejected"
+            );
+        }
     }
 }

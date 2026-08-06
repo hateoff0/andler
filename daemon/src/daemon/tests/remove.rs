@@ -1,11 +1,13 @@
 use super::common::*;
 use super::*;
 
-
 #[tokio::test]
 async fn remove_instance_on_unknown_instance_returns_instance_not_found() {
     let daemon = Daemon::new();
-    let err = daemon.remove_instance(InstanceId::new(), false).await.unwrap_err();
+    let err = daemon
+        .remove_instance(InstanceId::new(), false)
+        .await
+        .unwrap_err();
     assert!(matches!(err, DaemonError::InstanceNotFound(_)));
 }
 
@@ -130,7 +132,6 @@ async fn remove_instance_disappears_from_list_instances() {
     assert!(summaries.is_empty());
 }
 
-
 #[tokio::test]
 async fn remove_instance_without_purge_leaves_disk_and_firmware_files() {
     let dir = TestTempDir::new();
@@ -208,7 +209,9 @@ async fn remove_instance_with_purge_recursively_deletes_own_instance_directory()
     let qemu_log_path = instance_dir.join("qemu.log");
     tokio::fs::write(&disk_path, b"disk").await.unwrap();
     tokio::fs::write(&vars_path, b"vars").await.unwrap();
-    tokio::fs::write(&qemu_log_path, b"[stdout] hi\n").await.unwrap();
+    tokio::fs::write(&qemu_log_path, b"[stdout] hi\n")
+        .await
+        .unwrap();
 
     let daemon = Daemon::new();
     let mut cfg = sample_config();

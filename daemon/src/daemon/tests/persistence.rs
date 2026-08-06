@@ -2,7 +2,6 @@ use super::common::*;
 use super::*;
 use andler_core::RenderBackend;
 
-
 #[tokio::test]
 async fn with_store_persists_created_instance() {
     let store = andler_store::Store::open_in_memory().await.unwrap();
@@ -48,7 +47,6 @@ async fn daemon_without_store_does_not_panic_on_state_transitions() {
     let status = daemon.status(id).await.unwrap();
     assert!(matches!(status.state, InstanceState::Error { .. }));
 }
-
 
 #[tokio::test]
 async fn restore_recreates_daemon_from_store_contents() {
@@ -121,10 +119,7 @@ async fn restore_keeps_terminal_states_unchanged() {
         let store = andler_store::Store::open_in_memory().await.unwrap();
         let cfg = sample_config();
         let id = cfg.id;
-        store
-            .save_instance(&cfg, &terminal_state)
-            .await
-            .unwrap();
+        store.save_instance(&cfg, &terminal_state).await.unwrap();
 
         let daemon = Daemon::restore(store).await.unwrap();
         let status = daemon.status(id).await.unwrap();
