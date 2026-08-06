@@ -29,7 +29,7 @@ docker/images/build.sh 11 GAPPS        # Android 11, GAPPS
 
 One `base/Dockerfile`, four possible builds via
 `--build-arg` — not four separate Dockerfiles: everything except
-`system.img`/`vendor.img` (kernel, Mesa/venus, gamescope, systemd units)
+`system.img`/`vendor.img` (kernel, Mesa/venus, weston, systemd units)
 is identical across variants.
 
 **Android 11 is no longer updated upstream** — the latest `lineage-18.1`
@@ -119,31 +119,173 @@ of a given instance:
 
 | Mode | Target | What appears on screen |
 |---|---|---|
-| Android | `android.target` | `gamescope` + `waydroid show-full-ui`, nothing else |
+| Android | `android.target` | `weston` (kiosk shell) + `waydroid show-full-ui`, nothing else |
 | Linux | `multi-user.target` | bare tty1 console (root, autologin), no DE — the user installs whatever they want on top of the overlay |
 
 Mode switching is the responsibility of the instance overlay config, not of rebuilding
 the base image (the base image itself doesn't change; only the symlink
 `/etc/systemd/system/default.target` on the instance's overlay disk changes).
 
+### Why the Android session runs on Weston, not gamescope
+
+The Android session compositor must present a frame on **any** host GPU, and the
+GPU paths in front of it differ in a way that matters:
+
+- **GL (virgl)** — the guest renders through `virtio-gpu`'s GL context, the host
+  rasterizes it (on the physical GPU), and the resulting buffer scans out through
+  KMS. This never depends on host DRM modifier support. Proven end-to-end by the
+  Linux instance: its KDE (KWin) session composites exactly this way and works on
+  NVIDIA, AMD, and Intel hosts alike.
+- **Vulkan (venus)** — the guest gets a venus Vulkan device backed by the host's
+  physical GPU (and a second one backed by lavapipe). Scan-out of venus buffers
+  requires DRM format modifiers, and not every host driver provides them:
+  NVIDIA's driver exposes none for scanout formats, so `DMA-BUF import` into KMS
+  fails with "format/modifier not supported for scan-out".
+
+The previous session used **gamescope**, which *only* presents through Vulkan.
+On NVIDIA-backed venus devices its every frame import failed and it crash-looped
+with a black screen (plus a burst of `vkr` host-side errors, all consequences of
+the same import failures). That was structural to the stack, not a virglrenderer
+bug on the host.
+
+The session now runs **Weston** with its DRM backend and the kiosk shell: it
+composites through GL (default `renderer=auto`, GL with a pixman fallback), never
+allocates Vulkan buffers for scanout, and presents the waydroid window fullscreen
+on any host GPU. See `waydroid-compositor.service` and
+`usr/local/bin/andler-waydroid-compositor` for the exact wiring.
+
+This does **not** disable venus: QEMU still creates `virtio-gpu-gl` with
+`venus=true`, so the guest keeps a working Vulkan device for Android apps that
+want it (fully functional on hosts whose venus device exposes modifiers —
+AMD/Intel; rendering-only on NVIDIA). The split is: **venus = Vulkan for guest
+apps, virgl = display/compositing** — each works wherever the host allows it.
+
+Weston also means no Vulkan dependency at all in the session path; a hypothetical
+gamecope-with-lavapipe fallback would have traded the black screen for CPU
+rendering and an uncertain modifier story, with nothing gained.
+
+Output resolution: `andler-waydroid-compositor` appends
+`[output] name=Virtual-1 mode=…` to the base weston.ini at startup
+(`Virtual-1` is the virtio-gpu connector's kernel name, as logged by weston).
+The default is **1920x1080** — it exists in the virtio-gpu EDID mode list
+(verified in a boot log: `Output Virtual-1 … video modes: … 1920x1080@60.0`),
+so weston accepts it and the SDL window follows. Per-instance override: the daemon passes the instance config's
+`display.resolution` into the VM as QEMU fw_cfg
+(`-fw_cfg name=opt/andler/display-resolution,string=WxH`), and a guest
+oneshot (`andler-display-resolution.service`) writes it to
+`/etc/andler/display.conf` before the compositor starts — so the instance's
+configured resolution is what weston applies (any WxH that exists in the EDID
+mode list; weston refuses modes absent from it).
+
+Changing the resolution on a **running** VM is a host-side command — no guest
+login needed:
+
+```
+andler config set <id> display.resolution 1920x1200
+```
+
+The daemon updates `display.resolution` in the instance config (takes effect
+on the next boot via fw_cfg) and, when the VM is running, pushes the new
+value into the guest over the QEMU guest agent (`qemu-guest-agent` runs in
+the image; the virtio-serial port is wired in `cmdline.rs`): Android restarts
+the waydroid compositor session (2-3 s, the VM keeps running), Linux runs
+`andler-apply-resolution` which switches the active session's output
+(kscreen-doctor/gnome-randr/wlr-randr on Wayland, xrandr on X11) — Plasma
+then keeps the mode in its kscreen config. On a stopped instance the command
+only updates the config. `andler-set-resolution WxH` inside the guest still
+works for quick experiments, but lasts only until the next boot replay of
+fw_cfg.
+
+The Linux VM (KDE Plasma) reads the same EDID, so its available modes include
+
+The Linux VM (KDE Plasma) reads the same EDID, so its available modes include
+1920x1080 as well. The guest applies the instance resolution automatically at
+session start: `andler-apply-resolution` (XDG autostart entry
+`/etc/xdg/autostart/andler-apply-resolution.desktop`) reads
+`/etc/andler/display.conf` and switches the output via `kscreen-doctor
+output.Virtual-1 mode.WxH` (Wayland) or `xrandr --output Virtual-1 --mode WxH`
+(X11); Plasma then keeps the chosen mode in its kscreen config for later
+boots. The KDE VM just needs `andler-apply-resolution` plus the .desktop file
+copied into its image. Mode changes on the live Android VM: `andler-set-resolution WxH`
+inside the guest (writes display.conf, restarts the compositor session — the
+VM keeps running; the change lasts until the next boot replays fw_cfg from the
+instance config).
+
+### Session startup ordering (why nothing restarts twice)
+
+Both pipewire units use `PAMName=login`, whose PAM stack includes pam_nologin:
+starting them before `systemd-user-sessions.service` has removed `/run/nologin`
+fails with "System is booting up. Unprivileged users are not permitted to log
+in yet." — then `Restart=on-failure` bounces them, and since
+`waydroid-compositor.service` has `Requires=andler-pipewire-pulse.service`, the
+whole weston+waydroid session restarts mid-start (two westons, two container
+starts — and the composer@2.1-se abort inside the first, interrupted container
+boot). The units order themselves `After=systemd-user-sessions.service`, so the
+first start succeeds and nothing restarts.
+
+### Known cosmetic noise
+
+- `unknown libinput event 404` from weston: libinput ≥ 1.26 sends the new
+  `LIBINPUT_EVENT_POINTER_SCROLL_WHEEL` (404) *in addition to* the legacy
+  `LIBINPUT_EVENT_POINTER_AXIS` (403) that weston 15 consumes — scrolling works,
+  weston just logs the duplicate it doesn't handle. No config knob; harmless.
+
+### Guest DNS (why `/etc/resolv.conf` is a stub symlink)
+
+`docker build` injects a resolv.conf during RUN steps but never bakes one into
+the image layers — so a disk extracted from the image has no `/etc/resolv.conf`
+at all. The guest itself doesn't notice: systemd-resolved resolves through the
+per-link DHCP DNS (slirp's `10.0.2.3`). The **waydroid container's** DNS does
+notice: waydroid's dnsmasq on `waydroid0` reads `/etc/resolv.conf` for its
+upstream and, with no file, logs `no servers found in /etc/resolv.conf, will
+retry` forever — the container gets an IP via DHCP but every name lookup fails
+(`ERR_NAME_NOT_RESOLVED` in Android apps). The image therefore ships a
+systemd-tmpfiles rule (`rootfs/etc/tmpfiles.d/andler-resolv.conf`) that
+creates `/etc/resolv.conf` at boot as a symlink to systemd-resolved's stub
+(`/run/systemd/resolve/stub-resolv.conf`), giving the container the chain
+dnsmasq → stub `127.0.0.53` → resolved → `10.0.2.3` → slirp → host. Two gotchas
+make this non-trivial, both handled by the rule: a Dockerfile `RUN ln` cannot
+bake the symlink (docker build bind-mounts its own resolv.conf over the path,
+so `ln` fails with EBUSY), and `docker export` (used by `build-disk.sh`)
+injects an **empty** regular `/etc/resolv.conf` into the rootfs tar — which
+shadows everything, since a plain `L` rule silently skips existing files and
+Arch's own `L!` rule (`/usr/lib/tmpfiles.d/systemd-resolve.conf`) is dropped
+as a duplicate. The rule therefore uses `L+`, which unconditionally replaces
+whatever sits at `/etc/resolv.conf` with the stub symlink.
+
 ## Contents
 
 ```
 docker/images/
 ├── base/
-│   ├── Dockerfile              # rootfs build (Arch + linux-cachyos + waydroid + gamescope)
+│   ├── Dockerfile              # rootfs build (Arch + linux-cachyos + waydroid + weston)
 │   └── rootfs/                 # file overlay, copied on top of archlinux:base
+│       ├── etc/andler/weston.ini
+│       ├── etc/fstab
+│       ├── etc/kernel/cmdline
+│       ├── etc/mkinitcpio.conf
+│       ├── etc/pacman.d/hooks/95-andler-uki.hook
+│       ├── etc/systemd/journald.conf.d/andler-console-forward.conf
+│       ├── etc/systemd/network/20-virtio-wired.network
 │       ├── etc/systemd/system/android.target
-│       ├── etc/systemd/system/gamescope-waydroid.service
+│       ├── etc/systemd/system/andler-display-resolution.service
+│       ├── etc/systemd/system/andler-pipewire.service          # user session, PAMName=login
+│       ├── etc/systemd/system/andler-pipewire-pulse.service
+│       ├── etc/systemd/system/qemu-guest-agent.service         # custom: not tied to a virtio-ports device unit
+│       ├── etc/systemd/system/waydroid-compositor.service      # dbus-run-session + Weston DRM on tty1
 │       ├── etc/systemd/system/waydroid-init.service
 │       ├── etc/systemd/system/waydroid-container.service.d/andler-init.conf
 │       ├── etc/systemd/system/getty@tty1.service.d/autologin.conf
-│       ├── etc/systemd/network/20-virtio-wired.network
-│       ├── etc/pacman.d/hooks/95-andler-uki.hook
-│       ├── etc/mkinitcpio.conf
-│       ├── etc/kernel/cmdline
-│       ├── etc/fstab
+│       ├── etc/systemd/system/multi-user.target.wants/         # symlinks: display-resolution + qemu-guest-agent
+│       ├── etc/tmpfiles.d/andler-resolv.conf                   # L+ /etc/resolv.conf → stub (waydroid dnsmasq upstream)
+│       ├── etc/vconsole.conf
+│       ├── etc/xdg/autostart/andler-apply-resolution.desktop
+│       ├── usr/local/bin/andler-apply-resolution
 │       ├── usr/local/bin/andler-build-uki
+│       ├── usr/local/bin/andler-display-resolution
+│       ├── usr/local/bin/andler-set-resolution
+│       ├── usr/local/bin/andler-waydroid-compositor
+│       ├── usr/local/bin/andler-waydroid-session
 │       └── usr/local/lib/andler/fetch-waydroid-images.py
 ├── build.sh                    # docker build (desired Android version) + build-disk.sh, single command
 └── build-disk.sh                # rootfs → partitioned bootable qcow2 (root, loop devices)

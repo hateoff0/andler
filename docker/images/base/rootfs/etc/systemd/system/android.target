@@ -1,5 +1,5 @@
 [Unit]
-Description=ANDLER Android instance target (gamescope + Waydroid)
+Description=ANDLER Android instance target (weston + Waydroid)
 Documentation=https://github.com/andler-project/andler
 Requires=multi-user.target
 After=multi-user.target

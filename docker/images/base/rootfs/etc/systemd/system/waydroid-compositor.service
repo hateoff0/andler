@@ -1,0 +1,48 @@
+[Unit]
+Description=Weston + Waydroid full UI session
+Documentation=https://gitlab.freedesktop.org/wayland/weston https://waydro.id
+After=android.target waydroid-container.service systemd-udev-settle.service andler-pipewire-pulse.service
+Requires=waydroid-container.service andler-pipewire-pulse.service
+PartOf=android.target
+# Weston (unlike the previous gamescope session) composites through GL over the
+# virgl path and never touches Vulkan, so it presents a frame on any host GPU.
+# gamescope's Vulkan scanout failed on NVIDIA hosts because the venus device
+# exposes no DRM format modifiers for scanout formats (see images/README.md).
+# waydroid talks to a D-Bus *session* bus, which nothing here provides — there's no
+# display manager or full logind user session to activate one. dbus-run-session starts
+# a private, self-contained session bus for just this process tree and sets
+# DBUS_SESSION_BUS_ADDRESS accordingly; without it waydroid fails immediately with
+# "Using X11 for dbus-daemon autolaunch was disabled at compile time" and the session
+# exits right after — a fast, silent crash loop that looks like a black screen from
+# the QEMU display, with nothing to show for it until journald is forwarded to
+# console (see journald.conf.d/andler-console-forward.conf).
+# getty@tty1.service (with root autologin, see autologin.conf — meant for LinuxVM
+# console access) is enabled by default Arch presets and claims the same VT this
+# service needs (TTYPath=/dev/tty1 below). Without this, both units fight over
+# tty1: weston's VT take-over kicks getty off once, but nothing stops getty from
+# holding/reclaiming it afterwards, and the visible result is a stuck root shell
+# instead of the UI. Conflicts= makes systemd stop getty@tty1.service whenever
+# this unit starts (and vice versa), rather than racing for the VT.
+Conflicts=getty@tty1.service
+
+[Service]
+Type=simple
+EnvironmentFile=-/etc/andler/display.conf
+ExecStart=/usr/bin/dbus-run-session -- /usr/local/bin/andler-waydroid-compositor
+Restart=on-failure
+RestartSec=2
+# User/Groups: PAMName=login + TTYPath create a logind session (seat access for
+# DRM/VT); SupplementaryGroups grant direct device access supplementary to it.
+User=user
+Group=user
+SupplementaryGroups=video render input seat
+PAMName=login
+TTYPath=/dev/tty1
+TTYReset=yes
+TTYVHangup=yes
+StandardInput=tty
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=android.target

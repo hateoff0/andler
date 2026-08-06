@@ -1,0 +1,16 @@
+#!/bin/sh
+# Apply the instance display.resolution to /etc/andler/display.conf.
+# The daemon passes the resolution to the VM as QEMU fw_cfg
+# opt/andler/display-resolution (see backends/andler-qemu/src/cmdline.rs);
+# waydroid-compositor.service reads the result via EnvironmentFile.
+fwcfg=/sys/firmware/qemu_fw_cfg/by_name/opt/andler/display-resolution
+[ -d "$fwcfg" ] || exit 0
+size=$(cat "$fwcfg/size" 2>/dev/null) || exit 1
+[ "$size" -gt 0 ] || exit 1
+res=$(cat "$fwcfg/raw" 2>/dev/null) || exit 1
+case "$res" in
+    [1-9][0-9]*x[1-9][0-9]*) ;;
+    *) echo "invalid display resolution from fw_cfg: $res" >&2; exit 1 ;;
+esac
+mkdir -p /etc/andler
+printf 'RESOLUTION=%s\n' "$res" > /etc/andler/display.conf

@@ -1,0 +1,31 @@
+#!/bin/bash
+# waydroid/LXC write their own diagnostic log separately from stdout/stderr, so a
+# container-start failure normally leaves no trace in the journal (and therefore not
+# in andler's console.log capture either).
+#
+# This does NOT wait for waydroid to exit and then dump logs — on a crash the
+# session is torn down (the compositor session wrapper exits and weston is
+# killed), so any post-failure cleanup step never gets to run. Instead, it tails
+# waydroid/LXC's own log file(s) to the journal *while waydroid is still
+# running*, in the background, so lines are captured as they're written rather
+# than in a step that never gets to execute.
+set -uo pipefail
+
+logger -t andler-waydroid-session -- "starting waydroid show-full-ui"
+
+tail_pids=()
+for f in /var/lib/waydroid/waydroid.log \
+         /var/lib/waydroid/lxc/waydroid/waydroid.log \
+         /var/lib/waydroid/lxc/waydroid/console.log; do
+    tail -F -n 0 "$f" 2>/dev/null | logger -t "andler-waydroid-log:$(basename "$f")" &
+    tail_pids+=("$!")
+done
+
+/usr/bin/waydroid show-full-ui
+status=$?
+
+for pid in "${tail_pids[@]:-}"; do
+    kill "$pid" 2>/dev/null
+done
+
+exit "$status"

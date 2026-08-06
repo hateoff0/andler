@@ -1,0 +1,56 @@
+#!/bin/bash
+# Runs the Waydroid full-UI session on Weston (DRM backend). Weston renders and
+# scans out through GL (virgl), so presentation works on any host GPU; it never
+# allocates Vulkan buffers for scanout, which is what black-screened the old
+# gamescope session on NVIDIA hosts (venus exposes no DRM format modifiers).
+# The waydroid window is the first client, so weston's kiosk shell makes it
+# fullscreen on the only output.
+set -uo pipefail
+
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+export WAYLAND_DISPLAY=wayland-1
+
+logger -t andler-waydroid-compositor -- "starting weston + waydroid session"
+
+# Wanted output resolution: RESOLUTION=WxH in /etc/andler/display.conf
+# (the intended per-instance plumbing point, see docker/images/README.md);
+# default 1920x1080 matches the instance display.resolution. The mode must
+# exist in virtio-gpu's EDID, and 1920x1080@60 does. The generated config
+# goes into the session's XDG_RUNTIME_DIR: this unit runs as User=user
+# (PAMName=login session), and /run/andler is root-only.
+resolution="${RESOLUTION:-1920x1080}"
+mkdir -p "$XDG_RUNTIME_DIR"
+weston_ini="$XDG_RUNTIME_DIR/andler-weston.ini"
+{
+    cat /etc/andler/weston.ini
+    printf '\n[output]\nname=Virtual-1\nmode=%s\n' "$resolution"
+} > "$weston_ini"
+
+# A previous run may have left a stale socket behind (crash/restart); a live
+# socket path makes wl_display_add_socket fail and weston exit immediately.
+rm -f "$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY"
+
+weston --backend=drm --config="$weston_ini" &
+weston_pid=$!
+
+socket=""
+for _ in $(seq 1 100); do
+    if [ -S "$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY" ]; then
+        socket="$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY"
+        break
+    fi
+    sleep 0.1
+done
+
+if [ -z "$socket" ]; then
+    logger -t andler-waydroid-compositor -- "weston socket never appeared; aborting"
+    kill "$weston_pid" 2>/dev/null
+    exit 1
+fi
+
+/usr/local/bin/andler-waydroid-session
+status=$?
+
+kill "$weston_pid" 2>/dev/null
+wait "$weston_pid" 2>/dev/null
+exit "$status"

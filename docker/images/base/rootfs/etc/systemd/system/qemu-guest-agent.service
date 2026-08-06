@@ -1,0 +1,19 @@
+[Unit]
+Description=QEMU Guest Agent
+# The package's unit binds to dev-virtio\x2dports-org.qemu.guest_agent.0.device
+# (After= + BindTo). systemd never generates that device unit for the
+# virtio-ports devnode, so qemu-ga never started and every guest-* QMP
+# command answered "The command guest-file-open has not been found". qemu-ga
+# retries opening /dev/virtio-ports/org.qemu.guest_agent.0 itself, so a plain
+# unit is all that is needed.
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/qemu-ga
+ExecReload=/bin/kill -HUP $MAINPID
+TimeoutStopSec=60
+KillMode=process
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

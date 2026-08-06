@@ -1,0 +1,17 @@
+#!/bin/sh
+# Change the resolution of the running Android VM on the fly.
+# Usage: andler-set-resolution WxH
+# Writes RESOLUTION=WxH to /etc/andler/display.conf and restarts the
+# waydroid compositor session so weston picks up the new mode (2-3 seconds,
+# the Android session itself restarts; the VM keeps running). The mode must
+# exist in the virtio-gpu EDID list. Note: this value lasts until the next
+# boot replay of QEMU fw_cfg — for a permanent change, set
+# display.resolution in the instance config on the host and restart the VM.
+res="${1:-}"
+case "$res" in
+    [1-9][0-9]*x[1-9][0-9]*) ;;
+    *) echo "usage: andler-set-resolution WxH" >&2; exit 1 ;;
+esac
+mkdir -p /etc/andler
+printf 'RESOLUTION=%s\n' "$res" > /etc/andler/display.conf
+systemctl restart waydroid-compositor.service

@@ -1,0 +1,11 @@
+[Unit]
+Description=Apply instance display resolution from QEMU fw_cfg
+After=systemd-remount-fs.service
+Before=waydroid-compositor.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/andler-display-resolution
+
+[Install]
+WantedBy=multi-user.target

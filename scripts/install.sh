@@ -44,6 +44,10 @@ if [[ ! -x "$ANDLERD_BIN" ]]; then
     echo "error: $ANDLERD_BIN is not an executable file." >&2
     exit 1
 fi
+# systemd requires an absolute path or a bare executable name in ExecStart;
+# a relative path (e.g. `scripts/install.sh target/release/andlerd`) yields a
+# unit that fails to load. Resolve it before writing the unit.
+ANDLERD_BIN="$(readlink -f "$ANDLERD_BIN")"
 
 echo "Installing andlerd user service"
 echo "  binary: $ANDLERD_BIN"

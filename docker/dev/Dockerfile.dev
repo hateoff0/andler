@@ -17,13 +17,14 @@ COPY backends/andler-qemu/Cargo.toml backends/andler-qemu/Cargo.toml
 COPY backends/andler-vmm/Cargo.toml backends/andler-vmm/Cargo.toml
 COPY services/andler-disk/Cargo.toml services/andler-disk/Cargo.toml
 COPY services/andler-net/Cargo.toml services/andler-net/Cargo.toml
+COPY services/andler-firmware/Cargo.toml services/andler-firmware/Cargo.toml
 COPY services/andler-store/Cargo.toml services/andler-store/Cargo.toml
 COPY services/andler-rpc/Cargo.toml services/andler-rpc/Cargo.toml
 COPY daemon/Cargo.toml daemon/Cargo.toml
 COPY cli/Cargo.toml cli/Cargo.toml
 
 # Stub files for cargo fetch dependency resolution
-RUN for crate in andler-core andler-qemu andler-vmm andler-disk andler-net andler-store andler-rpc; do \
+RUN for crate in andler-core andler-qemu andler-vmm andler-disk andler-net andler-firmware andler-store andler-rpc; do \
         dir="core/$crate"; [ -d "backends/$crate" ] && dir="backends/$crate"; [ -d "services/$crate" ] && dir="services/$crate"; \
         mkdir -p "$dir/src" && echo "// placeholder" > "$dir/src/lib.rs"; \
     done && \

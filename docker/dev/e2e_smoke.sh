@@ -79,7 +79,7 @@ EOF
 start_daemon
 
 echo "==> andler create --file instance.toml"
-INSTANCE_ID="$(andler create --file "$WORKDIR/instance.toml")"
+INSTANCE_ID="$(andler create --file "$WORKDIR/instance.toml" | sed -n 's/.*(\(.*\))/\1/p')"
 echo "created instance_id=$INSTANCE_ID"
 [[ -n "$INSTANCE_ID" ]] || { echo "FAIL: empty instance_id from create"; exit 1; }
 
@@ -93,6 +93,24 @@ echo "==> andler status $INSTANCE_ID (expect Created)"
 STATUS_OUTPUT="$(andler status "$INSTANCE_ID")"
 echo "$STATUS_OUTPUT"
 grep -q "Created" <<<"$STATUS_OUTPUT" || { echo "FAIL: status is not Created"; exit 1; }
+
+echo "==> andler status nonexistent-instance-id (expect failure)"
+if andler status nonexistent-instance-id 2>"$WORKDIR/status_missing_stderr.txt"; then
+    echo "FAIL: status of a nonexistent instance must fail"; exit 1;
+fi
+grep -qi "not found" "$WORKDIR/status_missing_stderr.txt" || { echo "FAIL: missing-instance error must say not found"; exit 1; }
+
+echo "==> andler disk create --size 0 (expect failure: zero-size disk rejected)"
+if andler disk create --path "$WORKDIR/zero-size.qcow2" --size 0 2>"$WORKDIR/disk_zero_stderr.txt"; then
+    echo "FAIL: zero-size disk create must fail"; exit 1;
+fi
+grep -qi "0-byte" "$WORKDIR/disk_zero_stderr.txt" || { echo "FAIL: zero-size disk error must mention 0-byte"; exit 1; }
+
+echo "==> andler create --disk-size-gib 0 (expect failure: clap range rejects 0)"
+if andler create --kind linux --name zero-disk --iso-path "$WORKDIR/empty.iso" \
+        --disk-path "$WORKDIR/disk.qcow2" --disk-size-gib 0 2>"$WORKDIR/create_zero_stderr.txt"; then
+    echo "FAIL: --disk-size-gib 0 must fail"; exit 1;
+fi
 
 echo "==> andler config $INSTANCE_ID (expect full config incl. headless display)"
 CONFIG_OUTPUT="$(andler config "$INSTANCE_ID")"
@@ -213,7 +231,7 @@ SOURCE_ANDROID_ID="$(andler create \
     --android-version 13 \
     --base-image-path "$ANDROID_BASE_IMAGE" \
     --instances-root "$ANDROID_INSTANCES_ROOT" \
-    --ovmf-vars-template "$ANDROID_OVMF_TEMPLATE")"
+    --ovmf-vars-template "$ANDROID_OVMF_TEMPLATE" | sed -n 's/.*(\(.*\))/\1/p')"
 echo "created instance_id=$SOURCE_ANDROID_ID"
 [[ -n "$SOURCE_ANDROID_ID" ]] || { echo "FAIL: empty instance_id from create --android-version"; exit 1; }
 

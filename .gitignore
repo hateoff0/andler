@@ -1,10 +1,30 @@
 # Build
 /target
 
-# IDE / Editors
+# Environment
+.env
+.env.*
+
+# Index
+/.codebase-index/
+/.opencode/
+/.claude/
+
+# Rust
+*.pdb
+*.profraw
+*.profdata
+
+# Editors
 .idea/
+.zed/
+.cursor/
 .vscode/
 *.code-workspace
+.*.sw?
+*.swp
+*.swo
+*~
 
 # OS
 .DS_Store
@@ -12,20 +32,11 @@ Thumbs.db
 Desktop.ini
 ._*
 
-# Editors
-*.swp
-*.swo
-*~
-
-# Rust
-*.pdb
-*.profraw
-*.profdata
-
-# Environment
-.env
-.env.local
-
 # Temp
+*.log
 *.tmp
 *.bak
+
+# Python
+__pycache__/
+*.pyc

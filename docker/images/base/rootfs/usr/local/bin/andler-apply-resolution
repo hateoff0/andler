@@ -1,0 +1,49 @@
+#!/bin/sh
+# Apply the instance display resolution (written from QEMU fw_cfg at boot or
+# by the daemon on `andler config set display.resolution` to
+# /etc/andler/display.conf) to the active desktop session. Runs both at
+# session start (XDG autostart) and on demand (guest-exec from the daemon —
+# in that case it locates the graphical session itself via loginctl).
+[ -r /etc/andler/display.conf ] || exit 0
+. /etc/andler/display.conf
+[ -n "${RESOLUTION:-}" ] || exit 0
+case "$RESOLUTION" in
+    [1-9][0-9]*x[1-9][0-9]*) ;;
+    *) echo "invalid RESOLUTION in /etc/andler/display.conf: $RESOLUTION" >&2; exit 1 ;;
+esac
+
+if [ -z "${WAYLAND_DISPLAY:-}" ] && [ -z "${DISPLAY:-}" ] && command -v loginctl >/dev/null 2>&1; then
+    for session in $(loginctl list-sessions --no-legend 2>/dev/null | awk '{print $1}'); do
+        type=$(loginctl show-session "$session" -p Type --value 2>/dev/null)
+        case "$type" in
+            wayland|x11)
+                uid=$(loginctl show-session "$session" -p User --value 2>/dev/null)
+                [ -n "$uid" ] || continue
+                export XDG_RUNTIME_DIR="/run/user/$uid"
+                [ -S "$XDG_RUNTIME_DIR/bus" ] && export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
+                display=$(loginctl show-session "$session" -p Display --value 2>/dev/null)
+                case "$display" in
+                    wayland-*) export WAYLAND_DISPLAY="$display" ;;
+                    :*) export DISPLAY="$display" ;;
+                esac
+                break
+        esac
+    done
+fi
+
+if [ -n "${WAYLAND_DISPLAY:-}" ]; then
+    if command -v kscreen-doctor >/dev/null 2>&1; then
+        kscreen-doctor "output.Virtual-1 mode.$RESOLUTION"
+    elif command -v gnome-randr >/dev/null 2>&1; then
+        gnome-randr modify Virtual-1 --mode "$RESOLUTION"
+    elif command -v wlr-randr >/dev/null 2>&1; then
+        wlr-randr --output Virtual-1 --mode "$RESOLUTION"
+    else
+        echo "no Wayland tool known (kscreen-doctor/gnome-randr/wlr-randr) to apply $RESOLUTION" >&2
+        exit 1
+    fi
+elif [ -n "${DISPLAY:-}" ] && command -v xrandr >/dev/null 2>&1; then
+    xrandr --output Virtual-1 --mode "$RESOLUTION"
+else
+    exit 0
+fi

@@ -1,0 +1,23 @@
+[Unit]
+Description=ANDLER PipeWire audio (backs the waydroid session's audio passthrough)
+PartOf=android.target
+# systemd-user-sessions.service removes /run/nologin; without this ordering
+# the PAM session setup (PAMName=login below) fails early in boot with
+# "System is booting up. Unprivileged users are not permitted to log in yet."
+# and the unit bounces once — which also bounces waydroid-compositor.service
+# (Requires=), restarting the whole waydroid session mid-start.
+After=systemd-user-sessions.service
+Before=waydroid-compositor.service
+
+[Service]
+Type=simple
+User=user
+PAMName=login
+ExecStart=/usr/bin/pipewire
+Restart=on-failure
+RestartSec=1
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=android.target

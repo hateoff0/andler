@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=ANDLER display resolution
+Comment=Apply the instance display resolution to the desktop session
+Exec=/usr/local/bin/andler-apply-resolution
+X-GNOME-Autostart-enabled=true
+Terminal=false
