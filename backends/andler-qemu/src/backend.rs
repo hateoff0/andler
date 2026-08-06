@@ -428,7 +428,7 @@ impl HypervisorBackend for QemuBackend {
 
         let network_info = match &cfg.network.mode {
             NetworkMode::Bridge { interface: bridge } => {
-                let tap_iface = format!("tap{}", cfg.id);
+                let tap_iface = cmdline::primary_net_bridge_tap_iface(&cfg.id.to_string());
                 self.network_service
                     .setup_bridge(bridge, &tap_iface)
                     .await

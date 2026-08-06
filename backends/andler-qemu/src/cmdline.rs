@@ -62,11 +62,20 @@ pub fn extra_net_id(index: usize) -> String {
     format!("net-extra{index}")
 }
 
+/// Host-side tap interface name for the primary bridged NIC. Linux caps
+/// interface names at IFNAMSIZ (15 chars), so only the first 8 hex chars of
+/// the id (the CLI's short-id form) fit — a full 64-hex id would be rejected
+/// by `ip link add` and QEMU's TUNSETIFF.
+pub fn primary_net_bridge_tap_iface(instance_id: &str) -> String {
+    let short = &instance_id[..instance_id.len().min(8)];
+    format!("tap{short}")
+}
+
 /// Host-side tap interface name for a hotplugged bridge NIC. The instance id is
 /// part of the name because multiple instances may share one host bridge — the
-/// primary NIC uses `tap{id}`, extras use `tap{id}-e{index}`. Linux caps
-/// interface names at IFNAMSIZ (15 chars), so only the first 8 hex chars of the
-/// id (the CLI's short-id form) fit.
+/// primary NIC uses `tap{short-id}`, extras use `tap{short-id}-e{index}`.
+/// Linux caps interface names at IFNAMSIZ (15 chars), so only the first 8 hex
+/// chars of the id (the CLI's short-id form) fit.
 pub fn extra_net_bridge_tap_iface(instance_id: &str, index: usize) -> String {
     let short = &instance_id[..instance_id.len().min(8)];
     format!("tap{short}-e{index}")
@@ -371,7 +380,7 @@ fn primary_network_args(cfg: &InstanceConfig) -> Vec<String> {
             ],
         },
         NetworkMode::Bridge { interface: bridge } => {
-            let tap_iface = format!("tap{}", cfg.id);
+            let tap_iface = primary_net_bridge_tap_iface(&cfg.id.to_string());
             vec![
                 "-netdev".to_string(),
                 format!(
@@ -740,18 +749,24 @@ mod tests {
             interface: "br0".to_string(),
         };
         let args = network_args(&cfg);
+        let tap_iface = primary_net_bridge_tap_iface(&cfg.id.to_string());
         assert_eq!(
             args,
             vec![
                 "-netdev".to_string(),
-                format!(
-                    "tap,id=net0,ifname=tap{},bridge=br0,script=no,downscript=no",
-                    cfg.id
-                ),
+                format!("tap,id=net0,ifname={tap_iface},bridge=br0,script=no,downscript=no"),
                 "-device".to_string(),
                 format!("{},netdev=net0", cfg.network.device_model),
             ]
         );
+    }
+
+    #[test]
+    fn primary_bridge_tap_iface_truncates_full_instance_id_below_ifnamsiz() {
+        let full = "b".repeat(64);
+        let name = primary_net_bridge_tap_iface(&full);
+        assert_eq!(name, "tapbbbbbbbb");
+        assert!(name.len() <= 15, "tap name must fit IFNAMSIZ: {name}");
     }
 
     #[test]
