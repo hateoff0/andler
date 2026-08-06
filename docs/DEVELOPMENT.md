@@ -139,7 +139,7 @@ docker compose -f docker/dev/docker-compose.yml run --rm e2e
 
 ### gRPC Round-Trip Tests
 
-`daemon/src/grpc_roundtrip_test.rs` contains a suite of tests that verify the full gRPC pipeline:
+`apps/daemon/src/grpc_roundtrip_test.rs` contains a suite of tests that verify the full gRPC pipeline:
 
 - Real TCP connections (ephemeral ports)
 - Real protobuf serialization/deserialization
@@ -234,43 +234,44 @@ andler/
 │           ├── lib.rs            # Re-exports
 │           └── convert.rs        # Proto ↔ Domain conversions
 │
-├── daemon/
-│   └── src/
-│       ├── main.rs               # Entry point, tonic server setup
-│       ├── daemon/
-│       │   ├── mod.rs            # Daemon struct, constructors, persist helpers (~250 lines)
-│       │   ├── error.rs          # DaemonError enum (29 variants)
-│       │   ├── types.rs          # InstanceRecord, SnapshotRecord, InstanceDirGuard
-│       │   ├── instance_ops.rs   # create/start/stop/pause/resume/remove + create_linux_instance + resolve_instance_id
-│       │   ├── clone_ops.rs      # clone_instance, export, find_live_clones
-│       │   ├── snapshot_ops.rs   # create/restore/delete/list snapshots
-│       │   ├── query_ops.rs      # status, list, get_config, stream, update_instance_config
-│       │   ├── health_ops.rs     # periodic VM health checks (ANDLERD_HEALTH_CHECK_INTERVAL_SECS)
-│       │   └── tests/            # 12 test modules (incl. gRPC round-trip tests)
-│       ├── service.rs            # DaemonService (gRPC wrapper)
-│       └── grpc_roundtrip_test.rs # integration tests, real TCP
-│
-├── cli/
-│   └── src/
-│       ├── main.rs               # CLI dispatch + clap enums
-│       ├── instance_file.rs      # TOML config parser
-│       ├── create.rs             # Create command
-│       ├── status.rs             # Status, List, Config, Logs, Metrics
-│       ├── snapshot.rs           # Snapshot commands
-│       ├── disk.rs               # Disk commands
-│       ├── lifecycle.rs          # Start, Stop, Pause, Resume, Remove
-│       ├── clone.rs              # Clone, Export
-│       ├── guest.rs              # Guest package management + boot mode
-│       ├── doctor.rs             # Environment diagnostics
-│       ├── edit.rs               # `config edit` — editor-based config editing
-│       ├── preview.rs            # `create --dry-run` resolution
-│       ├── verify.rs             # `create --verify` checks
-│       ├── wizard/               # Interactive wizard
-│       │   ├── mod.rs            # Wizard entry point, handle_wizard()
-│       │   ├── basic.rs          # BasicResult, ask_kind, ask_name, ask_iso, ask_disk
-│       │   ├── advanced.rs       # AdvancedConfig, 16 ask_* functions
-│       │   └── summary.rs        # SummaryAction, print_summary
-│       └── helpers.rs            # parse_size, format_size, format_bytes, ensure_qcow2_extension
+├── apps/
+│   ├── daemon/
+│   │   └── src/
+│   │       ├── main.rs           # Entry point, tonic server setup
+│   │       ├── daemon/
+│   │       │   ├── mod.rs        # Daemon struct, constructors, persist helpers (~250 lines)
+│   │       │   ├── error.rs      # DaemonError enum (29 variants)
+│   │       │   ├── types.rs      # InstanceRecord, SnapshotRecord, InstanceDirGuard
+│   │       │   ├── instance_ops.rs  # create/start/stop/pause/resume/remove + create_linux_instance + resolve_instance_id
+│   │       │   ├── clone_ops.rs  # clone_instance, export, find_live_clones
+│   │       │   ├── snapshot_ops.rs  # create/restore/delete/list snapshots
+│   │       │   ├── query_ops.rs  # status, list, get_config, stream, update_instance_config
+│   │       │   ├── health_ops.rs # periodic VM health checks (ANDLERD_HEALTH_CHECK_INTERVAL_SECS)
+│   │       │   └── tests/        # 12 test modules (incl. gRPC round-trip tests)
+│   │       ├── service.rs        # DaemonService (gRPC wrapper)
+│   │       └── grpc_roundtrip_test.rs  # integration tests, real TCP
+│   │
+│   └── cli/
+│       └── src/
+│           ├── main.rs           # CLI dispatch + clap enums
+│           ├── instance_file.rs  # TOML config parser
+│           ├── create.rs         # Create command
+│           ├── status.rs         # Status, List, Config, Logs, Metrics
+│           ├── snapshot.rs       # Snapshot commands
+│           ├── disk.rs           # Disk commands
+│           ├── lifecycle.rs      # Start, Stop, Pause, Resume, Remove
+│           ├── clone.rs          # Clone, Export
+│           ├── guest.rs          # Guest package management + boot mode
+│           ├── doctor.rs         # Environment diagnostics
+│           ├── edit.rs           # `config edit` — editor-based config editing
+│           ├── preview.rs        # `create --dry-run` resolution
+│           ├── verify.rs         # `create --verify` checks
+│           ├── wizard/           # Interactive wizard
+│           │   ├── mod.rs        # Wizard entry point, handle_wizard()
+│           │   ├── basic.rs      # BasicResult, ask_kind, ask_name, ask_iso, ask_disk
+│           │   ├── advanced.rs   # AdvancedConfig, 16 ask_* functions
+│           │   └── summary.rs    # SummaryAction, print_summary
+│           └── helpers.rs        # parse_size, format_size, format_bytes, ensure_qcow2_extension
 │
 ├── docker/
 │   ├── dev/                      # Build environment + E2E
@@ -301,8 +302,8 @@ andler/
 2. Add `reference_default()` update if needed
 3. Add proto field in `services/andler-rpc/proto/andler.proto`
 4. Add conversion in `services/andler-rpc/src/convert.rs`
-5. Add CLI flag in the appropriate module (`cli/src/create.rs`, `cli/src/lifecycle.rs`, etc.) if applicable
-6. Add TOML field in `cli/src/instance_file.rs` if applicable
+5. Add CLI flag in the appropriate module (`apps/cli/src/create.rs`, `apps/cli/src/lifecycle.rs`, etc.) if applicable
+6. Add TOML field in `apps/cli/src/instance_file.rs` if applicable
 7. Add test for the new field
 
 ### Adding a New Hypervisor Backend
@@ -310,7 +311,7 @@ andler/
 1. Create `backends/andler-newbackend/` crate
 2. Add to `Cargo.toml` workspace members
 3. Implement `HypervisorBackend` trait from `andler-core`
-4. Register in `Daemon::new()` / `default_backends()` in `daemon/src/daemon/mod.rs`
+4. Register in `Daemon::new()` / `default_backends()` in `apps/daemon/src/daemon/mod.rs`
 5. Add `BackendKind` variant if needed in `andler-core`
 6. Write tests (unit + integration)
 
@@ -319,9 +320,9 @@ andler/
 1. Add RPC definition in `services/andler-rpc/proto/andler.proto`
 2. Add request/response message types if new
 3. Add conversion functions in `services/andler-rpc/src/convert.rs`
-4. Add daemon method in `daemon/src/daemon/mod.rs` (or appropriate ops file)
-5. Add gRPC handler in `daemon/src/service.rs`
-6. Add CLI command in the appropriate module (`cli/src/create.rs`, `cli/src/lifecycle.rs`, etc.)
+4. Add daemon method in `apps/daemon/src/daemon/mod.rs` (or appropriate ops file)
+5. Add gRPC handler in `apps/daemon/src/service.rs`
+6. Add CLI command in the appropriate module (`apps/cli/src/create.rs`, `apps/cli/src/lifecycle.rs`, etc.)
 7. Add tests (daemon unit test + gRPC round-trip test)
 
 ### Adding a New Disk Operation

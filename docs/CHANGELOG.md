@@ -27,6 +27,10 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Changed
 
+#### Structure
+
+- **`apps/` group**: `cli/` and `daemon/` moved under `apps/` — every crate now lives in a role group (`core/`, `backends/`, `services/`, `apps/`) at `<group>/<crate>/`. Package names and binary names (`andler`, `andlerd`) unchanged.
+
 #### Services (`andler-disk`)
 
 - **Privileged operations via `sudo -n`**: `nbd` and `guest_tools` modules now use `privileged_command()` that wraps `sudo -n` for `qemu-nbd`, `umount`, and `chroot` operations. Keeps the daemon unprivileged while still able to mount disks. `describe_sudo_failure()` provides actionable error messages.
@@ -134,14 +138,14 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 - **Snapshot spinner**: `indicatif` spinner during snapshot create/restore (hidden when not a terminal).
 - **CLI-side validation**: `validate_linux_paths`/`validate_android_paths` — checks existence before gRPC call.
 - **`create --dry-run`**: Prints the resolved instance config and QEMU command line without contacting the daemon at all — client-side resolution mirrors the daemon's own logic (OVMF auto-detection, fresh-disk path relocation, `andler_qemu::cmdline::build_args`). Works in TOML mode and CLI mode; not supported with a bare `andler create` (the wizard already shows a summary before creating).
-- **`create --verify`**: Validates a resolved instance config (paths exist, OVMF found/required-for-Android, disk size sane, GPU memory/CPU/memory in range) and prints a ✓/✗ report without contacting the daemon; exits non-zero if any check fails. Shares the same client-side resolution as `--dry-run` (`cli/src/preview.rs::resolve_linux`/`resolve_android`).
+- **`create --verify`**: Validates a resolved instance config (paths exist, OVMF found/required-for-Android, disk size sane, GPU memory/CPU/memory in range) and prints a ✓/✗ report without contacting the daemon; exits non-zero if any check fails. Shares the same client-side resolution as `--dry-run` (`apps/cli/src/preview.rs::resolve_linux`/`resolve_android`).
 
 ### Changed
 
-- **Monorepo restructure**: `crates/andler-*` reorganized into `core/`, `backends/`, `services/`, `daemon/`, `cli/` directories. Package names keep `andler-` prefix.
+- **Monorepo restructure**: `crates/andler-*` reorganized into grouped directories — `core/`, `backends/`, `services/`, with the `daemon`/`cli` applications under `apps/`. Package names keep `andler-` prefix.
 - **Documentation language**: All docs now in English. Historical/future docs moved to `docs/archive/`.
-- **Daemon module decomposition**: `daemon/src/daemon.rs` (3209 lines) decomposed into 9 files under `daemon/src/daemon/`. Core `mod.rs` reduced to 268 lines (92% reduction). Error types, instance lifecycle, clone/export, snapshots, and queries each in separate modules. Tests split into 9 domain-specific test files.
-- **CLI module decomposition**: `cli/src/main.rs` (1185 lines) decomposed into 8 modules. Main dispatch reduced to 769 lines. Commands extracted to domain-specific files: `create.rs`, `edit.rs`, `status.rs`, `snapshot.rs`, `disk.rs`, `lifecycle.rs`, `clone.rs`, `helpers.rs`.
+- **Daemon module decomposition**: `apps/daemon/src/daemon.rs` (3209 lines) decomposed into 9 files under `apps/daemon/src/daemon/`. Core `mod.rs` reduced to 268 lines (92% reduction). Error types, instance lifecycle, clone/export, snapshots, and queries each in separate modules. Tests split into 9 domain-specific test files.
+- **CLI module decomposition**: `apps/cli/src/main.rs` (1185 lines) decomposed into 8 modules. Main dispatch reduced to 769 lines. Commands extracted to domain-specific files: `create.rs`, `edit.rs`, `status.rs`, `snapshot.rs`, `disk.rs`, `lifecycle.rs`, `clone.rs`, `helpers.rs`.
 - **Disk default size**: 40 GiB → **256 GiB** (thin-provisioned qcow2, actual usage minimal).
 - **Database filename**: `state.db` → **`andlerd.db`**.
 - **Snapshot state requirements**: `restore`/`delete` now require **Running/Paused** instance (not terminal states) — QMP commands need live QEMU process.
@@ -217,7 +221,7 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
   preview needed to replicate this exact fallback logic client-side, which
   is what surfaced the mismatch). Covered by
   `create_instance_honors_explicit_ovmf_vars_template` in
-  `daemon/src/grpc_roundtrip_test.rs`.
+  `apps/daemon/src/grpc_roundtrip_test.rs`.
 - **`wait_job_completion` terminal status check**: was matching on `"completed"`/`"failed"`/
   `"aborted"`, none of which exist in QEMU's real job status enum (the only terminal status is
   `"concluded"`; success/failure is distinguished by the presence of an `error` field, not by a

@@ -8,8 +8,8 @@ members = [
     "services/andler-net",
     "services/andler-store",
     "services/andler-rpc",
-    "daemon",
-    "cli",
+    "apps/daemon",
+    "apps/cli",
 ]
 
 [workspace.package]

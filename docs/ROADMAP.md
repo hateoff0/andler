@@ -49,11 +49,11 @@
 - [x] Guest image pipelines — automated Android/Linux base image builds with Waydroid (`docker/images/`). Rootfs Dockerfile (Arch + CachyOS kernel + Mesa + waydroid + weston), `build.sh` orchestrator, `build-disk.sh` (rootfs → GPT-partitioned bootable qcow2 with UKI), `fetch-waydroid-images.py` (SourceForge RSS + MD5 verify). Base image auto-discovery via `base_image::resolve()` in `andler-core`. Daemon uses it automatically when client omits `base_image_path`. Android session composites via Weston (GL/virgl) instead of gamescope (Vulkan/venus) so the display path works on any host GPU — see `docker/images/README.md`.
 - [x] Network modes in `andler-net`: **bridge** implemented (via iproute2); **isolated** is config-representable but `setup_isolated` returns an explicit "not implemented yet" error — see `services/andler-net/README.md`
 - [x] Host-side bridge creation (via iproute2)
-- [x] `--dry-run` flag on `andler create` — prints the resolved config and QEMU command line without contacting the daemon at all (client-side resolution mirroring the daemon's own logic: OVMF auto-detect, disk relocation, `andler_qemu::cmdline::build_args`). Covers TOML mode and CLI mode; the interactive wizard already has its own summary screen before creating, so `--dry-run` with a bare `andler create` isn't supported — see `cli/src/preview.rs`.
-- [x] `--verify` flag — validates a resolved instance config (paths exist, OVMF found/required-for-Android, disk size sane, GPU memory/CPU/memory in range) and prints a ✓/✗ report, without contacting the daemon. Exits non-zero if any check fails (scriptable). Built on the same client-side resolution as `--dry-run` (`preview::resolve_linux`/`resolve_android`) — see `cli/src/verify.rs`.
+- [x] `--dry-run` flag on `andler create` — prints the resolved config and QEMU command line without contacting the daemon at all (client-side resolution mirroring the daemon's own logic: OVMF auto-detect, disk relocation, `andler_qemu::cmdline::build_args`). Covers TOML mode and CLI mode; the interactive wizard already has its own summary screen before creating, so `--dry-run` with a bare `andler create` isn't supported — see `apps/cli/src/preview.rs`.
+- [x] `--verify` flag — validates a resolved instance config (paths exist, OVMF found/required-for-Android, disk size sane, GPU memory/CPU/memory in range) and prints a ✓/✗ report, without contacting the daemon. Exits non-zero if any check fails (scriptable). Built on the same client-side resolution as `--dry-run` (`preview::resolve_linux`/`resolve_android`) — see `apps/cli/src/verify.rs`.
 - [x] QEMU backend: improve QMP error handling and recovery — a dropped/stale QMP connection is cleared on a connection-level error and reconnected once per operation (`pause`/`resume`/`status`). `BackendError::ProcessNotRunning` distinguishes "QEMU process itself is gone" (checked via `is_alive()` before giving up) from a transient QMP hiccup or a genuine command failure (`CommandFailed`/`ParseError`, never retried — QEMU already answered, retrying changes nothing). See `diagnose_and_reset_qmp` in `backends/andler-qemu/src/backend.rs`.
 - [x] Core: add disk space pre-check before snapshot operations — checks free space on the disk's filesystem via `statvfs(2)` before calling `backend.snapshot()`, using guest RAM size as a conservative upper bound for vmstate size (exact snapshot size isn't knowable in advance). Fails with `DiskError::InsufficientDiskSpace` (mapped to `Status::resource_exhausted`) instead of letting the operation run out of space partway through. See `services/andler-disk/src/diskspace.rs`.
-- [x] Core: add VM health checks — periodic background task (`ANDLERD_HEALTH_CHECK_INTERVAL_SECS`, default 30s, `0` disables) polls every `Running` instance's real backend status; if the process has died outside the normal `stop_instance` path, the FSM record is transitioned to `Error` and persisted, so a crash is visible in `andler status` instead of silently going unnoticed until someone happens to check. See `daemon/src/daemon/health_ops.rs`.
+- [x] Core: add VM health checks — periodic background task (`ANDLERD_HEALTH_CHECK_INTERVAL_SECS`, default 30s, `0` disables) polls every `Running` instance's real backend status; if the process has died outside the normal `stop_instance` path, the FSM record is transitioned to `Error` and persisted, so a crash is visible in `andler status` instead of silently going unnoticed until someone happens to check. See `apps/daemon/src/daemon/health_ops.rs`.
       **Auto-restart not implemented as an automatic behavior** — manual
       `andler start` on a stopped/crashed instance works (the FSM accepts
       `Start` from `Stopped`/`Error`, see the item right below). What's left
@@ -65,18 +65,10 @@
 - [x] Online guest operations over the QGA chardev socket (`*.qga.sock`, `org.qemu.guest_agent.0`) instead of QMP — QEMU ≥ 9 registers no `guest-*` commands on QMP. Package install/remove, file writes, and live resolution changes (`set_guest_display_resolution`) all talk to `qemu-ga`.
 - [x] gRPC error messages sanitized and truncated (384 chars) — long multi-KB package-manager stderr no longer trips the tonic h2 client with "h2 protocol error".
 - [x] `config set` whitelist + live display resolution — keys `display.resolution` (any state; applied live to a running guest via QGA and persisted via fw_cfg), `name`, `arm_translator` (stopped).
+
 ## In Progress
 
 - (none currently)
-
-## Roadmap
-
-> **Priority decision**: the second backend (`andler-vmm`/Cloud Hypervisor)
-> is explicitly the *last* thing on this roadmap, not medium-term. Until
-> the existing QEMU backend and its UX are as close to ideal as we can get
-> them, a second backend just doubles the maintenance surface without
-> making anything people actually use better. See "Why the second backend
-> is last" below.
 
 ### Medium-term
 
@@ -87,25 +79,8 @@
 
 ### Long-term
 
-- [ ] GPU passthrough via VFIO (`RenderBackend::Passthrough`)
 - [ ] Tauri GUI client
-- [ ] Live migration between hosts
 - [ ] Multi-disk support (snapshot device name parameterization)
 - [ ] QMP event subscription (async events beyond command responses)
-- [ ] **Cloud Hypervisor backend** (`andler-vmm` with `rust-vmm` crates) —
-      deliberately last. Everything above this line makes the existing,
-      working QEMU path better for people using it today; a second
-      backend is a parallel implementation of `HypervisorBackend` that
-      pays for itself only once the first one stops being the bottleneck.
-
-### Why the second backend is last
-
-`andler-vmm` currently exists as an empty stub. Standing up a real Cloud
-Hypervisor backend means re-implementing cmdline/process/QMP-equivalent
-lifecycle management, metrics, snapshotting, and every edge case the QEMU
-backend has already hit — a large, mostly independent effort that doesn't
-improve anything for the QEMU path in the meantime. Every item above it
-either fixes something that can silently go wrong today (QMP recovery,
-disk space pre-checks, health checks) or removes a "just run it and see"
-step from the most common workflow (`--dry-run`/`--verify`). Those come
-first.
+- [ ] Live migration between hosts
+- [ ] GPU passthrough via VFIO (`RenderBackend::Passthrough`)

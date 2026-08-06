@@ -112,7 +112,7 @@ Protobuf definitions and generated code via `tonic`/`prost`.
 **26 RPCs** covering instance lifecycle, monitoring, snapshots, clone/export.
 **~45 conversion tests** for bidirectional proto↔domain type mapping.
 
-### `daemon/` — Background Service
+### `apps/daemon/` — Background Service
 
 Orchestrates all operations. Holds backend registry, instance state, optional persistence.
 
@@ -128,7 +128,7 @@ Orchestrates all operations. Holds backend registry, instance state, optional pe
 
 **~120 unit tests** (some ignored) + **gRPC round-trip tests** (real TCP).
 
-### `cli/` — Command-Line Interface
+### `apps/cli/` — Command-Line Interface
 
 Thin gRPC client. Each subcommand = one gRPC request + print response.
 

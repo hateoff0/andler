@@ -9,12 +9,12 @@ name = "andlerd"
 path = "src/main.rs"
 
 [dependencies]
-andler-core = { path = "../core/andler-core" }
-andler-qemu = { path = "../backends/andler-qemu" }
-andler-disk = { path = "../services/andler-disk" }
-andler-firmware = { path = "../services/andler-firmware" }
-andler-rpc = { path = "../services/andler-rpc" }
-andler-store = { path = "../services/andler-store" }
+andler-core = { path = "../../core/andler-core" }
+andler-qemu = { path = "../../backends/andler-qemu" }
+andler-disk = { path = "../../services/andler-disk" }
+andler-firmware = { path = "../../services/andler-firmware" }
+andler-rpc = { path = "../../services/andler-rpc" }
+andler-store = { path = "../../services/andler-store" }
 tonic = { workspace = true }
 tokio = { workspace = true }
 thiserror = { workspace = true }

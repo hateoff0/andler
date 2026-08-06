@@ -390,7 +390,7 @@ mechanism of `andler-disk`.
 (`~/.andler/cache/base-images/`, or `$ANDLER_HOME/cache/base-images/` if
 `ANDLER_HOME` is set) for `*.manifest.json` files and picks the freshest one
 (by `built_at`) matching a requested `AndroidProfile`'s Android version and
-GApps/vanilla variant. `daemon/src/service.rs::create_android_instance`
+GApps/vanilla variant. `apps/daemon/src/service.rs::create_android_instance`
 uses this automatically whenever the client leaves `base_image_path` empty —
 an explicit `--base-image-path` (CLI) or `base_image_path` (gRPC) still
 overrides it, e.g. for a locally-built image not yet moved into the cache

@@ -316,44 +316,45 @@ andler/
 │   │                              host-level GPU metrics (AMD/NVIDIA/Intel)
 │   └── andler-rpc/                gRPC protocol + conversions
 │
-├── daemon/                        Background service (~120 unit tests, incl. gRPC round-trip)
-│   └── src/
-│       ├── main.rs                 andlerd binary (verbosity flags, signal handling)
-│       ├── firmware.rs             OVMF auto-detection
-│       ├── service.rs              gRPC service wrapper
-│       ├── grpc_roundtrip_test.rs  Integration tests
-│       └── daemon/
-│           ├── mod.rs              Core orchestration logic (~268 lines)
-│           ├── error.rs            DaemonError enum (29 variants)
-│           ├── types.rs            InstanceRecord, SnapshotRecord, InstanceDirGuard
-│           ├── instance_ops.rs     create/start/stop/pause/resume/remove, resolve_instance_id
-│           ├── clone_ops.rs        clone_instance, export, find_live_clones
-│           ├── snapshot_ops.rs     create/restore/delete/list snapshots
-│           ├── query_ops.rs        status, list, get_config, update_instance_config, stream
-│           ├── health_ops.rs       health check, mark_instance_crashed
-│           └── tests/              12 test modules
-│
-├── cli/                           Command-line client
-│   └── src/
-│       ├── main.rs                CLI dispatch + enums
-│       ├── instance_file.rs       TOML parser
-│       ├── create.rs              Create command
-│       ├── status.rs              Status, List (--full-id/-q), Config, Logs, Metrics
-│       ├── snapshot.rs            Snapshot commands
-│       ├── disk.rs                Disk commands (create/info/resize/compact)
-│       ├── lifecycle.rs           Start, Stop, Pause, Resume, Remove
-│       ├── clone.rs               Clone, Export
-│       ├── helpers.rs             parse_size, format_size, ensure_qcow2_extension
-│       ├── guest.rs               Guest subcommand (package management via guest agent)
-│       ├── doctor.rs              Doctor subcommand (environment checks)
-│       ├── edit.rs                config edit ($VISUAL/$EDITOR on real instance.toml)
-│       ├── verify.rs              --verify flag (pre-flight checks)
-│       ├── preview.rs             --dry-run flag (resolve QEMU command line)
-│       └── wizard/                Interactive setup wizard
-│           ├── mod.rs             Entry point, orchestration, build_create_request()
-│           ├── basic.rs           Basic mode (6 questions)
-│           ├── advanced.rs        Advanced mode (15 questions)
-│           └── summary.rs         Summary with Create/Modify/Cancel
+├── apps/                          User-facing applications
+│   ├── daemon/                    Background service (~120 unit tests, incl. gRPC round-trip)
+│   │   └── src/
+│   │       ├── main.rs            andlerd binary (verbosity flags, signal handling)
+│   │       ├── firmware.rs        OVMF auto-detection
+│   │       ├── service.rs         gRPC service wrapper
+│   │       ├── grpc_roundtrip_test.rs  Integration tests
+│   │       └── daemon/
+│   │           ├── mod.rs         Core orchestration logic (~268 lines)
+│   │           ├── error.rs       DaemonError enum (29 variants)
+│   │           ├── types.rs       InstanceRecord, SnapshotRecord, InstanceDirGuard
+│   │           ├── instance_ops.rs  create/start/stop/pause/resume/remove, resolve_instance_id
+│   │           ├── clone_ops.rs   clone_instance, export, find_live_clones
+│   │           ├── snapshot_ops.rs  create/restore/delete/list snapshots
+│   │           ├── query_ops.rs   status, list, get_config, update_instance_config, stream
+│   │           ├── health_ops.rs  health check, mark_instance_crashed
+│   │           └── tests/         12 test modules
+│   │
+│   └── cli/                       Command-line client
+│       └── src/
+│           ├── main.rs            CLI dispatch + enums
+│           ├── instance_file.rs   TOML parser
+│           ├── create.rs          Create command
+│           ├── status.rs          Status, List (--full-id/-q), Config, Logs, Metrics
+│           ├── snapshot.rs        Snapshot commands
+│           ├── disk.rs            Disk commands (create/info/resize/compact)
+│           ├── lifecycle.rs       Start, Stop, Pause, Resume, Remove
+│           ├── clone.rs           Clone, Export
+│           ├── helpers.rs         parse_size, format_size, ensure_qcow2_extension
+│           ├── guest.rs           Guest subcommand (package management via guest agent)
+│           ├── doctor.rs          Doctor subcommand (environment checks)
+│           ├── edit.rs            config edit ($VISUAL/$EDITOR on real instance.toml)
+│           ├── verify.rs          --verify flag (pre-flight checks)
+│           ├── preview.rs         --dry-run flag (resolve QEMU command line)
+│           └── wizard/            Interactive setup wizard
+│               ├── mod.rs         Entry point, orchestration, build_create_request()
+│               ├── basic.rs       Basic mode (6 questions)
+│               ├── advanced.rs    Advanced mode (15 questions)
+│               └── summary.rs     Summary with Create/Modify/Cancel
 │
 ├── docker/                        Build & test infrastructure
 ├── docs/                          Project documentation
@@ -420,8 +421,8 @@ Each crate has its own README with detailed API reference:
 - [`services/andler-net/README.md`](services/andler-net/README.md) — Bridge/NAT networking via iproute2 (isolated: config-only)
 - [`services/andler-firmware/README.md`](services/andler-firmware/README.md) — Hardware auto-detection + GPU metrics
 - [`services/andler-rpc/README.md`](services/andler-rpc/README.md) — gRPC protocol and conversions
-- [`daemon/README.md`](daemon/README.md) — Daemon orchestration, ~120 unit tests (incl. gRPC round-trip)
-- [`cli/README.md`](cli/README.md) — CLI commands + TOML parser + wizard, ~120 tests
+- [`apps/daemon/README.md`](apps/daemon/README.md) — Daemon orchestration, ~120 unit tests (incl. gRPC round-trip)
+- [`apps/cli/README.md`](apps/cli/README.md) — CLI commands + TOML parser + wizard, ~120 tests
 
 ## Metrics
 

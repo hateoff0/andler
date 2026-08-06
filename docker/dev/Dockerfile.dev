@@ -19,16 +19,16 @@ COPY services/andler-net/Cargo.toml services/andler-net/Cargo.toml
 COPY services/andler-firmware/Cargo.toml services/andler-firmware/Cargo.toml
 COPY services/andler-store/Cargo.toml services/andler-store/Cargo.toml
 COPY services/andler-rpc/Cargo.toml services/andler-rpc/Cargo.toml
-COPY daemon/Cargo.toml daemon/Cargo.toml
-COPY cli/Cargo.toml cli/Cargo.toml
+COPY apps/daemon/Cargo.toml apps/daemon/Cargo.toml
+COPY apps/cli/Cargo.toml apps/cli/Cargo.toml
 
 # Stub files for cargo fetch dependency resolution
 RUN for crate in andler-core andler-qemu andler-disk andler-net andler-firmware andler-store andler-rpc; do \
         dir="core/$crate"; [ -d "backends/$crate" ] && dir="backends/$crate"; [ -d "services/$crate" ] && dir="services/$crate"; \
         mkdir -p "$dir/src" && echo "// placeholder" > "$dir/src/lib.rs"; \
     done && \
-    mkdir -p daemon/src && echo "fn main() {}" > daemon/src/main.rs && \
-    mkdir -p cli/src && echo "fn main() {}" > cli/src/main.rs
+    mkdir -p apps/daemon/src && echo "fn main() {}" > apps/daemon/src/main.rs && \
+    mkdir -p apps/cli/src && echo "fn main() {}" > apps/cli/src/main.rs
 
 RUN cargo fetch
 
@@ -36,8 +36,7 @@ RUN cargo fetch
 COPY core/ core/
 COPY backends/ backends/
 COPY services/ services/
-COPY daemon/ daemon/
-COPY cli/ cli/
+COPY apps/ apps/
 
 # --bins required alongside --tests (cargo build narrows to specified target kind)
 RUN cargo build --workspace --bins --tests

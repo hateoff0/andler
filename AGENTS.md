@@ -59,8 +59,8 @@ Any active state can transition to `Error` via `Fail(msg)`. `Stopped`/`Error` ac
 | `services/andler-firmware/` | Hardware auto-detection, GPU metrics (NVIDIA/AMD/Intel), firmware discovery |
 | `services/andler-store/` | SQLite persistence (two tables: `instances`, `snapshots`) |
 | `services/andler-rpc/` | Protobuf definitions, gRPC generated code, proto↔domain conversions |
-| `daemon/` | Background service: orchestrates backends, FSM transitions, gRPC server |
-| `cli/` | Thin gRPC client: one subcommand = one gRPC request + print response |
+| `apps/daemon/` | Background service: orchestrates backends, FSM transitions, gRPC server |
+| `apps/cli/` | Thin gRPC client: one subcommand = one gRPC request + print response |
 | `docker/dev/` | Build environment, compose targets, E2E smoke test |
 | `docker/images/` | Guest base-image build pipelines (rootfs → bootable qcow2) |
 | `docs/` | Architecture, development guide, API reference, gRPC reference, changelog, roadmap |
@@ -203,7 +203,7 @@ Never assume a struct or enum's shape (field names, tuple vs. struct variant, et
 3. `core/andler-core/src/config/mod.rs` — re-export
 4. `services/andler-rpc/proto/andler.proto` — field on the `InstanceConfig` message
 5. `services/andler-rpc/src/convert.rs` — both conversion directions; required request fields → `ConvertError::MissingField`
-6. `cli/src/instance_file.rs` — TOML parsing (plus a `create.rs` flag or wizard step when user-facing)
+6. `apps/cli/src/instance_file.rs` — TOML parsing (plus a `create.rs` flag or wizard step when user-facing)
 7. tests: core domain + conversion round-trip
 8. docs in the same commit: `docs/API.md` (TOML examples), `docs/GRPC_API.md`, `docs/CHANGELOG.md` (Unreleased); grep existing TOML examples for stale shapes
 
@@ -271,8 +271,8 @@ A new file in `docs/` must be registered here in the same commit.
 
 ### Entry Points
 
-- `daemon/src/main.rs` — daemon binary entry, tonic server setup, signal handling
-- `cli/src/main.rs` — CLI dispatch, clap enums, gRPC client setup
+- `apps/daemon/src/main.rs` — daemon binary entry, tonic server setup, signal handling
+- `apps/cli/src/main.rs` — CLI dispatch, clap enums, gRPC client setup
 
 ### Core Domain
 
@@ -303,10 +303,10 @@ A new file in `docs/` must be registered here in the same commit.
 1. `services/andler-rpc/proto/andler.proto` — message/enum + `rpc` stub
 2. build (prost via the crate's build.rs, requires `protoc`)
 3. `services/andler-rpc/src/convert.rs` — explicit `From`/`TryFrom`; request `UNSPECIFIED` → `ConvertError::MissingField` (never a silent default)
-4. `daemon/src/daemon/<ops>.rs` — the daemon method
-5. `daemon/src/service.rs` — `DaemonService` handler + `DaemonError` → `Status` mapping arm
-6. `cli/src/main.rs` enum + handler file (thin 1:1 request → print response)
-7. `daemon/src/grpc_roundtrip_test.rs` — round-trip test over real TCP
+4. `apps/daemon/src/daemon/<ops>.rs` — the daemon method
+5. `apps/daemon/src/service.rs` — `DaemonService` handler + `DaemonError` → `Status` mapping arm
+6. `apps/cli/src/main.rs` enum + handler file (thin 1:1 request → print response)
+7. `apps/daemon/src/grpc_roundtrip_test.rs` — round-trip test over real TCP
 8. docs in the same commit: `docs/GRPC_API.md`, `docs/API.md`, `docs/CHANGELOG.md` (Unreleased)
 
 ### Persistence
@@ -315,33 +315,33 @@ A new file in `docs/` must be registered here in the same commit.
 
 ### Daemon Logic
 
-- `daemon/src/daemon/mod.rs` — `Daemon` struct, constructors, backend registry
-- `daemon/src/daemon/instance_ops.rs` — create/start/stop/pause/resume/remove
-- `daemon/src/daemon/clone_ops.rs` — clone/export/find_live_clones
-- `daemon/src/daemon/snapshot_ops.rs` — disk-only snapshots: live create/delete over QMP `blockdev-snapshot-internal-sync`/`-delete-internal-sync`; offline restore via `qemu-img snapshot -a` (instance must be stopped; no live revert exists)
-- `daemon/src/daemon/health_ops.rs` — periodic VM health checks (`ANDLERD_HEALTH_CHECK_INTERVAL_SECS`, default 30s, 0 disables)
-- `daemon/src/daemon/query_ops.rs` — status, list, metrics streaming
-- `daemon/src/daemon/types.rs` — InstanceRecord, SnapshotRecord, InstanceDirGuard
-- `daemon/src/daemon/error.rs` — `DaemonError` (30+ variants) → gRPC status mapping
-- `daemon/src/service.rs` — `DaemonService` (thin gRPC wrapper)
-- `daemon/src/grpc_roundtrip_test.rs` — 30 integration tests (real TCP; count drifts with each PR)
+- `apps/daemon/src/daemon/mod.rs` — `Daemon` struct, constructors, backend registry
+- `apps/daemon/src/daemon/instance_ops.rs` — create/start/stop/pause/resume/remove
+- `apps/daemon/src/daemon/clone_ops.rs` — clone/export/find_live_clones
+- `apps/daemon/src/daemon/snapshot_ops.rs` — disk-only snapshots: live create/delete over QMP `blockdev-snapshot-internal-sync`/`-delete-internal-sync`; offline restore via `qemu-img snapshot -a` (instance must be stopped; no live revert exists)
+- `apps/daemon/src/daemon/health_ops.rs` — periodic VM health checks (`ANDLERD_HEALTH_CHECK_INTERVAL_SECS`, default 30s, 0 disables)
+- `apps/daemon/src/daemon/query_ops.rs` — status, list, metrics streaming
+- `apps/daemon/src/daemon/types.rs` — InstanceRecord, SnapshotRecord, InstanceDirGuard
+- `apps/daemon/src/daemon/error.rs` — `DaemonError` (30+ variants) → gRPC status mapping
+- `apps/daemon/src/service.rs` — `DaemonService` (thin gRPC wrapper)
+- `apps/daemon/src/grpc_roundtrip_test.rs` — 30 integration tests (real TCP; count drifts with each PR)
 
 ### CLI Commands
 
-- `cli/src/create.rs` — Create instance (TOML or CLI flags), `--dry-run`/`--verify`
-- `cli/src/clone.rs` — `Clone`/`Export` commands (`CloneInstanceRequest` with Linked/FullStandalone/SharedBase modes, `ExportInstanceDiskRequest`)
-- `cli/src/instance_file.rs` — TOML `InstanceFile` parsing for `create --file` (android_version, base_image_path, ovmf_vars_path, overlay/gapps/microg/libndk)
-- `cli/src/status.rs` — Status, List, Config, Logs, Metrics (`--json` on status/list/metrics)
-- `cli/src/disk.rs` — disk create/info/resize/compact (action flags mutually exclusive)
-- `cli/src/snapshot.rs` — snapshot create/restore/delete/list (`--json` before the subcommand)
-- `cli/src/guest.rs` — guest install/remove/list/boot-mode (online via QGA chardev `*.qga.sock`; offline qemu-nbd fallback)
-- `cli/src/doctor.rs` — environment checks (KVM/QEMU/OVMF/nbd/sudoers/daemon/base images)
-- `cli/src/lifecycle.rs` — start/stop/pause/resume/remove (remove `--purge` confirms on TTY)
-- `cli/src/edit.rs` — `config view`/`edit` (opens the real `instance.toml` in `$VISUAL`/`$EDITOR`) and `config set` (whitelisted keys; `display.resolution` applies live via QGA, other keys → `InvalidConfigKey` — see `daemon::instance_ops::set_instance_config`)
-- `cli/src/preview.rs` — `--dry-run` client-side config/QEMU-cmdline resolution
-- `cli/src/verify.rs` — `--verify` pre-flight checks (paths, OVMF, disk size, GPU/CPU/memory)
-- `cli/src/wizard/` — Interactive wizard with hardware auto-detection
-- `cli/src/helpers.rs` — `parse_size`, `format_size`, `format_bytes`, `format_timestamp`, `which`, `ensure_qcow2_extension`
+- `apps/cli/src/create.rs` — Create instance (TOML or CLI flags), `--dry-run`/`--verify`
+- `apps/cli/src/clone.rs` — `Clone`/`Export` commands (`CloneInstanceRequest` with Linked/FullStandalone/SharedBase modes, `ExportInstanceDiskRequest`)
+- `apps/cli/src/instance_file.rs` — TOML `InstanceFile` parsing for `create --file` (android_version, base_image_path, ovmf_vars_path, overlay/gapps/microg/libndk)
+- `apps/cli/src/status.rs` — Status, List, Config, Logs, Metrics (`--json` on status/list/metrics)
+- `apps/cli/src/disk.rs` — disk create/info/resize/compact (action flags mutually exclusive)
+- `apps/cli/src/snapshot.rs` — snapshot create/restore/delete/list (`--json` before the subcommand)
+- `apps/cli/src/guest.rs` — guest install/remove/list/boot-mode (online via QGA chardev `*.qga.sock`; offline qemu-nbd fallback)
+- `apps/cli/src/doctor.rs` — environment checks (KVM/QEMU/OVMF/nbd/sudoers/daemon/base images)
+- `apps/cli/src/lifecycle.rs` — start/stop/pause/resume/remove (remove `--purge` confirms on TTY)
+- `apps/cli/src/edit.rs` — `config view`/`edit` (opens the real `instance.toml` in `$VISUAL`/`$EDITOR`) and `config set` (whitelisted keys; `display.resolution` applies live via QGA, other keys → `InvalidConfigKey` — see `daemon::instance_ops::set_instance_config`)
+- `apps/cli/src/preview.rs` — `--dry-run` client-side config/QEMU-cmdline resolution
+- `apps/cli/src/verify.rs` — `--verify` pre-flight checks (paths, OVMF, disk size, GPU/CPU/memory)
+- `apps/cli/src/wizard/` — Interactive wizard with hardware auto-detection
+- `apps/cli/src/helpers.rs` — `parse_size`, `format_size`, `format_bytes`, `format_timestamp`, `which`, `ensure_qcow2_extension`
 
 ### Config & Build
 
@@ -428,7 +428,7 @@ Per-crate test counts are NOT pinned in this file or in `docs/` — they drift w
 
 Suites worth knowing about (no numbers):
 - `andler-core`: pure domain tests, no I/O, no QEMU — must stay fully testable offline
-- `andler-daemon`: unit tests across 11 test modules in `daemon/src/daemon/tests/` (+ `mod.rs`) + gRPC round-trip tests (real TCP, real tonic, no QEMU)
+- `andler-daemon`: unit tests across 11 test modules in `apps/daemon/src/daemon/tests/` (+ `mod.rs`) + gRPC round-trip tests (real TCP, real tonic, no QEMU)
 - `andler-cli`: TOML parsing, helpers, wizard, create/status/disk/snapshot/guest commands
 - `andler-qemu`: cmdline reference-config comparison, QMP wire-schema tests, `/proc` metrics parsing
 - `andler-disk`: qemu-img parsing, NBD/mount helpers, translator staging (integration tests `#[ignore]`)
