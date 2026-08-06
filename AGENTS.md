@@ -70,6 +70,20 @@ Every crate directory has its own `README.md` with crate-local behavior and inte
 
 ## Development Commands
 
+### Feature Delivery Loop (mandatory order)
+
+Every user-facing change (feature, fix, refactor with observable behavior) goes through this loop, in order, in one turn — the agent writes the code AND the tests AND the E2E AND the docs itself, verifies, then commits:
+
+1. **Research** — read the crate READMEs and owning docs for every file you will touch; read all existing callers of shared infrastructure (see "Reuse existing patterns, including their hidden preconditions" in Refactoring Discipline) before writing anything.
+2. **Code** — implement the change.
+3. **Tests** — write/extend unit tests (realistic fixtures, see Test Patterns), gRPC round-trip tests for RPC changes, convert tests for proto changes.
+4. **E2E** — add or extend `docker/e2e/tests/NN_*.sh` for user-visible features; never leave a feature without an E2E suite that exercises its positive path (a suite that only asserts error paths is not coverage).
+5. **Docs** — update every owning doc in the same commit (see Documentation Sync); grep the docs for stale claims about the changed behavior.
+6. **Gate** — run the four Pre-Merge Verification steps; then re-run after any subsequent edit.
+7. **Commit** — per the Commit policy below; the commit message names the behavior change, the tests, and the docs.
+
+Steps 4–7 are not optional follow-ups; a change is not done until the loop is complete.
+
 ### Build
 
 ```bash
@@ -140,9 +154,17 @@ If the working environment cannot run a full build (e.g. no network access to cr
 
 Never assume a struct or enum's shape (field names, tuple vs. struct variant, etc.) from how you'd expect it to look — open the actual definition and check.
 
-**Commit policy**: the agent asks "may I commit?" with the message and file list, the user approves, then the agent runs `git add`/`git commit`. Never commit without explicit user approval; an unrequested commit is a workflow violation even when the change itself is good.
+**Commit policy**: the agent commits autonomously once the full Feature Delivery Loop is complete — all four gate steps green, tests/E2E/docs for the change in place, working tree contains only this change. The user has asked for self-driving commits; do not stop to ask "may I commit?" after every change. Exceptions where the agent MUST ask first:
+- destructive changes (deleting code/features/files, changing data formats, removing public API)
+- a change that cannot pass the full gate in this environment (see the fallback rules above)
+- anything the user explicitly asked to review before committing
 
-**Done means**: all four gate steps pass, the docs describing the changed behavior are updated in the same commit (see Documentation Sync), and the commit has been made after explicit user approval.
+Commit hygiene:
+- **Conventional Commit messages**: `feat(scope): …`, `fix(scope): …`, `refactor(scope): …`, `docs(scope): …`, `test(scope): …`, `chore(scope): …` (scope = crate/area: `qemu`, `disk`, `daemon`, `cli`, `rpc`, `core`, `store`, `net`, `e2e`, `docs`). Subject ≤ 72 chars, imperative, English. Body explains the behavior change, why, and the test/docs coverage — not a restatement of the diff.
+- **One logical change per commit.** If the loop produced two independent changes, make two commits (split the staging; docs travel with their change).
+- Never commit work-in-progress, broken builds, or untested changes; never commit unrelated files (`git status` must show only this change's files).
+
+**Done means**: all four gate steps pass, tests (unit + round-trip + E2E where applicable) are in place, the docs describing the changed behavior are updated in the same commit (see Documentation Sync), and the commit has been made.
 
 ## Code Conventions & Common Patterns
 
@@ -232,9 +254,25 @@ Rules that exist because violating them has produced real bugs in this repo:
 
 - **Cross-crate duplication must be hoisted, not copied.** If the same logic (parsing, formatting, path resolution) is needed in two crates, it belongs in `andler-core` or in one crate re-used via a workspace dependency — never a second copy. Real bug: the same validation was fixed twice in `cli` and `daemon` because each had its own copy.
 
+- **Reuse existing patterns, including their hidden preconditions.** Before writing code against shared infrastructure (NBD mounts, QMP, persistence, guest filesystem), read every existing caller of that infrastructure — identical-looking operations can require different privileges or state. Real bug: `arm_translator.rs` mutated the rw-mounted guest partition with raw `std::fs` while `guest_tools.rs`/`boot_mode.rs` already routed mutations through `sudo -n`; the raw path failed with EPERM on the guest's root-owned directories and the feature had never worked.
+
+- **All network and external-process I/O must have timeouts.** `reqwest::get` with no timeouts hung for minutes on a filtered network; a request without a total timeout can hang forever on a connection that accepts but never answers. Set connect + total timeouts on every HTTP call, and surface failures as actionable errors (what to do next, not just what failed).
+
+- **Test fixtures must use real input shapes.** A unit test that feeds a shortened stand-in for real data can mask length/format bugs. Real bug: the bridge tap name test used an 8-char fake id, so `tap{64-hex-id}-eN` (70 chars, over Linux's 15-char IFNAMSIZ) passed CI and bridge mode never worked. When the production input has a fixed form (64-hex instance id, absolute paths, real size suffixes), at least one test must use that exact form.
+
+- **Async tests must not deadlock.** Never hold a `tokio` lock guard across an `.await` that takes the same lock — a read guard held in the same task while another call awaits `write()` hangs forever, and the test harness reports a hang, not a failure. Scope guards in blocks (`{ let g = lock.read().await; ... }`) whenever a later call in the same test takes the lock. Run new async tests with a `timeout` once; a test that does not finish is a bug, not a slow test.
+
+- **A feature's tests must fail on its real bug.** If the only way a test passes is by not exercising the changed path (mock returns early, assertion greps a substring that also matches unrelated output), rewrite it. Real bug: the E2E suite tested bridge mode only as an error path, so the IFNAMSIZ failure of the positive path went unnoticed — every user-visible feature needs an E2E positive path.
+
 ## Documentation Sync
 
 Docs drift is a bug, same severity as a failing test. Rules that keep the repo honest:
+
+**Pre-commit checklist (run in order, before `git commit`):**
+1. `git status` — only this change's files are present (see Commit policy)
+2. `grep` the docs for every changed observable (error text, flag name, RPC, config key, count) — stale claims are bugs
+3. Confirm the owning doc of each touched area was updated: crate README for crate-local behavior, `docs/GRPC_API.md` for RPCs/status codes, `docs/API.md` for CLI/TOML, `docs/ARCHITECTURE.md` for mechanisms, `docs/CHANGELOG.md` (Unreleased) for user-visible changes, `docs/ROADMAP.md` when a planned item ships
+4. Confirm the E2E suite list (`docker/e2e/README.md`) and this file's docs map stayed accurate
 
 - **Code and docs change together, in the same commit.** Any change that alters observable behavior — RPC surface, error text, config keys, CLI flags, lifecycle semantics, snapshot behavior — must update the docs that describe it in the same commit:
   - proto messages / gRPC status codes → `docs/GRPC_API.md`
@@ -460,6 +498,13 @@ docker compose -f docker/e2e/compose.yaml run --rm e2e
 - gRPC round-trip tests: Real TCP, real protobuf, real tonic server/client
 - CLI tests: TOML parsing, helper functions, error formatting
 
+**Test quality bar** (violations are review blockers):
+- Every new test must fail on a plausible bug in the code it covers (a test that cannot fail is decoration)
+- Fixtures use real input shapes: real 64-hex instance ids, real paths, real size strings — not shortened stand-ins (see Refactoring Discipline)
+- No test may hang: lock guards scoped, no unbounded waits on sockets/processes; when a test waits on I/O it uses a bounded timeout and asserts the elapsed time
+- Tests that touch the network run against a local listener, never a live external host
+- A test that pins a known-limitation message must be updated (not deleted) when the limitation is fixed
+
 ### E2E Suite
 
 `docker/e2e/e2e.sh` orchestrates the suite: it starts a fresh `andlerd` on an
@@ -470,7 +515,8 @@ commands: lifecycle + FSM negatives (start/pause/resume/stop, remove-while-
 running, double-stop), config view/set/edit, disk create/info/resize/compact,
 live snapshots + offline restore, clone/export (all three modes + removal
 protection), guest install/remove/list and boot-mode (deep tests over a real
-rootfs via qemu-nbd, SKIP when the `nbd` module is unavailable), dry-run/
+rootfs via qemu-nbd, SKIP when the `nbd` module is unavailable), hotplug
+attach/detach disk+net on a live VM, dry-run/
 verify/wizard/completions/doctor, and daemon-restart persistence. Each suite
 leaves no instances behind.
 
@@ -481,3 +527,4 @@ leaves no instances behind.
 - gRPC changes require round-trip test additions
 - Integration tests (`#[ignore]`) for QEMU-dependent paths
 - Lifecycle/QMP/snapshot/guest-agent changes additionally require a live E2E against a test daemon (separate port, see "Working with a live daemon") — unit tests pin wire formats and parsing, not real QEMU behavior (precedent: vmstate snapshot blocking by non-migratable devices was only discoverable live)
+- **Every user-visible feature gets a `docker/e2e/tests/NN_*.sh` suite (or an extension of an existing one) that exercises its positive path** — error-path-only suites miss exactly the failures unit tests cannot see. The suite must be runnable in the containerized harness (SKIP guard when a kernel feature like `nbd` is unavailable) and must clean up after itself (no instances left behind)
