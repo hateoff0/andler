@@ -45,6 +45,10 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 - **GApps prompt moved earlier in wizard**: Base image variant selection (VANILLA vs GApps) now happens before base image choice, so the wizard uses it to filter available images. Forwarded through quick-mode.
 - **Docker-style instance IDs**: Instance IDs are 64 lowercase hex chars (formatted like docker/SHA IDs) instead of UUIDv4. Human output (`create`, `clone`, `start`/`stop`/`pause`/`resume`, `remove`, `list`, `config`) shows the 12-char short ID; the full ID is available via `list --full-id`, `list --json`, and the `~/.andler/instances/<id>/` directory name. Instance references resolve by any unique hex prefix (existing behavior, now hex-only). Old UUID-named instance data is not migrated — remove and recreate.
 
+#### Guest images (`docker/images`)
+
+- **Waydroid image fetch is resumable, parallel and visible**: `fetch-waydroid-images.py` now downloads system+vendor zips in parallel with periodic progress lines (MiB, %, speed, ETA) — a ~1.4 GiB download previously ran silently and looked like a hang. Interrupted downloads resume over HTTP Range (SourceForge mirrors serve 206), stalled connections (no data for 2 min) reconnect from the last byte, and MD5-verified zips are cached across builds via a BuildKit cache mount (`RUN --mount=type=cache` in `base/Dockerfile`), so a rebuild after any earlier layer change skips the re-download entirely; the cache keeps only the two current zips. Upstream files that fail MD5 after a fresh download abort the build with an actionable error; the unpacked size of the zips is now checked against the extraction directory before unpacking, instead of a compressed-size estimate. `build.sh` now requires `docker buildx` (the cache mount cannot be expressed by the legacy builder). Covered by a fixture-based test suite (`docker/images/tests/test-fetch.sh`, local HTTP server with Range support) exercising fresh download, cache reuse, resume, and the MD5-mismatch fatal path.
+
 ### Fixed
 
 #### Store (`andler-store`)

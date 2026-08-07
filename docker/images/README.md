@@ -108,7 +108,36 @@ file size — used to verify free space BEFORE downloading
 (in both the temp directory and `/etc/waydroid-extra/images`, which are different
 filesystems) instead of guessing with a constant; on insufficient space the build
 fails immediately with a clear number in megabytes, rather than midway through downloading
-a gigabyte-sized file with a vague write error.
+a gigabyte-sized file with a vague write error. After download, the *unpacked* size
+of the zips (sum of uncompressed member sizes) is checked against the extraction
+directory before unpacking, so a too-small filesystem is caught before extraction
+instead of halfway through it.
+
+### Why the fetch step is fast(er) and never looks hung
+
+The two zips (~1.1 GiB for Android 13 VANILLA, ~1.4 GiB for GAPPS) are downloaded
+**in parallel**, with a progress line every 10 seconds (`MiB / MiB (%), speed, ETA`)
+so a long download on a slow mirror shows liveness instead of a frozen build.
+Interrupted downloads **resume over HTTP Range** (SourceForge mirrors serve 206
+responses): a build killed mid-download continues from the last byte on the next
+attempt, and a connection that stalls (no data for 2 minutes) reconnects from the
+current position automatically. Each file has a 90-minute deadline; when it is hit,
+the failure message says the resume will continue on the next run.
+
+The fetch step runs with a **BuildKit cache mount**
+(`RUN --mount=type=cache,target=/var/cache/andler-fetch` in `base/Dockerfile`);
+verified zips live there between builds, so any rebuild that invalidates the fetch
+layer (new rootfs overlay, different Android version) re-checks MD5 and **skips the
+download entirely** instead of pulling another ~1 GiB from SourceForge. The cache
+keeps only the two zips of the most recent successful build (older ones are removed).
+Clearing it forces a fresh download: `docker builder prune`. This is also why
+`build.sh` now requires `docker buildx` — the legacy `docker build` builder cannot
+express cache mounts.
+
+The fetch logic is covered by `docker/images/tests/test-fetch.sh`, a fixture suite
+that runs the real script against a local Range-capable HTTP server and exercises
+fresh download, cache reuse (asserting zero re-download requests), byte-level resume,
+and the MD5-mismatch fatal path.
 
 ## Architecture: one base image for both modes (Android/Linux)
 
@@ -288,7 +317,10 @@ docker/images/
 │       ├── usr/local/bin/andler-waydroid-session
 │       └── usr/local/lib/andler/fetch-waydroid-images.py
 ├── build.sh                    # docker build (desired Android version) + build-disk.sh, single command
-└── build-disk.sh                # rootfs → partitioned bootable qcow2 (root, loop devices)
+├── build-disk.sh               # rootfs → partitioned bootable qcow2 (root, loop devices)
+└── tests/
+    ├── fixture_server.py       # local Range-capable HTTP server (fetch tests)
+    └── test-fetch.sh           # fetch-waydroid-images.py: download/cache/resume/md5 paths
 ```
 
 ## Why two stages (`docker build`, then a separate `build-disk.sh`)
@@ -381,6 +413,12 @@ sudo docker/images/build-disk.sh andler-base-rootfs:android13-vanilla \
 `build.sh` writes into a per-version-variant subdirectory of the cache by
 default (`~/.andler/cache/base-images/android13-vanilla/`); the manual
 `build-disk.sh` invocation above takes any path ending in `.qcow2`.
+
+The first build downloads the Waydroid system/vendor zips (≈1.1–1.4 GiB):
+progress lines every 10s, parallel system+vendor, resumable over HTTP Range
+(a killed build continues on the next run). Verified zips are cached in a
+BuildKit cache mount, so rebuilding after a rootfs change skips the download
+(`docker builder prune` forces a fresh one). Step 1 requires `docker buildx`.
 
 The result is a `.qcow2` file plus a `.manifest.json` next to it (size,
 sha256, build date, git revision, android_major/android_variant labels,

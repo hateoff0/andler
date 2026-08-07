@@ -89,16 +89,18 @@ acquire_sudo() {
 
 # --- 1. docker buildx build --------------------------------------------------
 
-# Prefer buildx; fallback to legacy docker build if unavailable
+# base/Dockerfile relies on a BuildKit cache mount (RUN --mount=type=cache) for
+# the Waydroid image downloads; the legacy builder cannot express it.
 build_rootfs_image() {
-    local build_cmd=(docker buildx build --load)
     if ! docker buildx version >/dev/null 2>&1; then
-        echo "==> docker buildx not found — falling back to legacy docker build (slower, DEPRECATED warning)" >&2
-        build_cmd=(docker build)
+        echo "build.sh: docker buildx is required (base image uses a BuildKit cache mount" >&2
+        echo "  for the Waydroid image downloads; legacy \`docker build\` cannot express it)." >&2
+        echo "  Install buildx (Docker 23+ ships it) or enable it with: docker buildx install" >&2
+        exit 1
     fi
 
     echo "==> [1/2] docker build (${IMAGE_TAG}, Android ${ANDROID_MAJOR} ${ANDROID_VARIANT})"
-    "${build_cmd[@]}" \
+    docker buildx build --load \
         -f "$SCRIPT_DIR/base/Dockerfile" \
         --build-arg "ANDROID_MAJOR=${ANDROID_MAJOR}" \
         --build-arg "ANDROID_VARIANT=${ANDROID_VARIANT}" \

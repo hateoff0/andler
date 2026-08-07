@@ -73,9 +73,11 @@ RUN pacman -Syyu --noconfirm && \
         weston waydroid qemu-guest-agent \
     && yes | pacman -Scc --noconfirm
 
-RUN python3 /usr/local/lib/andler/fetch-waydroid-images.py \
+RUN --mount=type=cache,target=/var/cache/andler-fetch \
+    python3 /usr/local/lib/andler/fetch-waydroid-images.py \
         --android-major="${ANDROID_MAJOR}" \
-        --variant="${ANDROID_VARIANT}"
+        --variant="${ANDROID_VARIANT}" \
+        --cache-dir=/var/cache/andler-fetch
 
 # Dedicated system user for the compositor session (Wayland compositors
 # misbehave/refuse to run as root)
