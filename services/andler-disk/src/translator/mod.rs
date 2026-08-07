@@ -11,6 +11,19 @@ pub struct TranslatorInfo {
     pub detect_file: &'static str,
 }
 
+pub const MANAGED_PROP_KEYS: &[&str] = &[
+    "ro.product.cpu.abilist",
+    "ro.product.cpu.abilist32",
+    "ro.product.cpu.abilist64",
+    "ro.dalvik.vm.native.bridge",
+    "ro.enable.native.bridge.exec",
+    "ro.vendor.enable.native.bridge.exec",
+    "ro.vendor.enable.native.bridge.exec64",
+    "ro.ndk_translation.version",
+    "ro.dalvik.vm.isa.arm",
+    "ro.dalvik.vm.isa.arm64",
+];
+
 pub fn resolve(translator: ArmTranslator) -> TranslatorInfo {
     match translator {
         ArmTranslator::Libndk => TranslatorInfo {
@@ -90,5 +103,38 @@ mod tests {
         assert_eq!(dir_name(ArmTranslator::Libndk), "ndk");
         assert_eq!(dir_name(ArmTranslator::Libhoudini), "houdini");
         assert_eq!(dir_name(ArmTranslator::None), "none");
+    }
+
+    #[test]
+    fn managed_prop_keys_cover_every_translator_key() {
+        for translator in [
+            ArmTranslator::Libndk,
+            ArmTranslator::Libhoudini,
+            ArmTranslator::None,
+        ] {
+            let info = resolve(translator);
+            for (key, _) in info.props {
+                assert!(
+                    MANAGED_PROP_KEYS.contains(key),
+                    "{key} of {translator:?} is missing from MANAGED_PROP_KEYS"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn houdini_init_rc_matches_reference_binfmt_registration() {
+        let rc = houdini::INIT_RC.expect("houdini has an init rc");
+        let reference = include_bytes!("../../tests/fixtures/houdini.rc");
+        assert_eq!(
+            rc.as_bytes(),
+            reference,
+            "houdini.rc must stay byte-identical to the waydroid-helper \
+             reference file so the binfmt escapes survive init + sh parsing"
+        );
+        let text = rc;
+        assert!(text.contains("mount binfmt_misc binfmt_misc"));
+        assert_eq!(text.matches("exec -- /system/bin/sh").count(), 4);
+        assert!(text.contains("/system/bin/houdini64:P"));
     }
 }

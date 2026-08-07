@@ -73,7 +73,7 @@ pub fn is_agent_installed(
 ) -> Result<bool, DiskError> {
     let (query_binary, cmd_args) = pkg_manager.check_installed_command(package);
 
-    let output = nbd::privileged_command("chroot")
+    let output = nbd::helper_command("chroot-run")
         .arg(mount_point)
         .arg(query_binary)
         .args(cmd_args)
@@ -129,7 +129,7 @@ fn install_agent_offline_blocking(disk_path: &Path, package: &str) -> Result<(),
         PackageManager::Pacman => vec!["-Sy"],
     };
 
-    let update_output = nbd::privileged_command("chroot")
+    let update_output = nbd::helper_command("chroot-run")
         .arg(mount_guard.path())
         .arg(pkg_manager.binary_name())
         .args(&update_args)
@@ -157,13 +157,13 @@ fn install_agent_offline_blocking(disk_path: &Path, package: &str) -> Result<(),
         return Err(DiskError::NbdSetupFailed(format!(
             "failed to update package indexes in guest (exit {}): {}",
             update_output.status,
-            nbd::describe_sudo_failure("chroot", stderr.trim())
+            nbd::describe_helper_failure(stderr.trim())
         )));
     }
 
     let cmd_args = pkg_manager.install_args(package);
 
-    let output = nbd::privileged_command("chroot")
+    let output = nbd::helper_command("chroot-run")
         .arg(mount_guard.path())
         .arg(pkg_manager.binary_name())
         .args(cmd_args)
@@ -177,7 +177,7 @@ fn install_agent_offline_blocking(disk_path: &Path, package: &str) -> Result<(),
         return Err(DiskError::NbdSetupFailed(format!(
             "package installation failed (exit {}): {}",
             output.status,
-            nbd::describe_sudo_failure("chroot", stderr.trim())
+            nbd::describe_helper_failure(stderr.trim())
         )));
     }
 
@@ -221,7 +221,7 @@ fn remove_agent_offline_blocking(disk_path: &Path, package: &str) -> Result<(), 
 
     let cmd_args = pkg_manager.remove_args(package);
 
-    let output = nbd::privileged_command("chroot")
+    let output = nbd::helper_command("chroot-run")
         .arg(mount_guard.path())
         .arg(pkg_manager.binary_name())
         .args(cmd_args)
@@ -235,7 +235,7 @@ fn remove_agent_offline_blocking(disk_path: &Path, package: &str) -> Result<(), 
         return Err(DiskError::NbdSetupFailed(format!(
             "package removal failed (exit {}): {}",
             output.status,
-            nbd::describe_sudo_failure("chroot", stderr.trim())
+            nbd::describe_helper_failure(stderr.trim())
         )));
     }
 

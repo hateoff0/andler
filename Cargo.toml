@@ -10,6 +10,7 @@ members = [
     "services/andler-rpc",
     "apps/daemon",
     "apps/cli",
+    "apps/helper",
 ]
 
 [workspace.package]

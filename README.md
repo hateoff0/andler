@@ -10,7 +10,7 @@ ANDLER manages the complete lifecycle of QEMU-based virtual machines with a focu
 
 - **Linux guests** with 3D GPU acceleration — install from ISO, get full Vulkan/OpenGL support via Venus/VirGL render backends, use as a daily-driver desktop or development environment
 - **Android guests** (Waydroid) — run Android apps with GPU acceleration on Linux hardware, with libndk/libhoudini for ARM→x86 translation
-- **Default XDG paths** — all data under `~/.andler/`, no root required for normal operation (nbd/chroot operations use `sudo -n` for unprivileged daemon, see `andler doctor` for setup)
+- **Default XDG paths** — all data under `~/.andler/`, no root required for normal operation (offline guest ops go through one privileged helper binary `sudo -n andler-helper`, set up by `andler doctor --fix`)
 - **Real-time monitoring** — CPU, RAM, disk, network, and GPU metrics (VRAM usage, GPU load) streamed every second
 - **Snapshots** — disk-only internal qcow2 snapshots: create/delete live on any GPU/audio/CPU configuration, restore offline with a stopped instance
 - **Clone & export** — duplicate VMs cheaply (linked overlays) or create standalone copies
@@ -172,7 +172,7 @@ gl = true
 | `disk` | Disk management (create/info/resize `--shrink`/compact) |
 | `guest` | Guest package management (install/remove/list). Auto-fallback: online via the QGA guest-agent socket if running, offline via qemu-nbd if stopped. |
 | `completions` | Generate shell completion script (bash/zsh/fish) |
-| `doctor` | Check local environment (KVM, QEMU, OVMF, nbd, sudoers, andlerd, base images). `--fix` to auto-write missing sudoers rules. |
+| `doctor` | Check local environment (KVM, QEMU, OVMF, nbd, andler-helper + sudoers rule, andlerd, base images). `--fix` installs the helper and writes/migrates its single sudoers rule. |
 
 See [`docs/API.md`](docs/API.md) for full command reference with all flags.
 
@@ -458,16 +458,21 @@ Polling interval: 1 second. GPU metrics: AMD → NVIDIA → Intel (first found v
   ```
   These same offline operations also need root to open `/dev/nbd*`, to `mount`/`umount`
   the guest partition, and to `chroot` into it for package management — `andlerd` runs
-  unprivileged and shells out to `sudo -n <tool>` for just these specific calls, rather
-  than running as root itself. Without a passwordless sudo rule these will fail with a
-  permission error; add one via `sudo visudo` (adjust the modprobe args and the binary
-  paths to match `which qemu-nbd`/`which mount`/`which umount`/`which chroot` on your
-  system — sudoers matches modprobe's arguments exactly, so this rule can't be used to
-  load any module other than `nbd`):
+  unprivileged and shells out to `sudo -n` **only** for a single privileged helper
+  binary (`/usr/local/sbin/andler-helper`, installed as root:root 0755 by
+  `andler doctor --fix`), rather than granting passwordless sudo to ten system tools.
+  The helper re-validates every argument it receives (paths must lie inside the
+  NBD-mounted guest partition — the `file cp-a` source is the one exception, a
+  read-only host path from the translator cache — devices must be free
+  `/dev/nbd*` devices, chroot commands come from a strict allowlist) before
+  doing anything. Without the
+  passwordless rule below these operations will fail with a permission error;
+  add it via `andler doctor --fix` or `sudo visudo`:
   ```
-  youruser ALL=(root) NOPASSWD: /usr/sbin/modprobe nbd max_part=8, \
-      /usr/bin/qemu-nbd, /usr/bin/mount, /usr/bin/umount, /usr/sbin/chroot
+  youruser ALL=(root) NOPASSWD: /usr/local/sbin/andler-helper
   ```
+  `andler doctor --fix` installs the helper binary (root:root 0755) and migrates
+  any legacy per-binary rules from the old sudoers format automatically.
 - Rust stable (via rustup)
 - Docker + Docker Compose (for reproducible builds)
 - `protobuf-compiler` (`protoc`) for gRPC code generation
@@ -475,6 +480,53 @@ Polling interval: 1 second. GPU metrics: AMD → NVIDIA → Intel (first found v
 ## Roadmap
 
 See [`docs/ROADMAP.md`](docs/ROADMAP.md) for full roadmap with short/medium/long-term plans.
+
+## Credits & Acknowledgments
+
+Thanks to the projects ANDLER builds on. Titles link to the source of truth.
+
+### Virtualization stack
+
+- [QEMU](https://www.qemu.org/) — hypervisor; `qemu-img`/`qemu-nbd` power disk ops
+- [KVM](https://www.kvm.org/) — Linux kernel virtualization (requires `/dev/kvm`)
+- [virtio](https://docs.oasis-open.org/virtio/) — paravirtualized devices
+  (virtio-blk/net/gpu/serial/sound)
+- [Venus](https://docs.mesa3d.org/drivers/venus.html) — Vulkan over virtio-gpu
+- [VirGL](https://docs.mesa3d.org/drivers/virgl.html) — OpenGL over virtio-gpu
+- [OVMF / edk2](https://github.com/tianocore/edk2) — UEFI firmware for guest boot
+
+### Android ecosystem
+
+- [Waydroid](https://github.com/waydroid/waydroid) — Android-in-container
+  runtime: overlay layout, boot-mode switching, ARM translation target
+- [waydroid_script (casualsnek)](https://github.com/casualsnek/waydroid_script)
+  — reference ARM translation implementation (pins, props, binfmt)
+- [waydroid-helper](https://github.com/waydroid-helper/waydroid-helper) —
+  reference translator packaging; our `houdini.rc` is byte-identical to its
+  reference file
+- [libndk_translation (Google)](https://github.com/supremegamers/vendor_google_proprietary_ndk_translation-prebuilt)
+  — ARM→x86 translation runtime (prebuilt mirror used for installs)
+- [libhoudini (Intel)](https://github.com/supremegamers/vendor_intel_proprietary_houdini)
+  — ARM→x86 translation runtime (prebuilt mirror used for installs)
+- [binfmt_misc (kernel)](https://docs.kernel.org/admin-guide/binfmt-misc.html)
+  — dispatches ARM ELF binaries to the translation runtime
+
+### Tooling & architecture references
+
+- [Docker / Docker Compose](https://docs.docker.com/) — containerized test
+  harness (`docker/e2e/`)
+- [Proxmox VE](https://github.com/proxmox/proxmox-rs) — Rust daemon/API
+  reference for improving daemon quality: `pvedaemon` (root daemon,
+  localhost-only API, thin client — same security model as andlerd),
+  `proxmox-api-server`/`proxmox-router` (typed parameter validation,
+  error→status mapping)
+- [containerd](https://github.com/containerd/containerd) — gRPC daemon
+  architecture reference: plugin services, snapshots, event streaming,
+  thin `ctr` client
+- [tokio](https://github.com/tokio-rs/tokio) · [tonic/prost](https://github.com/hyperium/tonic) ·
+  [clap](https://github.com/clap-rs/clap) · [rusqlite](https://github.com/rusqlite/rusqlite) ·
+  [serde](https://github.com/serde-rs/serde) · [tracing](https://github.com/tokio-rs/tracing) ·
+  [thiserror](https://github.com/dtolnay/thiserror) — Rust ecosystem
 
 ## License
 

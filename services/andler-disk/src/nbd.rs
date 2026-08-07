@@ -48,30 +48,36 @@ fn acquire_disk_lock(disk_path: &Path) -> Result<std::fs::File, DiskError> {
     Ok(file)
 }
 
-/// Builds a `sudo -n <program> ...` command. Connecting/disconnecting nbd devices and
-/// mounting/unmounting their partitions needs root (opening `/dev/nbd*` and qemu-nbd's
-/// own lock file in `/var/lock` both require it) — but andlerd itself should stay
-/// unprivileged rather than running as root wholesale just for this. `-n` (non-interactive)
-/// makes sudo fail immediately instead of hanging on a password prompt the daemon has no
-/// way to answer; see `describe_sudo_failure` for the resulting error message.
-pub(crate) fn privileged_command(program: &str) -> std::process::Command {
+/// Builds a `sudo -n /usr/local/sbin/andler-helper <subcommand> ...` command.
+/// Connecting/disconnecting nbd devices and mounting/unmounting their
+/// partitions needs root (opening `/dev/nbd*` and qemu-nbd's own lock file in
+/// `/var/lock` both require it) — but andlerd itself should stay unprivileged
+/// rather than running as root wholesale just for this. Exactly one sudoers
+/// rule authorizes this single binary (installed by `andler doctor --fix`);
+/// the helper re-validates every argument itself. `-n` (non-interactive) makes
+/// sudo fail immediately instead of hanging on a password prompt the daemon has
+/// no way to answer; see `describe_helper_failure` for the resulting error.
+pub(crate) const HELPER_PATH: &str = "/usr/local/sbin/andler-helper";
+
+pub(crate) fn helper_command(subcommand: &str) -> std::process::Command {
     let mut cmd = std::process::Command::new("sudo");
-    cmd.args(["-n", program]);
+    cmd.args(["-n", HELPER_PATH, subcommand]);
     cmd
 }
 
-/// Turns a failed privileged command's stderr into an actionable error, distinguishing
-/// "sudo isn't configured for passwordless use" (the common first-run case) from other
-/// failures so the message tells the user exactly what to do.
-pub(crate) fn describe_sudo_failure(program: &str, stderr: &str) -> String {
+/// Turns a failed helper invocation's stderr into an actionable error,
+/// distinguishing "sudo isn't configured for passwordless use" (the common
+/// first-run case) from other failures so the message tells the user exactly
+/// what to do.
+pub(crate) fn describe_helper_failure(stderr: &str) -> String {
     if stderr.contains("a password is required") || stderr.contains("no tty present") {
-        format!(
-            "{program} needs root and sudo isn't configured for passwordless use by andlerd. \
-             Find the binary's path with `which {program}`, then add a line like this via \
-             `sudo visudo`:\n  \
-             youruser ALL=(root) NOPASSWD: /usr/bin/{program}\n\
-             (replace `youruser` and the path with what `whoami`/`which {program}` show)"
-        )
+        "a privileged operation needs root and sudo isn't configured for \
+         passwordless use by andlerd. Run `andler doctor --fix` to install the \
+         andler-helper binary and its single sudoers rule, or add this line via \
+         `sudo visudo`:\n  \
+         youruser ALL=(root) NOPASSWD: /usr/local/sbin/andler-helper\n\
+         (replace `youruser` with what `whoami` shows)"
+            .to_string()
     } else {
         stderr.to_string()
     }
@@ -99,8 +105,8 @@ impl NbdGuard {
 
 impl Drop for NbdGuard {
     fn drop(&mut self) {
-        let result = privileged_command("qemu-nbd")
-            .args(["--disconnect", &self.device_path.to_string_lossy()])
+        let result = helper_command("nbd-disconnect")
+            .arg(&self.device_path)
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::piped())
             .status();
@@ -143,8 +149,8 @@ impl MountGuard {
 
 impl Drop for MountGuard {
     fn drop(&mut self) {
-        let result = privileged_command("umount")
-            .args(["-l", &self.mount_point.to_string_lossy()])
+        let result = helper_command("umount")
+            .arg(&self.mount_point)
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::piped())
             .status();
@@ -198,14 +204,13 @@ fn scan_nbd_entries(sys_block: &Path) -> Result<Vec<std::fs::DirEntry>, DiskErro
 /// afterwards — an idle nbd module costs nothing, and auto-unload would just be a new
 /// source of "module is busy" races between concurrent andler operations.
 fn try_autoload_nbd_module() {
-    match privileged_command("modprobe")
-        .args(["nbd", "max_part=8"])
+    let output = helper_command("modprobe-nbd")
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped())
-        .output()
-    {
+        .output();
+    match output {
         Ok(output) if output.status.success() => {
-            tracing::info!("auto-loaded the nbd kernel module (sudo -n modprobe nbd max_part=8)");
+            tracing::info!("auto-loaded the nbd kernel module (andler-helper modprobe-nbd)");
         }
         Ok(output) => {
             tracing::debug!(
@@ -322,22 +327,22 @@ pub fn connect_nbd(overlay_path: &Path) -> Result<NbdGuard, DiskError> {
 
     let device = find_free_nbd_device()?;
 
-    let device_str = device.to_string_lossy().into_owned();
-    let overlay_str = overlay_path.to_string_lossy().into_owned();
-
-    let output = privileged_command("qemu-nbd")
-        .args(["--connect", &device_str, &overlay_str, "--format=qcow2"])
+    let output = helper_command("nbd-connect")
+        .arg(&device)
+        .arg(overlay_path)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .output()
-        .map_err(|e| DiskError::NbdSetupFailed(format!("failed to run qemu-nbd: {e}")))?;
+        .map_err(|e| {
+            DiskError::NbdSetupFailed(format!("failed to run andler-helper nbd-connect: {e}"))
+        })?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(DiskError::NbdSetupFailed(format!(
-            "qemu-nbd --connect failed (exit {}): {}",
+            "nbd-connect failed (exit {}): {}",
             output.status,
-            describe_sudo_failure("qemu-nbd", stderr.trim())
+            describe_helper_failure(stderr.trim())
         )));
     }
 
@@ -448,8 +453,7 @@ fn bind_host_mounts(mount_point: &Path) {
     // crypto engine". Mirror arch-chroot: mount a fresh tmpfs there.
     let guest_run = mount_point.join("run");
     if guest_run.is_dir() {
-        let output = privileged_command("mount")
-            .args(["-t", "tmpfs", "tmpfs"])
+        let output = helper_command("mount-tmpfs")
             .arg(&guest_run)
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
@@ -490,13 +494,12 @@ fn host_nameservers() -> Option<String> {
 
 fn write_guest_resolv(mount_point: &Path, contents: &str) -> std::io::Result<()> {
     // The guest filesystem is owned by root and the daemon runs unprivileged,
-    // so write through the NOPASSWD-authorized `chroot` instead of direct I/O.
-    // Replace a (possibly dangling) symlink first: a regular file is what the
-    // chrooted package manager expects.
-    let mut child = privileged_command("chroot")
+    // so write through the NOPASSWD-authorized `guest-write` helper instead of
+    // direct I/O. The helper removes a (possibly dangling) symlink first: a
+    // regular file is what the chrooted package manager expects.
+    let mut child = helper_command("guest-write")
         .arg(mount_point)
-        .arg("/bin/sh")
-        .args(["-c", "rm -f /etc/resolv.conf && cat > /etc/resolv.conf"])
+        .arg("/etc/resolv.conf")
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -508,7 +511,7 @@ fn write_guest_resolv(mount_point: &Path, contents: &str) -> std::io::Result<()>
     let output = child.wait_with_output()?;
     if !output.status.success() {
         return Err(std::io::Error::other(format!(
-            "chroot write failed: {}",
+            "guest-write failed: {}",
             String::from_utf8_lossy(&output.stderr).trim()
         )));
     }
@@ -516,12 +519,9 @@ fn write_guest_resolv(mount_point: &Path, contents: &str) -> std::io::Result<()>
 }
 
 fn bind_host_mount(source: &Path, target: &Path) {
-    let output = privileged_command("mount")
-        .args([
-            "--bind",
-            &source.to_string_lossy(),
-            &target.to_string_lossy(),
-        ])
+    let output = helper_command("mount-bind")
+        .arg(source)
+        .arg(target)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .output();
@@ -556,12 +556,15 @@ pub fn mount_partition(partition: &Path) -> Result<MountGuard, DiskError> {
     let partition_str = partition.to_string_lossy().into_owned();
     let mount_point_str = mount_point.to_string_lossy().into_owned();
 
-    let output = privileged_command("mount")
-        .args(["-o", "rw", &partition_str, &mount_point_str])
+    let output = helper_command("mount-partition")
+        .arg(&partition_str)
+        .arg(&mount_point_str)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .output()
-        .map_err(|e| DiskError::NbdSetupFailed(format!("failed to run mount: {e}")))?;
+        .map_err(|e| {
+            DiskError::NbdSetupFailed(format!("failed to run andler-helper mount-partition: {e}"))
+        })?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -570,7 +573,7 @@ pub fn mount_partition(partition: &Path) -> Result<MountGuard, DiskError> {
             "mount {} on {} failed: {}",
             partition.display(),
             mount_point.display(),
-            describe_sudo_failure("mount", stderr.trim())
+            describe_helper_failure(stderr.trim())
         )));
     }
 

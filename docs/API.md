@@ -296,7 +296,7 @@ Mode selection by instance state:
 |-------|----------|
 | `Running` | Online via the guest agent. If `qemu-guest-agent` is not installed/responding, the command fails with a hint to stop the VM first (offline path) — no silent fallback. |
 | `Paused` | Treated like online, but the frozen guest agent cannot respond, so the command fails with a hint to resume or stop the VM. |
-| `Created` / `Stopped` / `Error` | Offline via `qemu-nbd` + mount + `chroot` (requires the `nbd` kernel module, `qemu-utils`, and passwordless `sudo -n` for `qemu-nbd`/`umount`/`chroot` — see `andler doctor`). |
+| `Created` / `Stopped` / `Error` | Offline via `qemu-nbd` + mount + chroot (requires the `nbd` kernel module, `qemu-utils`, and the single passwordless `sudo -n` rule for `/usr/local/sbin/andler-helper` — see `andler doctor --fix`). |
 | `Starting` / `Stopping` | Rejected. |
 
 ```bash
@@ -387,9 +387,9 @@ Interactive guided instance creation wizard (also the default when `andler` is i
 andler doctor [--fix]
 ```
 
-Checks the local environment for ANDLER prerequisites: KVM availability, QEMU/OVMF installation, nbd kernel module (a scan failure is reported with `Run: sudo modprobe nbd max_part=8`), passwordless sudo for privileged operations, daemon reachability, and base images. Read-only — works even if andlerd isn't running.
+Checks the local environment for ANDLER prerequisites: KVM availability, QEMU/OVMF installation, nbd kernel module (a scan failure is reported with `Run: sudo modprobe nbd max_part=8`), the `andler-helper` privileged binary and its passwordless-sudo rule, daemon reachability, and base images. Read-only — works even if andlerd isn't running.
 
-With `--fix`, offers to write missing passwordless-sudo rules to `/etc/sudoers.d/andler` (validates with `visudo -c` before writing).
+With `--fix`, offers to install the `andler-helper` binary (root:root 0755, via `sudo install`) and write its single passwordless-sudo rule to `/etc/sudoers.d/andler` (validates with `visudo -c` before writing; migrates legacy per-binary rules away).
 ### `completions`
 
 ```bash

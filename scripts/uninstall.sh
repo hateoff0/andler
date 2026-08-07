@@ -63,9 +63,10 @@ echo "run with --purge to delete it too."
 
 if [[ "$PURGE" -eq 1 ]]; then
     echo
-    echo "Purging data and system-wide sudoers rules:"
+    echo "Purging data and system-wide privileged setup:"
     echo "  1. ~/.andler/  — all instances, disks, snapshots, cache"
-    echo "  2. /etc/sudoers.d/andler  — NOPASSWD rules added by 'andler doctor --fix'"
+    echo "  2. /etc/sudoers.d/andler  — passwordless-sudo rule added by 'andler doctor --fix'"
+    echo "  3. /usr/local/sbin/andler-helper  — the privileged helper binary"
     echo
 
     # Deleting instance disks is irreversible; require an explicit
@@ -97,6 +98,18 @@ if [[ "$PURGE" -eq 1 ]]; then
         fi
     else
         echo "No /etc/sudoers.d/andler — nothing to remove"
+    fi
+
+    if [[ -f /usr/local/sbin/andler-helper ]]; then
+        echo "Removing /usr/local/sbin/andler-helper (interactive sudo)"
+        if sudo rm -f /usr/local/sbin/andler-helper; then
+            echo "Removed /usr/local/sbin/andler-helper"
+        else
+            echo "Warning: could not remove /usr/local/sbin/andler-helper — remove it manually:" >&2
+            echo "  sudo rm /usr/local/sbin/andler-helper" >&2
+        fi
+    else
+        echo "No /usr/local/sbin/andler-helper — nothing to remove"
     fi
 
     echo

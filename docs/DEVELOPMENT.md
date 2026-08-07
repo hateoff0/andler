@@ -66,14 +66,11 @@ ANDLERD_STORE_PATH=/path/to/andlerd.db ./target/release/andlerd
 
 ### Passwordless sudo for privileged operations
 
-The daemon runs unprivileged; offline guest operations (offline `guest install`/`remove`, ARM translator switching, boot-mode switching) need root only for a fixed set of commands:
+The daemon runs unprivileged; offline guest operations (offline `guest install`/`remove`, ARM translator switching, boot-mode switching) need root only for a fixed set of operations (nbd connect/disconnect, `mount`/`umount`, chrooted package-manager runs, guest-filesystem writes, `modprobe` for the nbd module). All of them go through **one** privileged binary:
 
-- `qemu-nbd` (connect/disconnect NBD devices)
-- `mount` / `umount` (partitions, bind mounts, tmpfs)
-- `chroot` (running package managers / writes inside the guest filesystem)
-- `modprobe` (best-effort `nbd max_part=8` module autoload)
+- `/usr/local/sbin/andler-helper` — root:root 0755, validates every argument itself (paths must lie inside the NBD-mounted guest partition, devices must be free `/dev/nbd*` devices, chroot commands come from a strict allowlist, mount points must be owned by the invoking user), installed by `andler doctor --fix`
 
-Configure with `andler doctor --fix` (writes `/etc/sudoers.d/andler`, validated with `visudo -c`), or manually. Without these rules, offline operations fail with an actionable message naming the missing sudoers entry.
+The single sudoers rule is `youruser ALL=(root) NOPASSWD: /usr/local/sbin/andler-helper` (written to `/etc/sudoers.d/andler`, validated with `visudo -c`). `--fix` also migrates legacy per-binary rules from the old sudoers format away. Without this rule, offline operations fail with an actionable message pointing at `andler doctor --fix`.
 
 ### Default Paths
 

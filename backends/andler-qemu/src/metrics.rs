@@ -129,10 +129,14 @@ fn compute_io_rates(prev: IoSample, curr: IoSample, delta_secs: f64) -> (u64, u6
     if delta_secs <= 0.0 {
         return (0, 0, 0, 0);
     }
-    let disk_read = ((curr.disk_read_bytes - prev.disk_read_bytes) as f64 / delta_secs) as u64;
-    let disk_write = ((curr.disk_write_bytes - prev.disk_write_bytes) as f64 / delta_secs) as u64;
-    let net_rx = ((curr.net_rx_bytes - prev.net_rx_bytes) as f64 / delta_secs) as u64;
-    let net_tx = ((curr.net_tx_bytes - prev.net_tx_bytes) as f64 / delta_secs) as u64;
+    // /proc/<pid>/io counters are not strictly monotonic (page-cache accounting
+    // can go down); a decrease must clamp to zero, not panic on overflow.
+    let disk_read =
+        (curr.disk_read_bytes.saturating_sub(prev.disk_read_bytes) as f64 / delta_secs) as u64;
+    let disk_write =
+        (curr.disk_write_bytes.saturating_sub(prev.disk_write_bytes) as f64 / delta_secs) as u64;
+    let net_rx = (curr.net_rx_bytes.saturating_sub(prev.net_rx_bytes) as f64 / delta_secs) as u64;
+    let net_tx = (curr.net_tx_bytes.saturating_sub(prev.net_tx_bytes) as f64 / delta_secs) as u64;
     (disk_read, disk_write, net_rx, net_tx)
 }
 
@@ -296,6 +300,29 @@ mod tests {
         assert_eq!(dw, 0);
         assert_eq!(nr, 0);
         assert_eq!(nt, 0);
+    }
+
+    #[test]
+    fn compute_io_rates_clamps_decreasing_counters_to_zero() {
+        // /proc/<pid>/io counters can go down (page-cache accounting); a
+        // decrease must clamp to zero instead of panicking on u64 overflow.
+        let prev = IoSample {
+            disk_read_bytes: 2000,
+            disk_write_bytes: 4000,
+            net_rx_bytes: 1500,
+            net_tx_bytes: 1800,
+        };
+        let curr = IoSample {
+            disk_read_bytes: 1000,
+            disk_write_bytes: 3000,
+            net_rx_bytes: 2000,
+            net_tx_bytes: 1700,
+        };
+        let (dr, dw, nr, nt) = compute_io_rates(prev, curr, 1.0);
+        assert_eq!(dr, 0, "decreasing disk read counter must clamp to zero");
+        assert_eq!(dw, 0, "decreasing disk write counter must clamp to zero");
+        assert_eq!(nr, 500);
+        assert_eq!(nt, 0, "decreasing net tx counter must clamp to zero");
     }
 
     #[test]

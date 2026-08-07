@@ -10,6 +10,20 @@ enum Status {
     Fail(String),
 }
 
+/// The single privileged entry point: a root-owned helper binary that performs
+/// every operation that used to need its own `NOPASSWD` rule. One sudoers rule
+/// (`youruser ALL=(root) NOPASSWD: /usr/local/sbin/andler-helper`) authorizes
+/// it; everything else stays off the policy surface.
+const HELPER_PATH: &str = "/usr/local/sbin/andler-helper";
+
+/// Legacy per-binary rules that an earlier `--fix` (or the old README) may have
+/// written. `--fix` migrates them: lines whose command list consists only of
+/// these binaries are replaced by the single helper rule; lines containing any
+/// other command are left untouched.
+const LEGACY_SUDOERS_BINS: [&str; 10] = [
+    "modprobe", "qemu-nbd", "mount", "umount", "chroot", "mkdir", "cp", "mv", "rm", "chmod",
+];
+
 /// A `youruser ALL=(root) NOPASSWD: <path>` line that `andler doctor --fix` can offer
 /// to write to /etc/sudoers.d/andler on behalf of a failed/warning passwordless-sudo
 /// check. Only ever attached to checks produced by `check_passwordless_sudo`.
@@ -107,15 +121,37 @@ fn check_passwordless_sudo(name: &'static str, path: &Path) -> Check {
     check.with_sudoers_rule(path)
 }
 
-fn check_binary_and_sudo(name: &'static str, bin: &str) -> Vec<Check> {
-    match which(bin) {
-        Some(path) => vec![check_passwordless_sudo(name, &path)],
-        None => vec![fail(
-            name,
-            format!("`{bin}` not found in PATH"),
-            format!("install the package that provides `{bin}`"),
-        )],
+/// What, if anything, is wrong with the installed andler-helper binary. A
+/// valid helper is a regular root-owned file with mode 0755 — anything else
+/// (or nothing at all) means `sudo` would be authorizing a wrong binary.
+fn helper_issue() -> Option<String> {
+    let p = Path::new(HELPER_PATH);
+    if !p.exists() {
+        return Some("not installed".to_string());
     }
+    let meta = std::fs::metadata(p).ok()?;
+    if !meta.is_file() {
+        return Some("not a regular file".to_string());
+    }
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    if meta.uid() != 0 {
+        return Some("not owned by root".to_string());
+    }
+    if meta.permissions().mode() & 0o777 != 0o755 {
+        return Some("not mode 0755".to_string());
+    }
+    None
+}
+
+/// Single `sudo -n /usr/local/sbin/andler-helper --version` probe — the one
+/// command andlerd will run through sudo, so one check covers the whole
+/// privileged surface that used to need ten per-binary probes.
+fn check_passwordless_helper() -> Check {
+    let check = check_passwordless_sudo(
+        "passwordless sudo for andler-helper",
+        Path::new(HELPER_PATH),
+    );
+    check.with_sudoers_rule(Path::new(HELPER_PATH))
 }
 
 fn hypervisor_checks() -> Vec<Check> {
@@ -205,15 +241,27 @@ fn nbd_checks() -> Vec<Check> {
         )),
     }
 
-    // modprobe's passwordless-sudo rule is what makes the "andlerd will try to load it
-    // automatically" note above actually true — without it, try_autoload_nbd_module()
-    // fails silently (see nbd.rs) and the user only finds out when something using nbd
-    // breaks later. Check it explicitly rather than leaving that as a silent gap.
-    checks.extend(check_binary_and_sudo("modprobe", "modprobe"));
-    checks.extend(check_binary_and_sudo("qemu-nbd", "qemu-nbd"));
-    checks.extend(check_binary_and_sudo("mount", "mount"));
-    checks.extend(check_binary_and_sudo("umount", "umount"));
-    checks.extend(check_binary_and_sudo("chroot", "chroot"));
+    // modprobe's passwordless-sudo rule is what makes the "andlerd will try to
+    // load it automatically" note above actually true — without it,
+    // try_autoload_nbd_module() fails silently (see nbd.rs) and the user only
+    // finds out when something using nbd breaks later. All of it (modprobe +
+    // qemu-nbd + mount/umount + chroot + the translator file ops) is now the
+    // single andler-helper binary, so one presence check plus one sudo probe
+    // covers the whole surface.
+    match helper_issue() {
+        None => checks.push(ok("andler-helper", HELPER_PATH)),
+        Some(issue) => checks.push(
+            fail(
+                "andler-helper",
+                format!("{HELPER_PATH}: {issue}"),
+                "run `andler doctor --fix` to install it (will require sudo)",
+            )
+            .with_sudoers_rule(Path::new(HELPER_PATH)),
+        ),
+    }
+    if helper_issue().is_none() {
+        checks.push(check_passwordless_helper());
+    }
 
     checks
 }
@@ -298,11 +346,13 @@ fn print_section(title: &str, checks: &[Check]) -> bool {
 /// different machine (via --daemon-addr / ANDLERD_ADDR), run `andler doctor` there
 /// too — the hypervisor/nbd checks describe andlerd's environment, not this one.
 ///
-/// If `fix` is set, after printing, offers to write the missing passwordless-sudo
-/// rules to /etc/sudoers.d/andler — see `fix_sudoers` for exactly what that does and
-/// doesn't do unattended. If the fix is applied, the nbd/sudo section (the only one
-/// `--fix` can affect) is re-run so the printed summary and the returned/exit status
-/// reflect the machine's state *after* the fix, not before it.
+/// If `fix` is set, after printing, offers to install the andler-helper binary
+/// (if missing) and write the single passwordless-sudo rule to
+/// /etc/sudoers.d/andler, migrating any legacy per-binary rules away — see
+/// `fix_sudoers` for exactly what that does and doesn't do unattended. If the
+/// fix is applied, the nbd/sudo section (the only one `--fix` can affect) is
+/// re-run so the printed summary and the returned/exit status reflect the
+/// machine's state *after* the fix, not before it.
 pub async fn run(daemon_addr: &str, fix: bool) -> bool {
     println!("andler doctor\n");
 
@@ -348,17 +398,89 @@ pub async fn run(daemon_addr: &str, fix: bool) -> bool {
     all_ok
 }
 
-/// Writes missing `NOPASSWD` rules to /etc/sudoers.d/andler, one line per binary that
-/// failed its passwordless-sudo check above. Returns true if, afterwards, the file
-/// should contain everything it needs to (nothing was missing, or the write
-/// succeeded) — the caller uses this to decide whether to re-run the affected checks.
+/// True when a sudoers line is a legacy per-binary andler rule (possibly a
+/// comma-separated command list): `user ALL=(root) NOPASSWD:` followed only by
+/// paths under /usr/bin|/usr/sbin|/bin|/sbin whose basename is one of the ten
+/// legacy binaries. Any other command in the line makes it foreign — such a
+/// line is preserved as-is rather than partially rewritten.
+fn is_legacy_andler_rule(line: &str, user: &str) -> bool {
+    let Some(rest) = line.strip_prefix(&format!("{user} ALL=(root) NOPASSWD: ")) else {
+        return false;
+    };
+    if rest.trim().is_empty() {
+        return false;
+    }
+    for part in rest.split(',') {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+        let cmd = part.split_whitespace().next().unwrap_or("");
+        let path = Path::new(cmd);
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            return false;
+        };
+        let in_legacy = LEGACY_SUDOERS_BINS.contains(&name);
+        let in_standard_dir = matches!(
+            path.parent().and_then(|p| p.to_str()),
+            Some("/usr/bin" | "/usr/sbin" | "/bin" | "/sbin")
+        );
+        if !in_legacy || !in_standard_dir {
+            return false;
+        }
+    }
+    true
+}
+
+/// Builds the sudoers content `--fix` should write: the existing lines minus
+/// any legacy per-binary andler rules, plus the single helper rule. Returns
+/// the content and whether it differs from what is currently there. Foreign
+/// lines (rules andler never wrote) are preserved verbatim.
+fn build_sudoers_content(existing: &[String], user: &str) -> (String, bool) {
+    let helper_line = format!("{user} ALL=(root) NOPASSWD: {HELPER_PATH}");
+    let mut changed = false;
+    let mut has_helper = false;
+    let mut kept: Vec<String> = Vec::new();
+    for line in existing {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if is_legacy_andler_rule(trimmed, user) {
+            changed = true;
+            continue;
+        }
+        if trimmed == helper_line {
+            has_helper = true;
+            continue;
+        }
+        kept.push(trimmed.to_string());
+    }
+    if !has_helper {
+        changed = true;
+    }
+    kept.push(helper_line);
+    kept.sort();
+    let mut content = kept.join("\n");
+    if !content.is_empty() {
+        content.push('\n');
+    }
+    (content, changed)
+}
+
+/// Writes the andler privileged setup to /etc/sudoers.d/andler: installs the
+/// andler-helper binary if it is missing or wrong, then replaces any legacy
+/// per-binary `NOPASSWD` rules with the single helper rule. Returns true if,
+/// afterwards, the file should contain everything it needs to — the caller
+/// uses this to decide whether to re-run the affected checks.
 ///
-/// Deliberately NOT fully unattended, unlike the nbd module auto-load: this edits a
-/// security-policy file, so it always (a) shows the exact lines before touching
-/// anything, (b) asks for explicit y/N confirmation, (c) validates syntax with
-/// `visudo -c` against a temp file before it ever touches the real sudoers.d file, and
-/// (d) installs with a real (interactive) `sudo`, not `sudo -n` — this is a one-time,
-/// user-confirmed action, not something that should ever run silently.
+/// Deliberately NOT fully unattended, unlike the nbd module auto-load: this
+/// edits a security-policy file, so it always (a) shows the exact lines before
+/// touching anything, (b) asks for explicit y/N confirmation, (c) validates
+/// syntax with `visudo -c` against a temp file before it ever touches the real
+/// sudoers.d file, and (d) installs with a real (interactive) `sudo`, not
+/// `sudo -n` — this is a one-time, user-confirmed action, not something that
+/// should ever run silently.
 fn fix_sudoers(binaries: &[PathBuf]) -> bool {
     if binaries.is_empty() {
         println!("--fix: no passwordless-sudo issues found, nothing to do.");
@@ -369,32 +491,88 @@ fn fix_sudoers(binaries: &[PathBuf]) -> bool {
         .or_else(|_| std::env::var("USER"))
         .unwrap_or_else(|_| "youruser".to_string());
 
-    let mut new_lines: Vec<String> = binaries
-        .iter()
-        .map(|bin| format!("{user} ALL=(root) NOPASSWD: {}", bin.display()))
-        .collect();
-    new_lines.sort();
-    new_lines.dedup();
+    // Step 1: install/repair the helper binary itself. The sudoers rule is
+    // only as good as what it points at — a missing or user-owned helper must
+    // be fixed before the policy line is written.
+    if let Some(issue) = helper_issue() {
+        println!("--fix: andler-helper is missing or broken ({issue}).");
+        let source = std::env::current_exe()
+            .ok()
+            .and_then(|exe| exe.parent().map(|dir| dir.join("andler-helper")));
+        match source.as_deref().filter(|s| s.is_file()) {
+            Some(src) => {
+                println!(
+                    "--fix: installing {} from {} (needs sudo — you may be \
+                     prompted for a password)",
+                    HELPER_PATH,
+                    src.display()
+                );
+                let install = std::process::Command::new("sudo")
+                    .args(["install", "-o", "root", "-g", "root", "-m", "0755"])
+                    .arg(src)
+                    .arg(HELPER_PATH)
+                    .status();
+                match install {
+                    Ok(s) if s.success() => {
+                        println!("--fix: installed {HELPER_PATH}");
+                    }
+                    Ok(s) => {
+                        println!(
+                            "--fix: `sudo install` exited with {s}; andler-helper \
+                             was not installed"
+                        );
+                        return false;
+                    }
+                    Err(e) => {
+                        println!("--fix: could not run `sudo install`: {e}");
+                        return false;
+                    }
+                }
+            }
+            None => {
+                println!(
+                    "--fix: cannot find an andler-helper binary next to {}; install \
+                     it manually as root:root 0755 at {HELPER_PATH} and re-run",
+                    std::env::current_exe()
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_else(|_| "the andler binary".to_string())
+                );
+                return false;
+            }
+        }
+    }
 
+    // Step 2: read what is there (or treat absence as empty), then build the
+    // migrated content.
     let target = Path::new("/etc/sudoers.d/andler");
-    let existing: Vec<String> = read_sudoers_file(target)
-        .map(|s| s.lines().map(str::to_string).collect())
-        .unwrap_or_default();
+    let existing: Vec<String> = match read_sudoers_file(target) {
+        Some(content) => content.lines().map(str::to_string).collect(),
+        None if !target.exists() => Vec::new(),
+        None => {
+            // Overwriting an unreadable file would silently drop the rules it
+            // already contains (the file is 0440 root:root after the first
+            // --fix; the chroot fallback read also needs its sudoers rule).
+            println!(
+                "--fix: {} exists but could not be read (needs root); nothing was \
+                 changed. Extend it manually: sudo visudo -f {}",
+                target.display(),
+                target.display()
+            );
+            return false;
+        }
+    };
 
-    let to_add: Vec<&String> = new_lines.iter().filter(|l| !existing.contains(l)).collect();
-    if to_add.is_empty() {
+    let (content, changed) = build_sudoers_content(&existing, &user);
+    if !changed {
         println!(
-            "--fix: {} already contains all the needed rules.",
+            "--fix: {} already contains the needed rule.",
             target.display()
         );
         return true;
     }
 
-    println!(
-        "--fix: the following line(s) would be added to {}:\n",
-        target.display()
-    );
-    for line in &to_add {
+    println!("--fix: {} would become:\n", target.display());
+    for line in content.lines() {
         println!("  {line}");
     }
     print!("\nApply? [y/N] ");
@@ -411,11 +589,6 @@ fn fix_sudoers(binaries: &[PathBuf]) -> bool {
         println!("--fix: aborted, nothing was changed.");
         return false;
     }
-
-    let mut content = existing;
-    content.extend(to_add.into_iter().cloned());
-    let mut content = content.join("\n");
-    content.push('\n');
 
     let tmp = std::env::temp_dir().join(format!("andler-sudoers-{}", std::process::id()));
     if let Err(e) = std::fs::write(&tmp, &content) {
@@ -479,18 +652,30 @@ fn fix_sudoers(binaries: &[PathBuf]) -> bool {
 }
 
 /// Reads /etc/sudoers.d/andler's current contents. Once written, the file is
-/// `0440 root:root`, so a plain (non-root) read only works before the first --fix; on
-/// later runs it falls back to a non-interactive `sudo -n cat`, so `--fix` can still
-/// tell what's already there and doesn't nag about lines it already added. If neither
-/// works, callers treat it as "nothing there yet" — worst case that just re-prompts
-/// for lines that were already applied.
+/// `0440 root:root`, so a plain (non-root) read only works before the first
+/// --fix; on later runs it falls back to `sudo -n andler-helper sudoers-print`
+/// (the helper's own read-back subcommand — no `cat` rule needed), and from
+/// there to the legacy `sudo -n chroot / cat <file>` so --fix still works on
+/// machines that kept their old per-binary rules. If neither works, callers
+/// must treat the file as "readable" only when it doesn't exist: overwriting
+/// an unreadable file would silently drop rules that were already there.
 fn read_sudoers_file(target: &Path) -> Option<String> {
     std::fs::read_to_string(target).ok().or_else(|| {
         if !target.exists() {
             return None;
         }
+        if Path::new(HELPER_PATH).is_file() {
+            if let Ok(o) = std::process::Command::new("sudo")
+                .args(["-n", HELPER_PATH, "sudoers-print"])
+                .output()
+            {
+                if o.status.success() {
+                    return Some(String::from_utf8_lossy(&o.stdout).into_owned());
+                }
+            }
+        }
         std::process::Command::new("sudo")
-            .args(["-n", "cat"])
+            .args(["-n", "chroot", "/", "cat"])
             .arg(target)
             .output()
             .ok()
@@ -511,5 +696,72 @@ mod tests {
     #[test]
     fn which_returns_none_for_a_binary_that_does_not_exist() {
         assert!(which("andler-doctor-definitely-not-a-real-binary-xyz").is_none());
+    }
+
+    #[test]
+    fn legacy_sudoers_rules_are_replaced_by_the_helper_line() {
+        let existing = vec![
+            "user ALL=(root) NOPASSWD: /usr/bin/mount".to_string(),
+            "user ALL=(root) NOPASSWD: /usr/bin/qemu-nbd".to_string(),
+            "user ALL=(root) NOPASSWD: /usr/bin/chmod".to_string(),
+        ];
+        let (content, changed) = build_sudoers_content(&existing, "user");
+        assert!(changed, "legacy rules must trigger a rewrite");
+        assert_eq!(
+            content,
+            format!("user ALL=(root) NOPASSWD: {HELPER_PATH}\n")
+        );
+    }
+
+    #[test]
+    fn migrated_file_is_idempotent_on_a_second_fix() {
+        let existing = vec![format!("user ALL=(root) NOPASSWD: {HELPER_PATH}")];
+        let (content, changed) = build_sudoers_content(&existing, "user");
+        assert!(!changed);
+        assert_eq!(
+            content,
+            format!("user ALL=(root) NOPASSWD: {HELPER_PATH}\n")
+        );
+    }
+
+    #[test]
+    fn foreign_sudoers_lines_are_preserved_verbatim() {
+        let existing = vec![
+            "user ALL=(root) NOPASSWD: /usr/bin/systemctl".to_string(),
+            // Mixed line: the mount rule is legacy but ssh is foreign — the
+            // whole line is nobody's to rewrite, so it is kept exactly as-is.
+            "user ALL=(root) NOPASSWD: /usr/bin/mount, /usr/bin/ssh".to_string(),
+        ];
+        let (content, changed) = build_sudoers_content(&existing, "user");
+        assert!(changed, "the helper rule must still be added");
+        let lines: Vec<&str> = content.lines().collect();
+        assert!(lines.contains(&"user ALL=(root) NOPASSWD: /usr/bin/systemctl"));
+        assert!(lines.contains(&"user ALL=(root) NOPASSWD: /usr/bin/mount, /usr/bin/ssh"));
+        assert!(lines.contains(&format!("user ALL=(root) NOPASSWD: {HELPER_PATH}").as_str()));
+    }
+
+    #[test]
+    fn comma_separated_legacy_lines_are_migrated() {
+        let existing = vec![
+            "user ALL=(root) NOPASSWD: /usr/bin/modprobe nbd max_part=8, \
+             /usr/bin/mount, /usr/bin/umount, /usr/bin/qemu-nbd, /usr/bin/chroot, \
+             /usr/bin/mkdir, /usr/bin/cp, /usr/bin/mv, /usr/bin/rm, /usr/bin/chmod"
+                .to_string(),
+        ];
+        let (content, changed) = build_sudoers_content(&existing, "user");
+        assert!(changed);
+        assert_eq!(
+            content,
+            format!("user ALL=(root) NOPASSWD: {HELPER_PATH}\n")
+        );
+    }
+
+    #[test]
+    fn other_users_lines_are_never_touched() {
+        let existing = vec!["alice ALL=(root) NOPASSWD: /usr/bin/mkdir".to_string()];
+        let (content, changed) = build_sudoers_content(&existing, "bob");
+        assert!(changed);
+        assert!(content.contains(&"alice ALL=(root) NOPASSWD: /usr/bin/mkdir"));
+        assert!(content.contains(&format!("bob ALL=(root) NOPASSWD: {HELPER_PATH}").as_str()));
     }
 }

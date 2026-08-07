@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use andler_core::android_profile::ArmTranslator;
 
@@ -147,6 +147,124 @@ mod tests {
         let _ = tx.send(());
         assert!(err.to_string().contains("404"), "got: {err}");
     }
+
+    #[test]
+    fn extract_zip_flattens_repo_prebuilts_prefix() {
+        use std::io::Write;
+        use std::path::Path;
+
+        let dir = std::env::temp_dir().join(format!(
+            "andler_test_extract_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let mut buf = Vec::new();
+        {
+            let mut writer = zip::ZipWriter::new(std::io::Cursor::new(&mut buf));
+            let opts = zip::write::FileOptions::default();
+            writer
+                .add_directory("vendor_repo-prebuilt-abc123/", opts)
+                .unwrap();
+            writer
+                .add_directory("vendor_repo-prebuilt-abc123/prebuilts/", opts)
+                .unwrap();
+            writer
+                .add_directory("vendor_repo-prebuilt-abc123/prebuilts/lib/", opts)
+                .unwrap();
+            writer
+                .start_file(
+                    "vendor_repo-prebuilt-abc123/prebuilts/lib/libndk_translation.so",
+                    opts,
+                )
+                .unwrap();
+            writer.write_all(b"not-a-real-elf").unwrap();
+            writer
+                .start_file("vendor_repo-prebuilt-abc123/README.md", opts)
+                .unwrap();
+            writer.write_all(b"junk").unwrap();
+            writer.finish().unwrap();
+        }
+
+        extract_zip(&buf, &dir).unwrap();
+        let cache_root = Path::new(&dir);
+        assert!(
+            cache_root.join("lib/libndk_translation.so").is_file(),
+            "payload must be hoisted out of the prebuilts/ prefix"
+        );
+        assert!(
+            !cache_root.join("vendor_repo-prebuilt-abc123").exists(),
+            "repo wrapper dir must be removed"
+        );
+        assert!(
+            !cache_root.join("README.md").exists(),
+            "non-prebuilts repo junk must not leak into the cache"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn flatten_prebuilts_does_not_touch_already_flat_payload_dirs() {
+        let dir = std::env::temp_dir().join(format!(
+            "andler_test_flatten_flat_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("lib/arm")).unwrap();
+        std::fs::create_dir_all(dir.join("wrapper-abc/prebuilts/bin")).unwrap();
+        std::fs::write(dir.join("lib/arm/cpuinfo.so"), b"payload").unwrap();
+        std::fs::write(dir.join("wrapper-abc/prebuilts/bin/houdini"), b"bin").unwrap();
+
+        flatten_prebuilts(&dir).unwrap();
+
+        assert!(
+            dir.join("lib/arm/cpuinfo.so").is_file(),
+            "already-flat payload dirs must not be hoisted"
+        );
+        assert!(dir.join("bin/houdini").is_file(), "prebuilts hoisted");
+        assert!(
+            !dir.join("wrapper-abc/prebuilts").exists(),
+            "wrapper dir removed"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn flatten_prebuilts_errors_on_collision_instead_of_silently_skipping() {
+        let dir = std::env::temp_dir().join(format!(
+            "andler_test_flatten_collision_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("lib/arm")).unwrap();
+        std::fs::create_dir_all(dir.join("wrapper_prepo/prebuilts/lib")).unwrap();
+        std::fs::write(dir.join("lib/arm/cpuinfo.so"), b"payload").unwrap();
+        std::fs::write(dir.join("wrapper_prepo/prebuilts/lib/libndk.so"), b"new").unwrap();
+
+        let err = flatten_prebuilts(&dir).unwrap_err();
+
+        assert!(
+            err.to_string().contains("remove the translator cache dir"),
+            "collision must surface as an actionable error: {err}"
+        );
+        assert!(
+            !dir.join("lib/libndk.so").exists(),
+            "nothing may go live on a partial extract"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
 
 fn verify_md5(bytes: &[u8], expected: &str) -> Result<(), DiskError> {
@@ -189,6 +307,55 @@ fn extract_zip(bytes: &[u8], target: &PathBuf) -> Result<(), DiskError> {
             std::io::copy(&mut file, &mut out)
                 .map_err(|e| DiskError::NbdSetupFailed(format!("failed to write file: {e}")))?;
         }
+    }
+
+    flatten_prebuilts(target)?;
+
+    Ok(())
+}
+
+// GitHub archive zips of the prebuilt repos wrap the payload in a single
+// `<repo>-<commit>/prebuilts/` directory. The cache existence check and the
+// install path joins expect the files directly under the cache root, so hoist
+// the payload up and drop the wrapper. Directories without a `prebuilts/`
+// subdir are already-flattened payload dirs (bin/, lib/, ...) and are left
+// alone — hoisting their contents would corrupt the layout.
+fn flatten_prebuilts(target: &Path) -> Result<(), DiskError> {
+    let entries: Vec<PathBuf> = std::fs::read_dir(target)
+        .map_err(|e| DiskError::NbdSetupFailed(format!("failed to read extract dir: {e}")))?
+        .flatten()
+        .map(|e| e.path())
+        .collect();
+
+    for dir in entries {
+        if !dir.is_dir() {
+            continue;
+        }
+        let payload = dir.join("prebuilts");
+        if !payload.is_dir() {
+            continue;
+        }
+        for entry in std::fs::read_dir(&payload)
+            .map_err(|e| DiskError::NbdSetupFailed(format!("failed to read extract dir {e}")))?
+        {
+            let entry = entry.map_err(|e| {
+                DiskError::NbdSetupFailed(format!("failed to read extract entry: {e}"))
+            })?;
+            let dst = target.join(entry.file_name());
+            if dst.exists() {
+                return Err(DiskError::NbdSetupFailed(format!(
+                    "extract target {} already contains {}; remove the translator \
+                     cache dir and retry",
+                    target.display(),
+                    dst.display()
+                )));
+            }
+            std::fs::rename(entry.path(), &dst).map_err(|e| {
+                DiskError::NbdSetupFailed(format!("failed to move extract entry: {e}"))
+            })?;
+        }
+        std::fs::remove_dir_all(&dir)
+            .map_err(|e| DiskError::NbdSetupFailed(format!("failed to clean extract dir: {e}")))?;
     }
 
     Ok(())

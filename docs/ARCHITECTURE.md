@@ -69,7 +69,7 @@ Wrapper around `qemu-img` for disk creation/cloning/resizing, plus guest tools o
 - `qcow2.rs`: 7 async functions wrapping `qemu-img` CLI
 - `overlay.rs`: Android-specific overlay disk creation + factory reset
 - `clone.rs`: 3 clone modes (linked, full-standalone, shared-base)
-- `nbd.rs`: nbd device management with flock-based locking, `nbd_status()`, and the chroot environment setup (`bind_host_mounts`): the guest's `/etc/resolv.conf` is *written* with the host's nameservers (via NOPASSWD `sudo chroot` — a dangling symlink would make a bind-mount fail with ENOENT), `/dev`, `/proc`, `/sys` are bind-mounted, and a fresh tmpfs is mounted on the guest's `/run` (gpg-agent, used by pacman, needs a writable `/run`)
+- `nbd.rs`: nbd device management with flock-based locking, `nbd_status()`, and the chroot environment setup (`bind_host_mounts`): the guest's `/etc/resolv.conf` is *written* with the host's nameservers (via the `guest-write` helper subcommand — a dangling symlink would make a bind-mount fail with ENOENT), `/dev`, `/proc`, `/sys` are bind-mounted, and a fresh tmpfs is mounted on the guest's `/run` (gpg-agent, used by pacman, needs a writable `/run`)
 - `guest_tools.rs`: offline guest provisioning via `qemu-nbd` + mount + chroot: detects the package manager (apt-get/dnf/pacman), refreshes package indexes (`update`/`makecache`/`-Sy`) and installs/removes packages inside the chroot
 - `arm_translator.rs`: ARM translator package staging in guest images (atomic staging + rename)
 - `boot_mode.rs`: Android/Linux boot-mode switching by re-pointing the guest's `default.target` symlink through chroot
@@ -167,11 +167,11 @@ Package management and resolution changes inside a guest use a two-tier strategy
 
 **Online (VM `Running`, guest agent available)**: commands run inside the guest via the QEMU guest agent (QGA) — `guest-exec`/`guest-exec-status` (package install/remove, package-manager detection) and `guest-file-*` (config file writes, e.g. `display.conf` on resolution change). The agent wire runs over the dedicated `*.qga.sock` chardev (`virtserialport name=org.qemu.guest_agent.0`), never the QMP monitor. This requires `qemu-guest-agent` inside the guest, which the base image ships enabled (`qemu-guest-agent.service`).
 
-**Offline path (VM stopped)** — the disk is exposed via `qemu-nbd` and the root partition mounted, then operations run inside a `sudo -n chroot`:
+**Offline path (VM stopped)** — the disk is exposed via `qemu-nbd` and the root partition mounted, then operations run inside a `chroot`:
 
 - package manager detected by binary (`apt-get`/`dnf`/`pacman`); package index is refreshed first (`apt-get update` / `dnf makecache` / `pacman -Sy`) so installs work on fresh images
-- the chroot is made network- and signature-capable by `bind_host_mounts`: host nameservers are written into the guest's `/etc/resolv.conf` (via chroot, replacing the dangling `stub-resolv.conf` symlink), `/dev`, `/proc`, `/sys` are bind-mounted, and a tmpfs is mounted on the guest's `/run` (gpg-agent needs it for pacman signatures)
-- all privileged operations go through `sudo -n` (NOPASSWD rules for `qemu-nbd`, `mount`, `umount`, `chroot`, `modprobe` — see `andler doctor --fix`)
+- the chroot is made network- and signature-capable by `bind_host_mounts`: host nameservers are written into the guest's `/etc/resolv.conf` (via `guest-write`, replacing the dangling `stub-resolv.conf` symlink), `/dev`, `/proc`, `/sys` are bind-mounted, and a tmpfs is mounted on the guest's `/run` (gpg-agent needs it for pacman signatures)
+- every privileged step — nbd connect/disconnect, `modprobe` for the nbd module, mount/umount, chrooted package-manager runs, and the ARM-translator guest-file operations — is one subcommand of the single `/usr/local/sbin/andler-helper` binary, authorized by one `NOPASSWD` sudoers rule (installed/migrated by `andler doctor --fix`)
 
 ARM translators (`libndk`/`libhoudini`) use the same offline mount machinery via `switch_arm_translator`: version-keyed download (MD5-verified, cached under `~/.andler/cache/arm-translators/`), staged into `var/lib/waydroid/overlay/system`, `build.prop` updated, old translator removed only after the new one is fully staged.
 
@@ -180,7 +180,7 @@ ARM translators (`libndk`/`libhoudini`) use the same offline mount machinery via
 ```
 andler CLI → gRPC → daemon
   ├─ running: backend.qga socket (*.qga.sock) → qemu-ga (guest) → guest-exec/file ops
-  └─ stopped: andler-disk → sudo -n qemu-nbd --connect /dev/nbdN → mount → chroot (resolv /dev /proc /sys tmpfs-/-run) → package manager
+  └─ stopped: andler-disk → sudo -n andler-helper nbd-connect /dev/nbdN → mount → chroot-run (resolv /dev /proc /sys tmpfs-/-run) → package manager
 ```
 
 ## Instance Lifecycle FSM

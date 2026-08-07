@@ -41,23 +41,25 @@ pub async fn switch_boot_mode(overlay_path: &Path, mode: AndroidBootMode) -> Res
     // is rw. Route the actual mutation through the same privileged chroot pattern
     // guest_tools.rs already uses for package installs: `ln -sfn` both removes the
     // old symlink and creates the new one, so no separate privileged remove is needed.
-    let output = nbd::privileged_command("chroot")
+    let output = nbd::helper_command("chroot-run")
         .arg(mount_guard.path())
+        .arg("ln")
         .args([
-            "ln",
             "-sfn",
             target_unit_path(mode),
             "/etc/systemd/system/default.target",
         ])
         .output()
-        .map_err(|e| DiskError::FileSystem(format!("failed to run chroot: {e}")))?;
+        .map_err(|e| {
+            DiskError::FileSystem(format!("failed to run andler-helper chroot-run: {e}"))
+        })?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(DiskError::FileSystem(format!(
             "failed to write default.target symlink (exit {}): {}",
             output.status,
-            nbd::describe_sudo_failure("chroot", stderr.trim())
+            nbd::describe_helper_failure(stderr.trim())
         )));
     }
 

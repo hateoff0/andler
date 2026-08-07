@@ -15,7 +15,13 @@ pub const FILES: &[&str] = &[
     "bin/arm",
     "bin/arm64",
     "bin/ndk_translation_program_runner_binfmt_misc",
+    "bin/ndk_translation_program_runner_binfmt_misc_arm64",
+    "etc/binfmt_misc",
+    "etc/cpuinfo.arm.txt",
+    "etc/cpuinfo.arm64.txt",
     "etc/init/ndk_translation.rc",
+    "etc/ld.config.arm.txt",
+    "etc/ld.config.arm64.txt",
     "lib/arm",
     "lib64/arm64",
     "lib/libndk*",
@@ -25,7 +31,7 @@ pub const FILES: &[&str] = &[
 pub const PROPS: &[(&str, &str)] = &[
     (
         "ro.product.cpu.abilist",
-        "x86_64,x86,arm64-v8a,armeabi-v7a,armeabi",
+        "x86_64,arm64-v8a,x86,armeabi-v7a,armeabi",
     ),
     ("ro.product.cpu.abilist32", "x86,armeabi-v7a,armeabi"),
     ("ro.product.cpu.abilist64", "x86_64,arm64-v8a"),
