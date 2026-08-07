@@ -57,3 +57,38 @@ expect_out_grep "doctor hypervisor section" "^Hypervisor"
 expect_out_grep "doctor daemon section" "^Daemon"
 expect_out_grep "doctor checks /dev/kvm" "/dev/kvm"
 expect_out_grep "doctor checks qemu" "qemu-system-x86_64"
+
+echo "  [doctor --fix installs andler-helper + single rule]"
+# The container runs as root, so the helper check passes trivially; what
+# --fix must still do is place the helper at the canonical path and write a
+# sudoers file containing exactly one rule (no legacy per-binary rules).
+if sudo -n true 2>/dev/null; then
+    echo y | andler doctor --fix >"$E2E_LAST_OUT" 2>"$E2E_LAST_ERR" || {
+        cat "$E2E_LAST_ERR" >&2
+        fail "doctor --fix must exit 0"
+    }
+    if [[ -x /usr/local/sbin/andler-helper ]]; then
+        pass "andler-helper installed at /usr/local/sbin/andler-helper"
+    else
+        fail "andler-helper installed at /usr/local/sbin/andler-helper"
+    fi
+    if [[ -f /etc/sudoers.d/andler ]]; then
+        HELPER_RULES=$(grep -c "NOPASSWD: /usr/local/sbin/andler-helper" /etc/sudoers.d/andler || true)
+        LEGACY_RULES=$(grep -cE "NOPASSWD: /(usr/bin|usr/sbin|bin|sbin)/(modprobe|qemu-nbd|mount|umount|chroot|mkdir|cp|mv|rm|chmod)( |,|$)" /etc/sudoers.d/andler || true)
+        if [[ "$HELPER_RULES" -eq 1 ]]; then
+            pass "sudoers file has exactly one andler-helper rule"
+        else
+            fail "sudoers file must contain exactly one andler-helper rule, found $HELPER_RULES"
+        fi
+        if [[ "$LEGACY_RULES" -eq 0 ]]; then
+            pass "no legacy per-binary rules remain"
+        else
+            fail "legacy per-binary rules must be migrated away, found $LEGACY_RULES"
+        fi
+    else
+        fail "/etc/sudoers.d/andler must exist after --fix"
+    fi
+else
+    echo "    ok: sudo not usable in this container; skipping --fix assertions" >>"$E2E_LAST_OUT"
+    pass "sudo not usable in this container; skipping --fix assertions"
+fi

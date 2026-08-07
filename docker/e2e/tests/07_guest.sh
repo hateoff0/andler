@@ -53,6 +53,16 @@ trap cleanup_nbd EXIT
 
 rm -f /opt/e2e/guest-rootfs/etc/resolv.conf
 cp /etc/resolv.conf /opt/e2e/guest-rootfs/etc/resolv.conf
+# Give the fixture a waydroid-style system image carrying a base build.prop,
+# so the translator install exercises the real merge path (upper build.prop
+# = base props + translator props) instead of the empty-base fallback.
+SYSIMG="$WORK/system.img"
+mke2fs -q -F -t ext4 "$SYSIMG" 8M >/dev/null 2>&1
+mkdir -p "$WORK/sysbp" /opt/e2e/guest-rootfs/etc/waydroid-extra/images
+printf 'ro.product.model=WaydroidE2E\nro.build.version.sdk=33\n' > "$WORK/sysbp/build.prop"
+debugfs -w -R "mkdir /system" "$SYSIMG" >/dev/null 2>&1
+debugfs -w -R "write $WORK/sysbp/build.prop /system/build.prop" "$SYSIMG" >/dev/null 2>&1
+cp "$SYSIMG" /opt/e2e/guest-rootfs/etc/waydroid-extra/images/system.img
 printf 'size=+, type=83\n' | sfdisk /dev/nbd0 >/dev/null 2>&1
 sleep 1
 # No udev in the container: create the partition node the way udev would,
@@ -122,12 +132,87 @@ expect_ok "guest list android (offline)" -- andler guest list "$AID"
 expect_out_grep "lists libndk" "libndk"
 expect_out_grep "translators not installed" "not installed"
 
-# No --translator-dir would trigger a network download of the translator
-# (unbounded reqwest) before the waydroid check fails — pass a plain local
-# path so the test stays deterministic offline. The waydroid-system check
-# runs before the translator files are ever read, so the path is never
-# created or opened.
-expect_fail "guest install libndk fails without a waydroid system" -- andler guest install libndk "$AID" --translator-dir "/cache/translator"
+# A waydroid overlay upper dir does not exist before the guest's first boot,
+# and a real install would download ~18 MiB of prebuilts. Craft a local
+# translator fixture with the real NDK archive layout (bin/, etc/binfmt_misc,
+# etc/init, lib/, lib64/, plus the top-level libndk* libraries) and install
+# from it — this exercises the full pre-boot path: overlay dir creation,
+# wildcard expansion, stage-then-move, props write, and the rc write.
+echo "  [deep: ARM translator install from a local fixture]"
+XLATE="$WORK/xfi-ndk"
+mkdir -p "$XLATE"/bin/arm "$XLATE"/bin/arm64 \
+    "$XLATE"/etc/binfmt_misc "$XLATE"/etc/init \
+    "$XLATE"/lib/arm "$XLATE"/lib64/arm64
+printf '\x7fELF' > "$XLATE/bin/arm/app_process"
+printf '\x7fELF' > "$XLATE/bin/arm64/app_process64"
+printf '\x7fELF' > "$XLATE/bin/ndk_translation_program_runner_binfmt_misc"
+printf '\x7fELF' > "$XLATE/bin/ndk_translation_program_runner_binfmt_misc_arm64"
+printf ':arm_exe:M::\x7fELF\x02\x01\x01\x00' > "$XLATE/etc/binfmt_misc/arm_exe"
+printf ':arm_dyn:M::\x7fELF\x02\x01\x01\x00' > "$XLATE/etc/binfmt_misc/arm_dyn"
+printf ':arm64_exe:M::\x7fELF\x02\x01\x01\x00' > "$XLATE/etc/binfmt_misc/arm64_exe"
+printf ':arm64_dyn:M::\x7fELF\x02\x01\x01\x00' > "$XLATE/etc/binfmt_misc/arm64_dyn"
+# The real ndk_translation.rc is byte-for-byte the file shipped in the
+# prebuilt archives (both the android-11 and android-13 pins carry this exact
+# content) — the fixture must be a functional rc so the binfmt registration
+# actually happens on guest boot, not a stub that does nothing.
+cat > "$XLATE/etc/init/ndk_translation.rc" <<'EOF'
+# Enable native bridge for target executables
+on early-init && property:ro.enable.native.bridge.exec=1
+    mount binfmt_misc binfmt_misc /proc/sys/fs/binfmt_misc
+
+on property:ro.enable.native.bridge.exec=1 && property:ro.dalvik.vm.isa.arm=x86
+    copy /system/etc/binfmt_misc/arm_exe /proc/sys/fs/binfmt_misc/register
+    copy /system/etc/binfmt_misc/arm_dyn /proc/sys/fs/binfmt_misc/register
+
+on property:ro.enable.native.bridge.exec=1 && property:ro.dalvik.vm.isa.arm64=x86_64
+    copy /system/etc/binfmt_misc/arm64_exe /proc/sys/fs/binfmt_misc/register
+    copy /system/etc/binfmt_misc/arm64_dyn /proc/sys/fs/binfmt_misc/register
+EOF
+printf 'Architecture: ARMv7\n' > "$XLATE/etc/cpuinfo.arm.txt"
+printf 'Architecture: AArch64\n' > "$XLATE/etc/cpuinfo.arm64.txt"
+echo 'arm { }' > "$XLATE/etc/ld.config.arm.txt"
+echo 'arm64 { }' > "$XLATE/etc/ld.config.arm64.txt"
+printf '\x7fELF' > "$XLATE/lib/libndk_translation.so"
+printf '\x7fELF' > "$XLATE/lib/libndk_proxy.so"
+printf '\x7fELF' > "$XLATE/lib/libndk_extra.so"
+printf '\x7fELF' > "$XLATE/lib64/libndk_translation.so"
+printf '\x7fELF' > "$XLATE/lib64/libndk_proxy.so"
+printf '\x7fELF' > "$XLATE/lib/arm/app_process"
+printf '\x7fELF' > "$XLATE/lib64/arm64/app_process64"
+
+expect_ok "guest install libndk pre-boot from fixture" -- andler guest install libndk "$AID" --translator-dir "$XLATE"
+expect_out_grep "install reports success" "Translator .libndk. installed"
+expect_ok "guest list shows libndk installed" -- andler guest list "$AID"
+expect_out_grep "libndk is now installed" "libndk.*installed"
+expect_ok "guest install libndk again is idempotent" -- andler guest install libndk "$AID" --translator-dir "$XLATE"
+expect_out_grep "reinstall reports success" "Translator .libndk. installed"
+
+echo "  [deep: upper build.prop merges base + translator props]"
+# Regression: an upper build.prop containing only translator props shadows
+# the base image's build.prop wholesale and breaks Android boot (waydroid
+# can't parse the android version, zygote/ART crash). The upper file must
+# contain the base image's props (from system.img) merged with the
+# translator's managed props.
+INST_DISK="$WORK/ai/android-instances/$AID/disk.qcow2"
+if ! qemu-nbd --connect=/dev/nbd0 "$INST_DISK"; then
+    fail "cannot re-connect the android instance disk"
+fi
+NBD_CONNECTED=1
+mkdir -p "$WORK/mnt"
+mount -o ro /dev/nbd0p1 "$WORK/mnt"
+BP="$WORK/mnt/var/lib/waydroid/overlay/system/build.prop"
+grep -q "^ro.product.model=WaydroidE2E$" "$BP" \
+    && pass "upper build.prop keeps the base image's props" \
+    || fail "upper build.prop must keep base props (found: $(head -c 300 "$BP" | tr '\n' ' '))"
+grep -q "^ro.build.version.sdk=33$" "$BP" \
+    && pass "upper build.prop keeps ro.build.version.sdk" \
+    || fail "upper build.prop must keep ro.build.version.sdk"
+grep -q "^ro.dalvik.vm.native.bridge=libndk_translation.so$" "$BP" \
+    && pass "upper build.prop has translator props" \
+    || fail "upper build.prop must carry the translator props"
+umount "$WORK/mnt"
+qemu-nbd --disconnect /dev/nbd0 >/dev/null 2>&1 || true
+NBD_CONNECTED=0
 
 expect_ok "boot-mode switch to android" -- andler guest boot-mode "$AID" android
 expect_out_grep "switch reports success" "Boot mode switched"

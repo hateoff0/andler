@@ -77,7 +77,7 @@ Coverage by suite:
 | `04_snapshot.sh` | live create (incl. duplicate tag)/list/`--json`, offline restore, restore-while-running, create/delete-while-stopped, remove-while-running, live config-set without a guest agent |
 | `05_clone_export.sh` | Android create (incl. missing base image), clone linked/full-standalone/shared-base, live-clone removal protection, export (file + no new instance), nonexistent-source negatives |
 | `07_guest.sh` | Guest error paths always; deep tests (needs the `nbd` kernel module + privileged container): offline `guest list`/`install`/`remove` against a real Debian rootfs via qemu-nbd, Android boot-mode switching, translator install failure |
-| `08_preview_verify.sh` | `create --dry-run` (nothing created), `--verify` pass/fail, wizard non-TTY refusal, shell completions, `andler doctor` sections |
+| `08_preview_verify.sh` | `create --dry-run` (nothing created), `--verify` pass/fail, wizard non-TTY refusal, shell completions, `andler doctor` sections, `doctor --fix` installing `andler-helper` at the canonical path + exactly one helper sudoers rule and zero legacy per-binary rules |
 | `09_persistence.sh` | daemon restart against the same store (state survives), final cleanup |
 
 ### Deep guest tests
