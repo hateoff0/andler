@@ -166,6 +166,15 @@ Commit hygiene:
 
 **Done means**: all four gate steps pass, tests (unit + round-trip + E2E where applicable) are in place, the docs describing the changed behavior are updated in the same commit (see Documentation Sync), and the commit has been made.
 
+**Branching**: day-to-day work (features, fixes, doc-only changes) commits straight to `main` — every commit already passes the full gate (see Commit policy above), so `main` stays green at every commit and there is no batching step that needs a branch. A **multi-phase architecture rework tracked by a temporary top-level plan file** — created for the refactor and deleted once it lands, see Temporary Plan Documents below — is the one case that uses branches, because a phase can span many commits over days/weeks and `main` must stay releasable throughout:
+
+- One branch per phase, `refactor/<phaseN>-<slug>` (e.g. `refactor/phase0-foundations`), cut from `main` when the phase starts.
+- **Every commit on a phase branch still passes the full four-step gate** — a phase branch is not a WIP dumping ground with a looser bar; it holds the same standard as `main`, just not yet merged. This is what makes the next two points possible.
+- **Phase-exit gate, in addition to the per-commit gate**: before merging a phase branch into `main`, run the full E2E suite (not only unit + round-trip), re-check the phase's own guardrail items in the plan document, and update the plan's own phase-status marker in the merge commit.
+- **Merge by fast-forward or rebase, never squash.** Squash-merging exists to hide messy WIP history; this repo's per-commit gate already guarantees there is no messy history to hide, so squashing would only destroy bisectability that was paid for one commit at a time. If `main` has moved during the phase, rebase the phase branch onto it (never merge `main` into the phase branch) and re-run the gate after the rebase — a rebase that changes no code still needs the gate re-run, because the new base can change behavior (dependency bumps, a sibling phase's changes).
+- **Independent phases get independent branches off `main`**, not off each other — if the plan document marks two phases as not depending on each other, branch and merge them separately; only rebase one on the other if they end up touching the same files.
+- Because every merge to `main` is a single, fully-gated, atomic phase, `git revert <merge-commit>` is always a safe way to back out a phase that turns out to have a problem after merging — this is the rollback path for any phase, not something to design separately per phase.
+
 ## Code Conventions & Common Patterns
 
 ### Error Handling
@@ -201,11 +210,13 @@ Commit hygiene:
 **Default: No comments in code.** The codebase is currently free of doc comments (`///`, `//!`) and inline comments. Keep it that way.
 
 **Exception: 1–2 line comments** allowed ONLY when:
-- A non-obvious `unsafe` block requires a safety justification
+- A non-obvious `unsafe` block requires a safety justification, written as `// SAFETY: …` directly above the block — already the convention at the three existing call sites (`backends/andler-qemu/src/process.rs`, `backend.rs`, `metrics.rs`). Enforce it mechanically, not just by review: add `undocumented_unsafe_blocks = "warn"` under a `[workspace.lints.clippy]` table in the root `Cargo.toml`, which the existing `cargo clippy --workspace -- -D warnings` gate then turns into a hard failure. All three existing sites already comply, so turning this on costs nothing today — but new `unsafe` is arriving soon (pidfd-based process supervision), and it should not be the first to skip the convention.
 - A complex algorithm needs a one-line "what this does" note
 - A `#[allow(...)]` lint suppression needs a brief reason
 
-**All detailed documentation belongs in `docs/`** — not in code comments. Every module, trait, struct, and public function is documented in the appropriate `docs/*.md` file or crate-level `README.md`. The implementer writes the code, then writes (or updates) the docs/ file to describe it.
+**Exception: documenting a rejected approach, sized to the hazard, not capped at 2 lines.** When a previous implementation was actively harmful (not just wrong) and the failure mode is not obvious from reading the current code, the comment may run longer than 1–2 lines — long enough to say what was tried, why it was dangerous, and what real fix is still missing. The canonical example already in this repo is `services/andler-net/src/lib.rs`, `setup_isolated`: the previous version silently dropped all inbound host traffic while providing no actual VM isolation, and the current stub's comment explains that so nobody "fixes" the stub by resurrecting the dangerous version without reading history first. The test for this exception is not length, it's stakes: would a future editor, seeing only the current code, plausibly reintroduce a real bug? If yes, write what they need to not do that; if the current code is simply not-yet-implemented for an ordinary reason, a short note plus a `docs/ROADMAP.md`/tracking-issue reference is enough and belongs under the normal 1–2 line rule instead.
+
+**All other detailed documentation belongs in `docs/`** — not in code comments. Every module, trait, struct, and public function is documented in the appropriate `docs/*.md` file or crate-level `README.md`. The implementer writes the code, then writes (or updates) the docs/ file to describe it.
 
 **Why:** Long doc comments in code rot faster than external docs (they're harder to find, harder to search, and split attention between two locations). Centralized docs/ files are easier to maintain, review, and keep accurate.
 - Struct fields: `snake_case`, types: `PascalCase`
@@ -246,6 +257,7 @@ Rules that exist because violating them has produced real bugs in this repo:
 - **`macro_rules!` fragment specifiers are not interchangeable.** `item` matches top-level items (fn, struct, impl, ...) — it does **not** match a bare struct field like `#[arg(long)] pub foo: bool,`. Use `tt` (token tree) repetition to splice arbitrary field-like syntax into a struct body.
 - **Never guess a struct/enum's exact shape.** Check the real definition before writing a literal that constructs it (tuple variant vs. struct variant, exact field names). Getting this wrong is a compile error, not a style nit, and it's easy to miss when skimming.
 - **Adding a new dependency**: check how other crates in the workspace already declare that dependency before deciding between `[workspace.dependencies]` and a direct per-crate version — match existing convention rather than introducing a second pattern for the same crate.
+- **A dependency that changes the binary's weight class needs a one-line justification in the commit, not just a `Cargo.toml` diff.** Most additions are ordinary (another `thiserror`-shaped crate costs nothing to reason about); the exception is a dependency that brings its own large static payload, a new system-level requirement, or a new privileged surface — the kind that changes what `doctor` has to check or what the install script has to ship. Concrete upcoming case: statically-linked `guestfs-tools` for offline guest mutation is exactly this class; `libc` for raw syscalls is not (already a thin, already-vetted dependency doing the same job it does today). The justification is one sentence — what it costs (binary size, build time, a new runtime requirement) and why the alternative was worse — not a defense, just a record so the next reader isn't left reverse-engineering the decision from a diff.
 - **No silent fallbacks on invalid input.** A missing/unsupported value must produce an explicit error, never a quietly different behavior. Real bugs: `android_version = 12` in a TOML file silently created an Android 13 VM; `parse_size("0")` created a 0-byte disk; `CdromBus::Unspecified` used to fall back to IDE. When a fallback is intentional (e.g. `NatBackend::Unspecified → Slirp`), it must be a documented decision, not a `default()` that hides the input.
 
 - **Never discard a `Result` whose operation has external effects.** `let _ = ...` / `.ok()` are only acceptable on pure code. Commands that touch the system (`qemu-nbd --disconnect`, `umount -l`, `apt-get update`, `dnf`, `pacman`) must have their errors surfaced or at least logged — real bugs: failed `qemu-nbd --disconnect` left stale NBD devices attached; a failed package-index update was reported as success. When a cleanup error is deliberately non-fatal, log it and say why.
@@ -263,6 +275,8 @@ Rules that exist because violating them has produced real bugs in this repo:
 - **Async tests must not deadlock.** Never hold a `tokio` lock guard across an `.await` that takes the same lock — a read guard held in the same task while another call awaits `write()` hangs forever, and the test harness reports a hang, not a failure. Scope guards in blocks (`{ let g = lock.read().await; ... }`) whenever a later call in the same test takes the lock. Run new async tests with a `timeout` once; a test that does not finish is a bug, not a slow test.
 
 - **A feature's tests must fail on its real bug.** If the only way a test passes is by not exercising the changed path (mock returns early, assertion greps a substring that also matches unrelated output), rewrite it. Real bug: the E2E suite tested bridge mode only as an error path, so the IFNAMSIZ failure of the positive path went unnoticed — every user-visible feature needs an E2E positive path.
+
+- **A module that keeps growing is a design signal, not a target.** Real example already in this repo: `backends/andler-qemu/src/cmdline.rs` (1000+ lines) and `services/andler-rpc/src/convert.rs` (1600+ lines) grew one small, individually-reasonable addition at a time until each was doing several unrelated jobs (cmdline.rs: arg-building for every device category in one function soup; convert.rs: every message's conversion in one file) — nobody made a bad call in any single commit, the size itself became the bug (hard to review a diff against 1000 lines of context, hard to find the one function that matters). When a change would push a module past roughly 600–800 lines, that commit's job is not just to add the feature — it's to also propose the seam to split along (the module usually already has one: cmdline.rs splits by device category, convert.rs by message group), even if the actual split lands in a later commit. Don't let "it's just one more function" be the reasoning for the tenth time in a row.
 
 ## Documentation Sync
 
@@ -304,6 +318,14 @@ Where the living truths live — read the owner before writing the claim anywher
 | other crate `README.md` | crate-local behavior |
 
 A new file in `docs/` must be registered here in the same commit.
+
+### Temporary plan documents
+
+A multi-phase architecture rework (see Branching) is tracked by a plan file created at the top level for the duration of that refactor only. It is **never added to the docs map above and never cited by name** — not from code, not from commit messages, not from any file in `docs/`, not from this file — because the file is deleted once the refactor lands, and a citation naming it becomes a dangling reference the moment it's gone. This is not hypothetical: this repo's own git history already shows a previous architecture-refactor plan file being created and later deleted — the discipline below is what keeps the next one from leaving a dangling trail behind.
+
+- Commit messages reference the phase by number and slug (`Phase 2 (resolver-access)`, matching the branch name — see Branching), never the plan file's name.
+- A decision that must be checkable after the refactor completes is written into the doc that owns that kind of content (see Docs map above) as part of that phase's exit checklist — it does not live only in the plan file.
+- The plan file's own phase-exit process defines when each landed section shrinks to a pointer, and — on the last phase — when the file is deleted outright and the repository is grepped for its filename to confirm no reference survived it.
 
 ## Important Files
 
@@ -497,6 +519,7 @@ docker compose -f docker/e2e/compose.yaml run --rm e2e
 - Store tests (`andler-store`): In-memory SQLite (`:memory:`)
 - gRPC round-trip tests: Real TCP, real protobuf, real tonic server/client
 - CLI tests: TOML parsing, helper functions, error formatting
+- **Trait-conformance tests, once a trait has two real (non-fake) implementations**: a shared test suite runs the same assertions against every implementation, so behavioral drift between them is caught as its own bug class, distinct from a bug in one implementation. `HypervisorBackend` has only ever had one real implementation (`andler-qemu`) so this hasn't been needed yet; it becomes necessary the day a second real implementation of any core trait exists.
 
 **Test quality bar** (violations are review blockers):
 - Every new test must fail on a plausible bug in the code it covers (a test that cannot fail is decoration)
