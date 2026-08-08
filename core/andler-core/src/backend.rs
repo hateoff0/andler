@@ -180,6 +180,14 @@ pub trait HypervisorBackend: Send + Sync {
 
     fn log_stream(&self, handle: &BackendHandle) -> BoxStream<'_, LogLine>;
 
+    /// Stream that yields once per process exit (the process is gone after
+    /// the first item). Defaults to an empty stream for backends that do not
+    /// supervise an external process; the QEMU backend implements it via
+    /// pidfd wait.
+    fn process_exit_stream(&self, _handle: &BackendHandle) -> BoxStream<'_, ()> {
+        Box::pin(futures_util::stream::empty())
+    }
+
     async fn is_guest_agent_available(&self, handle: &BackendHandle) -> Result<bool, BackendError> {
         let _ = handle;
         Ok(false)

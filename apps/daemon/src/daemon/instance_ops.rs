@@ -262,6 +262,54 @@ impl Daemon {
 
         match spawn_result {
             Ok(backend_handle) => {
+                // Subscribe as early as possible so a crash between spawn
+                // and StartCompleted is still caught; the watcher outlives
+                // set_handle below either way.
+                let monitor_supervisor = handle.clone();
+                let monitor_backend = backend.clone();
+                let monitor_handle = backend_handle.clone();
+                tokio::spawn(async move {
+                    use futures_util::StreamExt;
+                    let stream = monitor_backend.process_exit_stream(&monitor_handle);
+                    let mut exit_events = Box::pin(stream);
+                    tracing::debug!(instance_id = %id, "process exit watcher subscribed");
+                    while exit_events.next().await.is_some() {
+                        tracing::debug!(
+                            instance_id = %id,
+                            state = ?monitor_supervisor.state(),
+                            "qemu process exit event received"
+                        );
+                        match monitor_supervisor.state() {
+                            state @ (InstanceState::Running
+                            | InstanceState::Paused
+                            | InstanceState::Starting) => {
+                                let message = format!(
+                                    "QEMU process exited unexpectedly while in {:?} (see qemu.log)",
+                                    state
+                                );
+                                match monitor_supervisor
+                                    .transition(InstanceEvent::Fail(message))
+                                    .await
+                                {
+                                    Ok(new_state) => tracing::debug!(
+                                        instance_id = %id,
+                                        ?new_state,
+                                        "supervised exit applied"
+                                    ),
+                                    Err(err) => tracing::error!(
+                                        instance_id = %id,
+                                        error = %err,
+                                        "failed to apply supervised exit transition"
+                                    ),
+                                }
+                            }
+                            // A deliberate stop is in flight; the stop path
+                            // owns the outcome and the events after this.
+                            InstanceState::Stopping => break,
+                            _ => break,
+                        }
+                    }
+                });
                 handle.set_handle(Some(backend_handle)).await?;
                 handle.transition(InstanceEvent::StartCompleted).await?;
                 tracing::info!(instance_id = %id, "instance started");

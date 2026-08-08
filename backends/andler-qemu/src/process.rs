@@ -3,6 +3,9 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use andler_core::{LogLine, LogStreamSource, ResourceMetrics};
+use std::sync::Arc;
+
+use crate::pidfd;
 use thiserror::Error;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
@@ -30,9 +33,12 @@ pub enum ProcessError {
 }
 
 pub struct QemuProcess {
+    // drop-guard: kill_on_drop terminates qemu on daemon panic/unwind (PLAN §2.5)
+    #[allow(dead_code)]
     child: Child,
 
     pid: u32,
+    pidfd: Arc<pidfd::PidFd>,
     qmp_socket_path: PathBuf,
 
     log_file_path: Option<PathBuf>,
@@ -41,7 +47,11 @@ pub struct QemuProcess {
 
     metrics_sender: broadcast::Sender<ResourceMetrics>,
 
+    exit_sender: broadcast::Sender<()>,
+
     _metrics_task: tokio::task::JoinHandle<()>,
+
+    _exit_task: tokio::task::JoinHandle<()>,
 }
 
 impl QemuProcess {
@@ -60,6 +70,24 @@ impl QemuProcess {
             .map_err(ProcessError::SpawnFailed)?;
 
         let pid = child.id().expect("freshly spawned child must have a pid");
+        let pidfd = Arc::new(pidfd::PidFd::open(pid).map_err(ProcessError::Io)?);
+
+        let (exit_sender, _) = broadcast::channel(1);
+        let exit_task = tokio::spawn({
+            let pidfd = pidfd.clone();
+            let sender = exit_sender.clone();
+            async move {
+                match pidfd.wait_for_exit().await {
+                    Ok(status) => {
+                        tracing::debug!(pid, %status, "qemu process exited");
+                    }
+                    Err(error) => {
+                        tracing::error!(pid, %error, "failed to wait for qemu process exit");
+                    }
+                }
+                let _ = sender.send(());
+            }
+        });
 
         let (log_sender, _) = broadcast::channel(LOG_CHANNEL_CAPACITY);
 
@@ -97,11 +125,14 @@ impl QemuProcess {
         Ok(QemuProcess {
             child,
             pid,
+            pidfd,
             qmp_socket_path,
             log_file_path,
             log_sender,
             metrics_sender,
+            exit_sender,
             _metrics_task: metrics_task,
+            _exit_task: exit_task,
         })
     }
 
@@ -168,6 +199,13 @@ impl QemuProcess {
         self.metrics_sender.subscribe()
     }
 
+    /// Fires once when the QEMU process exits, for any reason — including
+    /// a crash or a kill that bypassed `stop()`. This is the replacement for
+    /// polling `is_alive()` (P8: death is an event, not a 30s-late fact).
+    pub fn subscribe_exit(&self) -> broadcast::Receiver<()> {
+        self.exit_sender.subscribe()
+    }
+
     pub fn pid(&self) -> u32 {
         self.pid
     }
@@ -184,11 +222,8 @@ impl QemuProcess {
         self.log_file_path.as_deref()
     }
 
-    pub async fn is_alive(&mut self) -> Result<bool, ProcessError> {
-        match self.child.try_wait().map_err(ProcessError::Io)? {
-            Some(_exit_status) => Ok(false),
-            None => Ok(true),
-        }
+    pub fn is_alive(&self) -> bool {
+        !self.pidfd.has_exited()
     }
 
     pub async fn terminate(&mut self) -> Result<(), ProcessError> {
@@ -198,7 +233,7 @@ impl QemuProcess {
             return Err(ProcessError::Io(std::io::Error::last_os_error()));
         }
 
-        match timeout(GRACEFUL_SHUTDOWN_TIMEOUT, self.child.wait()).await {
+        match timeout(GRACEFUL_SHUTDOWN_TIMEOUT, self.pidfd.wait_for_exit()).await {
             Ok(Ok(_exit_status)) => Ok(()),
             Ok(Err(io_err)) => Err(ProcessError::Io(io_err)),
             Err(_elapsed) => Err(ProcessError::GracefulShutdownTimedOut(
@@ -208,7 +243,22 @@ impl QemuProcess {
     }
 
     pub async fn force_kill(&mut self) -> Result<(), ProcessError> {
-        self.child.kill().await.map_err(ProcessError::Io)
+        // SIGKILL via libc instead of tokio Child::kill: the exit task holds
+        // the reaping lock (pidfd), so a concurrent tokio try_wait inside
+        // Child::kill races our waitpid and loses — surfacing as a bogus
+        // "No child processes" even though the kill succeeded.
+        // SAFETY: pid is from our own spawned child; SIGKILL is standard.
+        let kill_result = unsafe { libc::kill(self.pid as libc::pid_t, libc::SIGKILL) };
+        if kill_result != 0 {
+            return Err(ProcessError::Io(std::io::Error::last_os_error()));
+        }
+        // Best effort reap so no zombie outlives the kill by long.
+        let _ = timeout(Duration::from_secs(5), self.pidfd.wait_for_exit()).await;
+        Ok(())
+    }
+
+    pub fn pidfd(&self) -> &pidfd::PidFd {
+        &self.pidfd
     }
 }
 
@@ -227,10 +277,10 @@ mod tests {
         ];
 
         let mut process = QemuProcess::spawn(&args, qmp_path, None).await.unwrap();
-        assert!(process.is_alive().await.unwrap());
+        assert!(process.is_alive());
 
         process.terminate().await.unwrap();
-        assert!(!process.is_alive().await.unwrap());
+        assert!(!process.is_alive());
     }
 
     #[tokio::test]
@@ -245,7 +295,7 @@ mod tests {
 
         let mut process = QemuProcess::spawn(&args, qmp_path, None).await.unwrap();
         process.force_kill().await.unwrap();
-        assert!(!process.is_alive().await.unwrap());
+        assert!(!process.is_alive());
     }
 
     #[tokio::test]

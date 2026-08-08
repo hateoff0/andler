@@ -1,7 +1,9 @@
 use super::error::DaemonError;
 use super::types::InstanceSummary;
 use super::Daemon;
-use andler_core::{BackendStatus, InstanceConfig, InstanceId, LogLine, ResourceMetrics};
+use andler_core::{
+    BackendStatus, InstanceConfig, InstanceId, InstanceState, LogLine, ResourceMetrics,
+};
 use futures_core::stream::BoxStream;
 use futures_util::StreamExt;
 
@@ -9,18 +11,45 @@ impl Daemon {
     pub async fn status(&self, id: InstanceId) -> Result<BackendStatus, DaemonError> {
         let handle = self.handle_for(id).await?;
 
+        let state = handle.state();
         let Some(backend_handle) = handle.backend_handle() else {
             return Ok(BackendStatus {
-                state: handle.state(),
-                detail: Some("instance has no running backend handle".to_string()),
+                state,
+                detail: None,
                 clean_shutdown: false,
             });
         };
+
+        // The FSM state is the single source of truth; the backend is only
+        // consulted while the instance is actually expected to be alive.
+        // A backend that reports the process gone (e.g. right after a crash,
+        // before the exit watcher's Fail lands) must not override the FSM.
+        if !matches!(state, InstanceState::Running | InstanceState::Paused) {
+            return Ok(BackendStatus {
+                state,
+                detail: None,
+                clean_shutdown: false,
+            });
+        }
+
         let backend = self.backend_for(handle.config().backend)?;
-        backend
+        let status = backend
             .status(&backend_handle)
             .await
-            .map_err(DaemonError::Backend)
+            .map_err(DaemonError::Backend)?;
+
+        if status.state == state {
+            Ok(status)
+        } else {
+            Ok(BackendStatus {
+                state,
+                detail: Some(format!(
+                    "backend reports {:?}, supervisor transition pending",
+                    status.state
+                )),
+                clean_shutdown: false,
+            })
+        }
     }
 
     pub async fn stream_instance_logs(

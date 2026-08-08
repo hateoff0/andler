@@ -48,7 +48,7 @@ Always ends with `-boot menu=on`.
 
 ### `process` — QEMU Process Management
 
-Low-level management of a real `qemu-system-x86_64` process via `tokio::process::Command`.
+Low-level management of a real `qemu-system-x86_64` process via `tokio::process::Command`. Process death is tracked through a `pidfd` (`pidfd_open(2)`) instead of polling `try_wait`; a detached exit task publishes on `subscribe_exit()` the moment the process dies, and reaps the zombie (a pidfd wait is a poll on POLLIN, not a `read(2)` — reads of pidfds return EINVAL on several kernels). `terminate`/`force_kill` signal via `libc::kill` and wait the pidfd; never via `tokio::process::Child::kill`, which races the exit task's reap and can report ECHILD for a kill that was sent successfully.
 
 **`QemuProcess`:**
 
@@ -57,11 +57,12 @@ Low-level management of a real `qemu-system-x86_64` process via `tokio::process:
 | `spawn` | `async fn(args: &[String], qmp_socket_path: PathBuf, log_file_path: Option<PathBuf>) -> Result<Self, ProcessError>` | Spawn QEMU process, start log + metrics background tasks |
 | `subscribe_logs` | `fn(&self) -> broadcast::Receiver<LogLine>` | Subscribe to stdout/stderr lines |
 | `subscribe_metrics` | `fn(&self) -> broadcast::Receiver<ResourceMetrics>` | Subscribe to resource metrics |
+| `subscribe_exit` | `fn(&self) -> broadcast::Receiver<()>` | Fires when the QEMU process dies (pidfd-backed, ~instant) |
 | `pid` | `fn(&self) -> u32` | Process ID |
 | `qmp_socket_path` | `fn(&self) -> &PathBuf` | Path to QMP unix socket |
-| `is_alive` | `async fn(&mut self) -> Result<bool, ProcessError>` | Check if process is still running |
+| `is_alive` | `fn(&self) -> bool` | Synchronous pidfd state check (no polling) |
 | `terminate` | `async fn(&mut self) -> Result<(), ProcessError>` | SIGTERM + 30s timeout (temporary until proper ACPI) |
-| `force_kill` | `async fn(&mut self) -> Result<(), ProcessError>` | SIGKILL |
+| `force_kill` | `async fn(&mut self) -> Result<(), ProcessError>` | SIGKILL + pidfd wait |
 | `log_file_path` | `fn(&self) -> Option<&Path>` | Path to the log file, if configured |
 
 stdout/stderr are drained line-by-line in background tasks (`drain_to_tracing`): each line is simultaneously logged via `tracing::warn!` and published to a `broadcast` channel (`subscribe_logs`). Log lines use `[stdout]`/`[stderr]` prefixes (e.g. `[stdout] QEMU 8.2.0 starting`). `read_log_history()` parses these prefixes from the log file, and `log_stream` replays history from this file.

@@ -78,7 +78,7 @@ impl QemuBackend {
 
     async fn diagnose_and_reset_qmp(instance: &mut RunningInstance) -> Option<BackendError> {
         instance.qmp_client = None;
-        let alive = instance.process.is_alive().await.unwrap_or(false);
+        let alive = instance.process.is_alive();
         if alive {
             None
         } else {
@@ -647,11 +647,7 @@ impl HypervisorBackend for QemuBackend {
             .get_mut(handle)
             .ok_or_else(|| BackendError::HandleNotFound(handle.0.clone()))?;
 
-        let alive = instance
-            .process
-            .is_alive()
-            .await
-            .map_err(process_error_to_backend_error)?;
+        let alive = instance.process.is_alive();
 
         if !alive {
             return Ok(BackendStatus {
@@ -965,6 +961,26 @@ impl HypervisorBackend for QemuBackend {
                     ) as BoxStream<'_, ResourceMetrics>
                 }
                 None => Box::pin(futures_util::stream::empty()) as BoxStream<'_, ResourceMetrics>,
+            }
+        })
+        .flatten();
+
+        Box::pin(stream)
+    }
+
+    fn process_exit_stream(&self, handle: &BackendHandle) -> BoxStream<'_, ()> {
+        let handle = handle.clone();
+        let stream = futures_util::stream::once(async move {
+            let mut instances = self.instances.lock().await;
+            match instances.get_mut(&handle) {
+                Some(i) => {
+                    let receiver = i.process.subscribe_exit();
+                    Box::pin(
+                        tokio_stream::wrappers::BroadcastStream::new(receiver)
+                            .filter_map(|item| async move { item.ok() }),
+                    ) as BoxStream<'_, ()>
+                }
+                None => Box::pin(futures_util::stream::empty()) as BoxStream<'_, ()>,
             }
         })
         .flatten();
