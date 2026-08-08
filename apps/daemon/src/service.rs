@@ -22,7 +22,7 @@ use futures_core::Stream;
 use futures_util::StreamExt;
 use tonic::{Request, Response, Status};
 
-use crate::daemon::{Daemon, DaemonError};
+use crate::daemon::{Daemon, DaemonError, ErrorKind};
 use crate::firmware::OvmfPaths;
 
 pub struct DaemonService {
@@ -54,59 +54,14 @@ fn status_message(err: &DaemonError) -> String {
 impl From<DaemonError> for Status {
     fn from(err: DaemonError) -> Self {
         let msg = status_message(&err);
-        match &err {
-            DaemonError::InvalidConfig(_) => Status::invalid_argument(msg.clone()),
-            DaemonError::InstanceNotFound(_) => Status::not_found(msg.clone()),
-            DaemonError::NoBackendRegistered(_) => Status::unimplemented(msg.clone()),
-            DaemonError::InvalidTransition(_) => Status::failed_precondition(msg.clone()),
-            DaemonError::InstanceNotRemovable(_, _) => Status::failed_precondition(msg.clone()),
-            DaemonError::InstanceAlreadyStopped(_, _) => Status::failed_precondition(msg.clone()),
-            DaemonError::InstanceNotClonable(_, _) => Status::failed_precondition(msg.clone()),
-            DaemonError::SharedBaseNotSupportedForLinuxVm(_) => {
-                Status::failed_precondition(msg.clone())
-            }
-            DaemonError::InstanceHasLiveClones(_, _) => Status::failed_precondition(msg.clone()),
-            DaemonError::SnapshotNotFound { .. } => Status::not_found(msg.clone()),
-            DaemonError::SnapshotAlreadyExists { .. } => Status::already_exists(msg.clone()),
-            DaemonError::SnapshotOperationRequiresRunningInstance(_, _) => {
-                Status::failed_precondition(msg.clone())
-            }
-            DaemonError::SnapshotLimitExceeded { .. } => Status::failed_precondition(msg.clone()),
-            DaemonError::Backend(andler_core::BackendError::NotImplemented { .. }) => {
-                Status::unimplemented(msg.clone())
-            }
-            DaemonError::Backend(andler_core::BackendError::HandleNotFound(_)) => {
-                Status::failed_precondition(msg.clone())
-            }
-            DaemonError::Backend(andler_core::BackendError::ProcessNotRunning) => {
-                Status::failed_precondition(msg.clone())
-            }
-            DaemonError::Disk(andler_disk::DiskError::InsufficientDiskSpace { .. }) => {
-                Status::resource_exhausted(msg.clone())
-            }
-            DaemonError::Backend(_)
-            | DaemonError::Disk(_)
-            | DaemonError::Io { .. }
-            | DaemonError::Store(_) => Status::internal(msg.clone()),
-            DaemonError::Firmware(_) => Status::internal(msg.clone()),
-            DaemonError::EmptyInstanceRef => Status::invalid_argument(msg.clone()),
-            DaemonError::MalformedInstanceRef(_) => Status::invalid_argument(msg.clone()),
-            DaemonError::InstanceRefNotFound(_) => Status::not_found(msg.clone()),
-            DaemonError::AmbiguousInstanceId { .. } => Status::invalid_argument(msg.clone()),
-            DaemonError::ConfigIdMismatch { .. } => Status::invalid_argument(msg.clone()),
-            DaemonError::ConfigKindChanged(_) => Status::invalid_argument(msg.clone()),
-            DaemonError::ConfigDiskPathChanged(_) => Status::invalid_argument(msg.clone()),
-            DaemonError::GuestAgentUnavailable { .. } => Status::failed_precondition(msg.clone()),
-            DaemonError::InvalidConfigKey(_) => Status::invalid_argument(msg.clone()),
-            DaemonError::NotAndroid(_) => Status::failed_precondition(msg.clone()),
-            DaemonError::InstanceMustBeStopped(_, _) => Status::failed_precondition(msg.clone()),
-            DaemonError::MissingOvmfVarsTemplate => Status::invalid_argument(msg.clone()),
-            DaemonError::HotplugRequiresRunningInstance(_, _) => {
-                Status::failed_precondition(msg.clone())
-            }
-            DaemonError::DiskAlreadyAttached(_, _) => Status::already_exists(msg.clone()),
-            DaemonError::DiskNotAttached(_, _) => Status::not_found(msg.clone()),
-            DaemonError::NetworkNotAttached { .. } => Status::not_found(msg.clone()),
+        match err.kind() {
+            ErrorKind::InvalidArgument => Status::invalid_argument(msg.clone()),
+            ErrorKind::NotFound => Status::not_found(msg.clone()),
+            ErrorKind::AlreadyExists => Status::already_exists(msg.clone()),
+            ErrorKind::FailedPrecondition => Status::failed_precondition(msg.clone()),
+            ErrorKind::Unimplemented => Status::unimplemented(msg.clone()),
+            ErrorKind::ResourceExhausted => Status::resource_exhausted(msg.clone()),
+            ErrorKind::Internal => Status::internal(msg.clone()),
         }
     }
 }

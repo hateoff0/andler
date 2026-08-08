@@ -727,6 +727,8 @@ Single package entry.
 
 **Message truncation**: every error passes through `status_message()` before becoming a `grpc-message` header — control characters other than tab are replaced with spaces, and the message is truncated to 384 characters. Package-manager stderr can be multi-KB; sending it untruncated makes h2 clients fail with "h2 protocol error" instead of showing the real error.
 
+**Status derivation**: the `DaemonError → Status` mapping keys off `DaemonError::kind()` (`ErrorKind` in `apps/daemon/src/daemon/error.rs`) — the single exhaustive match over all error variants. `service.rs` maps the category to a gRPC status code; adding a variant to `DaemonError` forces a `kind()` arm at compile time, and adding a category forces its status mapping, so a new error can never silently fall through to `INTERNAL` (the table above is pinned by the `error_kind` unit test).
+
 ---
 
 ## Design Notes

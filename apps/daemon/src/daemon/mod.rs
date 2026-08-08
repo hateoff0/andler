@@ -7,7 +7,7 @@ mod query_ops;
 mod snapshot_ops;
 mod types;
 
-pub use error::DaemonError;
+pub use error::{DaemonError, ErrorKind};
 pub(crate) use types::InstanceRecord;
 
 use std::collections::HashMap;

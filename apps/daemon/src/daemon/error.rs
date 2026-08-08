@@ -157,3 +157,68 @@ pub enum DaemonError {
         attached: usize,
     },
 }
+
+/// Machine-readable category of a `DaemonError`, independent of its
+/// human-readable text. `DaemonError::kind()` is the single exhaustive match
+/// over all variants; the gRPC mapping and any future error metrics key off
+/// this, so a new variant can never silently fall through to `internal`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ErrorKind {
+    InvalidArgument,
+    NotFound,
+    AlreadyExists,
+    FailedPrecondition,
+    Unimplemented,
+    ResourceExhausted,
+    Internal,
+}
+
+impl DaemonError {
+    pub fn kind(&self) -> ErrorKind {
+        match self {
+            DaemonError::InvalidConfig(_) => ErrorKind::InvalidArgument,
+            DaemonError::InstanceNotFound(_) => ErrorKind::NotFound,
+            DaemonError::NoBackendRegistered(_) => ErrorKind::Unimplemented,
+            DaemonError::InvalidTransition(_) => ErrorKind::FailedPrecondition,
+            DaemonError::Backend(BackendError::NotImplemented { .. }) => ErrorKind::Unimplemented,
+            DaemonError::Backend(
+                BackendError::HandleNotFound(_) | BackendError::ProcessNotRunning,
+            ) => ErrorKind::FailedPrecondition,
+            DaemonError::Disk(andler_disk::DiskError::InsufficientDiskSpace { .. }) => {
+                ErrorKind::ResourceExhausted
+            }
+            DaemonError::Backend(_)
+            | DaemonError::Disk(_)
+            | DaemonError::Io { .. }
+            | DaemonError::Firmware(_)
+            | DaemonError::Store(_) => ErrorKind::Internal,
+            DaemonError::InstanceNotRemovable(_, _) => ErrorKind::FailedPrecondition,
+            DaemonError::InstanceNotClonable(_, _) => ErrorKind::FailedPrecondition,
+            DaemonError::InstanceAlreadyStopped(_, _) => ErrorKind::FailedPrecondition,
+            DaemonError::SharedBaseNotSupportedForLinuxVm(_) => ErrorKind::FailedPrecondition,
+            DaemonError::InstanceHasLiveClones(_, _) => ErrorKind::FailedPrecondition,
+            DaemonError::SnapshotNotFound { .. } => ErrorKind::NotFound,
+            DaemonError::SnapshotAlreadyExists { .. } => ErrorKind::AlreadyExists,
+            DaemonError::SnapshotOperationRequiresRunningInstance(_, _) => {
+                ErrorKind::FailedPrecondition
+            }
+            DaemonError::SnapshotLimitExceeded { .. } => ErrorKind::FailedPrecondition,
+            DaemonError::EmptyInstanceRef => ErrorKind::InvalidArgument,
+            DaemonError::ConfigIdMismatch { .. } => ErrorKind::InvalidArgument,
+            DaemonError::ConfigKindChanged(_) => ErrorKind::InvalidArgument,
+            DaemonError::ConfigDiskPathChanged(_) => ErrorKind::InvalidArgument,
+            DaemonError::MalformedInstanceRef(_) => ErrorKind::InvalidArgument,
+            DaemonError::InstanceRefNotFound(_) => ErrorKind::NotFound,
+            DaemonError::AmbiguousInstanceId { .. } => ErrorKind::InvalidArgument,
+            DaemonError::GuestAgentUnavailable { .. } => ErrorKind::FailedPrecondition,
+            DaemonError::InvalidConfigKey(_) => ErrorKind::InvalidArgument,
+            DaemonError::NotAndroid(_) => ErrorKind::FailedPrecondition,
+            DaemonError::InstanceMustBeStopped(_, _) => ErrorKind::FailedPrecondition,
+            DaemonError::MissingOvmfVarsTemplate => ErrorKind::InvalidArgument,
+            DaemonError::HotplugRequiresRunningInstance(_, _) => ErrorKind::FailedPrecondition,
+            DaemonError::DiskAlreadyAttached(_, _) => ErrorKind::AlreadyExists,
+            DaemonError::DiskNotAttached(_, _) => ErrorKind::NotFound,
+            DaemonError::NetworkNotAttached { .. } => ErrorKind::NotFound,
+        }
+    }
+}

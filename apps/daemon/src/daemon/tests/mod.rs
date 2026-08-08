@@ -4,6 +4,7 @@ mod android_boot_mode;
 mod clone;
 mod common;
 mod create;
+mod error_kind;
 mod health;
 mod hotplug;
 mod list_config;
