@@ -459,6 +459,7 @@ mod tests {
                 cdrom_bus: CdromBus::Ide,
             },
             backend: BackendKind::Qemu,
+            schema_version: andler_core::CURRENT_SCHEMA_VERSION,
             cpu: CpuConfig::reference_default(),
             memory: MemoryConfig::reference_default(),
             disk: DiskConfig::reference_default(PathBuf::from("disk.qcow2")),
