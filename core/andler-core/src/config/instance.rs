@@ -107,6 +107,11 @@ pub struct InstanceConfig {
     pub name: String,
     pub kind: InstanceKind,
     pub backend: BackendKind,
+
+    /// On-disk schema version (see `CURRENT_SCHEMA_VERSION`); missing in files
+    /// that predate schema versioning, which read back as v1.
+    #[serde(default = "schema_version_default")]
+    pub schema_version: u32,
     pub cpu: CpuConfig,
     pub memory: MemoryConfig,
     pub disk: DiskConfig,
@@ -127,6 +132,10 @@ pub struct InstanceConfig {
     pub firmware: FirmwareConfig,
     pub audio: AudioConfig,
     pub input: InputConfig,
+}
+
+fn schema_version_default() -> u32 {
+    1
 }
 
 impl InstanceConfig {
@@ -206,6 +215,7 @@ mod tests {
                 cdrom_bus: CdromBus::VirtioScsi,
             },
             backend: BackendKind::Qemu,
+            schema_version: crate::config::CURRENT_SCHEMA_VERSION,
             cpu: CpuConfig::reference_default(),
             memory: MemoryConfig::reference_default(),
             disk: DiskConfig::reference_default(PathBuf::from("disk.qcow2")),
@@ -233,6 +243,7 @@ mod tests {
                 cdrom_bus: CdromBus::VirtioScsi,
             },
             backend: BackendKind::Qemu,
+            schema_version: crate::config::CURRENT_SCHEMA_VERSION,
             cpu: CpuConfig::reference_default(),
             memory: MemoryConfig::reference_default(),
             disk: DiskConfig::reference_default(PathBuf::from("disk.qcow2")),
@@ -282,5 +293,39 @@ mod tests {
         let mut cfg2 = sample_valid_config();
         cfg2.display.resolution = Resolution::new(1920, 0);
         assert!(cfg2.validate().is_err());
+    }
+
+    #[test]
+    fn missing_schema_version_reads_back_as_v1() {
+        let cfg = sample_valid_config();
+        let mut value = serde_json::to_value(&cfg).expect("serialize");
+        value
+            .as_object_mut()
+            .expect("object")
+            .remove("schema_version");
+        let restored: InstanceConfig = serde_json::from_value(value).expect("deserialize");
+        assert_eq!(restored.schema_version, 1);
+    }
+
+    #[test]
+    fn migrate_schema_is_noop_at_current_version() {
+        let mut cfg = sample_valid_config();
+        cfg.schema_version = 1;
+        crate::config::migrate_schema(&mut cfg).expect("current version migrates cleanly");
+        assert_eq!(cfg.schema_version, crate::config::CURRENT_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn migrate_schema_rejects_unknown_future_version() {
+        let mut cfg = sample_valid_config();
+        cfg.schema_version = crate::config::CURRENT_SCHEMA_VERSION + 1;
+        assert!(crate::config::migrate_schema(&mut cfg).is_err());
+    }
+
+    #[test]
+    fn migrate_schema_rejects_version_zero() {
+        let mut cfg = sample_valid_config();
+        cfg.schema_version = 0;
+        assert!(crate::config::migrate_schema(&mut cfg).is_err());
     }
 }

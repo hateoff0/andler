@@ -77,6 +77,7 @@ impl AndroidProfile {
                 android_profile: self.clone(),
             },
             backend: BackendKind::Qemu,
+            schema_version: crate::config::CURRENT_SCHEMA_VERSION,
             cpu: CpuConfig::reference_default(),
             memory: MemoryConfig::reference_default(),
             disk,

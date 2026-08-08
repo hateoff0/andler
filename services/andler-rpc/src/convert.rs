@@ -648,6 +648,7 @@ impl TryFrom<proto::CreateInstanceRequest> for InstanceConfig {
                 cdrom_bus,
             },
             backend: BackendKind::Qemu,
+            schema_version: andler_core::CURRENT_SCHEMA_VERSION,
             cpu: value
                 .cpu
                 .ok_or(ConvertError::MissingField("cpu"))?
@@ -761,6 +762,7 @@ impl TryFrom<proto::GetInstanceConfigResponse> for InstanceConfig {
                 .clone()
                 .try_into()?,
             backend,
+            schema_version: andler_core::CURRENT_SCHEMA_VERSION,
             cpu: value
                 .cpu
                 .ok_or(ConvertError::MissingField("cpu"))?
@@ -890,6 +892,7 @@ pub fn update_request_to_instance_config(
             .clone()
             .try_into()?,
         backend,
+        schema_version: andler_core::CURRENT_SCHEMA_VERSION,
         cpu: req
             .cpu
             .ok_or(ConvertError::MissingField("cpu"))?
@@ -1158,6 +1161,7 @@ mod tests {
                 cdrom_bus: CdromBus::VirtioScsi,
             },
             backend: BackendKind::Qemu,
+            schema_version: andler_core::CURRENT_SCHEMA_VERSION,
             cpu: CpuConfig::reference_default(),
             memory: MemoryConfig::reference_default(),
             disk: DiskConfig::reference_default(PathBuf::from("/tmp/disk.qcow2")),

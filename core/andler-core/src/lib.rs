@@ -21,6 +21,7 @@ pub use backend::{
     SnapshotInfo,
 };
 pub use clone::CloneMode;
+pub use config::{migrate_schema, CURRENT_SCHEMA_VERSION};
 pub use config::{
     AudioBackend, AudioConfig, AudioDevice, BackendKind, CdromBus, CpuConfig, CpuPriority,
     DiskConfig, DiskFormat, DisplayConfig, DisplayEngine, FirmwareConfig, GpuConfig, InputConfig,

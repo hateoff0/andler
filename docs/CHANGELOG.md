@@ -27,6 +27,7 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 - **Pre-start file validation**: `validate_instance_files()` checks disk and firmware paths exist before spawning QEMU, catching deleted/moved instance directories early instead of letting QEMU fork and fail silently.
 - **Structured lifecycle tracing**: `info`/`error` tracing for all instance lifecycle operations (create, start, stop, pause, resume, remove) with `instance_id` and error details.
 - **`InstanceAlreadyStopped` error**: Clear error message when stopping an already-stopped instance, instead of a generic error.
+- **`schema_version` in `instance.toml`**: config files now carry the instance config schema version; files that predate schema versioning read back as v1. `andler-core` provides `migrate_schema()`, which applies pending migrations on load and refuses configs newer than the daemon (future versions fail loudly instead of being misread).
 
 ### Changed
 

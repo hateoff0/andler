@@ -44,6 +44,7 @@ pub(crate) fn sample_config() -> InstanceConfig {
             cdrom_bus: CdromBus::Ide,
         },
         backend: BackendKind::Qemu,
+        schema_version: andler_core::CURRENT_SCHEMA_VERSION,
         cpu: CpuConfig::reference_default(),
         memory: MemoryConfig::reference_default(),
         disk: DiskConfig::reference_default(disk_path),

@@ -21,3 +21,41 @@ pub use input::{InputConfig, PointerMode};
 pub use instance::{BackendKind, InstanceConfig, InstanceId, InstanceKind, INSTANCE_ID_HEX_LEN};
 pub use memory::MemoryConfig;
 pub use network::{NatBackend, NetworkConfig, NetworkMode};
+
+/// Current on-disk config schema version. Bump it when `InstanceConfig` gains
+/// a field that old files must migrate; add the migration step to
+/// `migrate_schema()` in the same commit.
+pub const CURRENT_SCHEMA_VERSION: u32 = 1;
+
+/// Applies all pending schema migrations to a config loaded from disk,
+/// advancing `schema_version` to `CURRENT_SCHEMA_VERSION`. Errors on a version
+/// newer than the daemon knows or one with no migration path — an explicit
+/// failure, never a silent reinterpretation of unknown fields.
+pub fn migrate_schema(cfg: &mut InstanceConfig) -> Result<(), String> {
+    if cfg.schema_version > CURRENT_SCHEMA_VERSION {
+        return Err(format!(
+            "config schema version {} is newer than this andlerd supports ({CURRENT_SCHEMA_VERSION}); upgrade andlerd first",
+            cfg.schema_version
+        ));
+    }
+    while cfg.schema_version < CURRENT_SCHEMA_VERSION {
+        migrate_one_step(cfg)?;
+    }
+    Ok(())
+}
+
+fn migrate_one_step(cfg: &mut InstanceConfig) -> Result<(), String> {
+    match cfg.schema_version {
+        // v1 -> v2: register the first real migration here and bump
+        // CURRENT_SCHEMA_VERSION; until then every loaded config is already
+        // current.
+        1 => {}
+        version => {
+            return Err(format!(
+                "unsupported config schema version {version} (daemon knows up to {CURRENT_SCHEMA_VERSION})"
+            ))
+        }
+    }
+    cfg.schema_version += 1;
+    Ok(())
+}
