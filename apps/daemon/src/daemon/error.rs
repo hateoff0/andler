@@ -34,6 +34,9 @@ pub enum DaemonError {
         source: std::io::Error,
     },
 
+    #[error("instance {0:?} supervisor is gone; the daemon is likely shutting down")]
+    InstanceSupervisorGone(InstanceId),
+
     #[error("store error: {0}")]
     Store(#[from] StoreError),
 
@@ -191,7 +194,8 @@ impl DaemonError {
             | DaemonError::Disk(_)
             | DaemonError::Io { .. }
             | DaemonError::Firmware(_)
-            | DaemonError::Store(_) => ErrorKind::Internal,
+            | DaemonError::Store(_)
+            | DaemonError::InstanceSupervisorGone(_) => ErrorKind::Internal,
             DaemonError::InstanceNotRemovable(_, _) => ErrorKind::FailedPrecondition,
             DaemonError::InstanceNotClonable(_, _) => ErrorKind::FailedPrecondition,
             DaemonError::InstanceAlreadyStopped(_, _) => ErrorKind::FailedPrecondition,

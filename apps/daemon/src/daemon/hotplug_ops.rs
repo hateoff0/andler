@@ -18,25 +18,19 @@ impl Daemon {
         &self,
         id: InstanceId,
     ) -> Result<(Arc<dyn HypervisorBackend>, andler_core::BackendHandle), DaemonError> {
-        let instances = self.instances.read().await;
-        let record = instances
-            .get(&id)
-            .ok_or(DaemonError::InstanceNotFound(id))?;
+        let handle = self.handle_for(id).await?;
 
-        if !matches!(record.state, InstanceState::Running | InstanceState::Paused) {
-            return Err(DaemonError::HotplugRequiresRunningInstance(
-                id,
-                record.state.clone(),
-            ));
+        let state = handle.state();
+        if !matches!(state, InstanceState::Running | InstanceState::Paused) {
+            return Err(DaemonError::HotplugRequiresRunningInstance(id, state));
         }
 
-        let handle = record
-            .handle
-            .clone()
+        let backend_handle = handle
+            .backend_handle()
             .ok_or_else(|| DaemonError::Backend(BackendError::HandleNotFound(id.to_string())))?;
-        let backend = self.backend_for(record.config.backend)?.clone();
+        let backend = self.backend_for(handle.config().backend)?.clone();
 
-        Ok((backend, handle))
+        Ok((backend, backend_handle))
     }
 
     pub async fn attach_disk(
@@ -45,15 +39,12 @@ impl Daemon {
         requested_path: Option<PathBuf>,
         size_bytes: u64,
     ) -> Result<(PathBuf, usize), DaemonError> {
-        let (backend, handle) = self.hotplug_target(id).await?;
+        let (backend, backend_handle) = self.hotplug_target(id).await?;
 
+        let sup = self.handle_for(id).await?;
         let (instance_dir, index) = {
-            let instances = self.instances.read().await;
-            let record = instances
-                .get(&id)
-                .ok_or(DaemonError::InstanceNotFound(id))?;
-            let instance_dir = record
-                .config
+            let config = sup.config();
+            let instance_dir = config
                 .disk
                 .path
                 .parent()
@@ -63,24 +54,13 @@ impl Daemon {
                         "instance {id:?} disk has no parent directory"
                     ))
                 })?;
-            (instance_dir, record.config.extra_disks.len())
+            (instance_dir, config.extra_disks.len())
         };
         let disk_path = resolve_extra_disk_path(requested_path, &instance_dir, index)?;
 
-        {
-            let instances = self.instances.read().await;
-            let record = instances
-                .get(&id)
-                .ok_or(DaemonError::InstanceNotFound(id))?;
-            if record.config.disk.path == disk_path
-                || record
-                    .config
-                    .extra_disks
-                    .iter()
-                    .any(|d| d.path == disk_path)
-            {
-                return Err(DaemonError::DiskAlreadyAttached(id, disk_path));
-            }
+        let config = sup.config();
+        if config.disk.path == disk_path || config.extra_disks.iter().any(|d| d.path == disk_path) {
+            return Err(DaemonError::DiskAlreadyAttached(id, disk_path));
         }
 
         let created = !disk_path.exists();
@@ -117,51 +97,39 @@ impl Daemon {
             snapshot_timeout_secs: None,
         };
 
-        if let Err(err) = backend.attach_disk(&handle, &cfg, index).await {
+        if let Err(err) = backend.attach_disk(&backend_handle, &cfg, index).await {
             if created {
                 let _ = tokio::fs::remove_file(&disk_path).await;
             }
             return Err(err.into());
         }
 
-        let mut instances = self.instances.write().await;
-        let record = instances
-            .get_mut(&id)
-            .ok_or(DaemonError::InstanceNotFound(id))?;
-        record.config.extra_disks.push(cfg);
-        let (cfg, state) = (record.config.clone(), record.state.clone());
-        drop(instances);
-        self.persist_config_update(&cfg, &state).await;
+        let mut config = sup.config();
+        config.extra_disks.push(cfg);
+        sup.set_config(config).await?;
 
         Ok((disk_path, index))
     }
 
     pub async fn detach_disk(&self, id: InstanceId, path: PathBuf) -> Result<(), DaemonError> {
-        let (backend, handle, index) = {
-            let (backend, handle) = self.hotplug_target(id).await?;
-            let instances = self.instances.read().await;
-            let record = instances
-                .get(&id)
-                .ok_or(DaemonError::InstanceNotFound(id))?;
-            let index = record
-                .config
+        let (backend, backend_handle) = self.hotplug_target(id).await?;
+
+        let index = {
+            let sup = self.handle_for(id).await?;
+            let config = sup.config();
+            config
                 .extra_disks
                 .iter()
                 .position(|d| d.path == path)
-                .ok_or_else(|| DaemonError::DiskNotAttached(id, path.clone()))?;
-            (backend, handle, index)
+                .ok_or_else(|| DaemonError::DiskNotAttached(id, path.clone()))?
         };
 
-        backend.detach_disk(&handle, index).await?;
+        backend.detach_disk(&backend_handle, index).await?;
 
-        let mut instances = self.instances.write().await;
-        let record = instances
-            .get_mut(&id)
-            .ok_or(DaemonError::InstanceNotFound(id))?;
-        record.config.extra_disks.remove(index);
-        let (cfg, state) = (record.config.clone(), record.state.clone());
-        drop(instances);
-        self.persist_config_update(&cfg, &state).await;
+        let sup = self.handle_for(id).await?;
+        let mut config = sup.config();
+        config.extra_disks.remove(index);
+        sup.set_config(config).await?;
         Ok(())
     }
 
@@ -176,36 +144,29 @@ impl Daemon {
             ));
         }
 
-        let (backend, handle) = self.hotplug_target(id).await?;
+        let (backend, backend_handle) = self.hotplug_target(id).await?;
         let index = {
-            let instances = self.instances.read().await;
-            let record = instances
-                .get(&id)
-                .ok_or(DaemonError::InstanceNotFound(id))?;
-            record.config.extra_networks.len()
+            let sup = self.handle_for(id).await?;
+            sup.config().extra_networks.len()
         };
-        backend.attach_network(&handle, &network, index).await?;
+        backend
+            .attach_network(&backend_handle, &network, index)
+            .await?;
 
-        let mut instances = self.instances.write().await;
-        let record = instances
-            .get_mut(&id)
-            .ok_or(DaemonError::InstanceNotFound(id))?;
-        record.config.extra_networks.push(network);
-        let (cfg, state) = (record.config.clone(), record.state.clone());
-        drop(instances);
-        self.persist_config_update(&cfg, &state).await;
+        let sup = self.handle_for(id).await?;
+        let mut config = sup.config();
+        config.extra_networks.push(network);
+        sup.set_config(config).await?;
 
         Ok(index)
     }
 
     pub async fn detach_network(&self, id: InstanceId, index: usize) -> Result<(), DaemonError> {
-        let (backend, handle) = self.hotplug_target(id).await?;
+        let (backend, backend_handle) = self.hotplug_target(id).await?;
         {
-            let instances = self.instances.read().await;
-            let record = instances
-                .get(&id)
-                .ok_or(DaemonError::InstanceNotFound(id))?;
-            let attached = record.config.extra_networks.len();
+            let sup = self.handle_for(id).await?;
+            let config = sup.config();
+            let attached = config.extra_networks.len();
             if index >= attached {
                 return Err(DaemonError::NetworkNotAttached {
                     instance_id: id,
@@ -214,16 +175,12 @@ impl Daemon {
                 });
             }
         }
-        backend.detach_network(&handle, index).await?;
+        backend.detach_network(&backend_handle, index).await?;
 
-        let mut instances = self.instances.write().await;
-        let record = instances
-            .get_mut(&id)
-            .ok_or(DaemonError::InstanceNotFound(id))?;
-        record.config.extra_networks.remove(index);
-        let (cfg, state) = (record.config.clone(), record.state.clone());
-        drop(instances);
-        self.persist_config_update(&cfg, &state).await;
+        let sup = self.handle_for(id).await?;
+        let mut config = sup.config();
+        config.extra_networks.remove(index);
+        sup.set_config(config).await?;
         Ok(())
     }
 }

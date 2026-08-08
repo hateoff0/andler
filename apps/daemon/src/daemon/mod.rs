@@ -5,17 +5,18 @@ mod hotplug_ops;
 mod instance_ops;
 mod query_ops;
 mod snapshot_ops;
+mod supervisor;
 mod types;
 
 pub use error::{DaemonError, ErrorKind};
-pub(crate) use types::InstanceRecord;
+pub(crate) use supervisor::{spawn_supervisor, SupervisorHandle};
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use andler_core::{
-    BackendError, BackendKind, DaemonEvent, EventKind, HypervisorBackend, InstanceConfig,
-    InstanceEvent, InstanceId, InstanceState,
+    BackendError, BackendKind, DaemonEvent, HypervisorBackend, InstanceConfig, InstanceEvent,
+    InstanceId, InstanceState,
 };
 use andler_qemu::QemuBackend;
 use andler_store::Store;
@@ -30,7 +31,7 @@ fn default_backends() -> HashMap<BackendKind, Arc<dyn HypervisorBackend>> {
 
 pub struct Daemon {
     pub(crate) backends: HashMap<BackendKind, Arc<dyn HypervisorBackend>>,
-    pub(crate) instances: RwLock<HashMap<InstanceId, InstanceRecord>>,
+    pub(crate) supervisors: RwLock<HashMap<InstanceId, SupervisorHandle>>,
     pub(crate) store: Option<Store>,
     events: broadcast::Sender<DaemonEvent>,
 }
@@ -38,31 +39,10 @@ pub struct Daemon {
 const EVENT_CHANNEL_CAPACITY: usize = 256;
 
 impl Daemon {
-    // consumed by the supervisor (next Phase 0 commit) and the events RPC
+    // consumed by the supervisor-next Phase 0 commit (events RPC) and tests
     #[allow(dead_code)]
     pub fn subscribe_events(&self) -> broadcast::Receiver<DaemonEvent> {
         self.events.subscribe()
-    }
-
-    /// Publishes a daemon event; drops silently when no subscriber is
-    /// listening (the audit file in Phase 1 subscribes and persists).
-    pub(crate) fn emit(&self, instance_id: Option<InstanceId>, kind: EventKind) {
-        let event = DaemonEvent {
-            ts_ms: chrono::Utc::now().timestamp_millis() as u64,
-            instance_id,
-            kind,
-        };
-        let _ = self.events.send(event);
-    }
-
-    pub(crate) fn emit_lifecycle(
-        &self,
-        id: InstanceId,
-        from: InstanceState,
-        to: InstanceState,
-        reason: Option<String>,
-    ) {
-        self.emit(Some(id), EventKind::Lifecycle { from, to, reason });
     }
 }
 
@@ -79,7 +59,8 @@ impl Daemon {
     pub async fn restore(store: Store) -> Result<Self, DaemonError> {
         let stored = store.load_all().await?;
 
-        let mut instances = HashMap::with_capacity(stored.len());
+        let (events, _) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
+        let mut supervisors = HashMap::with_capacity(stored.len());
         for entry in stored {
             let id = entry.config.id;
             let state = match entry.state {
@@ -105,40 +86,33 @@ impl Daemon {
                     }
                 }
             };
-
-            instances.insert(
+            let handle = spawn_supervisor(
                 id,
-                InstanceRecord {
-                    config: entry.config,
-                    state,
-                    handle: None,
-                },
+                entry.config,
+                state,
+                None,
+                Some(store.clone()),
+                events.clone(),
             );
+            supervisors.insert(id, handle);
         }
 
-        Ok(Self::with_backends_and_store_and_instances(
-            default_backends(),
-            Some(store),
-            instances,
-        ))
+        Ok(Self {
+            backends: default_backends(),
+            supervisors: RwLock::new(supervisors),
+            store: Some(store),
+            events,
+        })
     }
 
     fn with_backends_and_store(
         backends: HashMap<BackendKind, Arc<dyn HypervisorBackend>>,
         store: Option<Store>,
     ) -> Self {
-        Self::with_backends_and_store_and_instances(backends, store, HashMap::new())
-    }
-
-    fn with_backends_and_store_and_instances(
-        backends: HashMap<BackendKind, Arc<dyn HypervisorBackend>>,
-        store: Option<Store>,
-        instances: HashMap<InstanceId, InstanceRecord>,
-    ) -> Self {
         let (events, _) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
         Daemon {
             backends,
-            instances: RwLock::new(instances),
+            supervisors: RwLock::new(HashMap::new()),
             store,
             events,
         }
@@ -153,35 +127,31 @@ impl Daemon {
             .ok_or(DaemonError::NoBackendRegistered(kind))
     }
 
-    /// Applies an FSM event and persists the result, logging (but not failing the
-    /// caller's overall operation on) any error — used after an action that already
-    /// succeeded at the backend level, where the point is just to keep our own
-    /// bookkeeping in sync, not to gate the action itself.
+    pub(crate) async fn handle_for(&self, id: InstanceId) -> Result<SupervisorHandle, DaemonError> {
+        let supervisors = self.supervisors.read().await;
+        supervisors
+            .get(&id)
+            .cloned()
+            .ok_or(DaemonError::InstanceNotFound(id))
+    }
+
+    pub(crate) fn event_sender(&self) -> broadcast::Sender<DaemonEvent> {
+        self.events.clone()
+    }
+
+    /// Applies an FSM event via the instance supervisor and persists the
+    /// result, logging (but not failing the caller's overall operation on)
+    /// any error — used after an action that already succeeded at the backend
+    /// level, where the point is just to keep our own bookkeeping in sync,
+    /// not to gate the action itself.
     pub(crate) async fn apply_event_and_persist(&self, id: InstanceId, event: InstanceEvent) {
-        let (from, new_state) = {
-            let mut instances = self.instances.write().await;
-            let Some(record) = instances.get_mut(&id) else {
-                tracing::error!(instance_id = %id, ?event, "instance vanished before FSM event could be applied");
-                return;
-            };
-            match record.state.clone().apply(event.clone()) {
-                Ok(state) => {
-                    let from = record.state.clone();
-                    record.state = state.clone();
-                    (from, state)
-                }
-                Err(err) => {
-                    tracing::error!(instance_id = %id, ?event, error = %err, "failed to apply FSM event");
-                    return;
-                }
-            }
+        let Some(handle) = self.supervisors.read().await.get(&id).cloned() else {
+            tracing::error!(instance_id = %id, ?event, "instance vanished before FSM event could be applied");
+            return;
         };
-        let reason = match &event {
-            InstanceEvent::Fail(message) => Some(message.clone()),
-            _ => None,
-        };
-        self.emit_lifecycle(id, from, new_state.clone(), reason);
-        self.persist_state(id, &new_state).await;
+        if let Err(err) = handle.transition(event).await {
+            tracing::error!(instance_id = %id, error = %err, "failed to apply FSM event");
+        }
     }
 
     /// Returns (backend, handle) for an instance that has been spawned (handle present),
@@ -190,18 +160,14 @@ impl Daemon {
         &self,
         id: InstanceId,
     ) -> Result<(Arc<dyn HypervisorBackend>, andler_core::BackendHandle), DaemonError> {
-        let instances = self.instances.read().await;
-        let record = instances
-            .get(&id)
-            .ok_or(DaemonError::InstanceNotFound(id))?;
+        let handle = self.handle_for(id).await?;
 
-        let handle = record
-            .handle
-            .clone()
+        let backend_handle = handle
+            .backend_handle()
             .ok_or_else(|| DaemonError::Backend(BackendError::HandleNotFound(id.to_string())))?;
-        let backend = self.backend_for(record.config.backend)?.clone();
+        let backend = self.backend_for(handle.config().backend)?.clone();
 
-        Ok((backend, handle))
+        Ok((backend, backend_handle))
     }
 
     /// Returns (backend, handle) for an instance in Running or Paused state.
@@ -210,25 +176,21 @@ impl Daemon {
         &self,
         id: InstanceId,
     ) -> Result<(Arc<dyn HypervisorBackend>, andler_core::BackendHandle), DaemonError> {
-        let instances = self.instances.read().await;
-        let record = instances
-            .get(&id)
-            .ok_or(DaemonError::InstanceNotFound(id))?;
+        let handle = self.handle_for(id).await?;
 
-        if !matches!(record.state, InstanceState::Running | InstanceState::Paused) {
+        let state = handle.state();
+        if !matches!(state, InstanceState::Running | InstanceState::Paused) {
             return Err(DaemonError::SnapshotOperationRequiresRunningInstance(
-                id,
-                record.state.clone(),
+                id, state,
             ));
         }
 
-        let handle = record
-            .handle
-            .clone()
+        let backend_handle = handle
+            .backend_handle()
             .ok_or_else(|| DaemonError::Backend(BackendError::HandleNotFound(id.to_string())))?;
-        let backend = self.backend_for(record.config.backend)?.clone();
+        let backend = self.backend_for(handle.config().backend)?.clone();
 
-        Ok((backend, handle))
+        Ok((backend, backend_handle))
     }
 
     pub(crate) async fn persist_new_instance(
@@ -247,34 +209,6 @@ impl Daemon {
             );
             DaemonError::Store(err)
         })
-    }
-
-    pub(crate) async fn persist_config_update(&self, cfg: &InstanceConfig, state: &InstanceState) {
-        if let Some(dir) = cfg.disk.path.parent() {
-            types::write_instance_toml(dir, cfg).await;
-        }
-
-        let Some(store) = &self.store else {
-            return;
-        };
-        if let Err(err) = store.save_instance(cfg, state).await {
-            tracing::error!(
-                instance_id = %cfg.id,
-                error = %err,
-                "failed to persist updated instance config to store"
-            );
-        }
-    }
-
-    pub(crate) async fn persist_state(&self, id: InstanceId, state: &InstanceState) {
-        let cfg = {
-            let instances = self.instances.read().await;
-            match instances.get(&id) {
-                Some(record) => record.config.clone(),
-                None => return,
-            }
-        };
-        self.persist_config_update(&cfg, state).await;
     }
 }
 

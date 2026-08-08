@@ -1,7 +1,8 @@
 use std::path::PathBuf;
 
 use super::error::DaemonError;
-use super::types::{write_instance_toml, InstanceDirGuard, InstanceRecord};
+use super::spawn_supervisor;
+use super::types::{write_instance_toml, InstanceDirGuard};
 use super::Daemon;
 use andler_core::{
     BackendError, DiskFormat, InstanceConfig, InstanceEvent, InstanceId, InstanceKind,
@@ -57,8 +58,8 @@ impl Daemon {
                 .map_err(|_| DaemonError::MalformedInstanceRef(raw.to_string()));
         }
 
-        let instances = self.instances.read().await;
-        let matches: Vec<InstanceId> = instances
+        let supervisors = self.supervisors.read().await;
+        let matches: Vec<InstanceId> = supervisors
             .keys()
             .filter(|id| id.to_string().starts_with(&needle))
             .copied()
@@ -80,15 +81,15 @@ impl Daemon {
 
         let id = cfg.id;
         {
-            let mut instances = self.instances.write().await;
-            instances.insert(
+            let handle = spawn_supervisor(
                 id,
-                InstanceRecord {
-                    config: cfg.clone(),
-                    state: InstanceState::Created,
-                    handle: None,
-                },
+                cfg.clone(),
+                InstanceState::Created,
+                None,
+                self.store.clone(),
+                self.event_sender(),
             );
+            self.supervisors.write().await.insert(id, handle);
         }
 
         if let Err(err) = self
@@ -98,7 +99,9 @@ impl Daemon {
             // Couldn't durably save it — don't leave it lingering in memory only to
             // silently vanish the next time andlerd restarts. Roll back and report
             // the real failure instead of claiming success.
-            self.instances.write().await.remove(&id);
+            if let Some(handle) = self.supervisors.write().await.remove(&id) {
+                handle.shutdown().await;
+            }
             tracing::error!(
                 instance_id = %id,
                 error = %err,
@@ -246,114 +249,64 @@ impl Daemon {
     }
 
     pub async fn start_instance(&self, id: InstanceId) -> Result<(), DaemonError> {
-        let starting_state = {
-            let mut instances = self.instances.write().await;
-            let record = instances
-                .get_mut(&id)
-                .ok_or(DaemonError::InstanceNotFound(id))?;
-            record.state = record.state.clone().apply(InstanceEvent::Start)?;
-            record.state.clone()
-        };
-        self.persist_state(id, &starting_state).await;
+        let handle = self.handle_for(id).await?;
+        handle.transition(InstanceEvent::Start).await?;
 
-        let (backend, cfg) = {
-            let instances = self.instances.read().await;
-            let record = instances
-                .get(&id)
-                .ok_or(DaemonError::InstanceNotFound(id))?;
-            (
-                self.backend_for(record.config.backend)?.clone(),
-                record.config.clone(),
-            )
-        };
+        let cfg = handle.config();
+        let backend = self.backend_for(cfg.backend)?.clone();
 
         let spawn_result = match validate_instance_files(&cfg) {
             Ok(()) => backend.spawn(&cfg).await,
             Err(e) => Err(e),
         };
 
-        let mut instances = self.instances.write().await;
-        let record = instances
-            .get_mut(&id)
-            .ok_or(DaemonError::InstanceNotFound(id))?;
-
-        let result = match spawn_result {
-            Ok(handle) => {
-                record.handle = Some(handle);
-                record.state = record.state.clone().apply(InstanceEvent::StartCompleted)?;
+        match spawn_result {
+            Ok(backend_handle) => {
+                handle.set_handle(Some(backend_handle)).await?;
+                handle.transition(InstanceEvent::StartCompleted).await?;
+                tracing::info!(instance_id = %id, "instance started");
                 Ok(())
             }
             Err(backend_err) => {
-                record.state = record
-                    .state
-                    .clone()
-                    .apply(InstanceEvent::Fail(backend_err.to_string()))?;
+                handle
+                    .transition(InstanceEvent::Fail(backend_err.to_string()))
+                    .await?;
+                tracing::error!(instance_id = %id, error = %backend_err, "instance failed to start");
                 Err(DaemonError::Backend(backend_err))
             }
-        };
-        let final_state = record.state.clone();
-        drop(instances);
-
-        self.persist_state(id, &final_state).await;
-
-        match &result {
-            Ok(()) => tracing::info!(instance_id = %id, "instance started"),
-            Err(err) => {
-                tracing::error!(instance_id = %id, error = %err, "instance failed to start")
-            }
         }
-
-        result
     }
 
     pub async fn stop_instance(&self, id: InstanceId, graceful: bool) -> Result<(), DaemonError> {
-        let (handle, backend, stopping_state) = {
-            let mut instances = self.instances.write().await;
-            let record = instances
-                .get_mut(&id)
-                .ok_or(DaemonError::InstanceNotFound(id))?;
+        let handle = self.handle_for(id).await?;
 
-            if let InstanceState::Error { message } = &record.state {
-                return Err(DaemonError::InstanceAlreadyStopped(id, message.clone()));
-            }
+        let state = handle.state();
+        if let InstanceState::Error { message } = &state {
+            return Err(DaemonError::InstanceAlreadyStopped(id, message.clone()));
+        }
 
-            let handle = record.handle.clone().ok_or_else(|| {
-                DaemonError::Backend(BackendError::HandleNotFound(id.to_string()))
-            })?;
+        let backend_handle = handle
+            .backend_handle()
+            .ok_or_else(|| DaemonError::Backend(BackendError::HandleNotFound(id.to_string())))?;
+        let backend = self.backend_for(handle.config().backend)?.clone();
 
-            record.state = record.state.clone().apply(InstanceEvent::Stop)?;
-            let backend = self.backend_for(record.config.backend)?.clone();
+        handle.transition(InstanceEvent::Stop).await?;
 
-            (handle, backend, record.state.clone())
-        };
-        self.persist_state(id, &stopping_state).await;
-
-        let stop_result = backend.stop(&handle, graceful).await;
-
-        let mut instances = self.instances.write().await;
-        let record = instances
-            .get_mut(&id)
-            .ok_or(DaemonError::InstanceNotFound(id))?;
+        let stop_result = backend.stop(&backend_handle, graceful).await;
 
         let result = match stop_result {
             Ok(()) => {
-                record.handle = None;
-                record.state = record.state.clone().apply(InstanceEvent::StopCompleted)?;
+                handle.set_handle(None).await?;
+                handle.transition(InstanceEvent::StopCompleted).await?;
                 Ok(())
             }
             Err(backend_err) => {
-                record.state = record
-                    .state
-                    .clone()
-                    .apply(InstanceEvent::Fail(backend_err.to_string()))?;
+                handle
+                    .transition(InstanceEvent::Fail(backend_err.to_string()))
+                    .await?;
                 Err(DaemonError::Backend(backend_err))
             }
         };
-        let final_state = record.state.clone();
-        let disk = record.config.disk.clone();
-        drop(instances);
-
-        self.persist_state(id, &final_state).await;
 
         match &result {
             Ok(()) => tracing::info!(instance_id = %id, graceful, "instance stopped"),
@@ -363,7 +316,7 @@ impl Daemon {
         }
 
         if result.is_ok() {
-            spawn_compact_on_shutdown(id, disk);
+            spawn_compact_on_shutdown(id, handle.config().disk);
         }
 
         result
@@ -408,22 +361,20 @@ impl Daemon {
             }
         }
 
-        let config = {
-            let mut instances = self.instances.write().await;
-            let record = instances
-                .get(&id)
-                .ok_or(DaemonError::InstanceNotFound(id))?;
+        let handle = self.handle_for(id).await?;
+        let state = handle.state();
 
-            let removable = matches!(
-                record.state,
-                InstanceState::Created | InstanceState::Stopped | InstanceState::Error { .. }
-            );
-            if !removable {
-                return Err(DaemonError::InstanceNotRemovable(id, record.state.clone()));
-            }
+        let removable = matches!(
+            state,
+            InstanceState::Created | InstanceState::Stopped | InstanceState::Error { .. }
+        );
+        if !removable {
+            return Err(DaemonError::InstanceNotRemovable(id, state));
+        }
 
-            instances.remove(&id).map(|record| record.config)
-        };
+        let config = handle.config();
+        self.supervisors.write().await.remove(&id);
+        handle.shutdown().await;
 
         if let Some(store) = &self.store {
             if let Err(err) = store.delete_instance(id).await {
@@ -436,9 +387,7 @@ impl Daemon {
         }
 
         if purge {
-            if let Some(config) = config {
-                super::types::purge_instance_files(id, &config).await;
-            }
+            super::types::purge_instance_files(id, &config).await;
         }
 
         tracing::info!(instance_id = %id, purge, "instance removed");
@@ -450,29 +399,28 @@ impl Daemon {
         id: InstanceId,
         package: String,
     ) -> Result<(), DaemonError> {
-        let (state, disk_path, handle, backend_kind) = {
-            let instances = self.instances.read().await;
-            let record = instances
-                .get(&id)
-                .ok_or(DaemonError::InstanceNotFound(id))?;
+        let handle = self.handle_for(id).await?;
+        let (state, disk_path, backend_handle, backend_kind) = {
+            let config = handle.config();
             (
-                record.state.clone(),
-                record.config.disk.path.clone(),
-                record.handle.clone(),
-                record.config.backend,
+                handle.state(),
+                config.disk.path.clone(),
+                handle.backend_handle(),
+                config.backend,
             )
         };
 
         match &state {
             InstanceState::Running | InstanceState::Paused => {
-                let handle = handle.ok_or_else(|| DaemonError::GuestAgentUnavailable {
-                    instance_id: id,
-                    message: "instance is running but has no backend handle".to_string(),
-                })?;
+                let backend_handle =
+                    backend_handle.ok_or_else(|| DaemonError::GuestAgentUnavailable {
+                        instance_id: id,
+                        message: "instance is running but has no backend handle".to_string(),
+                    })?;
 
                 let backend = self.backend_for(backend_kind)?;
 
-                if !backend.is_guest_agent_available(&handle).await? {
+                if !backend.is_guest_agent_available(&backend_handle).await? {
                     let hint = match &state {
                         InstanceState::Paused => {
                             "VM is paused, so the guest agent cannot respond; \
@@ -489,7 +437,9 @@ impl Daemon {
                     });
                 }
 
-                backend.guest_exec_install(&handle, &package).await?;
+                backend
+                    .guest_exec_install(&backend_handle, &package)
+                    .await?;
                 tracing::info!(
                     instance_id = %id,
                     package = %package,
@@ -537,29 +487,28 @@ impl Daemon {
         id: InstanceId,
         package: String,
     ) -> Result<(), DaemonError> {
-        let (state, disk_path, handle, backend_kind) = {
-            let instances = self.instances.read().await;
-            let record = instances
-                .get(&id)
-                .ok_or(DaemonError::InstanceNotFound(id))?;
+        let handle = self.handle_for(id).await?;
+        let (state, disk_path, backend_handle, backend_kind) = {
+            let config = handle.config();
             (
-                record.state.clone(),
-                record.config.disk.path.clone(),
-                record.handle.clone(),
-                record.config.backend,
+                handle.state(),
+                config.disk.path.clone(),
+                handle.backend_handle(),
+                config.backend,
             )
         };
 
         match &state {
             InstanceState::Running | InstanceState::Paused => {
-                let handle = handle.ok_or_else(|| DaemonError::GuestAgentUnavailable {
-                    instance_id: id,
-                    message: "instance is running but has no backend handle".to_string(),
-                })?;
+                let backend_handle =
+                    backend_handle.ok_or_else(|| DaemonError::GuestAgentUnavailable {
+                        instance_id: id,
+                        message: "instance is running but has no backend handle".to_string(),
+                    })?;
 
                 let backend = self.backend_for(backend_kind)?;
 
-                if !backend.is_guest_agent_available(&handle).await? {
+                if !backend.is_guest_agent_available(&backend_handle).await? {
                     let hint = match &state {
                         InstanceState::Paused => {
                             "VM is paused, so the guest agent cannot respond; \
@@ -576,7 +525,7 @@ impl Daemon {
                     });
                 }
 
-                backend.guest_exec_remove(&handle, &package).await?;
+                backend.guest_exec_remove(&backend_handle, &package).await?;
                 tracing::info!(
                     instance_id = %id,
                     package = %package,
@@ -623,17 +572,15 @@ impl Daemon {
         &self,
         id: InstanceId,
     ) -> Result<Vec<(String, String, String)>, DaemonError> {
-        let (state, disk_path, handle, backend_kind, config_kind) = {
-            let instances = self.instances.read().await;
-            let record = instances
-                .get(&id)
-                .ok_or(DaemonError::InstanceNotFound(id))?;
+        let handle = self.handle_for(id).await?;
+        let (state, disk_path, backend_handle, backend_kind, config_kind) = {
+            let config = handle.config();
             (
-                record.state.clone(),
-                record.config.disk.path.clone(),
-                record.handle.clone(),
-                record.config.backend,
-                record.config.kind.clone(),
+                handle.state(),
+                config.disk.path.clone(),
+                handle.backend_handle(),
+                config.backend,
+                config.kind.clone(),
             )
         };
 
@@ -641,10 +588,11 @@ impl Daemon {
 
         match &state {
             InstanceState::Running | InstanceState::Paused => {
-                let handle = handle.ok_or_else(|| DaemonError::GuestAgentUnavailable {
-                    instance_id: id,
-                    message: "instance is running but has no backend handle".to_string(),
-                })?;
+                let backend_handle =
+                    backend_handle.ok_or_else(|| DaemonError::GuestAgentUnavailable {
+                        instance_id: id,
+                        message: "instance is running but has no backend handle".to_string(),
+                    })?;
 
                 let backend = self.backend_for(backend_kind)?;
 
@@ -658,7 +606,7 @@ impl Daemon {
                     let mut installed = false;
                     for binary in pkg.binary_checks {
                         if backend
-                            .guest_check_binary_installed(&handle, binary)
+                            .guest_check_binary_installed(&backend_handle, binary)
                             .await
                             .unwrap_or(false)
                         {
@@ -720,23 +668,24 @@ impl Daemon {
         id: InstanceId,
         mode: andler_core::AndroidBootMode,
     ) -> Result<(), DaemonError> {
-        let overlay_path = {
-            let instances = self.instances.read().await;
-            let record = instances
-                .get(&id)
-                .ok_or(DaemonError::InstanceNotFound(id))?;
-
-            match &record.config.kind {
-                InstanceKind::AndroidVm { .. } => {}
-                _ => return Err(DaemonError::NotAndroid(id)),
-            }
-
-            if !record.state.is_disk_idle() {
-                return Err(DaemonError::InstanceMustBeStopped(id, record.state.clone()));
-            }
-
-            record.config.disk.path.clone()
+        let handle = self.handle_for(id).await?;
+        let (overlay_path, state, kind) = {
+            let config = handle.config();
+            (
+                config.disk.path.clone(),
+                handle.state(),
+                config.kind.clone(),
+            )
         };
+
+        match &kind {
+            InstanceKind::AndroidVm { .. } => {}
+            _ => return Err(DaemonError::NotAndroid(id)),
+        }
+
+        if !state.is_disk_idle() {
+            return Err(DaemonError::InstanceMustBeStopped(id, state));
+        }
 
         andler_disk::boot_mode::switch_boot_mode(&overlay_path, mode).await?;
 
@@ -748,23 +697,24 @@ impl Daemon {
         &self,
         id: InstanceId,
     ) -> Result<andler_core::AndroidBootMode, DaemonError> {
-        let overlay_path = {
-            let instances = self.instances.read().await;
-            let record = instances
-                .get(&id)
-                .ok_or(DaemonError::InstanceNotFound(id))?;
-
-            match &record.config.kind {
-                InstanceKind::AndroidVm { .. } => {}
-                _ => return Err(DaemonError::NotAndroid(id)),
-            }
-
-            if !record.state.is_disk_idle() {
-                return Err(DaemonError::InstanceMustBeStopped(id, record.state.clone()));
-            }
-
-            record.config.disk.path.clone()
+        let handle = self.handle_for(id).await?;
+        let (overlay_path, state, kind) = {
+            let config = handle.config();
+            (
+                config.disk.path.clone(),
+                handle.state(),
+                config.kind.clone(),
+            )
         };
+
+        match &kind {
+            InstanceKind::AndroidVm { .. } => {}
+            _ => return Err(DaemonError::NotAndroid(id)),
+        }
+
+        if !state.is_disk_idle() {
+            return Err(DaemonError::InstanceMustBeStopped(id, state));
+        }
 
         Ok(andler_disk::boot_mode::current_boot_mode(&overlay_path)?)
     }
@@ -775,29 +725,30 @@ impl Daemon {
         translator: andler_core::android_profile::ArmTranslator,
         translator_dir: Option<PathBuf>,
     ) -> Result<(), DaemonError> {
-        let (overlay_path, android_version) = {
-            let instances = self.instances.read().await;
-            let record = instances
-                .get(&id)
-                .ok_or(DaemonError::InstanceNotFound(id))?;
+        let handle = self.handle_for(id).await?;
+        let (overlay_path, state, kind) = {
+            let config = handle.config();
+            (
+                config.disk.path.clone(),
+                handle.state(),
+                config.kind.clone(),
+            )
+        };
 
-            match &record.config.kind {
-                andler_core::config::InstanceKind::AndroidVm { .. } => {}
-                _ => return Err(DaemonError::NotAndroid(id)),
+        match &kind {
+            andler_core::config::InstanceKind::AndroidVm { .. } => {}
+            _ => return Err(DaemonError::NotAndroid(id)),
+        }
+
+        if !state.is_disk_idle() {
+            return Err(DaemonError::InstanceMustBeStopped(id, state));
+        }
+
+        let android_version = match &kind {
+            andler_core::config::InstanceKind::AndroidVm { android_profile } => {
+                android_profile.android_version.to_string()
             }
-
-            if !record.state.is_disk_idle() {
-                return Err(DaemonError::InstanceMustBeStopped(id, record.state.clone()));
-            }
-
-            let android_version = match &record.config.kind {
-                andler_core::config::InstanceKind::AndroidVm { android_profile } => {
-                    android_profile.android_version.to_string()
-                }
-                _ => "13".to_string(),
-            };
-
-            (record.config.disk.path.clone(), android_version)
+            _ => "13".to_string(),
         };
 
         andler_disk::arm_translator::switch_translator(
@@ -815,6 +766,7 @@ impl Daemon {
         );
         Ok(())
     }
+
     pub async fn set_instance_config(
         &self,
         id: InstanceId,
@@ -825,23 +777,17 @@ impl Daemon {
             return self.set_display_resolution(id, value).await;
         }
 
-        {
-            let instances = self.instances.read().await;
-            let record = instances
-                .get(&id)
-                .ok_or(DaemonError::InstanceNotFound(id))?;
-
-            if !record.state.is_disk_idle() {
-                return Err(DaemonError::InstanceMustBeStopped(id, record.state.clone()));
-            }
+        let handle = self.handle_for(id).await?;
+        let state = handle.state();
+        if !state.is_disk_idle() {
+            return Err(DaemonError::InstanceMustBeStopped(id, state));
         }
 
         match key {
             "name" => {
-                let mut instances = self.instances.write().await;
-                if let Some(record) = instances.get_mut(&id) {
-                    record.config.name = value.to_string();
-                }
+                let mut config = handle.config();
+                config.name = value.to_string();
+                handle.set_config(config).await?;
             }
             "arm_translator" => {
                 let translator: andler_core::android_profile::ArmTranslator = value
@@ -851,16 +797,6 @@ impl Daemon {
             }
             _ => return Err(DaemonError::InvalidConfigKey(key.to_string())),
         }
-
-        let (cfg_snapshot, state_snapshot) = {
-            let instances = self.instances.read().await;
-            let record = instances
-                .get(&id)
-                .ok_or(DaemonError::InstanceNotFound(id))?;
-            (record.config.clone(), record.state.clone())
-        };
-        self.persist_config_update(&cfg_snapshot, &state_snapshot)
-            .await;
 
         Ok(())
     }
@@ -881,46 +817,32 @@ impl Daemon {
             })?;
         let resolution = Resolution::new(width, height);
 
-        let (state, handle, backend_kind, kind) = {
-            let instances = self.instances.read().await;
-            let record = instances
-                .get(&id)
-                .ok_or(DaemonError::InstanceNotFound(id))?;
+        let handle = self.handle_for(id).await?;
+        let (state, backend_handle, backend_kind, kind) = {
+            let config = handle.config();
             (
-                record.state.clone(),
-                record.handle.clone(),
-                record.config.backend,
-                record.config.kind.clone(),
+                handle.state(),
+                handle.backend_handle(),
+                config.backend,
+                config.kind.clone(),
             )
         };
 
         if matches!(state, InstanceState::Running | InstanceState::Paused) {
-            let handle = handle.ok_or_else(|| DaemonError::GuestAgentUnavailable {
-                instance_id: id,
-                message: "instance is running but has no backend handle".to_string(),
-            })?;
+            let backend_handle =
+                backend_handle.ok_or_else(|| DaemonError::GuestAgentUnavailable {
+                    instance_id: id,
+                    message: "instance is running but has no backend handle".to_string(),
+                })?;
             let backend = self.backend_for(backend_kind)?;
             backend
-                .set_guest_display_resolution(&handle, &resolution, kind)
+                .set_guest_display_resolution(&backend_handle, &resolution, kind)
                 .await?;
         }
 
-        {
-            let mut instances = self.instances.write().await;
-            if let Some(record) = instances.get_mut(&id) {
-                record.config.display.resolution = resolution;
-            }
-        }
-
-        let (cfg_snapshot, state_snapshot) = {
-            let instances = self.instances.read().await;
-            let record = instances
-                .get(&id)
-                .ok_or(DaemonError::InstanceNotFound(id))?;
-            (record.config.clone(), record.state.clone())
-        };
-        self.persist_config_update(&cfg_snapshot, &state_snapshot)
-            .await;
+        let mut config = handle.config();
+        config.display.resolution = resolution;
+        handle.set_config(config).await?;
 
         Ok(())
     }

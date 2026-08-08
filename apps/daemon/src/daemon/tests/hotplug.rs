@@ -153,14 +153,7 @@ async fn running_instance_with_mock(
     let id = cfg.id;
     let mock = std::sync::Arc::new(MockBackend::new());
     let handle = BackendHandle("qemu:mock-id".to_string());
-    daemon.instances.write().await.insert(
-        id,
-        InstanceRecord {
-            config: cfg,
-            state: InstanceState::Running,
-            handle: Some(handle),
-        },
-    );
+    register_with_state(&daemon, cfg, InstanceState::Running, Some(handle)).await;
     daemon.backends.insert(BackendKind::Qemu, mock.clone());
     (daemon, mock, id)
 }
@@ -169,14 +162,7 @@ async fn running_instance_with_mock(
 async fn attach_disk_creates_image_and_appends_to_config() {
     let dir = TestTempDir::new();
     let (daemon, mock, id) = running_instance_with_mock(dir.path()).await;
-    let cfg = daemon
-        .instances
-        .read()
-        .await
-        .get(&id)
-        .unwrap()
-        .config
-        .clone();
+    let cfg = daemon.handle_for(id).await.unwrap().config();
 
     let (path, index) = daemon
         .attach_disk(id, None, 2 * DiskConfig::GIB)
@@ -194,9 +180,8 @@ async fn attach_disk_creates_image_and_appends_to_config() {
     assert_eq!(disks[0].path, path);
     assert_eq!(disks[0].size_bytes, 2 * DiskConfig::GIB);
 
-    let instances = daemon.instances.read().await;
-    let record = instances.get(&id).unwrap();
-    assert_eq!(record.config.extra_disks.len(), 1);
+    let config = daemon.handle_for(id).await.unwrap().config();
+    assert_eq!(config.extra_disks.len(), 1);
 }
 
 #[tokio::test]
@@ -212,14 +197,7 @@ async fn attach_disk_requires_running_or_paused_state() {
     let daemon = Daemon::new();
     let cfg = sample_config();
     let id = cfg.id;
-    daemon.instances.write().await.insert(
-        id,
-        InstanceRecord {
-            config: cfg,
-            state: InstanceState::Created,
-            handle: None,
-        },
-    );
+    register_with_state(&daemon, cfg, InstanceState::Created, None).await;
     let err = daemon
         .attach_disk(id, None, 1 * DiskConfig::GIB)
         .await
@@ -273,9 +251,8 @@ async fn attach_disk_rolls_back_created_file_on_backend_failure() {
         !dir.path().join("disk-extra0.qcow2").exists(),
         "created image must be removed when the backend attach fails"
     );
-    let instances = daemon.instances.read().await;
-    let record = instances.get(&id).unwrap();
-    assert!(record.config.extra_disks.is_empty());
+    let config = daemon.handle_for(id).await.unwrap().config();
+    assert!(config.extra_disks.is_empty());
 }
 
 #[tokio::test]
@@ -306,9 +283,8 @@ async fn detach_disk_removes_config_entry_but_keeps_file() {
         .unwrap();
     daemon.detach_disk(id, path.clone()).await.unwrap();
 
-    let instances = daemon.instances.read().await;
-    let record = instances.get(&id).unwrap();
-    assert!(record.config.extra_disks.is_empty());
+    let config = daemon.handle_for(id).await.unwrap().config();
+    assert!(config.extra_disks.is_empty());
     assert!(
         path.exists(),
         "detach must not delete the user's disk image"
@@ -331,14 +307,7 @@ async fn detach_disk_respects_state_gate() {
     let daemon = Daemon::new();
     let cfg = sample_config();
     let id = cfg.id;
-    daemon.instances.write().await.insert(
-        id,
-        InstanceRecord {
-            config: cfg,
-            state: InstanceState::Stopped,
-            handle: None,
-        },
-    );
+    register_with_state(&daemon, cfg, InstanceState::Stopped, None).await;
     let err = daemon
         .detach_disk(id, std::path::PathBuf::from("/tmp/x.qcow2"))
         .await
@@ -362,9 +331,8 @@ async fn attach_network_appends_to_config() {
     assert_eq!(index, 0);
     assert_eq!(mock.attached_nets.lock().await.len(), 1);
     {
-        let instances = daemon.instances.read().await;
-        let record = instances.get(&id).unwrap();
-        assert_eq!(record.config.extra_networks, vec![net]);
+        let config = daemon.handle_for(id).await.unwrap().config();
+        assert_eq!(config.extra_networks, vec![net]);
     }
 
     let net2 = NetworkConfig {
@@ -409,11 +377,10 @@ async fn detach_network_removes_by_index() {
     daemon.attach_network(id, net2).await.unwrap();
 
     daemon.detach_network(id, 0).await.unwrap();
-    let instances = daemon.instances.read().await;
-    let record = instances.get(&id).unwrap();
-    assert_eq!(record.config.extra_networks.len(), 1);
+    let config = daemon.handle_for(id).await.unwrap().config();
+    assert_eq!(config.extra_networks.len(), 1);
     assert_eq!(
-        record.config.extra_networks[0].mode,
+        config.extra_networks[0].mode,
         NetworkMode::Bridge {
             interface: "br0".to_string()
         }
@@ -454,7 +421,6 @@ async fn attach_disk_detaches_propagate_backend_errors() {
         .await
         .unwrap_err();
     assert!(matches!(err, DaemonError::Backend(_)));
-    let instances = daemon.instances.read().await;
-    let record = instances.get(&id).unwrap();
-    assert!(record.config.extra_networks.is_empty());
+    let config = daemon.handle_for(id).await.unwrap().config();
+    assert!(config.extra_networks.is_empty());
 }

@@ -16,14 +16,9 @@ impl Daemon {
         let (backend, handle) = self.with_running_instance(id).await?;
 
         let (disk_path, memory_size_bytes) = {
-            let instances = self.instances.read().await;
-            let record = instances
-                .get(&id)
-                .ok_or(DaemonError::InstanceNotFound(id))?;
-            (
-                record.config.disk.path.clone(),
-                record.config.memory.size_bytes,
-            )
+            let handle = self.handle_for(id).await?;
+            let config = handle.config();
+            (config.disk.path.clone(), config.memory.size_bytes)
         };
 
         if let Ok(existing) = backend.snapshot_list(&handle).await {
@@ -65,12 +60,10 @@ impl Daemon {
         tag: String,
         _timeout_secs: Option<u64>,
     ) -> Result<(), DaemonError> {
+        let handle = self.handle_for(id).await?;
         let (disk_path, state) = {
-            let instances = self.instances.read().await;
-            let record = instances
-                .get(&id)
-                .ok_or(DaemonError::InstanceNotFound(id))?;
-            (record.config.disk.path.clone(), record.state.clone())
+            let config = handle.config();
+            (config.disk.path.clone(), handle.state())
         };
 
         ensure_snapshot_restore_allowed(id, &state)?;
@@ -100,17 +93,15 @@ impl Daemon {
     }
 
     pub async fn list_snapshots(&self, id: InstanceId) -> Result<Vec<SnapshotRecord>, DaemonError> {
-        let instances = self.instances.read().await;
-        let record = instances
-            .get(&id)
-            .ok_or(DaemonError::InstanceNotFound(id))?;
+        let handle = self.handle_for(id).await?;
+        let backend_handle = handle.backend_handle();
+        let backend = self.backend_for(handle.config().backend)?.clone();
 
-        let handle = record.handle.clone();
-        let backend = self.backend_for(record.config.backend)?.clone();
-        drop(instances);
-
-        let backend_snapshots = if let Some(handle) = handle {
-            backend.snapshot_list(&handle).await.unwrap_or_default()
+        let backend_snapshots = if let Some(backend_handle) = backend_handle {
+            backend
+                .snapshot_list(&backend_handle)
+                .await
+                .unwrap_or_default()
         } else {
             Vec::new()
         };

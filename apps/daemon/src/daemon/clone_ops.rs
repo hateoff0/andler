@@ -106,34 +106,33 @@ impl Daemon {
         &self,
         id: InstanceId,
     ) -> Result<InstanceConfig, DaemonError> {
-        let instances = self.instances.read().await;
-        let record = instances
-            .get(&id)
-            .ok_or(DaemonError::InstanceNotFound(id))?;
+        let handle = self.handle_for(id).await?;
+        let (state, config) = (handle.state(), handle.config());
 
         let clonable = matches!(
-            record.state,
+            state,
             InstanceState::Created | InstanceState::Stopped | InstanceState::Error { .. }
         );
         if !clonable {
-            return Err(DaemonError::InstanceNotClonable(id, record.state.clone()));
+            return Err(DaemonError::InstanceNotClonable(id, state));
         }
 
-        Ok(record.config.clone())
+        Ok(config)
     }
 
     pub async fn find_live_clones(&self, id: InstanceId) -> Result<Vec<InstanceId>, DaemonError> {
-        let instances = self.instances.read().await;
-        let target_disk_path = instances
+        let supervisors = self.supervisors.read().await;
+        let target_disk_path = supervisors
             .get(&id)
-            .map(|record| record.config.disk.path.clone())
+            .map(|handle| handle.config().disk.path.clone())
             .ok_or(DaemonError::InstanceNotFound(id))?;
 
-        let clones = instances
+        let clones = supervisors
             .iter()
-            .filter(|(other_id, record)| {
+            .filter(|(other_id, handle)| {
                 **other_id != id
-                    && record.config.disk.base_image.as_deref() == Some(target_disk_path.as_path())
+                    && handle.config().disk.base_image.as_deref()
+                        == Some(target_disk_path.as_path())
             })
             .map(|(other_id, _)| *other_id)
             .collect();

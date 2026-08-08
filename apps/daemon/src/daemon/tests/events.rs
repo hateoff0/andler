@@ -1,21 +1,13 @@
+use super::common::*;
 use super::*;
+use andler_core::EventKind;
 
 #[tokio::test]
 async fn lifecycle_events_are_broadcast_on_fsm_transitions() {
     let daemon = Daemon::new();
-    let id = InstanceId::new();
     let cfg = common::sample_config();
-    {
-        let mut instances = daemon.instances.write().await;
-        instances.insert(
-            id,
-            InstanceRecord {
-                config: cfg,
-                state: InstanceState::Created,
-                handle: None,
-            },
-        );
-    }
+    let id = cfg.id;
+    register_with_state(&daemon, cfg, InstanceState::Created, None).await;
 
     let mut rx = daemon.subscribe_events();
     daemon
@@ -56,19 +48,9 @@ async fn lifecycle_events_are_broadcast_on_fsm_transitions() {
 #[tokio::test]
 async fn fail_transition_carries_the_reason_in_the_event() {
     let daemon = Daemon::new();
-    let id = InstanceId::new();
     let cfg = common::sample_config();
-    {
-        let mut instances = daemon.instances.write().await;
-        instances.insert(
-            id,
-            InstanceRecord {
-                config: cfg,
-                state: InstanceState::Running,
-                handle: None,
-            },
-        );
-    }
+    let id = cfg.id;
+    register_with_state(&daemon, cfg, InstanceState::Running, None).await;
 
     let mut rx = daemon.subscribe_events();
     daemon
@@ -89,19 +71,9 @@ async fn fail_transition_carries_the_reason_in_the_event() {
 #[tokio::test]
 async fn events_channel_drops_when_no_subscriber_listens() {
     let daemon = Daemon::new();
-    let id = InstanceId::new();
     let cfg = common::sample_config();
-    {
-        let mut instances = daemon.instances.write().await;
-        instances.insert(
-            id,
-            InstanceRecord {
-                config: cfg,
-                state: InstanceState::Created,
-                handle: None,
-            },
-        );
-    }
+    let id = cfg.id;
+    register_with_state(&daemon, cfg, InstanceState::Created, None).await;
 
     // No receiver: emit must not panic and must not block.
     daemon

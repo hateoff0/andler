@@ -32,14 +32,7 @@ async fn switch_android_boot_mode_rejects_running_instance() {
         PathBuf::from("/tmp/test-android-base.qcow2"),
     );
     let id = cfg.id;
-    daemon.instances.write().await.insert(
-        id,
-        InstanceRecord {
-            config: cfg,
-            state: InstanceState::Running,
-            handle: None,
-        },
-    );
+    register_with_state(&daemon, cfg, InstanceState::Running, None).await;
 
     let err = daemon
         .switch_android_boot_mode(id, andler_core::AndroidBootMode::Linux)
@@ -78,14 +71,7 @@ async fn get_android_boot_mode_rejects_running_instance() {
         PathBuf::from("/tmp/test-android-base-2.qcow2"),
     );
     let id = cfg.id;
-    daemon.instances.write().await.insert(
-        id,
-        InstanceRecord {
-            config: cfg,
-            state: InstanceState::Running,
-            handle: None,
-        },
-    );
+    register_with_state(&daemon, cfg, InstanceState::Running, None).await;
 
     let err = daemon.get_android_boot_mode(id).await.unwrap_err();
     assert!(matches!(

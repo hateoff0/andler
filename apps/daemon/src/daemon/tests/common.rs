@@ -2,7 +2,8 @@ use super::*;
 pub(crate) use andler_core::AndroidVersion;
 use andler_core::{
     AndroidProfile, ArmTranslator, AudioConfig, CdromBus, CpuConfig, DiskConfig, DisplayConfig,
-    FirmwareConfig, GpuConfig, InputConfig, InstanceKind, MemoryConfig, NetworkConfig,
+    FirmwareConfig, GpuConfig, InputConfig, InstanceKind, InstanceState, MemoryConfig,
+    NetworkConfig,
 };
 use std::path::PathBuf;
 
@@ -72,4 +73,19 @@ pub(crate) fn sample_android_config(disk_path: PathBuf, base_image: PathBuf) -> 
     };
     cfg.disk = DiskConfig::overlay(disk_path, base_image, 20 * DiskConfig::GIB);
     cfg
+}
+
+/// Registers an instance directly with the given lifecycle state and backend
+/// handle (bypassing create/start), the way tests used to insert into the
+/// registry — returns the instance id.
+pub(crate) async fn register_with_state(
+    daemon: &super::Daemon,
+    cfg: InstanceConfig,
+    state: InstanceState,
+    handle: Option<andler_core::BackendHandle>,
+) -> InstanceId {
+    let id = cfg.id;
+    let supervisor = super::spawn_supervisor(id, cfg, state, handle, None, daemon.event_sender());
+    daemon.supervisors.write().await.insert(id, supervisor);
+    id
 }

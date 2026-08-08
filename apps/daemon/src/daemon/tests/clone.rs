@@ -47,11 +47,13 @@ async fn clone_rejects_non_terminal_source_state() {
     let id = cfg.id;
     daemon.create_instance(cfg).await.unwrap();
 
-    {
-        let mut instances = daemon.instances.write().await;
-        let record = instances.get_mut(&id).unwrap();
-        record.state = InstanceState::Running;
-    }
+    daemon
+        .handle_for(id)
+        .await
+        .unwrap()
+        .transition(InstanceEvent::Start)
+        .await
+        .unwrap();
 
     let err = daemon
         .clone_instance(
@@ -64,7 +66,7 @@ async fn clone_rejects_non_terminal_source_state() {
         .unwrap_err();
     assert!(matches!(
         err,
-        DaemonError::InstanceNotClonable(returned_id, InstanceState::Running)
+        DaemonError::InstanceNotClonable(returned_id, InstanceState::Starting)
             if returned_id == id
     ));
 }
@@ -321,11 +323,13 @@ async fn clone_linux_vm_rejects_non_terminal_source_state() {
     let id = cfg.id;
     daemon.create_instance(cfg).await.unwrap();
 
-    {
-        let mut instances = daemon.instances.write().await;
-        let record = instances.get_mut(&id).unwrap();
-        record.state = InstanceState::Running;
-    }
+    daemon
+        .handle_for(id)
+        .await
+        .unwrap()
+        .transition(InstanceEvent::Start)
+        .await
+        .unwrap();
 
     let err = daemon
         .clone_instance(
@@ -338,7 +342,7 @@ async fn clone_linux_vm_rejects_non_terminal_source_state() {
         .unwrap_err();
     assert!(matches!(
         err,
-        DaemonError::InstanceNotClonable(returned_id, InstanceState::Running)
+        DaemonError::InstanceNotClonable(returned_id, InstanceState::Starting)
             if returned_id == id
     ));
 }

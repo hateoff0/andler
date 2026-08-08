@@ -114,17 +114,19 @@ Protobuf definitions and generated code via `tonic`/`prost`.
 
 ### `apps/daemon/` — Background Service
 
-Orchestrates all operations. Holds backend registry, instance state, optional persistence.
+Orchestrates all operations. Holds backend registry, per-instance supervisors, optional persistence.
 
 **Key design:**
 - `Daemon::new()` / `with_store()` / `restore()` — three construction paths
-- Instance lifecycle via FSM transitions
+- **Instance supervisor (task per instance)**: each registered instance runs one tokio task that owns the FSM state, the backend handle and the config — the only writer of all three. Everything else reads them through `tokio::sync::watch` snapshots (`SupervisorHandle::state()/backend_handle()/config()`) and mutates them through an mpsc command channel (`transition`, `set_handle`, `set_config`), which acknowledges only after the change is applied and persisted. This replaces the old shared `RwLock<HashMap<…>>` as the daemon's structural state and is the seam where op-queueing and event sourcing grow (see PLAN §2.4; QMP/metrics ownership moves under the supervisor in Phase 0 §2.5).
+- **Event bus**: the daemon owns a `broadcast::Sender<DaemonEvent>`; supervisors publish `Lifecycle` events on every applied FSM transition (with the `Fail` reason). Consumers subscribe via `Daemon::subscribe_events()` (event types live in `andler-core::events`, pure serde types).
+- Instance lifecycle via FSM transitions (applied by the supervisor)
 - `InstanceDirGuard` RAII for cleanup on partial failure
 - `create_linux_instance()` / `create_android_instance()` — high-level resource creation + registration
 - `resolve_instance_id()` — Docker-style partial ID resolution (12-char hex prefix)
 - `update_instance_config()` — Edit config via gRPC, protects id/kind/disk.path
 - `DaemonService` — thin gRPC wrapper, one method per Daemon method
-- Error mapping: `DaemonError` (29 variants) → gRPC status codes
+- Error mapping: `DaemonError` (count from `error.rs`) → `ErrorKind` (single exhaustive match) → gRPC status codes
 
 **~120 unit tests** (some ignored) + **gRPC round-trip tests** (real TCP).
 

@@ -11,11 +11,8 @@ async fn health_check_ignores_non_running_instances() {
 
     daemon.run_health_check_once().await;
 
-    let instances = daemon.instances.read().await;
-    let record = instances
-        .get(&id)
-        .expect("instance must still be registered");
-    assert_eq!(record.state, InstanceState::Created);
+    let handle = daemon.handle_for(id).await.unwrap();
+    assert_eq!(handle.state(), InstanceState::Created);
 }
 
 #[tokio::test]
@@ -23,22 +20,12 @@ async fn health_check_skips_running_instance_without_handle() {
     let daemon = Daemon::new();
     let cfg = sample_config();
     let id = cfg.id;
-    daemon.instances.write().await.insert(
-        id,
-        InstanceRecord {
-            config: cfg,
-            state: InstanceState::Running,
-            handle: None,
-        },
-    );
+    register_with_state(&daemon, cfg, InstanceState::Running, None).await;
 
     daemon.run_health_check_once().await;
 
-    let instances = daemon.instances.read().await;
-    let record = instances
-        .get(&id)
-        .expect("instance must still be registered");
-    assert_eq!(record.state, InstanceState::Running);
+    let handle = daemon.handle_for(id).await.unwrap();
+    assert_eq!(handle.state(), InstanceState::Running);
 }
 
 #[tokio::test]
@@ -46,24 +33,22 @@ async fn mark_instance_crashed_transitions_to_error_and_clears_handle() {
     let daemon = Daemon::new();
     let cfg = sample_config();
     let id = cfg.id;
-    daemon.instances.write().await.insert(
-        id,
-        InstanceRecord {
-            config: cfg,
-            state: InstanceState::Running,
-            handle: Some(BackendHandle("qemu:test".to_string())),
-        },
-    );
+    register_with_state(
+        &daemon,
+        cfg,
+        InstanceState::Running,
+        Some(BackendHandle("qemu:test".to_string())),
+    )
+    .await;
 
     daemon
         .mark_instance_crashed(id, "process exited unexpectedly".to_string())
         .await
         .unwrap();
 
-    let instances = daemon.instances.read().await;
-    let record = instances.get(&id).unwrap();
-    assert!(matches!(record.state, InstanceState::Error { .. }));
-    assert!(record.handle.is_none());
+    let handle = daemon.handle_for(id).await.unwrap();
+    assert!(matches!(handle.state(), InstanceState::Error { .. }));
+    assert!(handle.backend_handle().is_none());
 }
 
 #[tokio::test]
@@ -83,21 +68,19 @@ async fn mark_instance_stopped_cleanly_transitions_to_stopped_and_clears_handle(
     let daemon = Daemon::new();
     let cfg = sample_config();
     let id = cfg.id;
-    daemon.instances.write().await.insert(
-        id,
-        InstanceRecord {
-            config: cfg,
-            state: InstanceState::Running,
-            handle: Some(BackendHandle("qemu:test".to_string())),
-        },
-    );
+    register_with_state(
+        &daemon,
+        cfg,
+        InstanceState::Running,
+        Some(BackendHandle("qemu:test".to_string())),
+    )
+    .await;
 
     daemon.mark_instance_stopped_cleanly(id).await.unwrap();
 
-    let instances = daemon.instances.read().await;
-    let record = instances.get(&id).unwrap();
-    assert_eq!(record.state, InstanceState::Stopped);
-    assert!(record.handle.is_none());
+    let handle = daemon.handle_for(id).await.unwrap();
+    assert_eq!(handle.state(), InstanceState::Stopped);
+    assert!(handle.backend_handle().is_none());
 }
 
 #[tokio::test]

@@ -27,8 +27,8 @@ async fn double_create_with_same_id_overwrites_record() {
     cfg2.name = "renamed".to_string();
     daemon.create_instance(cfg2).await.unwrap();
 
-    let instances = daemon.instances.read().await;
-    assert_eq!(instances.get(&id).unwrap().config.name, "renamed");
+    let handle = daemon.handle_for(id).await.unwrap();
+    assert_eq!(handle.config().name, "renamed");
 }
 
 #[tokio::test]
@@ -60,12 +60,12 @@ async fn create_linux_instance_places_disk_inside_own_instance_dir() {
     assert!(expected_disk_path.exists());
     assert!(instance_dir.join("VARS.fd").exists());
 
-    let instances = daemon.instances.read().await;
-    let record = instances.get(&id).unwrap();
-    assert_eq!(record.config.disk.path, expected_disk_path);
+    let handle = daemon.handle_for(id).await.unwrap();
+    let config = handle.config();
+    assert_eq!(config.disk.path, expected_disk_path);
     assert_eq!(
-        record.config.disk.path.parent(),
-        record.config.firmware.ovmf_vars_path.parent(),
+        config.disk.path.parent(),
+        config.firmware.ovmf_vars_path.parent(),
         "disk.qcow2 and VARS.fd must live in the same instance directory"
     );
 
@@ -125,11 +125,11 @@ async fn create_android_instance_resolves_profile_and_creates_overlay() {
     assert_eq!(parsed.id, id);
     assert_eq!(parsed.name, "my-android");
 
-    let instances = daemon.instances.read().await;
-    let record = instances.get(&id).unwrap();
-    assert_eq!(record.config.id, id);
-    assert_eq!(record.config.disk.base_image, Some(base_image));
-    match &record.config.kind {
+    let handle = daemon.handle_for(id).await.unwrap();
+    let config = handle.config();
+    assert_eq!(config.id, id);
+    assert_eq!(config.disk.base_image, Some(base_image));
+    match &config.kind {
         InstanceKind::AndroidVm { android_profile } => {
             assert_eq!(*android_profile, profile);
         }

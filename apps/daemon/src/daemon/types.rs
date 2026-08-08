@@ -1,12 +1,6 @@
 use std::path::PathBuf;
 
-use andler_core::{BackendHandle, InstanceConfig, InstanceId, InstanceState};
-
-pub(crate) struct InstanceRecord {
-    pub(crate) config: InstanceConfig,
-    pub(crate) state: InstanceState,
-    pub(crate) handle: Option<BackendHandle>,
-}
+use andler_core::{InstanceConfig, InstanceId, InstanceState};
 
 #[derive(Debug, Clone)]
 pub struct SnapshotRecord {

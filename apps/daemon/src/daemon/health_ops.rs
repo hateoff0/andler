@@ -5,15 +5,15 @@ use andler_core::{InstanceEvent, InstanceId, InstanceState};
 impl Daemon {
     pub async fn run_health_check_once(&self) {
         let running: Vec<_> = {
-            let instances = self.instances.read().await;
-            instances
+            let supervisors = self.supervisors.read().await;
+            supervisors
                 .iter()
-                .filter_map(|(id, record)| {
-                    if record.state == InstanceState::Running {
-                        record
-                            .handle
-                            .clone()
-                            .map(|handle| (*id, record.config.backend, handle))
+                .filter_map(|(id, handle)| {
+                    if handle.state() == InstanceState::Running {
+                        let config = handle.config();
+                        handle
+                            .backend_handle()
+                            .map(|backend_handle| (*id, config.backend, backend_handle))
                     } else {
                         None
                     }
@@ -21,7 +21,7 @@ impl Daemon {
                 .collect()
         };
 
-        for (id, backend_kind, handle) in running {
+        for (id, backend_kind, backend_handle) in running {
             let backend = match self.backend_for(backend_kind) {
                 Ok(backend) => backend.clone(),
                 Err(err) => {
@@ -34,7 +34,7 @@ impl Daemon {
                 }
             };
 
-            let status = match backend.status(&handle).await {
+            let status = match backend.status(&backend_handle).await {
                 Ok(status) => status,
                 Err(err) => {
                     tracing::warn!(
@@ -96,16 +96,9 @@ impl Daemon {
         id: InstanceId,
         reason: String,
     ) -> Result<(), DaemonError> {
-        let final_state = {
-            let mut instances = self.instances.write().await;
-            let record = instances
-                .get_mut(&id)
-                .ok_or(DaemonError::InstanceNotFound(id))?;
-            record.handle = None;
-            record.state = record.state.clone().apply(InstanceEvent::Fail(reason))?;
-            record.state.clone()
-        };
-        self.persist_state(id, &final_state).await;
+        let handle = self.handle_for(id).await?;
+        handle.set_handle(None).await?;
+        handle.transition(InstanceEvent::Fail(reason)).await?;
         Ok(())
     }
 
@@ -117,20 +110,10 @@ impl Daemon {
         &self,
         id: InstanceId,
     ) -> Result<(), DaemonError> {
-        let final_state = {
-            let mut instances = self.instances.write().await;
-            let record = instances
-                .get_mut(&id)
-                .ok_or(DaemonError::InstanceNotFound(id))?;
-            record.handle = None;
-            record.state = record
-                .state
-                .clone()
-                .apply(InstanceEvent::Stop)?
-                .apply(InstanceEvent::StopCompleted)?;
-            record.state.clone()
-        };
-        self.persist_state(id, &final_state).await;
+        let handle = self.handle_for(id).await?;
+        handle.set_handle(None).await?;
+        handle.transition(InstanceEvent::Stop).await?;
+        handle.transition(InstanceEvent::StopCompleted).await?;
         Ok(())
     }
 }

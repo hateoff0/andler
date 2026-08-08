@@ -47,12 +47,12 @@ async fn shutdown_signal(daemon: Arc<Daemon>) {
     tracing::info!("shutdown signal received, stopping running instances gracefully");
 
     let running_ids: Vec<andler_core::InstanceId> = {
-        let instances = daemon.instances.read().await;
-        instances
+        let supervisors = daemon.supervisors.read().await;
+        supervisors
             .iter()
-            .filter(|(_, record)| {
+            .filter(|(_, handle)| {
                 matches!(
-                    record.state,
+                    handle.state(),
                     andler_core::InstanceState::Running | andler_core::InstanceState::Paused
                 )
             })

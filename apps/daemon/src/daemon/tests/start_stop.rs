@@ -33,14 +33,7 @@ async fn start_instance_no_longer_rejected_by_fsm_when_stopped_or_errored() {
         let daemon = Daemon::new();
         let cfg = sample_config();
         let id = cfg.id;
-        daemon.instances.write().await.insert(
-            id,
-            InstanceRecord {
-                config: cfg,
-                state: initial_state.clone(),
-                handle: None,
-            },
-        );
+        register_with_state(&daemon, cfg, initial_state.clone(), None).await;
 
         match daemon.start_instance(id).await {
             Ok(()) => {
@@ -153,7 +146,12 @@ async fn apply_event_and_persist_pause_transitions_running_to_paused() {
     let cfg = sample_config();
     let id = cfg.id;
     daemon.create_instance(cfg).await.unwrap();
-    daemon.instances.write().await.get_mut(&id).unwrap().state = InstanceState::Running;
+    let handle = daemon.handle_for(id).await.unwrap();
+    handle.transition(InstanceEvent::Start).await.unwrap();
+    handle
+        .transition(InstanceEvent::StartCompleted)
+        .await
+        .unwrap();
 
     daemon
         .apply_event_and_persist(id, andler_core::InstanceEvent::Pause)
@@ -169,7 +167,13 @@ async fn apply_event_and_persist_resume_transitions_paused_to_running() {
     let cfg = sample_config();
     let id = cfg.id;
     daemon.create_instance(cfg).await.unwrap();
-    daemon.instances.write().await.get_mut(&id).unwrap().state = InstanceState::Paused;
+    let handle = daemon.handle_for(id).await.unwrap();
+    handle.transition(InstanceEvent::Start).await.unwrap();
+    handle
+        .transition(InstanceEvent::StartCompleted)
+        .await
+        .unwrap();
+    handle.transition(InstanceEvent::Pause).await.unwrap();
 
     daemon
         .apply_event_and_persist(id, andler_core::InstanceEvent::Resume)

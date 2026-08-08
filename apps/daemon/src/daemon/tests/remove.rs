@@ -43,14 +43,7 @@ async fn remove_instance_rejects_running_instance() {
     let daemon = Daemon::new();
     let cfg = sample_config();
     let id = cfg.id;
-    daemon.instances.write().await.insert(
-        id,
-        InstanceRecord {
-            config: cfg,
-            state: InstanceState::Running,
-            handle: None,
-        },
-    );
+    register_with_state(&daemon, cfg, InstanceState::Running, None).await;
 
     let err = daemon.remove_instance(id, false).await.unwrap_err();
     assert!(matches!(
@@ -73,14 +66,7 @@ async fn remove_instance_rejects_every_non_terminal_state() {
         let daemon = Daemon::new();
         let cfg = sample_config();
         let id = cfg.id;
-        daemon.instances.write().await.insert(
-            id,
-            InstanceRecord {
-                config: cfg,
-                state: state.clone(),
-                handle: None,
-            },
-        );
+        register_with_state(&daemon, cfg, state.clone(), None).await;
 
         let err = daemon.remove_instance(id, false).await.unwrap_err();
         assert!(
@@ -95,14 +81,7 @@ async fn remove_instance_succeeds_from_stopped() {
     let daemon = Daemon::new();
     let cfg = sample_config();
     let id = cfg.id;
-    daemon.instances.write().await.insert(
-        id,
-        InstanceRecord {
-            config: cfg,
-            state: InstanceState::Stopped,
-            handle: None,
-        },
-    );
+    register_with_state(&daemon, cfg, InstanceState::Stopped, None).await;
 
     daemon.remove_instance(id, false).await.unwrap();
 
