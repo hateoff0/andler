@@ -14,11 +14,12 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use andler_core::{
-    BackendError, BackendKind, HypervisorBackend, InstanceConfig, InstanceEvent, InstanceId,
-    InstanceState,
+    BackendError, BackendKind, DaemonEvent, EventKind, HypervisorBackend, InstanceConfig,
+    InstanceEvent, InstanceId, InstanceState,
 };
 use andler_qemu::QemuBackend;
 use andler_store::Store;
+use tokio::sync::broadcast;
 use tokio::sync::RwLock;
 
 fn default_backends() -> HashMap<BackendKind, Arc<dyn HypervisorBackend>> {
@@ -31,6 +32,38 @@ pub struct Daemon {
     pub(crate) backends: HashMap<BackendKind, Arc<dyn HypervisorBackend>>,
     pub(crate) instances: RwLock<HashMap<InstanceId, InstanceRecord>>,
     pub(crate) store: Option<Store>,
+    events: broadcast::Sender<DaemonEvent>,
+}
+
+const EVENT_CHANNEL_CAPACITY: usize = 256;
+
+impl Daemon {
+    // consumed by the supervisor (next Phase 0 commit) and the events RPC
+    #[allow(dead_code)]
+    pub fn subscribe_events(&self) -> broadcast::Receiver<DaemonEvent> {
+        self.events.subscribe()
+    }
+
+    /// Publishes a daemon event; drops silently when no subscriber is
+    /// listening (the audit file in Phase 1 subscribes and persists).
+    pub(crate) fn emit(&self, instance_id: Option<InstanceId>, kind: EventKind) {
+        let event = DaemonEvent {
+            ts_ms: chrono::Utc::now().timestamp_millis() as u64,
+            instance_id,
+            kind,
+        };
+        let _ = self.events.send(event);
+    }
+
+    pub(crate) fn emit_lifecycle(
+        &self,
+        id: InstanceId,
+        from: InstanceState,
+        to: InstanceState,
+        reason: Option<String>,
+    ) {
+        self.emit(Some(id), EventKind::Lifecycle { from, to, reason });
+    }
 }
 
 impl Daemon {
@@ -102,10 +135,12 @@ impl Daemon {
         store: Option<Store>,
         instances: HashMap<InstanceId, InstanceRecord>,
     ) -> Self {
+        let (events, _) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
         Daemon {
             backends,
             instances: RwLock::new(instances),
             store,
+            events,
         }
     }
 
@@ -123,7 +158,7 @@ impl Daemon {
     /// succeeded at the backend level, where the point is just to keep our own
     /// bookkeeping in sync, not to gate the action itself.
     pub(crate) async fn apply_event_and_persist(&self, id: InstanceId, event: InstanceEvent) {
-        let new_state = {
+        let (from, new_state) = {
             let mut instances = self.instances.write().await;
             let Some(record) = instances.get_mut(&id) else {
                 tracing::error!(instance_id = %id, ?event, "instance vanished before FSM event could be applied");
@@ -131,8 +166,9 @@ impl Daemon {
             };
             match record.state.clone().apply(event.clone()) {
                 Ok(state) => {
+                    let from = record.state.clone();
                     record.state = state.clone();
-                    state
+                    (from, state)
                 }
                 Err(err) => {
                     tracing::error!(instance_id = %id, ?event, error = %err, "failed to apply FSM event");
@@ -140,6 +176,11 @@ impl Daemon {
                 }
             }
         };
+        let reason = match &event {
+            InstanceEvent::Fail(message) => Some(message.clone()),
+            _ => None,
+        };
+        self.emit_lifecycle(id, from, new_state.clone(), reason);
         self.persist_state(id, &new_state).await;
     }
 

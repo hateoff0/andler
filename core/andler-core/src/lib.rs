@@ -4,6 +4,7 @@ pub mod base_image;
 pub mod clone;
 pub mod config;
 pub mod error;
+pub mod events;
 pub mod fsm;
 pub mod paths;
 
@@ -29,4 +30,8 @@ pub use config::{
     PointerMode, RenderBackend, Resolution, INSTANCE_ID_HEX_LEN,
 };
 pub use error::{BackendError, FsmError};
+pub use events::{
+    DaemonEvent, EventKind, EventLogLevel, GuestReadinessLevel, OpId, Operation, OperationKind,
+    OperationState, QmpEvent,
+};
 pub use fsm::{InstanceEvent, InstanceState};
