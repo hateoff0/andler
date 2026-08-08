@@ -210,7 +210,7 @@ Commit hygiene:
 **Default: No comments in code.** The codebase is currently free of doc comments (`///`, `//!`) and inline comments. Keep it that way.
 
 **Exception: 1–2 line comments** allowed ONLY when:
-- A non-obvious `unsafe` block requires a safety justification, written as `// SAFETY: …` directly above the block — already the convention at the three existing call sites (`backends/andler-qemu/src/process.rs`, `backend.rs`, `metrics.rs`). Enforce it mechanically, not just by review: add `undocumented_unsafe_blocks = "warn"` under a `[workspace.lints.clippy]` table in the root `Cargo.toml`, which the existing `cargo clippy --workspace -- -D warnings` gate then turns into a hard failure. All three existing sites already comply, so turning this on costs nothing today — but new `unsafe` is arriving soon (pidfd-based process supervision), and it should not be the first to skip the convention.
+- A non-obvious `unsafe` block requires a safety justification, written as `// SAFETY: …` directly above the block. Enforce it mechanically, not just by review: `undocumented_unsafe_blocks = "warn"` sits under `[workspace.lints.clippy]` in the root `Cargo.toml` (inherited by every crate), which the existing `cargo clippy --workspace -- -D warnings` gate then turns into a hard failure. Every `unsafe` site in the workspace carries such a comment — keep it that way when new `unsafe` arrives (pidfd-based process supervision is the next one).
 - A complex algorithm needs a one-line "what this does" note
 - A `#[allow(...)]` lint suppression needs a brief reason
 

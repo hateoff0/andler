@@ -55,6 +55,7 @@ fn main() -> ExitCode {
             println!("andler-helper {VERSION}");
             ExitCode::SUCCESS
         }
+        // SAFETY: geteuid(2) is a pure POSIX call — no arguments, no mutable state.
         _ if unsafe { libc::geteuid() } != 0 => {
             eprintln!("andler-helper: must run as root (via sudo)");
             ExitCode::from(2)

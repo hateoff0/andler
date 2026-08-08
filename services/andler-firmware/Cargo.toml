@@ -18,3 +18,8 @@ tracing = { workspace = true }
 # and `libnvidia-ml.so` is not required for building. See
 # `metrics/gpu_nvidia.rs`, docs/ARCHITECTURE.md section "GPU Metrics".
 nvml-wrapper = "0.12"
+
+
+
+[lints]
+workspace = true

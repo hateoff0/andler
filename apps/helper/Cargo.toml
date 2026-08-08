@@ -12,3 +12,7 @@ libc = "0.2"
 [[bin]]
 name = "andler-helper"
 path = "src/main.rs"
+
+
+[lints]
+workspace = true

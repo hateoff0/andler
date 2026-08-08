@@ -80,6 +80,7 @@ fn expect_success(out: &std::process::Output, what: &str) {
 fn offline_guest_cycle_through_the_helper() {
     // Running as root is required for every step; skip cleanly otherwise so the
     // ignored suite can still be collected on unprivileged machines.
+    // SAFETY: geteuid(2) is a pure POSIX call — no arguments, no mutable state.
     if unsafe { libc::geteuid() } != 0 {
         eprintln!("skipping: andler-helper cycle needs root");
         return;

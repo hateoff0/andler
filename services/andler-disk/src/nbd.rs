@@ -38,6 +38,8 @@ fn acquire_disk_lock(disk_path: &Path) -> Result<std::fs::File, DiskError> {
 
     // Blocking: waits for any other andler operation on this same disk image to
     // finish, rather than racing it or failing outright.
+    // SAFETY: flock(2) takes a valid open fd from our own File handle; the
+    // lock is released by the kernel on close regardless of the call result.
     let ret = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
     if ret != 0 {
         return Err(DiskError::NbdSetupFailed(format!(

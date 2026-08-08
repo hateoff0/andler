@@ -34,3 +34,8 @@ chrono = { version = "0.4", features = ["serde"] }
 [dev-dependencies]
 tokio-stream = { version = "0.1", features = ["net"] }
 uuid = { version = "1" }
+
+
+
+[lints]
+workspace = true

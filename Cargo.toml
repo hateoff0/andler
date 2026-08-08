@@ -33,6 +33,12 @@ clap = { version = "4", features = ["derive"] }
 dirs = "5"
 rand = "0.10"
 
+[workspace.lints.clippy]
+# Every `unsafe` block must carry a `// SAFETY:` justification above it
+# (see AGENTS.md, Code Comments Policy). `cargo clippy --workspace -- -D warnings`
+# turns this warning into a hard failure.
+undocumented_unsafe_blocks = "warn"
+
 [profile.dev]
 # Full debug builds of QEMU wrapper often require live processes —
 # keep panic readable without sacrificing test performance.
