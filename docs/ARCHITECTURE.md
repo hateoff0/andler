@@ -227,6 +227,34 @@ andler CLI → gRPC → daemon
 
 Any active state (Created/Starting/Running/Paused/Stopping) can transition to `Error` via `Fail(msg)`.
 
+## Guest Readiness Contract
+
+The daemon's `status` reports the guest's readiness as an explicit level, not a
+guess from log text. The contract (decision from the architecture rework,
+documented here) is a monotonic ladder — each level implies the previous one:
+
+| Level | Meaning |
+|---|---|
+| `SerialUp` | VM process is up, serial chardev responds |
+| `QgaUp` | QEMU guest agent answers probes (QGA chardev socket) |
+| `DisplayApplied` | configured display resolution was applied inside the guest |
+| `GuestOsUp` | guest OS finished booting (systemd / init reports ready) |
+| `WaydroidReady` | Android session: Waydroid container is running (AndroidVm only) |
+
+**Effective profile, not just `kind`**: the terminal level depends on the
+`(kind, boot_mode)` pair, because an `AndroidVm` switched to Linux boot-mode
+never brings up Waydroid. For `LinuxVm` (and Android-in-Linux-mode) the
+terminal level is `GuestOsUp`; for Android-in-waydroid-mode it is
+`WaydroidReady`. Callers that consume readiness (status display, guest access
+levels) must derive the terminal level from the effective profile, never from
+`kind` alone.
+
+How levels are reached is the guest's own reporting (systemd units + QGA
+probes + fw_cfg phase marker); the readiness event flows through the
+daemon event bus as `DaemonEvent::Readiness { level }` (see `andler-core`
+events). The implementation of the reporting mechanism itself is phase 3
+work (QMP/QGA subscription); the contract above is the stable interface.
+
 ## Snapshot Mechanism
 
 Disk-only internal qcow2 snapshots — no VM-state (RAM) serialization, so they work on any
@@ -275,6 +303,49 @@ All host-side metrics from `/proc` — no QMP communication needed for metrics:
 Polling interval: 1 second. Broadcast via `tokio::sync::broadcast`.
 
 GPU vendor detection priority: AMD → NVIDIA → Intel (first found wins). AMD uses direct sysfs reads. NVIDIA uses NVML (`nvml-wrapper` crate, primary) with `nvidia-smi` CLI fallback. Intel uses `i915` sysfs `power/rc6_residency_ms` (documented idle-time ABI) for GPU load, derived from a real elapsed-time delta; Intel has no VRAM metric (stolen-memory accounting is a `debugfs`, not `sysfs`, interface).
+
+## Log Rotation & Retention
+
+Instance logs must not grow without bound (a long-running guest filled 4.4 GB
+of disk with logs). Policy (decision from the architecture rework):
+
+- `qemu.log` and `console.log` in the instance directory rotate logrotate-style
+  by **size**, enforced by the daemon (not by the guest): when a file exceeds
+  a size cap (default 16 MiB), it is renamed to `.<N>` generations (default 3
+  kept, newest-highest), rotation happens at a safe point (daemon-driven, not
+  mid-write). Rotated generations are capped by the same size rule.
+- The daemon's own log directory (`~/.andler/logs`, when used) applies
+  **retention by age + total size**: generations older than 30 days or beyond
+  a total budget (default 256 MiB) are pruned.
+- Rotation is a daemon mechanism, not a CLI concern: `andler logs` reads
+  through the same file, so a rotated file never breaks the stream contract.
+
+## Security / Threat Model
+
+Honest model, written down because the helper doc referenced it (see ROADMAP)
+and it was absent. Scope: single-user Linux desktop running QEMU/KVM.
+
+- **Boundary**: the VM is the isolation boundary — guests are untrusted. The
+  daemon runs as the user, not root; after the guestfs migration (see ROADMAP)
+  the daemon performs no privileged operations at all. The
+  `andler-helper` entry point narrows and structure-hardens the remaining
+  privileged surface (argument injection, path traversal, symlink confusion),
+  but a compromised daemon remains root — it is **not** a sandbox; the
+  boundary is against bugs and other users.
+- **IPC boundary**: `andlerd` listens on TCP loopback (`ANDLERD_LISTEN_ADDR`,
+  default `127.0.0.1:50051`). Loopback bounds the network, not the user; the
+  rework explicitly chose the documented assumption **one host user per
+  machine** (multi-user trust is out of scope; a unix-socket transport with
+  `0600` is the documented upgrade path if that assumption ever changes).
+- **Untrusted artifacts**: snapshots and base-image manifests may be
+  corrupted or malicious (a broken snapshot must not wedge the daemon):
+  manifests are validated (shape, required fields, size limits) before use;
+  snapshot restore validates the image before switching the disk; resource
+  limits (time/size) apply to guest-driven operations.
+- **Per-instance files**: instance directory, QMP/QGA sockets, and SSH key
+  material use the same private-permissions discipline as the rest of
+  `~/.andler` (0700/0600); QMP/QGA sockets live under
+  `$XDG_RUNTIME_DIR/andler/` which is user-private by construction.
 
 ## Future Directions
 - **Bridge network mode**: Implemented in `andler-net` using `iproute2` for bridge creation and network configuration. Isolated mode is config-representable but not yet implemented (`setup_isolated` returns an explicit error)
