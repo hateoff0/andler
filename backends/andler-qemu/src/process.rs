@@ -158,6 +158,7 @@ impl QemuProcess {
         let ticks_per_sec = crate::metrics::ticks_per_second();
         let metrics_task = crate::metrics::spawn_metrics_poller(
             pid,
+            pidfd.clone(),
             ticks_per_sec,
             crate::metrics::DEFAULT_POLL_INTERVAL,
             metrics_sender.clone(),

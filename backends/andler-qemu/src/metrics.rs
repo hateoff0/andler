@@ -142,6 +142,7 @@ fn compute_io_rates(prev: IoSample, curr: IoSample, delta_secs: f64) -> (u64, u6
 
 pub fn spawn_metrics_poller(
     pid: u32,
+    pidfd: std::sync::Arc<crate::pidfd::PidFd>,
     ticks_per_sec: u64,
     interval: std::time::Duration,
     sender: tokio::sync::broadcast::Sender<ResourceMetrics>,
@@ -154,8 +155,9 @@ pub fn spawn_metrics_poller(
         loop {
             tokio::time::sleep(interval).await;
 
-            let alive = std::path::Path::new(&format!("/proc/{pid}")).exists();
-            if !alive {
+            // pidfd tells us about the exact process instance — never a
+            // reused PID — unlike a /proc/<pid> existence check.
+            if pidfd.has_exited() {
                 tracing::debug!(pid, "metrics poller: process exited, stopping");
                 break;
             }
