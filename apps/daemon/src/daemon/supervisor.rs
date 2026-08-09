@@ -170,6 +170,10 @@ pub(crate) fn spawn_supervisor(
 }
 
 impl InstanceSupervisor {
+    // Intentionally sequential: every command today (FSM transition, handle/
+    // config swap) completes in milliseconds. The first long-running command
+    // (DiskChain ops, provisioning) MUST spawn its own task and ack through
+    // its handle — awaiting it inline freezes status/cancel behind it.
     async fn run(mut self) {
         while let Some(command) = self.inbox.recv().await {
             match command {
