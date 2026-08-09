@@ -61,6 +61,11 @@ struct QueryStatusReturn {
     status: VmStatus,
 }
 
+#[derive(Debug, Deserialize)]
+struct ProcessInfo {
+    pid: u32,
+}
+
 pub struct QmpClient {
     stream: BufReader<UnixStream>,
     read_timeout: Option<std::time::Duration>,
@@ -121,6 +126,25 @@ impl QmpClient {
         let parsed: QueryStatusReturn =
             serde_json::from_value(value).map_err(QmpError::ParseError)?;
         Ok(parsed.status)
+    }
+
+    /// Resolves the host PID of the QEMU process owning this QMP connection
+    /// via `query-processes` (the QAPI ProcessInfo list; the first entry is
+    /// the emulator process itself). Used by reconnect/adopt: the socket
+    /// proves identity, this gives the pid to pidfd-wait on.
+    pub async fn query_process_pid(&mut self) -> Result<u32, QmpError> {
+        let value = self.execute_raw("query-processes", None).await?;
+        let processes: Vec<ProcessInfo> =
+            serde_json::from_value(value).map_err(QmpError::ParseError)?;
+        processes
+            .into_iter()
+            .next()
+            .map(|info| info.pid)
+            .ok_or_else(|| {
+                QmpError::ParseError(serde_json::Error::io(std::io::Error::other(
+                    "query-processes returned an empty list",
+                )))
+            })
     }
 
     pub async fn snapshot_save(&mut self, device: &str, tag: &str) -> Result<(), QmpError> {
@@ -628,6 +652,14 @@ mod tests {
         let json = r#"{"status": "paused", "running": false, "singlestep": false}"#;
         let parsed: QueryStatusReturn = serde_json::from_str(json).unwrap();
         assert_eq!(parsed.status, VmStatus::Paused);
+    }
+
+    #[test]
+    fn query_processes_return_parses_pid_list() {
+        let json = r#"[{"pid": 4242, "cpu-time": 57163828, "cpu": 12.35}]"#;
+        let parsed: Vec<ProcessInfo> = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].pid, 4242);
     }
 
     #[test]

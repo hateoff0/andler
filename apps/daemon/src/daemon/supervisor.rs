@@ -147,8 +147,17 @@ pub(crate) fn spawn_supervisor(
         config_tx,
         inbox,
     };
-    tokio::spawn(async move {
+    // Watchdog: never fire-and-forget a task that owns instance
+    // state. The JoinHandle is awaited by a tiny watcher so a supervisor
+    // panic is logged with the instance id instead of surfacing only as a
+    // silently closed command channel.
+    let join = tokio::spawn(async move {
         supervisor.run().await;
+    });
+    tokio::spawn(async move {
+        if let Err(error) = join.await {
+            tracing::error!(instance_id = %id, %error, "instance supervisor task failed");
+        }
     });
 
     SupervisorHandle {

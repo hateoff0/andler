@@ -15,8 +15,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use andler_core::{
-    BackendError, BackendKind, DaemonEvent, HypervisorBackend, InstanceConfig, InstanceEvent,
-    InstanceId, InstanceState,
+    BackendError, BackendHandle, BackendKind, DaemonEvent, HypervisorBackend, InstanceConfig,
+    InstanceEvent, InstanceId, InstanceState,
 };
 use andler_qemu::QemuBackend;
 use andler_store::Store;
@@ -39,7 +39,7 @@ pub struct Daemon {
 const EVENT_CHANNEL_CAPACITY: usize = 256;
 
 impl Daemon {
-    // consumed by the supervisor-next Phase 0 commit (events RPC) and tests
+    // consumed by the upcoming events-RPC work and tests
     #[allow(dead_code)]
     pub fn subscribe_events(&self) -> broadcast::Receiver<DaemonEvent> {
         self.events.subscribe()
@@ -59,29 +59,59 @@ impl Daemon {
     pub async fn restore(store: Store) -> Result<Self, DaemonError> {
         let stored = store.load_all().await?;
 
+        let backends = default_backends();
         let (events, _) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
         let mut supervisors = HashMap::with_capacity(stored.len());
         for entry in stored {
             let id = entry.config.id;
+            let mut recovered_handle: Option<BackendHandle> = None;
             let state = match entry.state {
                 state @ (InstanceState::Created
                 | InstanceState::Stopped
                 | InstanceState::Error { .. }) => state,
-                lost_state @ (InstanceState::Starting
-                | InstanceState::Running
-                | InstanceState::Paused
-                | InstanceState::Stopping) => {
+                recoverable_state @ (InstanceState::Running | InstanceState::Paused) => {
+                    let backend = backends
+                        .get(&entry.config.backend)
+                        .ok_or_else(|| DaemonError::NoBackendRegistered(entry.config.backend))?;
+                    match backend.adopt(&entry.config).await {
+                        Ok((backend_handle, actual_state)) => {
+                            tracing::info!(
+                                instance_id = %id,
+                                previous_state = ?recoverable_state,
+                                ?actual_state,
+                                "reconnected to a QEMU process that survived the daemon restart"
+                            );
+                            recovered_handle = Some(backend_handle);
+                            actual_state
+                        }
+                        Err(adopt_err) => {
+                            tracing::warn!(
+                                instance_id = %id,
+                                error = %adopt_err,
+                                "failed to reconnect to instance process after restart; \
+                                 marking as Error"
+                            );
+                            InstanceState::Error {
+                                message: format!(
+                                    "andlerd restarted while instance was in {recoverable_state:?} \
+                                     but the backend process could not be recovered: {adopt_err}"
+                                ),
+                            }
+                        }
+                    }
+                }
+                lost_state @ (InstanceState::Starting | InstanceState::Stopping) => {
                     tracing::warn!(
                         instance_id = %id,
                         previous_state = ?lost_state,
-                        "restored instance was not in a terminal state before restart; \
-                         backend handle cannot be recovered, marking as Error"
+                        "restored instance was mid-operation before restart; result unknown, \
+                         marking as Error"
                     );
                     InstanceState::Error {
                         message: format!(
                             "andlerd restarted while instance was in state {lost_state:?}; \
-                             backend handle was not persisted and cannot be recovered, \
-                             instance must be restarted explicitly"
+                             the in-flight operation's result is unknown — check \
+                             'andler status' and 'andler snapshot list' before acting"
                         ),
                     }
                 }
@@ -90,15 +120,21 @@ impl Daemon {
                 id,
                 entry.config,
                 state,
-                None,
+                recovered_handle.clone(),
                 Some(store.clone()),
                 events.clone(),
             );
+            if let Some(backend_handle) = recovered_handle {
+                let backend = backends
+                    .get(&handle.config().backend)
+                    .expect("supervisor config backend must be registered");
+                Self::attach_process_exit_watcher(id, &handle, backend.clone(), backend_handle);
+            }
             supervisors.insert(id, handle);
         }
 
         Ok(Self {
-            backends: default_backends(),
+            backends,
             supervisors: RwLock::new(supervisors),
             store: Some(store),
             events,

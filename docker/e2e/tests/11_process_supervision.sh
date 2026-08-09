@@ -36,8 +36,11 @@ pass "instance transitioned to Error promptly after qemu died"
 expect_ok "status reports the exit reason" -- andler status "$ID"
 expect_out_grep "exit message mentions the process" "QEMU process exited unexpectedly"
 
-expect_ok "logs still show qemu output before the kill" -- andler logs "$ID"
-expect_out_grep "log tailer works after supervised death" '^\[stderr\]'
+# qemu is silent on a working KVM boot (empty qemu.log), so the real
+# contract is termination: the log stream must end once the process is
+# dead, not hang waiting for lines that will never come. (No live-process
+# `andler logs` here — that stream is open-ended and would hang the suite.)
+expect_ok "log stream terminates after supervised death" -- timeout 10 "$ANDLER_BIN" --daemon-addr "http://${E2E_LISTEN_ADDR:?}" logs "$ID"
 
 expect_ok "restart from Error is the documented recovery" -- andler start "$ID"
 expect_ok "restarted status shows Running" -- andler status "$ID"

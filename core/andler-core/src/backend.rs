@@ -66,6 +66,21 @@ pub trait HypervisorBackend: Send + Sync {
 
     async fn spawn(&self, cfg: &InstanceConfig) -> Result<BackendHandle, BackendError>;
 
+    /// Re-attaches to an instance whose process survived a daemon restart,
+    /// returning the recovered handle and the VM's actual state. The backend
+    /// must verify identity (never trust a pid); QEMU does so via the
+    /// instance-owned QMP socket plus the `process=` cmdline marker.
+    async fn adopt(
+        &self,
+        cfg: &InstanceConfig,
+    ) -> Result<(BackendHandle, InstanceState), BackendError> {
+        let _ = cfg;
+        Err(BackendError::NotImplemented {
+            backend: self.name(),
+            operation: "adopt",
+        })
+    }
+
     async fn pause(&self, handle: &BackendHandle) -> Result<(), BackendError>;
 
     async fn resume(&self, handle: &BackendHandle) -> Result<(), BackendError>;

@@ -28,6 +28,9 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 - **Structured lifecycle tracing**: `info`/`error` tracing for all instance lifecycle operations (create, start, stop, pause, resume, remove) with `instance_id` and error details.
 - **`InstanceAlreadyStopped` error**: Clear error message when stopping an already-stopped instance, instead of a generic error.
 - **`schema_version` in `instance.toml`**: config files now carry the instance config schema version; files that predate schema versioning read back as v1. `andler-core` provides `migrate_schema()`, which applies pending migrations on load and refuses configs newer than the daemon (future versions fail loudly instead of being misread).
+- **Per-instance supervisor**: every registered instance runs a dedicated tokio task that owns its FSM state, backend handle and config (all reads/writes funnel through `watch` snapshots and an acknowledged command channel). `DaemonError` is classified through one exhaustive `ErrorKind` match; an instance-level event bus (`subscribe_events`) carries lifecycle transitions and failures; supervisor task panics are logged with the instance id instead of silently closing its command channel.
+- **Instant QEMU death detection**: a killed/crashed QEMU process is now detected via pidfd death notification (no 30s health-check poll) — the instance lands in `Error { QEMU process exited unexpectedly }` within milliseconds, and `Handler logs` etc. keep working.
+- **Daemon restart reconnect**: after `andlerd` is SIGKILLed/crashes, a restarted daemon adopts instances that were `Running`/`Paused` by re-attaching to the surviving QEMU process (identity verified through QMP and the `process=<name>` cmdline marker) instead of marking them `Error`. Instances that were mid-operation on restart are marked `Error` with an “unknown result” message pointing at `andler status` / `andler snapshot list`.
 
 ### Changed
 

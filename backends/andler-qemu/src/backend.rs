@@ -385,6 +385,102 @@ fn vm_status_to_instance_state(status: VmStatus) -> Option<InstanceState> {
     }
 }
 
+/// Guard against pid reuse when adopting: the QMP socket pins the identity of
+/// the QEMU process, but the pid we get from it must still match the cmdline
+/// marker `process=<name>` that cmdline.rs puts into `-name` for this
+/// instance — otherwise the daemon would pidfd-wait on an unrelated process.
+fn verify_cmdline_marker(pid: u32, instance_name: &str) -> Result<(), String> {
+    let cmdline = std::fs::read(format!("/proc/{pid}/cmdline"))
+        .map_err(|e| format!("cannot read /proc/{pid}/cmdline: {e}"))?;
+    let marker = format!("process={instance_name}");
+    for arg in cmdline.split(|b| *b == 0) {
+        if arg.windows(marker.len()).any(|w| w == marker.as_bytes()) {
+            return Ok(());
+        }
+    }
+    Err(format!(
+        "/proc/{pid}/cmdline does not contain the `{marker}` marker"
+    ))
+}
+
+impl QemuBackend {
+    /// Resolves the host pid of the QEMU process holding `qmp_socket_path`.
+    /// `query-processes` is the cheap direct answer but is not present in
+    /// every QEMU build (CommandNotFound). The fallback scans /proc for the
+    /// `process=` cmdline marker (the marker exists precisely so an orphaned
+    /// QEMU can be recognized after a daemon restart). Reading /proc/<pid>/fd of an
+    /// orphaned process is blocked by Yama ptrace_scope, so socket-inode
+    /// matching cannot be the primary path — the marker scan is, and the
+    /// already-succeeded QMP connection plus the instance-owned socket
+    /// location pin the identity; the marker guards against pid reuse.
+    async fn resolve_owner_pid(
+        qmp: &mut QmpClient,
+        qmp_socket_path: &std::path::Path,
+        instance_name: &str,
+    ) -> Result<u32, String> {
+        if let Ok(pid) = qmp.query_process_pid().await {
+            return verify_cmdline_marker(pid, instance_name)
+                .map(|()| pid)
+                .map_err(|reason| {
+                    format!(
+                        "QMP gives owner pid {pid} but it is not the expected instance \
+                         process: {reason}"
+                    )
+                });
+        }
+
+        let mut candidates = Vec::new();
+        let proc = std::fs::read_dir("/proc").map_err(|e| format!("cannot scan /proc: {e}"))?;
+        for entry in proc.flatten() {
+            let Some(pid) = entry
+                .file_name()
+                .to_str()
+                .and_then(|name| name.parse::<u32>().ok())
+            else {
+                continue;
+            };
+            if verify_cmdline_marker(pid, instance_name).is_ok() {
+                candidates.push(pid);
+            }
+        }
+        match candidates.as_slice() {
+            [] => Err(format!(
+                "no live process carries the `process={instance_name}` marker — \
+                 the instance QEMU either died or never ran"
+            )),
+            [single] => Ok(*single),
+            many => {
+                // Multiple instances may share a name; the one that owns the
+                // QMP socket is the one we connected to. Its listen socket's
+                // inode equals the socket file's inode.
+                let Ok(meta) = std::fs::metadata(qmp_socket_path) else {
+                    return Err(format!("cannot stat {}", qmp_socket_path.display()));
+                };
+                let socket_ino = std::os::unix::fs::MetadataExt::ino(&meta);
+                for pid in many {
+                    let Ok(fds) = std::fs::read_dir(format!("/proc/{pid}/fd")) else {
+                        continue;
+                    };
+                    let holds_socket = fds.flatten().any(|fd| {
+                        std::fs::read_link(fd.path())
+                            .ok()
+                            .map(|target| target.to_string_lossy().into_owned())
+                            .is_some_and(|target| target == format!("socket:[{socket_ino}]"))
+                    });
+                    if holds_socket {
+                        return Ok(*pid);
+                    }
+                }
+                Err(format!(
+                    "multiple processes carry the `process={instance_name}` marker \
+                     ({many:?}) and none can be tied to {}",
+                    qmp_socket_path.display()
+                ))
+            }
+        }
+    }
+}
+
 #[async_trait]
 impl HypervisorBackend for QemuBackend {
     fn name(&self) -> &'static str {
@@ -488,6 +584,66 @@ impl HypervisorBackend for QemuBackend {
         );
 
         Ok(handle)
+    }
+
+    async fn adopt(
+        &self,
+        cfg: &InstanceConfig,
+    ) -> Result<(BackendHandle, InstanceState), BackendError> {
+        let handle = Self::handle_for(cfg);
+        let qmp_socket_path = Self::qmp_socket_path_for(cfg);
+
+        let mut qmp = QmpClient::connect(&qmp_socket_path)
+            .await
+            .map_err(qmp_error_to_backend_error)?;
+
+        let vm_status = qmp
+            .query_status()
+            .await
+            .map_err(qmp_error_to_backend_error)?;
+        let state = vm_status_to_instance_state(vm_status)
+            .filter(|s| matches!(s, InstanceState::Running | InstanceState::Paused))
+            .ok_or_else(|| {
+                BackendError::Io(format!(
+                    "QMP socket {path} answers, but the VM is {status:?} — not a state a \
+                     restarted daemon can adopt",
+                    path = qmp_socket_path.display(),
+                    status = vm_status
+                ))
+            })?;
+
+        let pid = Self::resolve_owner_pid(&mut qmp, &qmp_socket_path, &cfg.name)
+            .await
+            .map_err(BackendError::Io)?;
+
+        let log_file_path = cfg.disk.path.parent().map(|dir| dir.join("qemu.log"));
+        let process = QemuProcess::adopt(pid, qmp_socket_path, log_file_path)
+            .map_err(process_error_to_backend_error)?;
+
+        // Host-side network state is deterministic for Bridge (the tap name
+        // derives from the instance id), so `stop` can still tear it down;
+        // Isolated mode cannot be alive (setup always fails today) and Nat
+        // needs no teardown, so both degrade to NetworkInfo::Nat.
+        let network_info = match &cfg.network.mode {
+            NetworkMode::Bridge { interface } => NetworkInfo::Bridge {
+                bridge: interface.clone(),
+                tap_iface: cmdline::primary_net_bridge_tap_iface(&cfg.id.to_string()),
+            },
+            NetworkMode::Isolated | NetworkMode::Nat => NetworkInfo::Nat,
+        };
+
+        let mut instances = self.instances.lock().await;
+        instances.insert(
+            handle.clone(),
+            RunningInstance {
+                process,
+                qmp_client: Some(qmp),
+                network_info,
+                extra_network_infos: Vec::new(),
+            },
+        );
+
+        Ok((handle, state))
     }
 
     async fn pause(&self, handle: &BackendHandle) -> Result<(), BackendError> {
@@ -996,11 +1152,13 @@ impl HypervisorBackend for QemuBackend {
                 (
                     i.process.log_file_path().map(PathBuf::from),
                     i.process.subscribe_logs(),
+                    i.process.subscribe_exit(),
+                    !i.process.is_alive(),
                 )
             });
 
             match subscription {
-                Some((log_file_path, receiver)) => {
+                Some((log_file_path, receiver, exit_receiver, already_dead)) => {
                     let live = tokio_stream::wrappers::BroadcastStream::new(receiver)
                         .filter_map(|item| async move { item.ok() });
 
@@ -1012,7 +1170,19 @@ impl HypervisorBackend for QemuBackend {
                     })
                     .flat_map(futures_util::stream::iter);
 
-                    Box::pin(history.chain(live)) as BoxStream<'_, LogLine>
+                    // A dead process must end the log stream: the history is
+                    // everything it will ever emit. Live receivers only
+                    // observe the buffered exit value when the death happened
+                    // after subscription, so an already-dead process skips
+                    // the wait entirely.
+                    let done = async move {
+                        let mut exit_receiver = exit_receiver;
+                        if !already_dead {
+                            let _ = exit_receiver.recv().await;
+                        }
+                    };
+
+                    Box::pin(history.chain(live.take_until(done))) as BoxStream<'_, LogLine>
                 }
                 None => Box::pin(futures_util::stream::empty()) as BoxStream<'_, LogLine>,
             }
@@ -1437,6 +1607,73 @@ mod tests {
 
         let _ = timeout(Duration::from_secs(5), stream.next()).await;
 
+        // Killing the process must close the stream (history is complete) —
+        // BroadcastStream alone would hold it open forever.
+        let mut instances = backend.instances.lock().await;
+        let pid = instances.get_mut(&handle).unwrap().process.pid();
+        drop(instances);
+        // SAFETY: pid belongs to our own spawned child; SIGKILL is the one
+        // signal that cannot be blocked or handled by qemu.
+        assert_eq!(unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) }, 0);
+
+        match timeout(Duration::from_secs(5), async {
+            let mut buffered = Vec::new();
+            while let Some(line) = stream.next().await {
+                buffered.push(line);
+            }
+        })
+        .await
+        {
+            Ok(()) => {}
+            Err(_) => panic!("log stream did not end after process death"),
+        }
+
         backend.stop(&handle, false).await.unwrap();
+    }
+
+    #[test]
+    fn cmdline_marker_matches_live_process_arg() {
+        // A loop (not a single trailing command) defeats the shell's exec
+        // optimization, so the argv with `process=` marker stays on the shell
+        // process itself; `sleep 1` children live at most 1s and never outlive
+        // the killed shell long enough to hold the test harness's stdout pipe.
+        let mut child = std::process::Command::new("sh")
+            .args([
+                "-c",
+                "while true; do sleep 1; done",
+                "sh",
+                "process=my-instance",
+            ])
+            .spawn()
+            .expect("sh must spawn");
+        let pid = child.id();
+        // /proc/<pid>/cmdline is empty between fork and exec — wait for argv to appear
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let cmdline = std::fs::read(format!("/proc/{pid}/cmdline")).unwrap_or_default();
+            if !cmdline.is_empty() {
+                break;
+            }
+            if std::time::Instant::now() > deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("sh never reached exec within 5s");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        match verify_cmdline_marker(pid, "my-instance") {
+            Ok(()) => {}
+            Err(err) => panic!("marker verification failed: {err}"),
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    #[test]
+    fn cmdline_marker_rejects_unrelated_process() {
+        assert!(
+            verify_cmdline_marker(std::process::id(), "no-such-instance").is_err(),
+            "a process without the marker must be rejected"
+        );
     }
 }

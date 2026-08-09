@@ -79,6 +79,9 @@ Coverage by suite:
 | `07_guest.sh` | Guest error paths always; deep tests (needs the `nbd` kernel module + privileged container): offline `guest list`/`install`/`remove` against a real Debian rootfs via qemu-nbd, Android boot-mode switching, translator install failure |
 | `08_preview_verify.sh` | `create --dry-run` (nothing created), `--verify` pass/fail, wizard non-TTY refusal, shell completions, `andler doctor` sections, `doctor --fix` installing `andler-helper` at the canonical path + exactly one helper sudoers rule and zero legacy per-binary rules |
 | `09_persistence.sh` | daemon restart against the same store (state survives), final cleanup |
+| `10_base_images.sh` | Android base-image auto-discovery (`cache/base-images/<major>-<variant>/` subdir layout + legacy flat-root fallback) |
+| `11_process_supervision.sh` | `kill -9` of the live qemu process → instance lands in `Error { QEMU process exited unexpectedly }` promptly via pidfd death notification, restart-from-Error recovery, clean stop/remove |
+| `12_process_reconnect.sh` | SIGKILL of the daemon while the instance is Running → qemu survives, restarted daemon adopts it (`Running`, not `Error`), stop terminates the adopted process, remove leaves no strays |
 
 ### Deep guest tests
 

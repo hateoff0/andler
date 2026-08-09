@@ -1,12 +1,14 @@
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use super::error::DaemonError;
 use super::spawn_supervisor;
 use super::types::{write_instance_toml, InstanceDirGuard};
 use super::Daemon;
+use super::SupervisorHandle;
 use andler_core::{
-    BackendError, DiskFormat, InstanceConfig, InstanceEvent, InstanceId, InstanceKind,
-    InstanceState, Resolution, INSTANCE_ID_HEX_LEN,
+    BackendError, BackendHandle, DiskFormat, HypervisorBackend, InstanceConfig, InstanceEvent,
+    InstanceId, InstanceKind, InstanceState, Resolution, INSTANCE_ID_HEX_LEN,
 };
 
 /// Checks that the files this instance needs to boot are still present on disk.
@@ -265,51 +267,12 @@ impl Daemon {
                 // Subscribe as early as possible so a crash between spawn
                 // and StartCompleted is still caught; the watcher outlives
                 // set_handle below either way.
-                let monitor_supervisor = handle.clone();
-                let monitor_backend = backend.clone();
-                let monitor_handle = backend_handle.clone();
-                tokio::spawn(async move {
-                    use futures_util::StreamExt;
-                    let stream = monitor_backend.process_exit_stream(&monitor_handle);
-                    let mut exit_events = Box::pin(stream);
-                    tracing::debug!(instance_id = %id, "process exit watcher subscribed");
-                    while exit_events.next().await.is_some() {
-                        tracing::debug!(
-                            instance_id = %id,
-                            state = ?monitor_supervisor.state(),
-                            "qemu process exit event received"
-                        );
-                        match monitor_supervisor.state() {
-                            state @ (InstanceState::Running
-                            | InstanceState::Paused
-                            | InstanceState::Starting) => {
-                                let message = format!(
-                                    "QEMU process exited unexpectedly while in {:?} (see qemu.log)",
-                                    state
-                                );
-                                match monitor_supervisor
-                                    .transition(InstanceEvent::Fail(message))
-                                    .await
-                                {
-                                    Ok(new_state) => tracing::debug!(
-                                        instance_id = %id,
-                                        ?new_state,
-                                        "supervised exit applied"
-                                    ),
-                                    Err(err) => tracing::error!(
-                                        instance_id = %id,
-                                        error = %err,
-                                        "failed to apply supervised exit transition"
-                                    ),
-                                }
-                            }
-                            // A deliberate stop is in flight; the stop path
-                            // owns the outcome and the events after this.
-                            InstanceState::Stopping => break,
-                            _ => break,
-                        }
-                    }
-                });
+                Self::attach_process_exit_watcher(
+                    id,
+                    &handle,
+                    backend.clone(),
+                    backend_handle.clone(),
+                );
                 handle.set_handle(Some(backend_handle)).await?;
                 handle.transition(InstanceEvent::StartCompleted).await?;
                 tracing::info!(instance_id = %id, "instance started");
@@ -323,6 +286,61 @@ impl Daemon {
                 Err(DaemonError::Backend(backend_err))
             }
         }
+    }
+
+    /// Watches the backend's process-exit stream and turns an unexpected
+    /// QEMU death into an immediate supervised Fail — but only while the
+    /// instance is Running/Paused/Starting; a deliberate stop owns its own
+    /// outcome and must not be raced by this task.
+    pub(crate) fn attach_process_exit_watcher(
+        id: InstanceId,
+        handle: &SupervisorHandle,
+        backend: Arc<dyn HypervisorBackend>,
+        backend_handle: BackendHandle,
+    ) {
+        let monitor_supervisor = handle.clone();
+        tokio::spawn(async move {
+            use futures_util::StreamExt;
+            let stream = backend.process_exit_stream(&backend_handle);
+            let mut exit_events = Box::pin(stream);
+            tracing::debug!(instance_id = %id, "process exit watcher subscribed");
+            while exit_events.next().await.is_some() {
+                tracing::debug!(
+                    instance_id = %id,
+                    state = ?monitor_supervisor.state(),
+                    "qemu process exit event received"
+                );
+                match monitor_supervisor.state() {
+                    state @ (InstanceState::Running
+                    | InstanceState::Paused
+                    | InstanceState::Starting) => {
+                        let message = format!(
+                            "QEMU process exited unexpectedly while in {:?} (see qemu.log)",
+                            state
+                        );
+                        match monitor_supervisor
+                            .transition(InstanceEvent::Fail(message))
+                            .await
+                        {
+                            Ok(new_state) => tracing::debug!(
+                                instance_id = %id,
+                                ?new_state,
+                                "supervised exit applied"
+                            ),
+                            Err(err) => tracing::error!(
+                                instance_id = %id,
+                                error = %err,
+                                "failed to apply supervised exit transition"
+                            ),
+                        }
+                    }
+                    // A deliberate stop is in flight; the stop path
+                    // owns the outcome and the events after this.
+                    InstanceState::Stopping => break,
+                    _ => break,
+                }
+            }
+        });
     }
 
     pub async fn stop_instance(&self, id: InstanceId, graceful: bool) -> Result<(), DaemonError> {

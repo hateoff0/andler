@@ -27,7 +27,7 @@ pub enum EventKind {
     /// Raw QEMU QMP event the daemon reacts to.
     Qmp { event: QmpEvent, data: String },
 
-    /// Guest readiness contract reached (see §12.A).
+    /// Guest readiness contract reached.
     Readiness { level: GuestReadinessLevel },
 
     /// User-facing diagnostic line for the audit trail.
@@ -37,7 +37,7 @@ pub enum EventKind {
     },
 }
 
-/// QMP events the daemon watches (rework plan §14).
+/// Raw QEMU QMP events the daemon can react to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum QmpEvent {
     VserportChanged,
@@ -54,8 +54,8 @@ pub enum QmpEvent {
     Other,
 }
 
-/// Steps of the guest readiness contract (rework plan §12.A); ordered from
-/// weakest to strongest guarantee.
+/// Steps of the guest readiness contract; ordered from weakest to strongest
+/// guarantee.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum GuestReadinessLevel {
     SerialUp,

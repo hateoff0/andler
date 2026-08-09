@@ -1,3 +1,4 @@
+use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
@@ -33,9 +34,10 @@ pub enum ProcessError {
 }
 
 pub struct QemuProcess {
-    // drop-guard: kill_on_drop terminates qemu on daemon panic/unwind (PLAN §2.5)
+    // drop-guard: kill_on_drop terminates qemu on daemon panic/unwind;
+    // None for a process adopted after a daemon restart (never ours to kill-on-drop)
     #[allow(dead_code)]
-    child: Child,
+    child: Option<Child>,
 
     pid: u32,
     pidfd: Arc<pidfd::PidFd>,
@@ -72,23 +74,6 @@ impl QemuProcess {
         let pid = child.id().expect("freshly spawned child must have a pid");
         let pidfd = Arc::new(pidfd::PidFd::open(pid).map_err(ProcessError::Io)?);
 
-        let (exit_sender, _) = broadcast::channel(1);
-        let exit_task = tokio::spawn({
-            let pidfd = pidfd.clone();
-            let sender = exit_sender.clone();
-            async move {
-                match pidfd.wait_for_exit().await {
-                    Ok(status) => {
-                        tracing::debug!(pid, %status, "qemu process exited");
-                    }
-                    Err(error) => {
-                        tracing::error!(pid, %error, "failed to wait for qemu process exit");
-                    }
-                }
-                let _ = sender.send(());
-            }
-        });
-
         let (log_sender, _) = broadcast::channel(LOG_CHANNEL_CAPACITY);
 
         let stdout_log_file = Self::open_log_file(log_file_path.as_deref()).await;
@@ -113,6 +98,62 @@ impl QemuProcess {
             ));
         }
 
+        Ok(Self::new_inner(
+            Some(child),
+            pid,
+            pidfd,
+            qmp_socket_path,
+            log_file_path,
+            log_sender,
+        ))
+    }
+
+    /// Re-attaches to a QEMU process that survived a daemon restart (reconnect): the pid comes from the QMP socket's owner, identity
+    /// is verified by the caller, and death notification runs through the
+    /// same pidfd machinery as a freshly spawned process. The process is
+    /// deliberately NOT killed on drop — it was not ours to begin with.
+    pub fn adopt(
+        pid: u32,
+        qmp_socket_path: PathBuf,
+        log_file_path: Option<PathBuf>,
+    ) -> Result<Self, ProcessError> {
+        let pidfd = Arc::new(pidfd::PidFd::open(pid).map_err(ProcessError::Io)?);
+        let (log_sender, _) = broadcast::channel(LOG_CHANNEL_CAPACITY);
+        Ok(Self::new_inner(
+            None,
+            pid,
+            pidfd,
+            qmp_socket_path,
+            log_file_path,
+            log_sender,
+        ))
+    }
+
+    fn new_inner(
+        child: Option<Child>,
+        pid: u32,
+        pidfd: Arc<pidfd::PidFd>,
+        qmp_socket_path: PathBuf,
+        log_file_path: Option<PathBuf>,
+        log_sender: broadcast::Sender<LogLine>,
+    ) -> Self {
+        let (exit_sender, _) = broadcast::channel(1);
+        let exit_task = tokio::spawn({
+            let pidfd = pidfd.clone();
+            let sender = exit_sender.clone();
+            async move {
+                match pidfd.wait_for_exit().await {
+                    Ok(status) => {
+                        tracing::debug!(pid, %status, "qemu process exited");
+                    }
+                    Err(error) => {
+                        tracing::error!(pid, %error, "failed to wait for qemu process exit");
+                    }
+                }
+                let _ = sender.send(());
+            }
+        });
+
         let (metrics_sender, _) = broadcast::channel(METRICS_CHANNEL_CAPACITY);
         let ticks_per_sec = crate::metrics::ticks_per_second();
         let metrics_task = crate::metrics::spawn_metrics_poller(
@@ -122,7 +163,7 @@ impl QemuProcess {
             metrics_sender.clone(),
         );
 
-        Ok(QemuProcess {
+        QemuProcess {
             child,
             pid,
             pidfd,
@@ -133,7 +174,7 @@ impl QemuProcess {
             exit_sender,
             _metrics_task: metrics_task,
             _exit_task: exit_task,
-        })
+        }
     }
 
     async fn open_log_file(path: Option<&std::path::Path>) -> Option<tokio::fs::File> {
@@ -230,6 +271,11 @@ impl QemuProcess {
         // SAFETY: PID is from our own spawned child process; SIGTERM is a standard signal.
         let kill_result = unsafe { libc::kill(self.pid as libc::pid_t, libc::SIGTERM) };
         if kill_result != 0 {
+            // ESRCH: the process is already gone (reaped by the pidfd exit
+            // task) — stopping a dead process is not an error.
+            if io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
+                return Ok(());
+            }
             return Err(ProcessError::Io(std::io::Error::last_os_error()));
         }
 
@@ -250,6 +296,10 @@ impl QemuProcess {
         // SAFETY: pid is from our own spawned child; SIGKILL is standard.
         let kill_result = unsafe { libc::kill(self.pid as libc::pid_t, libc::SIGKILL) };
         if kill_result != 0 {
+            // ESRCH: already reaped — killing a dead process is a no-op success.
+            if io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
+                return Ok(());
+            }
             return Err(ProcessError::Io(std::io::Error::last_os_error()));
         }
         // Best effort reap so no zombie outlives the kill by long.
@@ -296,6 +346,44 @@ mod tests {
         let mut process = QemuProcess::spawn(&args, qmp_path, None).await.unwrap();
         process.force_kill().await.unwrap();
         assert!(!process.is_alive());
+    }
+
+    #[tokio::test]
+    async fn adopt_attaches_to_existing_process_and_tracks_its_death() {
+        let mut sleeper = std::process::Command::new("sleep")
+            .arg("300")
+            .spawn()
+            .expect("sleep must spawn");
+        let pid = sleeper.id();
+
+        let process = QemuProcess::adopt(pid, PathBuf::from("/nonexistent/qmp.sock"), None)
+            .expect("adopt must succeed");
+        assert!(process.is_alive(), "adopted process is running");
+
+        let mut exit_rx = process.subscribe_exit();
+        let (dead_tx, dead_rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            dead_tx.send(exit_rx.recv().await).unwrap();
+        });
+
+        let _ = sleeper.kill();
+        let _ = sleeper.wait();
+
+        let notified = tokio::time::timeout(std::time::Duration::from_secs(5), dead_rx)
+            .await
+            .expect("exit notification must arrive after the process dies")
+            .expect("channel must deliver");
+        assert!(
+            notified.is_ok(),
+            "process death published on subscribe_exit"
+        );
+        assert!(!process.is_alive());
+    }
+
+    #[tokio::test]
+    async fn adopt_rejects_non_existent_pid() {
+        let result = QemuProcess::adopt(999_999, PathBuf::from("/tmp/qmp.sock"), None);
+        assert!(result.is_err(), "pidfd_open must fail for a dead pid");
     }
 
     #[tokio::test]
