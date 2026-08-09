@@ -27,6 +27,7 @@ pub struct AndroidBasicResult {
     pub gapps: bool,
     pub disk_size_gib: u64,
     pub instances_root: String,
+    pub linked: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -103,6 +104,7 @@ pub fn run_android(
         gapps,
         disk_size_gib,
         instances_root,
+        linked: false,
     })
 }
 

@@ -143,6 +143,7 @@ pub async fn handle(
             instances_root: Some(instances_root.clone()),
             gapps,
             quick,
+            linked: linked_overlay,
         };
 
         let result = crate::wizard::run(partial).await;

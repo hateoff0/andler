@@ -33,6 +33,7 @@ pub struct PartialArgs {
     pub instances_root: Option<String>,
     pub gapps: bool,
     pub quick: bool,
+    pub linked: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -310,6 +311,7 @@ fn build_quick(
                 gapps: partial.gapps,
                 disk_size_gib: 256,
                 instances_root,
+                linked: partial.linked,
             };
             let req = build_android_request(&basic, None, detected)?;
             Ok(WizardResult::Android(req))
@@ -409,7 +411,7 @@ pub(crate) fn build_android_request(
             .checked_mul(andler_core::DiskConfig::GIB)
             .ok_or_else(|| WizardError::Inquire("overlay size overflow".into()))?,
         ovmf_vars_template: ovmf_vars_template(detected),
-        linked_overlay: advanced.map(|a| a.linked_overlay).unwrap_or(false),
+        linked_overlay: advanced.map(|a| a.linked_overlay).unwrap_or(basic.linked),
     })
 }
 
@@ -727,6 +729,7 @@ mod tests {
             gapps: false,
             disk_size_gib: 256,
             instances_root: "/tmp/instances".into(),
+            linked: false,
         };
         let req = build_android_request(&basic, None, &sample_detected()).unwrap();
         assert_eq!(req.name, "android");
@@ -816,6 +819,7 @@ mod tests {
             gapps: false,
             disk_size_gib: 256,
             instances_root: "/tmp/instances".into(),
+            linked: false,
         });
         let advanced = sample_advanced(true);
         reresolve_android_base_image(&mut basic_result, Some(&advanced), &sample_detected());
@@ -841,6 +845,7 @@ mod tests {
             gapps: false,
             disk_size_gib: 256,
             instances_root: "/tmp/instances".into(),
+            linked: false,
         });
         let advanced = sample_advanced(true);
         reresolve_android_base_image(&mut basic_result, Some(&advanced), &sample_detected());
@@ -909,6 +914,36 @@ mod tests {
             result,
             Err(WizardError::Inquire(msg)) if msg.contains("Base image not found")
         ));
+    }
+
+    #[test]
+    fn test_quick_android_forward_linked_overlay_flag() {
+        let dir =
+            std::env::temp_dir().join(format!("andler-wizard-quick-linked-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let base = dir.join("base.qcow2");
+        std::fs::write(&base, b"stand-in base image for the linked-overlay test").unwrap();
+        let partial = PartialArgs {
+            kind: Some(WizardKind::Android),
+            name: Some("quick-linked".into()),
+            base_image_path: Some(base.to_string_lossy().into_owned()),
+            instances_root: Some(dir.join("instances").to_string_lossy().into_owned()),
+            quick: true,
+            linked: true,
+            ..Default::default()
+        };
+        let result = build_quick(partial, &sample_detected());
+        match result {
+            Ok(WizardResult::Android(req)) => {
+                assert!(
+                    req.linked_overlay,
+                    "quick create must forward --linked-overlay into the create request"
+                );
+            }
+            Ok(WizardResult::Linux(..)) => panic!("expected Android result"),
+            Err(e) => panic!("build_quick failed: {e}"),
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
     }
     #[tokio::test]
     async fn test_wizard_not_tty() {
