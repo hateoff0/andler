@@ -33,7 +33,7 @@ expect_out_grep "lists snap-second" "tag=snap-second"
 expect_out_grep "lists the description" "description=first"
 
 expect_ok "snapshot list --json" -- andler snapshot --json list "$ID"
-expect_ok "snapshot list json parses to two" -- jq -e 'length == 2' "$E2E_LAST_OUT"
+expect_ok "snapshot list json parses to two" -- jq -e 'length == 2' <<<"$(cat "$E2E_LAST_OUT")"
 
 echo "  [offline restore]"
 expect_ok "stop" -- andler stop "$ID" --graceful

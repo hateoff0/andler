@@ -104,9 +104,10 @@ expect_no_file() {
 }
 
 start_daemon() {
+    local bin="${ANDLERD_BIN:-/usr/local/bin/andlerd}"
     echo "  starting andlerd (store: $E2E_STORE_PATH)"
     ANDLERD_STORE_PATH="$E2E_STORE_PATH" ANDLERD_LISTEN_ADDR="$E2E_LISTEN_ADDR" \
-        RUST_LOG=info /usr/local/bin/andlerd >>"$E2E_WORKDIR/daemon.log" 2>&1 &
+        RUST_LOG=info "$bin" >>"$E2E_WORKDIR/daemon.log" 2>&1 &
     echo "$!" >"$E2E_DAEMON_PID_FILE"
     for _ in $(seq 1 50); do
         if andler list >/dev/null 2>&1; then
@@ -115,6 +116,10 @@ start_daemon() {
         sleep 0.2
     done
     echo "    FAIL: andlerd did not become ready within 10s"
+    echo "    --- daemon.log tail ---"
+    tail -20 "$E2E_WORKDIR/daemon.log" | sed 's/^/      /'
+    echo "    --- andlerd processes ---"
+    pgrep -af "andlerd" | sed 's/^/      /' || true
     exit 1
 }
 

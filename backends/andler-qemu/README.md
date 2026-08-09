@@ -233,6 +233,8 @@ All marked `#[ignore]` with reason — run separately in `integration-test` Dock
 - **Hardcoded snapshot device name**: `drive-disk0`. Will need parameterization if multi-disk support is added.
 - **Internal snapshots cover only the primary disk**: extra hotplugged disks (`drive-extraN`) are not included in `blockdev-snapshot-internal-sync` — `snapshot create` snapshots `drive-disk0` alone.
 - **`device_del` is asynchronous**: the detach path retries `blockdev-del`/`netdev-del` only while QEMU reports the device in use; a guest that keeps the device busy (open files on an attached disk, active sockets on a NIC) can delay or fail the detach — the config entry is only removed after the backend confirms.
+- **Disk hot-unplug is guest-driven**: PCIe unplug of a `virtio-blk-pci` device needs a guest-side ack, so with no booted OS (headless test VM, stuck firmware) `detach disk` fails after the 15s retry window with `GuestUnplugTimeout` ("unplug is guest-driven...") — verified live on QEMU 11.0.3: `DEVICE_DELETED` never arrives without a guest. The backing file is never touched on failure. This is QEMU's PCIe hot-unplug protocol, not a daemon bug.
+- **q35 hotplug requires `pcie-root-port` bridges**: `pcie.0` rejects `device_add` ("Bus 'pcie.0' does not support hotplugging"), so the command line always reserves 16 root ports (slots 0-7 extra disks, 8-15 extra networks); `device_add` and boot-time re-attach target the same `root-port-N` bus. Removing the bridges removes hotplug entirely.
 
 ## What Is NOT Implemented Here
 

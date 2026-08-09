@@ -19,6 +19,7 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 - **Serial console logging**: `-serial file:console.log` captures QEMU serial output to a file next to the instance disk for debugging.
 - **`window-close=off`**: SDL and GTK display windows no longer close the VM when the window is closed — prevents accidental shutdown.
 - **Device hot-plug**: `blockdev-add`/`device_add` (virtio-blk-pci, virtio-net-pci) and `netdev-add` (user/tap/passt) over QMP for extra disks and networks, plus async-aware `device_del` (retries `blockdev-del`/`netdev-del` only while QEMU reports the device in use). Extra devices are also wired into the boot command line (`drive-extraN`/`net-extraN`, bridge taps embed the first 8 hex chars of the instance id), so attached devices reappear after a restart. Host tap/veth lifecycle for bridge mode is set up before spawn and torn down on stop, with rollback on failure.
+- **Happy-path hotplug on q35 without a display-less guest quirk**: `pcie.0` rejects `device_add`, so the QEMU command line reserves 16 `pcie-root-port` bridges (slots 0–7 for extra disks, 8–15 for extra networks); `device_add` and boot-time re-attach target the same bus. Detaching a disk is guest-driven — without a booted guest the unplug is never acknowledged and the operation fails after a 15s retry with an explicit "unplug was not acknowledged by the guest" error instead of a raw QEMU string; the image file is never touched. Attach itself works on a headless VM.
 
 #### Daemon
 

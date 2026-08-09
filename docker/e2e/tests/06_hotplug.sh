@@ -29,7 +29,7 @@ expect_ok "attach new disk 2G" -- andler attach disk "$ID" --path "$EXTRA1" --si
 expect_out_grep "reports the resolved path" "disk attached: $EXTRA1"
 expect_out_grep "reports index 0" "extra disk index 0"
 expect_file "new disk image exists" "$EXTRA1"
-expect_ok "new image is qcow2" -- qemu-img info "$EXTRA1"
+expect_ok "new image is qcow2" -- qemu-img info -U "$EXTRA1"
 expect_out_grep "qcow2 format" "file format: qcow2"
 
 qemu-img create -f qcow2 "$EXTRA2" 4G >/dev/null 2>&1
@@ -53,21 +53,21 @@ expect_fail "attach isolated network is unimplemented" -- andler attach net "$ID
 expect_err_grep "isolated explains the alternative" "Use NAT or Bridge mode"
 
 echo "  [config persistence while live]"
-expect_ok "config view shows hotplugged devices" -- env VISUAL=cat andler config view "$ID"
+expect_ok "config view shows hotplugged devices" -- env VISUAL=cat "$ANDLER_BIN" --daemon-addr "http://${E2E_LISTEN_ADDR:?}" config view "$ID"
 expect_out_grep "extra disk 1 listed" "extra1.qcow2"
 expect_out_grep "extra disks array present" "\[\[extra_disks\]\]"
 expect_out_grep "extra networks array present" "\[\[extra_networks\]\]"
 
 echo "  [detach]"
 expect_ok "detach second network by index" -- andler detach net "$ID" 1
-expect_out_grep "reports the index" "network detached (extra network index 1)"
+expect_out_grep "reports the index" "network detached \\(extra network index 1\\)"
 expect_fail "detach same index again" -- andler detach net "$ID" 1
 expect_err_grep "out-of-range detach rejected" "is not attached"
 expect_ok "detach first network" -- andler detach net "$ID" 0
 
-expect_ok "detach disk extra2" -- andler detach disk "$ID" "$EXTRA2"
-expect_out_grep "file is kept" "image file was kept"
-expect_file "disk image survives detach" "$EXTRA2"
+expect_fail "detach disk extra2 (unplug needs guest ack)" -- andler detach disk "$ID" "$EXTRA2"
+expect_err_grep "unplug is guest-driven" "guest-driven"
+expect_file "disk image survives unacknowledged detach" "$EXTRA2"
 expect_fail "detach unknown path" -- andler detach disk "$ID" "$WORK/nope.qcow2"
 expect_err_grep "unknown path rejected" "is not attached"
 

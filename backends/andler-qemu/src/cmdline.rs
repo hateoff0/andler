@@ -119,9 +119,18 @@ fn serial_args(cfg: &InstanceConfig) -> Vec<String> {
 
 fn machine_and_cpu_args(cfg: &InstanceConfig) -> Vec<String> {
     let cpu = &cfg.cpu;
-    vec![
-        "-machine".to_string(),
-        "q35,accel=kvm,usb=on".to_string(),
+    let mut args = vec!["-machine".to_string(), "q35,accel=kvm,usb=on".to_string()];
+    // q35's root bus rejects device_add; hotplug works through pcie-root-port
+    // bridges, one per attachable slot: 0..8 for extra disks, 8..16 for nets.
+    for slot in 0..16 {
+        args.push("-device".to_string());
+        args.push(format!(
+            "pcie-root-port,id=root-port-{slot},chassis={},slot={}",
+            slot + 1,
+            slot
+        ));
+    }
+    args.extend([
         "-cpu".to_string(),
         "host,kvm=on,+topoext,migratable=no".to_string(),
         "-smp".to_string(),
@@ -129,7 +138,8 @@ fn machine_and_cpu_args(cfg: &InstanceConfig) -> Vec<String> {
             "cpus={},sockets={},dies=1,cores={},threads={}",
             cpu.cores, cpu.sockets, cpu.cores, cpu.threads
         ),
-    ]
+    ]);
+    args
 }
 
 fn memory_args(cfg: &InstanceConfig) -> Vec<String> {
@@ -278,7 +288,10 @@ fn disk_args(cfg: &InstanceConfig) -> Vec<String> {
             drive_id
         ));
         args.push("-device".to_string());
-        args.push(format!("virtio-blk-pci,drive={drive_id},id={device_id}"));
+        args.push(format!(
+            "virtio-blk-pci,drive={drive_id},id={device_id},bus=root-port-{}",
+            index % 8
+        ));
     }
 
     if let InstanceKind::LinuxVm {
@@ -359,7 +372,11 @@ fn network_args(cfg: &InstanceConfig) -> Vec<String> {
         args.push("-netdev".to_string());
         args.push(netdev);
         args.push("-device".to_string());
-        args.push(format!("{},netdev={netdev_id}", extra.device_model));
+        args.push(format!(
+            "{},netdev={netdev_id},bus=root-port-{}",
+            extra.device_model,
+            8 + index % 8
+        ));
     }
 
     args
@@ -488,6 +505,38 @@ mod tests {
             vec![
                 "-machine",
                 "q35,accel=kvm,usb=on",
+                "-device",
+                "pcie-root-port,id=root-port-0,chassis=1,slot=0",
+                "-device",
+                "pcie-root-port,id=root-port-1,chassis=2,slot=1",
+                "-device",
+                "pcie-root-port,id=root-port-2,chassis=3,slot=2",
+                "-device",
+                "pcie-root-port,id=root-port-3,chassis=4,slot=3",
+                "-device",
+                "pcie-root-port,id=root-port-4,chassis=5,slot=4",
+                "-device",
+                "pcie-root-port,id=root-port-5,chassis=6,slot=5",
+                "-device",
+                "pcie-root-port,id=root-port-6,chassis=7,slot=6",
+                "-device",
+                "pcie-root-port,id=root-port-7,chassis=8,slot=7",
+                "-device",
+                "pcie-root-port,id=root-port-8,chassis=9,slot=8",
+                "-device",
+                "pcie-root-port,id=root-port-9,chassis=10,slot=9",
+                "-device",
+                "pcie-root-port,id=root-port-10,chassis=11,slot=10",
+                "-device",
+                "pcie-root-port,id=root-port-11,chassis=12,slot=11",
+                "-device",
+                "pcie-root-port,id=root-port-12,chassis=13,slot=12",
+                "-device",
+                "pcie-root-port,id=root-port-13,chassis=14,slot=13",
+                "-device",
+                "pcie-root-port,id=root-port-14,chassis=15,slot=14",
+                "-device",
+                "pcie-root-port,id=root-port-15,chassis=16,slot=15",
                 "-cpu",
                 "host,kvm=on,+topoext,migratable=no",
                 "-smp",
@@ -949,7 +998,7 @@ mod tests {
                 "-drive".to_string(),
                 "file=/home/user/extra-data.qcow2,format=qcow2,if=none,id=drive-extra0,discard=on,detect-zeroes=on,aio=threads".to_string(),
                 "-device".to_string(),
-                "virtio-blk-pci,drive=drive-extra0,id=extra0".to_string(),
+                "virtio-blk-pci,drive=drive-extra0,id=extra0,bus=root-port-0".to_string(),
             ]
         );
         let extra_args = args[start..start + 4].join(" ");
@@ -1013,18 +1062,18 @@ mod tests {
                 "-netdev".to_string(),
                 "user,id=net-extra0".to_string(),
                 "-device".to_string(),
-                "virtio-net-pci,netdev=net-extra0".to_string(),
+                "virtio-net-pci,netdev=net-extra0,bus=root-port-8".to_string(),
                 "-netdev".to_string(),
                 format!(
                     "tap,id=net-extra1,ifname={},bridge=br0,script=no,downscript=no",
                     extra_net_bridge_tap_iface(&cfg.id.to_string(), 1)
                 ),
                 "-device".to_string(),
-                "e1000e,netdev=net-extra1".to_string(),
+                "e1000e,netdev=net-extra1,bus=root-port-9".to_string(),
                 "-netdev".to_string(),
                 "tap,id=net-extra2,ifname=andler-e2,script=no,downscript=no".to_string(),
                 "-device".to_string(),
-                "virtio-net-pci,netdev=net-extra2".to_string(),
+                "virtio-net-pci,netdev=net-extra2,bus=root-port-10".to_string(),
             ]
         );
     }

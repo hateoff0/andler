@@ -192,6 +192,7 @@ Commit hygiene:
 - `rusqlite` calls wrapped in `tokio::task::spawn_blocking` (blocking API)
 - `tokio::sync::RwLock` for `Daemon.instances` (concurrent reads, rare writes)
 - `tokio::sync::broadcast` for metrics streaming
+- **Supervised background tasks only**: any `tokio::spawn` that holds instance/appliance state longer than one RPC must keep its `JoinHandle` and explicitly log/observe its completion (panics included) — a watcher task awaiting the handle and logging `instance_id` on panic, or a `JoinSet` with restart policy. Fire-and-forget spawning is allowed only for tasks shorter than one RPC, where channel closure is the signal. Same rule for external-process ownership: `QemuProcess` is pidfd-based (`subscribe_exit`/sync `is_alive`), adopts adopt orphans on daemon restart with `kill_on_drop` disabled — the adopted process is not ours to kill on drop.
 
 ### Serialization
 

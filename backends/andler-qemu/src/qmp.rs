@@ -31,6 +31,9 @@ pub enum QmpError {
         class: String,
         desc: String,
     },
+
+    #[error("hot-unplug of `{device_id}` was not acknowledged by the guest within the timeout — unplug is guest-driven, so a running VM with a loaded virtio driver must release the device first; the backing file is untouched")]
+    GuestUnplugTimeout { device_id: String },
 }
 
 #[derive(Debug, Deserialize)]
@@ -249,11 +252,17 @@ impl QmpClient {
         Ok(())
     }
 
-    pub async fn device_add_block(&mut self, id: &str, drive: &str) -> Result<(), QmpError> {
+    pub async fn device_add_block(
+        &mut self,
+        id: &str,
+        drive: &str,
+        index: usize,
+    ) -> Result<(), QmpError> {
         let args = json!({
             "driver": "virtio-blk-pci",
             "id": id,
             "drive": drive,
+            "bus": format!("root-port-{}", index % 8),
         });
         self.execute_raw("device_add", Some(args)).await?;
         Ok(())
@@ -264,11 +273,13 @@ impl QmpClient {
         id: &str,
         netdev: &str,
         model: &str,
+        index: usize,
     ) -> Result<(), QmpError> {
         let args = json!({
             "driver": model,
             "id": id,
             "netdev": netdev,
+            "bus": format!("root-port-{}", 8 + index % 8),
         });
         self.execute_raw("device_add", Some(args)).await?;
         Ok(())
@@ -337,6 +348,11 @@ impl QmpClient {
                 {
                     tokio::time::sleep(std::time::Duration::from_millis(250)).await;
                 }
+                Err(err) if Self::is_device_in_use_error(&err) => {
+                    return Err(QmpError::GuestUnplugTimeout {
+                        device_id: device_id.to_string(),
+                    });
+                }
                 Err(err) => return Err(err),
             }
         }
@@ -360,6 +376,11 @@ impl QmpClient {
                         && std::time::Instant::now() < deadline =>
                 {
                     tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                }
+                Err(err) if Self::is_device_in_use_error(&err) => {
+                    return Err(QmpError::GuestUnplugTimeout {
+                        device_id: device_id.to_string(),
+                    });
                 }
                 Err(err) => return Err(err),
             }
@@ -1125,7 +1146,7 @@ mod tests {
     async fn device_add_block_sends_virtio_blk_pci() {
         let (mut client, server) = fake_qmp_pair();
         let requests = run_with_server(server, vec![b"{\"return\": {}}\n"], async {
-            client.device_add_block("extra0", "drive-extra0").await
+            client.device_add_block("extra0", "drive-extra0", 0).await
         })
         .await;
         let req = &requests[0];
@@ -1134,6 +1155,7 @@ mod tests {
         assert_eq!(args["driver"], "virtio-blk-pci");
         assert_eq!(args["id"], "extra0");
         assert_eq!(args["drive"], "drive-extra0");
+        assert_eq!(args["bus"], "root-port-0");
     }
 
     #[tokio::test]
@@ -1141,7 +1163,7 @@ mod tests {
         let (mut client, server) = fake_qmp_pair();
         let requests = run_with_server(server, vec![b"{\"return\": {}}\n"], async {
             client
-                .device_add_net("net-extra0", "net-extra0", "virtio-net-pci")
+                .device_add_net("net-extra0", "net-extra0", "virtio-net-pci", 1)
                 .await
         })
         .await;
@@ -1151,6 +1173,7 @@ mod tests {
         assert_eq!(args["driver"], "virtio-net-pci");
         assert_eq!(args["id"], "net-extra0");
         assert_eq!(args["netdev"], "net-extra0");
+        assert_eq!(args["bus"], "root-port-9");
     }
 
     #[tokio::test]
@@ -1265,6 +1288,38 @@ mod tests {
             "expected CommandFailed, got: {err:?}"
         );
         server_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn detach_block_device_guest_timeout_maps_to_guest_unplug_timeout() {
+        let (mut client, server) = fake_qmp_pair();
+        let error = b"{\"error\": {\"class\": \"DeviceInUse\", \"desc\": \"Node drive-extra0 is in use\"}}\n";
+        let (mut server_read, mut server_write) = tokio::io::split(server);
+        let server_task = tokio::spawn(async move {
+            let mut buf = BufReader::new(&mut server_read);
+            for i in 0.. {
+                let mut line = String::new();
+                buf.read_line(&mut line).await.unwrap();
+                if i == 0 {
+                    server_write.write_all(b"{\"return\": {}}\n").await.unwrap();
+                } else {
+                    server_write.write_all(error).await.unwrap();
+                }
+            }
+        });
+        let err = client
+            .detach_block_device(
+                "extra0",
+                "drive-extra0",
+                std::time::Duration::from_millis(200),
+            )
+            .await
+            .unwrap_err();
+        server_task.abort();
+        assert!(
+            matches!(&err, QmpError::GuestUnplugTimeout { device_id } if device_id.as_str() == "extra0"),
+            "expected GuestUnplugTimeout, got: {err:?}"
+        );
     }
 
     #[tokio::test]

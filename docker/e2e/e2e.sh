@@ -35,23 +35,6 @@ export ANDLERD_BIN="${ANDLERD_BIN:-/usr/local/bin/andlerd}"
 
 source "$E2E_ROOT/tests/common.sh"
 
-# common.sh's andler() uses ANDLER_BIN; start_daemon hardcodes andlerd — make
-# it honor the override by redefining locally after sourcing.
-start_daemon() {
-    echo "  starting andlerd (store: $E2E_STORE_PATH)"
-    ANDLERD_STORE_PATH="$E2E_STORE_PATH" ANDLERD_LISTEN_ADDR="$E2E_LISTEN_ADDR" \
-        RUST_LOG=info "$ANDLERD_BIN" >>"$E2E_WORKDIR/daemon.log" 2>&1 &
-    echo "$!" >"$E2E_DAEMON_PID_FILE"
-    for _ in $(seq 1 50); do
-        if andler list >/dev/null 2>&1; then
-            return 0
-        fi
-        sleep 0.2
-    done
-    echo "    FAIL: andlerd did not become ready within 10s"
-    exit 1
-}
-
 cleanup() {
     stop_daemon
     rm -rf "$E2E_WORKDIR"

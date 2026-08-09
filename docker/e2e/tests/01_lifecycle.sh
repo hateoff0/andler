@@ -18,7 +18,7 @@ expect_out_grep "list shows Created state" "Created"
 
 expect_ok "list --json" -- andler list --json
 expect_out_grep "list --json state" '"state": *"Created"'
-expect_ok "list --json parses to one entry" -- jq -e 'length == 1' "$E2E_LAST_OUT"
+expect_ok "list --json parses to one entry" -- jq -e 'length == 1' <<<"$(cat "$E2E_LAST_OUT")"
 
 expect_ok "status resolves the short id prefix" -- andler status "$ID"
 expect_out_grep "status shows Created" "Created"
@@ -69,15 +69,16 @@ expect_fail "guest install while running (no guest agent)" -- andler guest insta
 expect_err_grep "guest-agent-unavailable message" "guest agent"
 
 echo "  [metrics]"
-expect_ok "metrics --once returns a sample" -- timeout 10 andler metrics "$ID" --once
+DAEMON_URL="http://${E2E_LISTEN_ADDR:?}"
+expect_ok "metrics --once returns a sample" -- timeout 10 "$ANDLER_BIN" --daemon-addr "$DAEMON_URL" metrics "$ID" --once
 expect_out_grep "metrics sample has cpu" "cpu="
-expect_ok "metrics --once --json" -- timeout 10 andler metrics "$ID" --once --json
+expect_ok "metrics --once --json" -- timeout 10 "$ANDLER_BIN" --daemon-addr "$DAEMON_URL" metrics "$ID" --once --json
 expect_out_grep "metrics json has cpu_percent" "cpu_percent"
-expect_ok "metrics json parses" -- jq -e 'has("cpu_percent")' "$E2E_LAST_OUT"
+expect_ok "metrics json parses" -- jq -e 'has("cpu_percent")' <<<"$(cat "$E2E_LAST_OUT")"
 
 echo "  [logs + stop]"
 LOGS_FILE="$WORK/logs-during-run.txt"
-timeout 20 andler logs "$ID" >"$LOGS_FILE" 2>&1 &
+timeout 20 "$ANDLER_BIN" --daemon-addr "$DAEMON_URL" logs "$ID" >"$LOGS_FILE" 2>&1 &
 LOGS_BG=$!
 sleep 1
 

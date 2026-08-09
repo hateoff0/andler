@@ -64,9 +64,32 @@ impl QemuBackend {
             return Ok(());
         }
 
-        let client = QmpClient::connect(instance.process.qmp_socket_path()).await?;
-        instance.qmp_client = Some(client);
-        Ok(())
+        let path = instance.process.qmp_socket_path().clone();
+        let mut last_connect_error = None;
+        for _ in 0..300 {
+            match QmpClient::connect(&path).await {
+                Ok(client) => {
+                    instance.qmp_client = Some(client);
+                    return Ok(());
+                }
+                Err(err) => {
+                    let is_missing_socket = matches!(
+                        &err,
+                        QmpError::ConnectFailed { source, .. }
+                            if source.kind() == std::io::ErrorKind::NotFound
+                    );
+                    if is_missing_socket {
+                        last_connect_error = Some(err);
+                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    } else {
+                        return Err(err);
+                    }
+                }
+            }
+        }
+        // The loop only exits through a successful connect or a non-NotFound
+        // error, so this runs exactly after 300 NotFound retries (~30s).
+        Err(last_connect_error.expect("retry loop always records its last error"))
     }
 
     async fn guest_agent_client(instance: &RunningInstance) -> Result<QmpClient, BackendError> {
@@ -981,7 +1004,7 @@ impl HypervisorBackend for QemuBackend {
             let path = path.clone();
             Box::pin(async move {
                 qmp.blockdev_add(&drive_id, &path, format_str).await?;
-                match qmp.device_add_block(&device_id, &drive_id).await {
+                match qmp.device_add_block(&device_id, &drive_id, index).await {
                     Ok(()) => Ok(()),
                     Err(err) => {
                         // Roll back the block node so a failed device_add leaves no
@@ -1054,7 +1077,8 @@ impl HypervisorBackend for QemuBackend {
                         qmp.netdev_add_tap(&netdev_id, &ifname).await?
                     }
                 }
-                qmp.device_add_net(&netdev_id, &netdev_id, &model).await
+                qmp.device_add_net(&netdev_id, &netdev_id, &model, index)
+                    .await
             })
         })
         .await;

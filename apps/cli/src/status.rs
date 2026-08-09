@@ -548,6 +548,34 @@ fn print_instance_config(config: GetInstanceConfigResponse) {
         println!("  hide_host_cursor: {}", input.hide_host_cursor);
         println!("  clipboard_enabled: {}", input.clipboard_enabled);
     }
+
+    if !config.extra_disks.is_empty() {
+        println!("[[extra_disks]]");
+        for disk in &config.extra_disks {
+            println!("  path: {}", disk.path);
+            println!("  size_bytes: {}", format_size(disk.size_bytes));
+        }
+    }
+    if !config.extra_networks.is_empty() {
+        println!("[[extra_networks]]");
+        for net in &config.extra_networks {
+            println!("  device_model: {}", net.device_model);
+            match net.mode.clone().and_then(|m| m.kind) {
+                Some(network_mode::Kind::Nat(_)) => {
+                    let nat_backend = match net.nat_backend() {
+                        andler_rpc::proto::NatBackend::Passt => "passt",
+                        _ => "slirp",
+                    };
+                    println!("  mode: Nat ({nat_backend})")
+                }
+                Some(network_mode::Kind::Bridge(b)) => {
+                    println!("  mode: Bridge({})", b.interface)
+                }
+                Some(network_mode::Kind::Isolated(_)) => println!("  mode: Isolated"),
+                None => println!("  mode: <missing>"),
+            }
+        }
+    }
 }
 
 #[cfg(test)]
