@@ -72,15 +72,6 @@ fn parse_state_filter(s: &str) -> Option<InstanceStateKind> {
     .find(|&kind| state_kind_name(kind).eq_ignore_ascii_case(s))
 }
 
-#[derive(serde::Serialize)]
-struct InstanceListJson<'a> {
-    id: &'a str,
-    name: &'a str,
-    state: &'a str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    error_message: Option<&'a str>,
-}
-
 pub async fn handle_list(
     client: &mut AndlerServiceClient<Channel>,
     full_id: bool,
@@ -136,6 +127,16 @@ pub async fn handle_list(
     }
 
     if json {
+        #[derive(serde::Serialize)]
+        struct InstanceListJson<'a> {
+            id: &'a str,
+            name: &'a str,
+            state: &'a str,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            error_message: Option<&'a str>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            broken_reason: Option<&'a str>,
+        }
         let entries: Vec<InstanceListJson> = instances
             .iter()
             .map(|entry| InstanceListJson {
@@ -144,6 +145,7 @@ pub async fn handle_list(
                 state: state_kind_name(entry.state()),
                 error_message: (!entry.error_message.is_empty())
                     .then_some(entry.error_message.as_str()),
+                broken_reason: entry.broken_reason.as_deref(),
             })
             .collect();
         println!("{}", serde_json::to_string(&entries)?);
@@ -168,6 +170,9 @@ pub async fn handle_list(
             if entry.state() == InstanceStateKind::Error && !entry.error_message.is_empty() {
                 print!("  ({})", entry.error_message);
             }
+            if let Some(reason) = &entry.broken_reason {
+                print!("  [broken: {reason}]");
+            }
             println!();
         }
     }
@@ -183,6 +188,44 @@ pub async fn handle_config(
         .await?
         .into_inner();
     print_instance_config(response);
+    Ok(())
+}
+
+pub async fn handle_config_status(
+    client: &mut AndlerServiceClient<Channel>,
+    instance_id: String,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let response = client
+        .get_config_status(InstanceIdRequest { instance_id })
+        .await?
+        .into_inner();
+
+    println!(
+        "instance_id: {}",
+        crate::helpers::short_id(&response.instance_id)
+    );
+    println!("name: {}", response.name);
+    println!("state: {}", state_kind_name(response.state()));
+    if let Some(resolution) = &response.live_resolution {
+        println!("live_resolution: {resolution}");
+    }
+    if let Some(error) = &response.file_error {
+        println!("file_error: {error}");
+    }
+    if response.diffs.is_empty() {
+        println!("config: file and memory are in sync");
+    } else {
+        println!(
+            "config: {} key(s) differ between file and memory:",
+            response.diffs.len()
+        );
+        for diff in &response.diffs {
+            println!(
+                "  {:<24} file={}  memory={}",
+                diff.key, diff.file_value, diff.memory_value
+            );
+        }
+    }
     Ok(())
 }
 

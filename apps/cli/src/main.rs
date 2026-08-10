@@ -128,6 +128,12 @@ pub enum ConfigCommand {
 
         value: String,
     },
+
+    /// File-vs-memory diff: what `instance.toml` holds vs what the daemon
+    /// loaded, plus the live-applied resolution when one is pending.
+    Status {
+        instance_id: Option<String>,
+    },
 }
 
 #[derive(Args)]
@@ -775,6 +781,13 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                     .or(flags.instance.as_deref())
                     .ok_or("instance ID required")?;
                 edit::handle(&mut client, id.to_string()).await?;
+            }
+            Some(ConfigCommand::Status { instance_id }) => {
+                let id = instance_id
+                    .as_deref()
+                    .or(flags.instance.as_deref())
+                    .ok_or("instance ID required")?;
+                status::handle_config_status(&mut client, id.to_string()).await?;
             }
             Some(ConfigCommand::Set {
                 instance_id,

@@ -11,6 +11,7 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 
 #### CLI
 
+- **`andler config status`**: reports how `instance.toml` and the daemon's loaded config relate — the per-key diff list (`file and memory are in sync` when identical), the live-applied resolution, and any file read/parse error. Manual file edits are applied on read for idle instances (Created/Stopped/Error) and never silently for Running/Paused ones — there they show up as a pending diff (next stop/start or `config set`/`edit` applies them). `andler list` annotates registry directories whose toml is missing/invalid/mismatched with `[broken: reason]` (and `broken_reason` in `--json`).
 - **`andler doctor` command**: Checks local environment health — KVM, QEMU, OVMF, nbd module, passwordless sudo, daemon reachability, base images. `--fix` flag offers to write missing sudoers rules via `visudo`.
 - **`andler attach` / `andler detach`**: Hot-plug extra disks (`attach disk --path <p> --size <s>` / `detach disk <p>`) and network devices (`attach net [--mode nat|bridge|isolated] [--bridge <if>] [--model <m>] [--nat-backend slirp|passt]` / `detach net <index>`) into a running/paused instance. Attached devices are persisted in `instance.toml` (`extra_disks`/`extra_networks`) and re-created automatically on the next start. Detaching a disk never deletes the image file.
 

@@ -1059,6 +1059,84 @@ async fn attach_disk_on_created_instance_round_trips_as_failed_precondition() {
 }
 
 #[tokio::test]
+async fn get_config_status_reports_file_vs_memory_diff_over_real_grpc() {
+    let (mut client, server) = spawn_server_and_connect().await;
+
+    // Unique disk dir so the manual instance.toml write below cannot race
+    // with other round-trip tests using the shared /tmp/disk.qcow2.
+    let dir = std::env::temp_dir().join(format!("andler-rt-cfg-{}", InstanceId::new()));
+    tokio::fs::create_dir_all(&dir).await.unwrap();
+
+    let mut request = sample_create_instance_request();
+    request.disk.as_mut().unwrap().path = dir.join("disk.qcow2").to_string_lossy().into_owned();
+    let create_response = client
+        .create_instance(request)
+        .await
+        .expect("create_instance must succeed")
+        .into_inner();
+    let id = create_response.instance_id;
+
+    let status = client
+        .get_config_status(InstanceIdRequest {
+            instance_id: id.clone(),
+        })
+        .await
+        .expect("get_config_status must succeed")
+        .into_inner();
+    assert_eq!(status.instance_id, id);
+    assert!(
+        status.diffs.is_empty(),
+        "fresh instance: file and memory in sync"
+    );
+    assert!(status.file_error.is_none());
+
+    // A manual edit of instance.toml (the documented way to change a stopped
+    // instance) is picked up: on an idle instance the file is the source of
+    // truth, so the status is in sync and the loaded config reflects it.
+    let original: andler_core::InstanceConfig = client
+        .get_instance_config(InstanceIdRequest {
+            instance_id: id.clone(),
+        })
+        .await
+        .expect("get_instance_config must succeed")
+        .into_inner()
+        .try_into()
+        .expect("round-trip conversion must succeed");
+    let mut edited = original.clone();
+    edited.name = "hand-edited-name".to_string();
+    let instance_dir = edited.disk.path.parent().expect("disk must have a parent");
+    tokio::fs::write(
+        instance_dir.join("instance.toml"),
+        toml::to_string_pretty(&edited).expect("serialize"),
+    )
+    .await
+    .unwrap();
+
+    let status = client
+        .get_config_status(InstanceIdRequest {
+            instance_id: id.clone(),
+        })
+        .await
+        .expect("get_config_status must succeed")
+        .into_inner();
+    assert!(
+        status.diffs.is_empty(),
+        "idle instance: file edit is applied, not pending: {:?}",
+        status.diffs
+    );
+
+    let config = client
+        .get_instance_config(InstanceIdRequest { instance_id: id })
+        .await
+        .expect("get_instance_config must succeed")
+        .into_inner();
+    assert_eq!(config.name, "hand-edited-name");
+
+    let _ = tokio::fs::remove_dir_all(&dir).await;
+    server.abort();
+}
+
+#[tokio::test]
 async fn attach_network_on_created_instance_round_trips_as_failed_precondition() {
     let (mut client, server) = spawn_server_and_connect().await;
     let create_response = client

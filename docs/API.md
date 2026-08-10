@@ -118,7 +118,7 @@ Prints current state: `Created`, `Starting`, `Running`, `Paused`, `Stopping`, `S
 andler list [--state <STATE>] [--name <REGEX>] [--sort <FIELD>] [--json] [--full-id]
 ```
 
-Lists all registered instances. Supports filtering by state and name (regex, case-insensitive).
+Lists all registered instances. Supports filtering by state and name (regex, case-insensitive). A directory under `~/.andler/instances/` whose `instance.toml` is missing, unreadable, or invalid is reported as a broken entry (`[broken: reason]` after the name, `broken_reason` in JSON) — it is held in memory as `Error` and can be removed with `andler remove <id> --purge`.
 
 | Flag | Description |
 |------|-------------|
@@ -134,6 +134,7 @@ Lists all registered instances. Supports filtering by state and name (regex, cas
 andler config view <instance-id>
 andler config edit <instance-id>
 andler config set <instance-id> <key> <value>
+andler config status <instance-id>
 andler config --instance <instance-id> [--edit]
 ```
 
@@ -141,15 +142,26 @@ andler config --instance <instance-id> [--edit]
 
 `edit` opens the real on-disk `instance.toml` in `$VISUAL`/`$EDITOR` (falling back to `vi`/`vim`/`nano`), then applies the edited config via gRPC. If the TOML is invalid, nothing is applied and the error message points at the file to fix. `config edit` requires the CLI to run on the same machine as the daemon (it edits the file on disk). Prints `No changes made.` when the file is left untouched.
 
-`set` updates a single config key by name. Supported keys:
+`status` reports how `instance.toml` and the daemon's loaded config relate: the instance id/name/state, the list of keys where file and memory differ (or `file and memory are in sync`), the live-applied resolution, and any error from reading the file. On an idle instance (`Created`/`Stopped`/`Error`) a hand-edited file is applied on read, so `status` normally shows sync; on a `Running`/`Paused` instance manual edits are never applied silently — they appear as a pending diff and take effect at the next stop/start or via `config set`/`edit`.
+
+`set` updates a single config key by name. Supported keys (the full whitelist lives in `andler-core` `config_keys()`):
 
 | Key | Value | Requirements |
 |-----|-------|--------------|
 | `display.resolution` | `WxH`, e.g. `1920x1080` | Works in any state; on a `Running`/`Paused` instance the new resolution is pushed into the guest over the QEMU guest agent immediately (applied by the guest compositor/session), and persisted for the next boot (delivered via fw_cfg) |
 | `name` | any valid instance name | Instance must be stopped (`disk_idle`) |
-| `arm_translator` | `none` \| `libndk` \| `libhoudini` | Android instances only, instance must be stopped; performs the same offline switch as `SwitchArmTranslator` |
+| `arm_translator` (`kind.android_profile.arm_translator`) | `none` \| `libndk` \| `libhoudini` | Android instances only, instance must be stopped; performs the same offline switch as `SwitchArmTranslator` |
+| `cpu.cores` / `cpu.sockets` / `cpu.threads` / `cpu.priority` | integers / priority name | Instance must be stopped |
+| `memory.size_bytes` / `memory.ballooning` / `memory.zram` / `memory.ksm` | size string / `true`\|`false` | Instance must be stopped |
+| `disk.thin_provisioning` / `disk.trim_on_shutdown` / `disk.compact_on_shutdown` / `disk.snapshot_timeout_secs` | boolean / seconds | Instance must be stopped |
+| `display.dpi` / `display.fps_limit` / `display.display_engine` / `display.fullscreen` | int / engine name / boolean | Instance must be stopped |
+| `gpu.render_backend` / `gpu.hostmem_bytes` / `gpu.blob` / `gpu.gl` | backend name / bytes / boolean | Instance must be stopped |
+| `network.mode` / `network.device_model` / `network.nat_backend` | mode / model / backend name | Instance must be stopped |
+| `audio.backend` / `audio.device` | backend / device name | Instance must be stopped |
+| `input.pointer_mode` / `input.hide_host_cursor` / `input.clipboard_enabled` | mode / boolean | Instance must be stopped |
+| `firmware.enable_uefi` | `true`\|`false` | Instance must be stopped |
 
-Anything else is rejected with `invalid config key: <key>` (`INVALID_ARGUMENT`).
+Anything else is rejected with `invalid config key: <key>` (`INVALID_ARGUMENT`), naming the reason (immutable or unknown key).
 
 The flag form `andler config --instance <id>` is equivalent to `view`; add `--edit`/`-e` for the editor. Protected fields (`id`, `kind`, `disk.path`) cannot be changed.
 
@@ -159,7 +171,7 @@ The flag form `andler config --instance <id>` is equivalent to `view`; add `--ed
 andler remove <instance-id> [--purge]
 ```
 
-Without `--purge`: removes the instance record only. Files remain on disk.
+Without `--purge`: removes the instance record and its registry files (`instance.toml`, `events.jsonl`). Disk and OVMF vars remain on disk.
 With `--purge`: also deletes `disk.path` and `firmware.ovmf_vars_path`. Never deletes `base_image` or `ovmf_code_path` (shared across instances).
 
 Instance must be in a terminal state (`Created`, `Stopped`, or `Error`). Use `stop` first for running instances.

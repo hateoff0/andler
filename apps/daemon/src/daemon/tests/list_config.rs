@@ -116,6 +116,93 @@ async fn update_instance_config_succeeds_on_idle_instance() {
 }
 
 #[tokio::test]
+async fn config_status_shows_pending_file_edit_on_running_instance() {
+    let dir = TestTempDir::new();
+    let daemon = Daemon::new();
+    let mut cfg = sample_config();
+    cfg.disk.path = dir.path().join("disk.qcow2");
+    cfg.firmware.ovmf_vars_path = dir.path().join("VARS.fd");
+    let id = cfg.id;
+    daemon.create_instance(cfg.clone()).await.unwrap();
+    register_with_state(&daemon, cfg.clone(), InstanceState::Running, None).await;
+
+    let mut edited = cfg.clone();
+    edited.name = "pending-name".to_string();
+    tokio::fs::write(
+        dir.path().join("instance.toml"),
+        andler_core::instance_config_to_toml(&edited).unwrap(),
+    )
+    .await
+    .unwrap();
+
+    let (_, diffs, file_error, _) = daemon.config_status(id).await.unwrap();
+    assert!(file_error.is_none());
+    let name_diff = diffs
+        .iter()
+        .find(|(key, _, _)| key == "name")
+        .expect("pending file edit must be reported as a diff");
+    assert_eq!(name_diff.1, "pending-name");
+    assert_eq!(name_diff.2, cfg.name);
+
+    // The live config is untouched by the file edit.
+    let fetched = daemon.get_instance_config(id).await.unwrap();
+    assert_eq!(fetched.name, cfg.name);
+}
+
+#[tokio::test]
+async fn config_status_on_idle_instance_applies_file_edit() {
+    let dir = TestTempDir::new();
+    let daemon = Daemon::new();
+    let mut cfg = sample_config();
+    cfg.disk.path = dir.path().join("disk.qcow2");
+    cfg.firmware.ovmf_vars_path = dir.path().join("VARS.fd");
+    let id = cfg.id;
+    daemon.create_instance(cfg.clone()).await.unwrap();
+
+    let mut edited = cfg.clone();
+    edited.name = "applied-name".to_string();
+    tokio::fs::write(
+        dir.path().join("instance.toml"),
+        andler_core::instance_config_to_toml(&edited).unwrap(),
+    )
+    .await
+    .unwrap();
+
+    let (_, diffs, file_error, _) = daemon.config_status(id).await.unwrap();
+    assert!(file_error.is_none());
+    assert!(
+        diffs.is_empty(),
+        "idle instance: file edit is applied, not pending"
+    );
+
+    let fetched = daemon.get_instance_config(id).await.unwrap();
+    assert_eq!(fetched.name, "applied-name");
+}
+
+#[tokio::test]
+async fn config_status_reports_invalid_file_without_touching_memory() {
+    let dir = TestTempDir::new();
+    let daemon = Daemon::new();
+    let mut cfg = sample_config();
+    cfg.disk.path = dir.path().join("disk.qcow2");
+    cfg.firmware.ovmf_vars_path = dir.path().join("VARS.fd");
+    let id = cfg.id;
+    daemon.create_instance(cfg.clone()).await.unwrap();
+    register_with_state(&daemon, cfg.clone(), InstanceState::Running, None).await;
+
+    tokio::fs::write(dir.path().join("instance.toml"), b"not [valid toml")
+        .await
+        .unwrap();
+
+    let (_, diffs, file_error, _) = daemon.config_status(id).await.unwrap();
+    assert!(diffs.is_empty());
+    assert!(file_error.is_some(), "invalid toml must be reported");
+
+    let fetched = daemon.get_instance_config(id).await.unwrap();
+    assert_eq!(fetched.name, cfg.name);
+}
+
+#[tokio::test]
 async fn update_instance_config_rejected_while_running() {
     let daemon = Daemon::new();
     let cfg = sample_config();

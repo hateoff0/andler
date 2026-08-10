@@ -15,6 +15,16 @@ expect_ok "stop" -- andler stop "$ID" --graceful
 expect_ok "status shows Stopped" -- andler status "$ID"
 expect_out_grep "Stopped" "Stopped"
 
+echo "  [registry audit log]"
+INSTANCE_TOML="$(echo "$HOME/.andler/instances/$ID"*/instance.toml)"
+EVENTS_JSONL="$(echo "$HOME/.andler/instances/$ID"*/events.jsonl)"
+[[ -n "$EVENTS_JSONL" && -f "$EVENTS_JSONL" ]] || fail "events.jsonl not found"
+pass "events.jsonl exists next to instance.toml"
+[[ -s "$EVENTS_JSONL" ]] || fail "events.jsonl is empty"
+pass "events.jsonl records lifecycle events"
+grep -qE '"event":"(started|stopped|created)"' "$EVENTS_JSONL" || fail "no started/stopped/created event in events.jsonl"
+pass "events.jsonl holds created/started/stopped records"
+
 echo "  [daemon restart]"
 ID_CREATED="$(create_linux "$WORK" e2e-persist-created)"
 [[ -n "$ID_CREATED" ]] || fail "empty id from create"
@@ -30,6 +40,41 @@ expect_ok "status after the restart" -- andler status "$ID"
 expect_out_grep "status Stopped" "Stopped"
 
 expect_ok "remove --purge" -- andler remove "$ID_CREATED" --purge
+
+echo "  [broken registry entry]"
+BROKEN_ID="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+BROKEN_DIR="$HOME/.andler/instances/$BROKEN_ID"
+mkdir -p "$BROKEN_DIR"
+touch "$BROKEN_DIR/disk.qcow2"
+expect_ok "list shows the broken entry" -- andler list
+expect_out_grep "broken entry with reason" "\[broken:"
+expect_ok "broken entry is removable" -- andler remove "$BROKEN_ID" --purge
+expect_no_file "broken dir removed" "$BROKEN_DIR"
+expect_ok "list clean after removing the broken entry" -- andler list
+expect_out_nogrep "no broken entries left" "\[broken:"
+
+echo "  [single-daemon flock]"
+SECOND_LOG="$E2E_WORKDIR/09-second-daemon.log"
+ANDLERD_STORE_PATH="$E2E_WORKDIR/09-second.db" "${ANDLERD_BIN:-/usr/local/bin/andlerd}" >>"$SECOND_LOG" 2>&1 &
+SECOND_PID=$!
+for _ in $(seq 1 15); do
+    if ! kill -0 "$SECOND_PID" 2>/dev/null || grep -q "already running" "$SECOND_LOG"; then
+        break
+    fi
+    sleep 0.2
+done
+if kill -0 "$SECOND_PID" 2>/dev/null; then
+    kill "$SECOND_PID" 2>/dev/null || true
+    fail "second andlerd must refuse to start while the first holds ANDLER_HOME"
+else
+    pass "second andlerd refused to start (flock)"
+fi
+if grep -q "already running" "$SECOND_LOG"; then
+    pass "flock refusal message explains the conflict"
+else
+    sed 's/^/      /' "$SECOND_LOG" | head -10
+    fail "flock refusal message missing"
+fi
 
 echo "  [cleanup]"
 expect_ok "remove --purge" -- andler remove "$ID" --purge

@@ -53,7 +53,13 @@ pub(crate) enum SupervisorCommand {
 /// File-vs-memory config picture, produced by `ReloadConfig`.
 #[derive(Debug, Clone)]
 pub(crate) struct ConfigSnapshot {
+    /// In-memory (live) config — what the daemon currently operates on.
     pub(crate) config: InstanceConfig,
+    /// Config as last read from instance.toml, when the file is readable.
+    /// Diffed against `config` to show pending manual edits on a
+    /// Running/Paused instance, whose memory config is never silently
+    /// overwritten by a file edit.
+    pub(crate) file_config: Option<InstanceConfig>,
     /// Set when instance.toml exists but cannot be parsed or belongs to a
     /// different instance; the in-memory config is then left untouched.
     pub(crate) file_error: Option<String>,
@@ -159,6 +165,7 @@ struct InstanceSupervisor {
     config_path: PathBuf,
     audit_dir: PathBuf,
     config_mtime: Option<SystemTime>,
+    file_config: Option<InstanceConfig>,
     file_error: Option<String>,
     live_resolution: Option<Resolution>,
 }
@@ -194,6 +201,7 @@ pub(crate) fn spawn_supervisor(
         config_path,
         audit_dir,
         config_mtime: None,
+        file_config: None,
         file_error: None,
         live_resolution: None,
     };
@@ -252,6 +260,7 @@ impl InstanceSupervisor {
                     self.reload_if_changed().await;
                     let _ = ack.send(Ok(ConfigSnapshot {
                         config: self.config.clone(),
+                        file_config: self.file_config.clone(),
                         file_error: self.file_error.clone(),
                         live_resolution: self.live_resolution,
                     }));
@@ -296,15 +305,20 @@ impl InstanceSupervisor {
         }
     }
 
-    /// Re-reads instance.toml when its mtime changed. The file is the source
-    /// of truth: manual edits on a stopped instance must survive (they are
-    /// picked up here and pushed through config_tx). A file that cannot be
-    /// parsed leaves the in-memory config untouched and records the reason.
+    /// Re-reads instance.toml when its mtime changed. On an idle instance
+    /// (Created/Stopped/Error) the file is the source of truth: manual edits
+    /// are picked up here and pushed through config_tx. On a Running/Paused
+    /// instance the memory config is the live one — a file edit is never
+    /// applied silently, it is only cached as `file_config` so `config
+    /// status` can report it as pending (it applies at the next stop/start
+    /// or through `config set`). A file that cannot be parsed leaves the
+    /// in-memory config untouched and records the reason.
     async fn reload_if_changed(&mut self) {
         let meta = match tokio::fs::metadata(&self.config_path).await {
             Ok(meta) => meta,
             Err(_) => {
                 self.config_mtime = None;
+                self.file_config = None;
                 return;
             }
         };
@@ -323,12 +337,16 @@ impl InstanceSupervisor {
 
         match andler_core::config::parse_instance_config_toml(&content) {
             Ok(cfg) if cfg.id == self.id => {
-                self.config = cfg.clone();
+                self.file_config = Some(cfg.clone());
                 self.config_mtime = mtime;
                 self.file_error = None;
-                let _ = self.config_tx.send(cfg);
+                if self.state.is_disk_idle() {
+                    self.config = cfg.clone();
+                    let _ = self.config_tx.send(cfg);
+                }
             }
             Ok(_) => {
+                self.file_config = None;
                 self.file_error = Some(
                     "instance.toml belongs to a different instance id; \
                      refusing to load it"
@@ -336,6 +354,7 @@ impl InstanceSupervisor {
                 );
             }
             Err(err) => {
+                self.file_config = None;
                 self.file_error = Some(format!("invalid instance.toml: {err}"));
             }
         }

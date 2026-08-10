@@ -23,6 +23,7 @@ The core service exposing all instance management operations.
 | `ListInstances` | `Empty` | `ListInstancesResponse` | Unary | Lists all registered instances. |
 | `RemoveInstance` | `RemoveInstanceRequest` | `Empty` | Unary | Removes an instance record. |
 | `GetInstanceConfig` | `InstanceIdRequest` | `GetInstanceConfigResponse` | Unary | Returns the full configuration of an instance. |
+| `GetConfigStatus` | `InstanceIdRequest` | `GetConfigStatusResponse` | Unary | Returns the file-vs-memory config picture: keys where `instance.toml` and the daemon's loaded config differ, plus the live-applied resolution and file errors. |
 | `UpdateInstanceConfig` | `UpdateInstanceConfigRequest` | `Empty` | Unary | Replaces the entire configuration of an instance. |
 | `StreamInstanceLogs` | `InstanceIdRequest` | `stream LogLineResponse` | Server-streaming | Streams live logs from the hypervisor process. |
 | `StreamResourceMetrics` | `InstanceIdRequest` | `stream ResourceMetricsResponse` | Server-streaming | Streams CPU, memory, disk, network, and GPU metrics. |
@@ -471,6 +472,29 @@ Request to replace the entire configuration of an instance. Must match current `
 | `audio` | `AudioConfig` | Audio config. |
 | `input` | `InputConfig` | Input config. |
 
+### `ConfigKeyDiff`
+
+One key where `instance.toml` and the daemon's loaded (memory) config differ.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `key` | `string` | Config key path, e.g. `name`, `cpu.cores`, `display.resolution`. |
+| `file_value` | `string` | Value as last read from `instance.toml` (canonical string form). |
+| `memory_value` | `string` | Value currently loaded in the daemon. |
+
+### `GetConfigStatusResponse`
+
+File-vs-memory config picture for `config status`.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `instance_id` | `string` | Instance ID. |
+| `name` | `string` | Instance name. |
+| `state` | `InstanceStateKind` | Current lifecycle state. |
+| `diffs` | `repeated ConfigKeyDiff` | Keys where file and memory disagree. On an idle instance (Created/Stopped/Error) the file is applied on read, so diffs are normally empty; on a Running/Paused instance manual file edits are *not* applied silently and show up here as pending (they apply at the next stop/start or through `SetInstanceConfig`). |
+| `live_resolution` | `optional string` | `WxH` resolution actually applied to the guest via the live path, when one is pending. |
+| `file_error` | `optional string` | Set when `instance.toml` exists but cannot be read/parsed or belongs to a different instance id; the in-memory config is left untouched. |
+
 ### `AttachDiskRequest`
 
 Request to hot-plug an extra disk into a running/paused instance.
@@ -698,7 +722,7 @@ Request for a partial configuration update by key/value.
 | Field | Type | Description |
 |-------|------|-------------|
 | `instance_ref` | `string` | Instance ID (full or prefix). |
-| `key` | `string` | Configuration key. Supported: `display.resolution` (any state, applied live to a running guest via the guest agent and persisted via fw_cfg), `name` (stopped instance), `arm_translator` (Android, stopped instance). |
+| `key` | `string` | Configuration key. The whitelist is the settable key-path table in `andler-core` (`config_keys()`): `name`, `cpu.cores`/`sockets`/`threads`/`priority`, `memory.size_bytes`/`ballooning`/`zram`/`ksm`, `disk.thin_provisioning`/`trim_on_shutdown`/`compact_on_shutdown`/`snapshot_timeout_secs`, `display.resolution` (any state; applied live to a running guest via the guest agent), `display.dpi`/`fps_limit`/`display_engine`/`fullscreen`, `gpu.render_backend`/`hostmem_bytes`/`blob`/`gl`, `network.mode`/`device_model`/`nat_backend`, `audio.backend`/`device`, `input.pointer_mode`/`hide_host_cursor`/`clipboard_enabled`, `firmware.enable_uefi`, `kind.android_profile.arm_translator` (Android, stopped instance). Any other key is rejected with `InvalidConfigKey` explaining why (immutable or unknown). |
 | `value` | `string` | New value. |
 
 ### `GuestPackageEntry`

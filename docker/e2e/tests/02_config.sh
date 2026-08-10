@@ -44,6 +44,20 @@ export VISUAL="sed -i s/name =/name =x/ $INSTANCE_TOML"
 expect_fail "config edit with a broken TOML" -- andler config edit "$ID"
 unset VISUAL
 
+echo "  [config status]"
+expect_ok "config status in sync after set/edit" -- andler config status "$ID"
+expect_out_grep "status shows in sync" "in sync"
+
+# A manual edit visible to the daemon only after a status call: on a stopped
+# instance the file is applied, so the status stays in sync and the loaded
+# config picks the edit up.
+export VISUAL="sed -i s/e2e-edited/e2e-status/ $INSTANCE_TOML"
+expect_ok "config status after hand edit" -- andler config status "$ID"
+expect_out_grep "hand edit applied, still in sync" "in sync"
+unset VISUAL
+expect_ok "config view sees the hand edit" -- andler config view "$ID"
+expect_out_grep "hand-edited name visible" "e2e-status"
+
 expect_ok "remove --purge" -- andler remove "$ID" --purge
 expect_ok "list empty" -- andler list
 expect_out_grep "no instances" "no instances"

@@ -136,8 +136,9 @@ impl Daemon {
     > {
         let handle = self.handle_for(id).await?;
         let snapshot = handle.reload_config().await?;
-        let memory = handle.config();
-        let diffs = andler_core::config::diff_configs(&snapshot.config, &memory);
+        let memory = &snapshot.config;
+        let file = snapshot.file_config.as_ref().unwrap_or(memory);
+        let diffs = andler_core::config::diff_configs(file, memory);
         Ok((
             snapshot.config,
             diffs,
