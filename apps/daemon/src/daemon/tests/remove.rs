@@ -90,15 +90,49 @@ async fn remove_instance_succeeds_from_stopped() {
 }
 
 #[tokio::test]
-async fn remove_instance_also_deletes_from_store() {
-    let store = andler_store::Store::open_in_memory().await.unwrap();
-    let daemon = Daemon::with_store(store.clone());
-    let id = daemon.create_instance(sample_config()).await.unwrap();
+async fn remove_instance_without_purge_forgets_registry_but_keeps_disk() {
+    let dir = TestTempDir::new();
+    let daemon = Daemon::new();
+    let mut cfg = sample_config();
+    let disk_path = dir.path().join("disk.qcow2");
+    let vars_path = dir.path().join("VARS.fd");
+    tokio::fs::write(&disk_path, b"disk").await.unwrap();
+    tokio::fs::write(&vars_path, b"vars").await.unwrap();
+    cfg.disk.path = disk_path.clone();
+    cfg.firmware.ovmf_vars_path = vars_path.clone();
+    let id = cfg.id;
+    super::types::write_instance_toml(dir.path(), &cfg).await;
+    let toml_path = dir.path().join("instance.toml");
+    assert!(toml_path.exists(), "precondition: toml seeded");
 
+    let daemon = Daemon::new();
+    daemon.create_instance(cfg).await.unwrap();
     daemon.remove_instance(id, false).await.unwrap();
 
-    let err = store.load_instance(id).await.unwrap_err();
-    assert!(matches!(err, andler_store::StoreError::NotFound(_)));
+    // Registry entry gone: a restart would not resurrect the instance.
+    assert!(!toml_path.exists());
+    // Disk and firmware files kept for reuse.
+    assert!(disk_path.exists());
+    assert!(vars_path.exists());
+}
+
+#[tokio::test]
+async fn remove_instance_with_purge_deletes_instance_toml() {
+    let dir = TestTempDir::new();
+    let daemon = Daemon::new();
+    let mut cfg = sample_config();
+    cfg.disk.path = dir.path().join("disk.qcow2");
+    cfg.firmware.ovmf_vars_path = dir.path().join("VARS.fd");
+    let id = cfg.id;
+    super::types::write_instance_toml(dir.path(), &cfg).await;
+    let toml_path = dir.path().join("instance.toml");
+    assert!(toml_path.exists());
+
+    let daemon = Daemon::new();
+    daemon.create_instance(cfg).await.unwrap();
+    daemon.remove_instance(id, true).await.unwrap();
+
+    assert!(!toml_path.exists());
 }
 
 #[tokio::test]

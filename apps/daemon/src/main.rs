@@ -183,6 +183,30 @@ fn default_store_path() -> String {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     init_tracing();
 
+    // One daemon per ANDLER_HOME: the lock file lives next to the database
+    // and is held (via the File's fd) for the whole process lifetime.
+    let home = andler_core::paths::andler_home();
+    std::fs::create_dir_all(&home)?;
+    let lock_file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(home.join("andlerd.lock"))?;
+    use std::os::fd::AsRawFd;
+    // SAFETY: fd is a valid open file descriptor owned by lock_file; flock
+    // does not take ownership and only fails with an errno we inspect.
+    let lock_result = unsafe { libc::flock(lock_file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    if lock_result != 0 {
+        eprintln!(
+            "andlerd: another daemon is already running for {} (flock failed: {}); \
+             stop it or point ANDLER_HOME elsewhere",
+            home.display(),
+            std::io::Error::last_os_error()
+        );
+        std::process::exit(1);
+    }
+    let _lock_file = lock_file;
+
     let addr: SocketAddr = std::env::var("ANDLERD_LISTEN_ADDR")
         .unwrap_or_else(|_| DEFAULT_LISTEN_ADDR.to_string())
         .parse()?;

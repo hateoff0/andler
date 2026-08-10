@@ -60,16 +60,14 @@
 - [x] gRPC error messages sanitized and truncated (384 chars) — long multi-KB package-manager stderr no longer trips the tonic h2 client with "h2 protocol error".
 - [x] `config set` whitelist + live display resolution — keys `display.resolution` (any state; applied live to a running guest via QGA and persisted via fw_cfg), `name`, `arm_translator` (stopped).
 - [x] QEMU backend: hot-plug disk/network devices — `andler attach disk|net` / `andler detach disk|net` over four new RPCs (`AttachDisk`/`DetachDisk`/`AttachNetwork`/`DetachNetwork`), gated on `Running`/`Paused`. Extra devices persist in `extra_disks`/`extra_networks` in `instance.toml` and are re-created from the command line at boot; QMP `blockdev-add`/`device_add`/`netdev_add`/`device_del` with async-aware detach (retries only on `DeviceInUse`), host tap lifecycle for bridge mode, rollback on failure. Extra disks are not covered by internal snapshots (see Known Limitations in `backends/andler-qemu/README.md`).
-
 - [x] Privilege: single passwordless-sudo entry point — `andler-helper`. New crate `apps/helper` (`andler-helper`, dir named after the existing `apps/cli`/`apps/daemon` pattern), binary `/usr/local/sbin/andler-helper` (root:root 0755, **std-only, zero deps**), one sudoers line `user ALL=(root) NOPASSWD: /usr/local/sbin/andler-helper` replaces the current ten (`modprobe`/`qemu-nbd`/`mount`/`umount`/`chroot`/`mkdir`/`cp`/`mv`/`rm`/`chmod`) that must stay in sync with every privileged call in `offline-disk` — a stale set broke offline installs and `doctor --fix` once overwrote the file instead of merging. Subcommands (each with strict validation, no shell anywhere): `nbd-connect <dev> <img>` (dev regex `/dev/nbd[0-9]+` + free via `/sys/block` size==0/no pid; img realpath + regular file), `nbd-disconnect` (idempotent no-op when already free), `modprobe-nbd` (fixed args, zero input), `mount-partition <dev> <mp>` (`-o rw`; mp last component owned by `SUDO_UID`), `mount-bind <src> <tgt>` (src ∈ `{/dev,/proc,/sys}`), `mount-tmpfs`, `umount <mp>` (lazy; must be a mount we created per `/proc/self/mountinfo`), `chroot-run <mount> <cmd> <args…>` (chroot(2)+execvp, cmd allowlist `apt-get|apt|dnf|pacman|ln`, clean env + `PATH`/`HOME=/root`), `guest-write <mount> <rel-path>` (stdin content, replaces the `sh -c` resolv hack and the `/tmp` temp-file detour in `sudo_write`), `file <mkdir-p|cp-a|mv|rm-rf|chmod> <paths…>` (every path realpath-checked under a managed mount), `sudoers-print` (replaces the `sudo -n chroot / cat` read-back), `--version`/`--help`. Core validation: parse `/proc/self/mountinfo`; a managed mount has `root=="/"` and `source` = nbd device / tmpfs / host bind; everything else must be a realpath prefix of one. Threat model documented honestly in `docs/ARCHITECTURE.md`: the helper narrows and structure-hardens the surface (argument injection, path traversal, symlink confusion, unqualified `chroot`), but a compromised daemon remains root — it is **not** a sandbox; the boundary is against bugs and other users. Install path is `andler doctor --fix` (interactive sudo `install -o root -g root -m 0755`; `install.sh` stays root-less and untouched); `--fix` migrates old 10-rule files in place when every line matches our pattern (foreign lines → refuse, warn), replaces the 10 binary probes with one `--version` check, and `uninstall.sh --purge` additionally removes the helper.
 
 ## In Progress
 
-- [ ] Daemon + CLI architecture rework (no more half-finished paths): audit and eliminate the accumulated inconsistencies, at minimum:
-- single config source of truth — the daemon keeps `InstanceConfig` in SQLite and only *writes* `instance.toml` (never reads it), so `config edit` and hand-edited TOML silently do nothing; pick one authority (TOML as source with the DB as cache, or store-backed with TOML as a rendered view) and make read/write consistent; revisit whether SQLite earns its place for instance config at all (snapshots/records yes, full config duplication no)
-- `config set` whitelist is a partial re-implementation of the TOML schema — every `InstanceConfig` key should be settable or explicitly rejected with a reason; `pointer_mode` is currently not settable at all (had to edit the DB row by hand)
-- every user-visible path (wizard, TOML, CLI flags, config set, config edit) must converge on the same resolved config with the same validation, so a key added in one place works everywhere (the `config edit` dead-end was found exactly this way)
-  - `config edit` must either reload the daemon's in-memory config or be removed
+- [x] Instance registry on files, not SQLite — `instance.toml` per instance under `~/.andler/instances/<id>/` is the single source of truth for config: the daemon re-reads it on every state transition (hand-edited TOML is honored, `config view` shows the file), `Daemon::restore()` scans the instances directory (broken entries are listed and removable, never fatal), and legacy databases are migrated to toml on first start (a conflicting pre-existing toml refuses startup). SQLite keeps only snapshot metadata. Non-purge `remove` deletes the registry entries and keeps the disk; `--purge` deletes everything.
+- [ ] Daemon + CLI architecture rework (no more half-finished paths), remaining items:
+`config set` whitelist is a partial re-implementation of the TOML schema — every `InstanceConfig` key should be settable or explicitly rejected with a reason; `pointer_mode` is currently not settable at all
+every user-visible path (wizard, TOML, CLI flags, config set, config edit) must converge on the same resolved config with the same validation, so a key added in one place works everywhere (the `config edit` dead-end was found exactly this way)
 - [ ] Offline guest ops via libguestfs (drop nbd/mount/chroot privilege): replace the `qemu-nbd` + host-mount + `chroot` pipeline in `offline-disk` with the `libguestfs` appliance (libguestfs runs its own unprivileged QEMU instance — no `/dev/nbd*`, no host mounts, no kernel module) so offline install/remove, ARM-translator staging, and boot-mode switching need no root at all and the remaining sudoers set (after the `andler-helper` consolidation) can shrink further. Trade-offs to spike before committing: (a) package-manager installs inside the guest — the chroot recipe (`bind_host_mounts`: guest resolv.conf, `/dev`/`/proc`/`/sys` binds, tmpfs on `/run`, `apt-get update` first) does not transfer to the appliance (its own kernel/sys), so the chroot-based apt/pacman/dnf install must be re-verified end-to-end or scoped out in favor of `virt-customize --install` semantics; (b) exclusive-access semantics — today NbdGuard takes a process flock; libguestfs has its own lock/aq abstraction that must not drop that guarantee; (c) the translator staging and boot-mode writes move from overlay paths to the guest layer (E2E expectations in `07_guest.sh` and fixture paths change); (d) dependency weight — static-linked `guestfs-tools` lands as a new runtime dependency. If the chroot-install spike fails, scoped-down version keeps nbd+mount for package installs only and moves translator/boot-mode to libguestfs. **Spike result (phase 0, live host, libguestfs 1.60.1): installroot does not start on this host** — the appliance ships no package manager (`supermin.d/packages`: rpm-tools only; no apt/dnf/pacman), so `virt-customize --install` is dead on Arch and the scoped-down version is confirmed: **libguestfs for file mutations only** (translator staging, boot-mode switch, resolv.conf/build.prop via guestfs write; `system.img` attached as a second drive of the same session — loop-mount not needed, the appliance has no `/bin/mount` anyway), package installs keep the chroot recipe or move online to the QGA mutator (guest runs its own package manager); exclusive access confirmed — a second parallel agent fails to open the image (qemu image lock); one session ≈ 1.7–1.8 s cold, batch sessions per operation package, never per-file. Readiness-threat contract and log policy live in `docs/ARCHITECTURE.md`.
 - [ ] Core: add VM resource limits (CPU pinning, memory overcommit)
 - [ ] QMP event subscription (async events beyond command responses)
@@ -77,9 +75,34 @@
 - [ ] CLI: add `--export` flag to export VM as OCI container
 - [ ] Core: add VM template system for quick VM creation
 
-### Long-term
+## Short-term  
 
-- [ ] Tauri GUI client
+- [ ] USB device pass-through (`usb-host,vendorid=...,productid=...`) — useful
+  for both guest kinds (peripherals into a Linux guest, a physical device
+  into Android); not yet tracked anywhere
+- [ ] `cmdline.rs`: CPU flag accumulator with dedup + conflict detection
+  (reject `+flag` after `-flag` already set, instead of silently building a
+  broken QEMU arg string) — quickemu's `add_cpu_flag()` is a concrete
+  reference; worth doing as part of the `cmdline.rs` split (already flagged
+  oversized, see architecture rework)
+- [ ] Wizard: verify host RAM/core auto-tiering against quickemu's model
+  (RAM: ≥128G host → 32G VM, ≥64→16, ≥16→8, ≥8→4; cores: tiered by
+  `nproc`, hard-fail with the exact config key to fix if a guest OS floor
+  isn't met) — the wizard already does "hardware auto-detection"; confirm
+  whether host-capacity tiering specifically is already covered before
+  building it again
+- [ ] OVMF firmware-path discovery: walk a prioritized candidate list across
+  distro packaging layouts (Debian/Fedora/Nix/Arch put OVMF in different
+  places) instead of one fixed path, so `andler-firmware` doesn't silently
+  fail on a host it hasn't been tested against — quickemu's
+  `get_qemu_share_path()` + OVMF candidate list is a concrete reference
+
+## Medium-term
+
 - [ ] Multi-disk support (snapshot device name parameterization)
 - [ ] Live migration between hosts
+- [ ] Tauri GUI client
+
+## Long-term
+
 - [ ] GPU passthrough via VFIO (`RenderBackend::Passthrough`)

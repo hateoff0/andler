@@ -46,15 +46,19 @@ async fn list_instances_reflects_state_after_failed_start() {
 
 #[tokio::test]
 async fn list_instances_after_restore_includes_restored_instances() {
-    let store = andler_store::Store::open_in_memory().await.unwrap();
-    let cfg = sample_config();
+    let root = TestTempDir::new();
+    let mut cfg = sample_config();
+    cfg.disk.path = root.path().join("disk.qcow2");
+    cfg.firmware.ovmf_vars_path = root.path().join("VARS.fd");
     let id = cfg.id;
-    store
-        .save_instance(&cfg, &InstanceState::Created)
+    let instance_dir = root.path().join(id.to_string());
+    tokio::fs::create_dir_all(&instance_dir).await.unwrap();
+    super::types::write_instance_toml(&instance_dir, &cfg).await;
+    let store = andler_store::Store::open_in_memory().await.unwrap();
+
+    let daemon = Daemon::restore_with_root(store, root.path().to_path_buf())
         .await
         .unwrap();
-
-    let daemon = Daemon::restore(store).await.unwrap();
     let summaries = daemon.list_instances().await;
 
     assert_eq!(summaries.len(), 1);

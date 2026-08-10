@@ -106,7 +106,7 @@ impl Daemon {
 
         let mut config = sup.config();
         config.extra_disks.push(cfg);
-        sup.set_config(config).await?;
+        sup.set_config(config, None).await?;
 
         Ok((disk_path, index))
     }
@@ -129,7 +129,7 @@ impl Daemon {
         let sup = self.handle_for(id).await?;
         let mut config = sup.config();
         config.extra_disks.remove(index);
-        sup.set_config(config).await?;
+        sup.set_config(config, None).await?;
         Ok(())
     }
 
@@ -156,7 +156,7 @@ impl Daemon {
         let sup = self.handle_for(id).await?;
         let mut config = sup.config();
         config.extra_networks.push(network);
-        sup.set_config(config).await?;
+        sup.set_config(config, None).await?;
 
         Ok(index)
     }
@@ -180,7 +180,7 @@ impl Daemon {
         let sup = self.handle_for(id).await?;
         let mut config = sup.config();
         config.extra_networks.remove(index);
-        sup.set_config(config).await?;
+        sup.set_config(config, None).await?;
         Ok(())
     }
 }

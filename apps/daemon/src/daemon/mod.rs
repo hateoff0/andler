@@ -1,3 +1,4 @@
+mod audit;
 mod clone_ops;
 mod error;
 mod health_ops;
@@ -15,8 +16,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use andler_core::{
-    BackendError, BackendHandle, BackendKind, DaemonEvent, HypervisorBackend, InstanceConfig,
-    InstanceEvent, InstanceId, InstanceState,
+    BackendError, BackendHandle, BackendKind, DaemonEvent, HypervisorBackend, InstanceEvent,
+    InstanceId, InstanceState,
 };
 use andler_qemu::QemuBackend;
 use andler_store::Store;
@@ -32,6 +33,9 @@ fn default_backends() -> HashMap<BackendKind, Arc<dyn HypervisorBackend>> {
 pub struct Daemon {
     pub(crate) backends: HashMap<BackendKind, Arc<dyn HypervisorBackend>>,
     pub(crate) supervisors: RwLock<HashMap<InstanceId, SupervisorHandle>>,
+    /// Registry entries whose instance.toml is missing/unreadable; kept so
+    /// list/resolve/remove still see them, with the reason attached.
+    pub(crate) broken: RwLock<HashMap<InstanceId, String>>,
     pub(crate) store: Option<Store>,
     events: broadcast::Sender<DaemonEvent>,
 }
@@ -51,79 +55,171 @@ impl Daemon {
         Self::with_backends_and_store(default_backends(), None)
     }
 
-    #[cfg(test)]
-    pub fn with_store(store: Store) -> Self {
-        Self::with_backends_and_store(default_backends(), Some(store))
+    pub async fn restore(store: Store) -> Result<Self, DaemonError> {
+        Self::restore_with_root(store, andler_core::paths::instances_root()).await
     }
 
-    pub async fn restore(store: Store) -> Result<Self, DaemonError> {
-        let stored = store.load_all().await?;
-
+    /// File-based registry builder. `instances_root` is parameterized for
+    /// tests; production goes through [`Self::restore`].
+    pub async fn restore_with_root(
+        store: Store,
+        instances_root: std::path::PathBuf,
+    ) -> Result<Self, DaemonError> {
         let backends = default_backends();
         let (events, _) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
-        let mut supervisors = HashMap::with_capacity(stored.len());
-        for entry in stored {
-            let id = entry.config.id;
-            let mut recovered_handle: Option<BackendHandle> = None;
-            let state = match entry.state {
-                state @ (InstanceState::Created
-                | InstanceState::Stopped
-                | InstanceState::Error { .. }) => state,
-                recoverable_state @ (InstanceState::Running | InstanceState::Paused) => {
-                    let backend = backends
-                        .get(&entry.config.backend)
-                        .ok_or_else(|| DaemonError::NoBackendRegistered(entry.config.backend))?;
-                    match backend.adopt(&entry.config).await {
-                        Ok((backend_handle, actual_state)) => {
-                            tracing::info!(
-                                instance_id = %id,
-                                previous_state = ?recoverable_state,
-                                ?actual_state,
-                                "reconnected to a QEMU process that survived the daemon restart"
-                            );
-                            recovered_handle = Some(backend_handle);
-                            actual_state
-                        }
-                        Err(adopt_err) => {
-                            tracing::warn!(
-                                instance_id = %id,
-                                error = %adopt_err,
-                                "failed to reconnect to instance process after restart; \
-                                 marking as Error"
-                            );
-                            InstanceState::Error {
-                                message: format!(
-                                    "andlerd restarted while instance was in {recoverable_state:?} \
-                                     but the backend process could not be recovered: {adopt_err}"
-                                ),
-                            }
-                        }
+        let mut supervisors = HashMap::new();
+        let mut broken: HashMap<InstanceId, String> = HashMap::new();
+
+        // Legacy migration (pre-phase-1 databases): write each stored config
+        // out as instance.toml. A file that already exists and differs is an
+        // ambiguity — refuse loudly instead of silently picking one.
+        let legacy = store.load_legacy_instances().await?;
+        let migrated = legacy.len();
+        for cfg in &legacy {
+            let id = cfg.id;
+            let dir = instances_root.join(id.to_string());
+            let toml_path = dir.join("instance.toml");
+            if toml_path.exists() {
+                let content =
+                    tokio::fs::read_to_string(&toml_path)
+                        .await
+                        .map_err(|err| DaemonError::Io {
+                            path: toml_path.clone(),
+                            source: err,
+                        })?;
+                match andler_core::config::parse_instance_config_toml(&content) {
+                    Ok(file_cfg) if file_cfg == *cfg => {}
+                    Ok(_) | Err(_) => {
+                        return Err(DaemonError::ConfigMigrationConflict {
+                            instance_id: id,
+                            file_path: toml_path,
+                        });
                     }
                 }
-                lost_state @ (InstanceState::Starting | InstanceState::Stopping) => {
-                    tracing::warn!(
-                        instance_id = %id,
-                        previous_state = ?lost_state,
-                        "restored instance was mid-operation before restart; result unknown, \
-                         marking as Error"
+            } else {
+                andler_core::paths::ensure_private_dir(&dir)
+                    .await
+                    .map_err(|err| DaemonError::Io {
+                        path: dir.clone(),
+                        source: err,
+                    })?;
+                types::write_instance_toml(&dir, cfg).await;
+            }
+        }
+        if !legacy.is_empty() {
+            store.finalize_config_migration().await?;
+            tracing::info!(
+                migrated,
+                "migrated instance configs from the legacy store to instance.toml"
+            );
+        }
+
+        // Directory scan: every instance is a directory under
+        // ~/.andler/instances/<id> whose instance.toml is the source of
+        // truth. Unreadable entries are tracked as broken — listed with the
+        // reason and removable — never fatal to daemon startup. The root
+        // itself is created (0700) when missing, e.g. a fresh ANDLER_HOME.
+        andler_core::paths::ensure_private_dir(&instances_root)
+            .await
+            .map_err(|err| DaemonError::Io {
+                path: instances_root.clone(),
+                source: err,
+            })?;
+        let mut entries =
+            tokio::fs::read_dir(&instances_root)
+                .await
+                .map_err(|err| DaemonError::Io {
+                    path: instances_root.clone(),
+                    source: err,
+                })?;
+        while let Some(entry) = entries.next_entry().await.map_err(|err| DaemonError::Io {
+            path: instances_root.clone(),
+            source: err,
+        })? {
+            let Ok(file_type) = entry.file_type().await else {
+                continue;
+            };
+            if !file_type.is_dir() {
+                continue;
+            }
+            let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+                continue;
+            };
+            let Ok(id) = name.parse::<InstanceId>() else {
+                continue;
+            };
+            if supervisors.contains_key(&id) || broken.contains_key(&id) {
+                continue;
+            }
+
+            let dir = entry.path();
+            let toml_path = dir.join("instance.toml");
+            let content = match tokio::fs::read_to_string(&toml_path).await {
+                Ok(content) => content,
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                    broken.insert(
+                        id,
+                        "instance.toml is missing — was the instance directory tampered \
+                         with? `andler remove --purge` can clean it up"
+                            .to_string(),
                     );
-                    InstanceState::Error {
-                        message: format!(
-                            "andlerd restarted while instance was in state {lost_state:?}; \
-                             the in-flight operation's result is unknown — check \
-                             'andler status' and 'andler snapshot list' before acting"
-                        ),
-                    }
+                    continue;
+                }
+                Err(err) => {
+                    broken.insert(id, format!("cannot read instance.toml: {err}"));
+                    continue;
                 }
             };
-            let handle = spawn_supervisor(
-                id,
-                entry.config,
-                state,
-                recovered_handle.clone(),
-                Some(store.clone()),
-                events.clone(),
-            );
+            let cfg = match andler_core::config::parse_instance_config_toml(&content) {
+                Ok(cfg) => cfg,
+                Err(err) => {
+                    broken.insert(
+                        id,
+                        format!(
+                            "invalid instance.toml ({err}) — fix the file or `andler remove \
+                             --purge` the directory"
+                        ),
+                    );
+                    continue;
+                }
+            };
+            if cfg.id != id {
+                broken.insert(
+                    id,
+                    "instance.toml belongs to a different instance id — fix the file or \
+                     `andler remove --purge` the directory"
+                        .to_string(),
+                );
+                continue;
+            }
+
+            // Adopt any QEMU process that survived the daemon restart; no
+            // socket means no process and the instance is simply stopped.
+            let mut state = InstanceState::Stopped;
+            let mut recovered_handle: Option<BackendHandle> = None;
+            let backend = backends
+                .get(&cfg.backend)
+                .ok_or_else(|| DaemonError::NoBackendRegistered(cfg.backend))?;
+            match backend.adopt(&cfg).await {
+                Ok((backend_handle, actual_state)) => {
+                    tracing::info!(
+                        instance_id = %id,
+                        ?actual_state,
+                        "reconnected to a QEMU process that survived the daemon restart"
+                    );
+                    recovered_handle = Some(backend_handle);
+                    state = actual_state;
+                }
+                Err(adopt_err) => {
+                    tracing::debug!(
+                        instance_id = %id,
+                        error = %adopt_err,
+                        "no live backend process to adopt; instance starts stopped"
+                    );
+                }
+            }
+
+            let handle = spawn_supervisor(id, cfg, state, recovered_handle.clone(), events.clone());
             if let Some(backend_handle) = recovered_handle {
                 let backend = backends
                     .get(&handle.config().backend)
@@ -136,6 +232,7 @@ impl Daemon {
         Ok(Self {
             backends,
             supervisors: RwLock::new(supervisors),
+            broken: RwLock::new(broken),
             store: Some(store),
             events,
         })
@@ -149,6 +246,7 @@ impl Daemon {
         Daemon {
             backends,
             supervisors: RwLock::new(HashMap::new()),
+            broken: RwLock::new(HashMap::new()),
             store,
             events,
         }
@@ -227,24 +325,6 @@ impl Daemon {
         let backend = self.backend_for(handle.config().backend)?.clone();
 
         Ok((backend, backend_handle))
-    }
-
-    pub(crate) async fn persist_new_instance(
-        &self,
-        cfg: &InstanceConfig,
-        state: &InstanceState,
-    ) -> Result<(), DaemonError> {
-        let Some(store) = &self.store else {
-            return Ok(());
-        };
-        store.save_instance(cfg, state).await.map_err(|err| {
-            tracing::error!(
-                instance_id = %cfg.id,
-                error = %err,
-                "failed to persist new instance to store"
-            );
-            DaemonError::Store(err)
-        })
     }
 }
 

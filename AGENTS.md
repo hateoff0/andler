@@ -16,7 +16,7 @@ User → andler-cli (gRPC client) → andler-daemon (gRPC server) → andler-qem
 - **Domain-driven separation**: Pure domain types in `andler-core` — no I/O dependencies
 - **Backend abstraction**: `HypervisorBackend` trait defines hypervisor-agnostic interface — sync methods: `name`, `supported_render_backends`, `metrics_stream`, `log_stream`; async: lifecycle (`spawn`/`pause`/`resume`/`stop`/`status`), snapshots (`snapshot`/`snapshot_restore`/`snapshot_delete`/`snapshot_list`), guest operations (`is_guest_agent_available`, `set_guest_display_resolution`, `guest_exec_install`, `guest_exec_remove`, `guest_check_binary_installed`). Method counts drift with features — count from `core/andler-core/src/backend.rs`, never from this file. New backend = implement this trait
 - **Explicit FSM**: Instance lifecycle governed by strict state machine (7 states, 7 events). No implicit transitions
-- **Persistence optional**: Daemon works with or without SQLite. In-memory is source of truth for current session
+- **Persistence optional**: Daemon works with or without SQLite. Instance configs live in per-instance `instance.toml` files (re-read on every state transition); SQLite holds only snapshot metadata
 - **No global state**: Each crate has clear responsibilities
 
 ### Crate Dependency Graph
@@ -57,7 +57,7 @@ Any active state can transition to `Error` via `Fail(msg)`. `Stopped`/`Error` ac
 | `services/andler-disk/` | `qemu-img`/`qemu-nbd` wrappers: disk create/clone/resize/compact, offline guest provisioning (guest tools, ARM translators), free-space pre-check |
 | `services/andler-net/` | Bridge/isolated network modes via `iproute2` |
 | `services/andler-firmware/` | Hardware auto-detection, GPU metrics (NVIDIA/AMD/Intel), firmware discovery |
-| `services/andler-store/` | SQLite persistence (two tables: `instances`, `snapshots`) |
+| `services/andler-store/` | SQLite snapshot metadata + legacy instance-config migration (see crate README) |
 | `services/andler-rpc/` | Protobuf definitions, gRPC generated code, proto↔domain conversions |
 | `apps/daemon/` | Background service: orchestrates backends, FSM transitions, gRPC server |
 | `apps/cli/` | Thin gRPC client: one subcommand = one gRPC request + print response |
@@ -244,7 +244,7 @@ Commit hygiene:
 
 ### Dependency Injection
 
-- `Daemon::new()` / `with_store()` / `restore()` — three construction paths
+- `Daemon::new()` / `restore()` — two construction paths (file-based registry scan, see `docs/ARCHITECTURE.md`)
 - Backend registry: `HashMap<BackendKind, Arc<dyn HypervisorBackend>>`
 - `default_backends()` function ensures consistent registry across constructors
 - `Option<Store>` — persistence is opt-in, not mandatory
@@ -373,7 +373,7 @@ A multi-phase architecture rework (see Branching) is tracked by a plan file crea
 
 ### Persistence
 
-- `services/andler-store/src/store.rs` — SQLite store (instances + snapshots), `Arc<Mutex<Connection>>`
+- `services/andler-store/src/store.rs` — SQLite store (snapshot metadata; legacy `instances` table migration on daemon startup), `Arc<Mutex<Connection>>`
 
 ### Daemon Logic
 
@@ -456,9 +456,9 @@ A multi-phase architecture rework (see Branching) is tracked by a plan file crea
 - **`ANDLERD_STORE_PATH` must live in a user-owned directory** — `ensure_private_dir` chmods the parent 0700 and fails with `PermissionDenied` on root-owned directories like `/tmp`.
 - **Never attach a second client to a live `qmp.sock`/`qga.sock`** — a QEMU chardev serves only the latest client, so a probe starves the daemon and hangs its operation (see Known Limitations in `backends/andler-qemu/README.md`).
 - **`config edit` spawns `$VISUAL`/`$EDITOR`** — the variable's value is executed as a command (e.g. `VISUAL="sed -i s/OldValue/NewValue/ /path/to/instance.toml"`); in scripted/agent environments the default (`true`) would fail, so always set it explicitly.
-- **A daemon restart loses live instances** — instances that were `Running` restore in `Error` state (backend handle gone); `start` is the documented recovery path and works from `Error`.
+- **A daemon restart loses live instances** — instances with no surviving QEMU process restore in `Stopped` state (backend handle gone); `start` is the documented recovery path. Live QEMU processes are adopted and resume their state (see `docs/ARCHITECTURE.md`).
 - **Diagnosing a failed start**: read the tail of `~/.andler/instances/<id>/qemu.log` and `console.log` (QEMU stderr/stdout/serial); `andler logs <id>` streams the same.
-- **Instance stuck in `Error`**: the state message (from `andler status`) records why (health check, backend loss); after a daemon restart the `Error` record points at the original failure, and `start` retries.
+- **Instance stuck in `Error`**: the state message (from `andler status`) records why (health check, backend loss); `start` retries from `Error`.
 - **daemon tracing**: run andlerd with `RUST_LOG=debug` (or `ANDLERD_LOG_FORMAT=json`) for request-level diagnostics; the CLI `-v`/`-vv` flags affect the client only.
 
 ### Key Dependencies

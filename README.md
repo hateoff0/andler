@@ -523,6 +523,10 @@ Thanks to the projects ANDLER builds on. Titles link to the source of truth.
 - [containerd](https://github.com/containerd/containerd) — gRPC daemon
   architecture reference: plugin services, snapshots, event streaming,
   thin `ctr` client
+- [quickemu](https://github.com/quickemu-project/quickemu) — cmdline-building
+  reference: host-capability-driven CPU flag selection with conflict
+  detection, RAM/core auto-tiering by host capacity, and OVMF firmware-path
+  discovery across distro packaging layouts
 - [tokio](https://github.com/tokio-rs/tokio) · [tonic/prost](https://github.com/hyperium/tonic) ·
   [clap](https://github.com/clap-rs/clap) · [rusqlite](https://github.com/rusqlite/rusqlite) ·
   [serde](https://github.com/serde-rs/serde) · [tracing](https://github.com/tokio-rs/tracing) ·

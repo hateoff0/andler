@@ -48,8 +48,19 @@ pub(crate) async fn write_instance_toml(instance_dir: &std::path::Path, cfg: &In
         }
     };
 
+    // tmp+rename so a concurrent reader never observes a half-written file.
     let path = instance_dir.join("instance.toml");
-    if let Err(err) = tokio::fs::write(&path, toml_string).await {
+    let tmp_path = instance_dir.join("instance.toml.tmp");
+    if let Err(err) = tokio::fs::write(&tmp_path, toml_string).await {
+        tracing::error!(
+            instance_id = %cfg.id,
+            path = %tmp_path.display(),
+            error = %err,
+            "failed to write instance.toml (instance was still created successfully)"
+        );
+        return;
+    }
+    if let Err(err) = tokio::fs::rename(&tmp_path, &path).await {
         tracing::error!(
             instance_id = %cfg.id,
             path = %path.display(),
@@ -93,6 +104,22 @@ pub(crate) async fn purge_instance_files(id: InstanceId, config: &InstanceConfig
         }
     }
 
+    for audit_file in ["instance.toml", "events.jsonl"] {
+        if let Some(dir) = instance_dir {
+            let path = dir.join(audit_file);
+            if let Err(err) = tokio::fs::remove_file(&path).await {
+                if err.kind() != std::io::ErrorKind::NotFound {
+                    tracing::error!(
+                        instance_id = %id,
+                        path = %path.display(),
+                        error = %err,
+                        "purge: failed to remove {audit_file}"
+                    );
+                }
+            }
+        }
+    }
+
     if let Some(parent) = config.disk.path.parent() {
         let is_instance_dir = parent
             .file_name()
@@ -113,9 +140,33 @@ pub(crate) async fn purge_instance_files(id: InstanceId, config: &InstanceConfig
     }
 }
 
+/// Removes the registry entries (instance.toml, events.jsonl) for a removed
+/// instance without touching its disk or firmware files.
+pub async fn remove_registry_entries(config: &InstanceConfig) {
+    let Some(dir) = config.disk.path.parent() else {
+        return;
+    };
+    for file in ["instance.toml", "events.jsonl"] {
+        let path = dir.join(file);
+        if let Err(err) = tokio::fs::remove_file(&path).await {
+            if err.kind() != std::io::ErrorKind::NotFound {
+                tracing::error!(
+                    instance_id = %config.id,
+                    path = %path.display(),
+                    error = %err,
+                    "remove: failed to remove {file}"
+                );
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InstanceSummary {
     pub id: InstanceId,
     pub name: String,
     pub state: InstanceState,
+    /// Set for registry entries whose instance.toml is missing or unreadable;
+    /// such entries carry no config, so name/state are placeholders.
+    pub broken_reason: Option<String>,
 }

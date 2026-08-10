@@ -2,7 +2,7 @@ use super::error::DaemonError;
 use super::types::InstanceSummary;
 use super::Daemon;
 use andler_core::{
-    BackendStatus, InstanceConfig, InstanceId, InstanceState, LogLine, ResourceMetrics,
+    BackendStatus, InstanceConfig, InstanceId, InstanceState, LogLine, Resolution, ResourceMetrics,
 };
 use futures_core::stream::BoxStream;
 use futures_util::StreamExt;
@@ -94,7 +94,7 @@ impl Daemon {
 
     pub async fn list_instances(&self) -> Vec<InstanceSummary> {
         let supervisors = self.supervisors.read().await;
-        supervisors
+        let mut summaries: Vec<InstanceSummary> = supervisors
             .values()
             .map(|handle| {
                 let config = handle.config();
@@ -102,9 +102,48 @@ impl Daemon {
                     id: config.id,
                     name: config.name.clone(),
                     state: handle.state(),
+                    broken_reason: None,
                 }
             })
-            .collect()
+            .collect();
+
+        let broken = self.broken.read().await;
+        summaries.extend(broken.iter().map(|(id, reason)| InstanceSummary {
+            id: *id,
+            name: String::new(),
+            state: InstanceState::Error {
+                message: reason.clone(),
+            },
+            broken_reason: Some(reason.clone()),
+        }));
+        summaries.sort_by_key(|summary| summary.id.to_string());
+        summaries
+    }
+
+    /// File-vs-memory diff for `config status`, after a reload so manual
+    /// edits made since the last operation are visible.
+    pub async fn config_status(
+        &self,
+        id: InstanceId,
+    ) -> Result<
+        (
+            InstanceConfig,
+            Vec<(String, String, String)>,
+            Option<String>,
+            Option<Resolution>,
+        ),
+        DaemonError,
+    > {
+        let handle = self.handle_for(id).await?;
+        let snapshot = handle.reload_config().await?;
+        let memory = handle.config();
+        let diffs = andler_core::config::diff_configs(&snapshot.config, &memory);
+        Ok((
+            snapshot.config,
+            diffs,
+            snapshot.file_error,
+            snapshot.live_resolution,
+        ))
     }
 
     pub async fn get_instance_config(&self, id: InstanceId) -> Result<InstanceConfig, DaemonError> {
@@ -143,7 +182,14 @@ impl Daemon {
             return Err(DaemonError::ConfigDiskPathChanged(id));
         }
 
-        handle.set_config(new_config).await?;
+        // Deprecated path (CLI `config edit` now edits the file directly):
+        // keep file and memory in sync so callers of the RPC still observe
+        // the TOML as the source of truth.
+        let instance_dir = new_config.disk.path.parent().map(std::path::PathBuf::from);
+        if let Some(dir) = instance_dir {
+            super::types::write_instance_toml(&dir, &new_config).await;
+        }
+        handle.set_config(new_config, None).await?;
 
         Ok(())
     }

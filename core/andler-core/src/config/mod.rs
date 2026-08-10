@@ -7,6 +7,8 @@ mod firmware;
 mod gpu;
 mod input;
 mod instance;
+mod keypath;
+mod loader;
 mod memory;
 mod network;
 
@@ -19,6 +21,10 @@ pub use firmware::FirmwareConfig;
 pub use gpu::{GpuConfig, RenderBackend};
 pub use input::{InputConfig, PointerMode};
 pub use instance::{BackendKind, InstanceConfig, InstanceId, InstanceKind, INSTANCE_ID_HEX_LEN};
+pub use keypath::{
+    config_keys, diff_configs, get_key, is_live_key, set_key, ConfigKey, ConfigKeyError,
+};
+pub use loader::{instance_config_to_toml, parse_instance_config_toml};
 pub use memory::MemoryConfig;
 pub use network::{NatBackend, NetworkConfig, NetworkMode};
 

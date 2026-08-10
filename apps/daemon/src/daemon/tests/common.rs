@@ -2,8 +2,8 @@ use super::*;
 pub(crate) use andler_core::AndroidVersion;
 use andler_core::{
     AndroidProfile, ArmTranslator, AudioConfig, CdromBus, CpuConfig, DiskConfig, DisplayConfig,
-    FirmwareConfig, GpuConfig, InputConfig, InstanceKind, InstanceState, MemoryConfig,
-    NetworkConfig,
+    FirmwareConfig, GpuConfig, InputConfig, InstanceConfig, InstanceKind, InstanceState,
+    MemoryConfig, NetworkConfig,
 };
 use std::path::PathBuf;
 
@@ -85,7 +85,7 @@ pub(crate) async fn register_with_state(
     handle: Option<andler_core::BackendHandle>,
 ) -> InstanceId {
     let id = cfg.id;
-    let supervisor = super::spawn_supervisor(id, cfg, state, handle, None, daemon.event_sender());
+    let supervisor = super::spawn_supervisor(id, cfg, state, handle, daemon.event_sender());
     daemon.supervisors.write().await.insert(id, supervisor);
     id
 }

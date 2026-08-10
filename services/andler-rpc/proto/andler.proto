@@ -13,6 +13,7 @@ service AndlerService {
     rpc ListInstances(Empty) returns (ListInstancesResponse);
     rpc RemoveInstance(RemoveInstanceRequest) returns (Empty);
     rpc GetInstanceConfig(InstanceIdRequest) returns (GetInstanceConfigResponse);
+    rpc GetConfigStatus(InstanceIdRequest) returns (GetConfigStatusResponse);
     rpc UpdateInstanceConfig(UpdateInstanceConfigRequest) returns (Empty);
     rpc StreamInstanceLogs(InstanceIdRequest) returns (stream LogLineResponse);
     rpc StreamResourceMetrics(InstanceIdRequest) returns (stream ResourceMetricsResponse);
@@ -281,6 +282,7 @@ message InstanceListEntry {
     string name = 2;
     InstanceStateKind state = 3;
     string error_message = 4;
+    optional string broken_reason = 5;
 }
 
 message ListInstancesResponse {
@@ -464,6 +466,21 @@ message SetInstanceConfigRequest {
     string instance_ref = 1;
     string key = 2;
     string value = 3;
+}
+
+message ConfigKeyDiff {
+    string key = 1;
+    string file_value = 2;
+    string memory_value = 3;
+}
+
+message GetConfigStatusResponse {
+    string instance_id = 1;
+    string name = 2;
+    InstanceStateKind state = 3;
+    repeated ConfigKeyDiff diffs = 4;
+    optional string live_resolution = 5;
+    optional string file_error = 6;
 }
 
 message AttachDiskRequest {

@@ -22,6 +22,10 @@ pub use backend::{
     SnapshotInfo,
 };
 pub use clone::CloneMode;
+pub use config::{
+    config_keys, diff_configs, get_key, instance_config_to_toml, is_live_key,
+    parse_instance_config_toml, set_key, ConfigKey, ConfigKeyError,
+};
 pub use config::{migrate_schema, CURRENT_SCHEMA_VERSION};
 pub use config::{
     AudioBackend, AudioConfig, AudioDevice, BackendKind, CdromBus, CpuConfig, CpuPriority,
@@ -35,3 +39,4 @@ pub use events::{
     OperationState, QmpEvent,
 };
 pub use fsm::{InstanceEvent, InstanceState};
+pub mod sizes;

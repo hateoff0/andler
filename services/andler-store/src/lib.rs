@@ -2,4 +2,4 @@ pub mod error;
 pub mod store;
 
 pub use error::StoreError;
-pub use store::{Store, StoredInstance, StoredSnapshot};
+pub use store::{Store, StoredSnapshot};

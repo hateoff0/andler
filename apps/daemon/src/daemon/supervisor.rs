@@ -1,8 +1,10 @@
+use std::path::PathBuf;
+use std::time::SystemTime;
+
 use andler_core::{
     BackendHandle, DaemonEvent, EventKind, FsmError, InstanceConfig, InstanceEvent, InstanceId,
-    InstanceState,
+    InstanceState, Resolution,
 };
-use andler_store::Store;
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 
 use super::error::DaemonError;
@@ -36,9 +38,28 @@ pub(crate) enum SupervisorCommand {
     },
     SetConfig {
         config: InstanceConfig,
+        applied_live_resolution: Option<Resolution>,
         ack: oneshot::Sender<Result<(), ()>>,
     },
+    /// Re-reads instance.toml when its mtime changed and reports the current
+    /// file-vs-memory picture (for `config status` and as the read side of
+    /// read-modify-write `config set`).
+    ReloadConfig {
+        ack: oneshot::Sender<Result<ConfigSnapshot, DaemonError>>,
+    },
     Shutdown,
+}
+
+/// File-vs-memory config picture, produced by `ReloadConfig`.
+#[derive(Debug, Clone)]
+pub(crate) struct ConfigSnapshot {
+    pub(crate) config: InstanceConfig,
+    /// Set when instance.toml exists but cannot be parsed or belongs to a
+    /// different instance; the in-memory config is then left untouched.
+    pub(crate) file_error: Option<String>,
+    /// Resolution actually applied to the guest through the live RPC path,
+    /// if any (may differ from both file and memory values).
+    pub(crate) live_resolution: Option<Resolution>,
 }
 
 impl SupervisorHandle {
@@ -89,11 +110,16 @@ impl SupervisorHandle {
         result.map_err(|_| DaemonError::InstanceSupervisorGone(self.id))
     }
 
-    pub(crate) async fn set_config(&self, config: InstanceConfig) -> Result<(), DaemonError> {
+    pub(crate) async fn set_config(
+        &self,
+        config: InstanceConfig,
+        applied_live_resolution: Option<Resolution>,
+    ) -> Result<(), DaemonError> {
         let (ack_tx, ack_rx) = oneshot::channel();
         self.cmd_tx
             .send(SupervisorCommand::SetConfig {
                 config,
+                applied_live_resolution,
                 ack: ack_tx,
             })
             .await
@@ -102,6 +128,17 @@ impl SupervisorHandle {
             .await
             .map_err(|_| DaemonError::InstanceSupervisorGone(self.id))?;
         result.map_err(|_| DaemonError::InstanceSupervisorGone(self.id))
+    }
+
+    pub(crate) async fn reload_config(&self) -> Result<ConfigSnapshot, DaemonError> {
+        let (ack_tx, ack_rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SupervisorCommand::ReloadConfig { ack: ack_tx })
+            .await
+            .map_err(|_| DaemonError::InstanceSupervisorGone(self.id))?;
+        ack_rx
+            .await
+            .map_err(|_| DaemonError::InstanceSupervisorGone(self.id))?
     }
 
     pub(crate) async fn shutdown(&self) {
@@ -114,12 +151,16 @@ struct InstanceSupervisor {
     state: InstanceState,
     handle: Option<BackendHandle>,
     config: InstanceConfig,
-    store: Option<Store>,
     events: broadcast::Sender<DaemonEvent>,
     state_tx: watch::Sender<InstanceState>,
     handle_tx: watch::Sender<Option<BackendHandle>>,
     config_tx: watch::Sender<InstanceConfig>,
     inbox: mpsc::Receiver<SupervisorCommand>,
+    config_path: PathBuf,
+    audit_dir: PathBuf,
+    config_mtime: Option<SystemTime>,
+    file_error: Option<String>,
+    live_resolution: Option<Resolution>,
 }
 
 pub(crate) fn spawn_supervisor(
@@ -127,7 +168,6 @@ pub(crate) fn spawn_supervisor(
     config: InstanceConfig,
     state: InstanceState,
     handle: Option<BackendHandle>,
-    store: Option<Store>,
     events: broadcast::Sender<DaemonEvent>,
 ) -> SupervisorHandle {
     let (cmd_tx, inbox) = mpsc::channel(64);
@@ -135,17 +175,27 @@ pub(crate) fn spawn_supervisor(
     let (handle_tx, handle_rx) = watch::channel(handle.clone());
     let (config_tx, config_rx) = watch::channel(config.clone());
 
+    let instance_dir = config.disk.path.parent().map(PathBuf::from);
+    let (config_path, audit_dir) = match &instance_dir {
+        Some(dir) => (dir.join("instance.toml"), dir.clone()),
+        None => (PathBuf::from("instance.toml"), PathBuf::from(".")),
+    };
+
     let supervisor = InstanceSupervisor {
         id,
         state,
         handle,
         config,
-        store,
         events,
         state_tx,
         handle_tx,
         config_tx,
         inbox,
+        config_path,
+        audit_dir,
+        config_mtime: None,
+        file_error: None,
+        live_resolution: None,
     };
     // Watchdog: never fire-and-forget a task that owns instance
     // state. The JoinHandle is awaited by a tiny watcher so a supervisor
@@ -185,11 +235,26 @@ impl InstanceSupervisor {
                     let _ = self.handle_tx.send(handle);
                     let _ = ack.send(Ok(()));
                 }
-                SupervisorCommand::SetConfig { config, ack } => {
+                SupervisorCommand::SetConfig {
+                    config,
+                    applied_live_resolution,
+                    ack,
+                } => {
+                    if let Some(resolution) = applied_live_resolution {
+                        self.live_resolution = Some(resolution);
+                    }
                     self.config = config.clone();
                     let _ = self.config_tx.send(config);
                     self.persist().await;
                     let _ = ack.send(Ok(()));
+                }
+                SupervisorCommand::ReloadConfig { ack } => {
+                    self.reload_if_changed().await;
+                    let _ = ack.send(Ok(ConfigSnapshot {
+                        config: self.config.clone(),
+                        file_error: self.file_error.clone(),
+                        live_resolution: self.live_resolution,
+                    }));
                 }
                 SupervisorCommand::Shutdown => break,
             }
@@ -221,7 +286,8 @@ impl InstanceSupervisor {
                 };
                 self.persist().await;
                 let _ = self.state_tx.send(new_state.clone());
-                let _ = self.events.send(event);
+                let _ = self.events.send(event.clone());
+                super::audit::append_event(&self.audit_dir, &event).await;
                 let _ = ack.send(Ok(new_state));
             }
             Err(err) => {
@@ -230,19 +296,60 @@ impl InstanceSupervisor {
         }
     }
 
-    async fn persist(&self) {
-        let instance_dir = self.config.disk.path.parent();
-        if let Some(dir) = instance_dir {
-            super::types::write_instance_toml(dir, &self.config).await;
+    /// Re-reads instance.toml when its mtime changed. The file is the source
+    /// of truth: manual edits on a stopped instance must survive (they are
+    /// picked up here and pushed through config_tx). A file that cannot be
+    /// parsed leaves the in-memory config untouched and records the reason.
+    async fn reload_if_changed(&mut self) {
+        let meta = match tokio::fs::metadata(&self.config_path).await {
+            Ok(meta) => meta,
+            Err(_) => {
+                self.config_mtime = None;
+                return;
+            }
+        };
+        let mtime = meta.modified().ok();
+        if self.config_mtime.is_some() && mtime == self.config_mtime {
+            return;
         }
-        if let Some(store) = &self.store {
-            if let Err(err) = store.save_instance(&self.config, &self.state).await {
-                tracing::error!(
-                    instance_id = %self.id,
-                    error = %err,
-                    "failed to persist instance state to store"
+
+        let content = match tokio::fs::read_to_string(&self.config_path).await {
+            Ok(content) => content,
+            Err(err) => {
+                self.file_error = Some(format!("cannot read instance.toml: {err}"));
+                return;
+            }
+        };
+
+        match andler_core::config::parse_instance_config_toml(&content) {
+            Ok(cfg) if cfg.id == self.id => {
+                self.config = cfg.clone();
+                self.config_mtime = mtime;
+                self.file_error = None;
+                let _ = self.config_tx.send(cfg);
+            }
+            Ok(_) => {
+                self.file_error = Some(
+                    "instance.toml belongs to a different instance id; \
+                     refusing to load it"
+                        .to_string(),
                 );
             }
+            Err(err) => {
+                self.file_error = Some(format!("invalid instance.toml: {err}"));
+            }
+        }
+    }
+
+    /// Writes the in-memory config to instance.toml (atomic tmp+rename),
+    /// after picking up any manual edits via reload so they are not
+    /// clobbered by the write. Refreshes the cached mtime so the write does
+    /// not look like a manual change.
+    async fn persist(&mut self) {
+        self.reload_if_changed().await;
+        super::types::write_instance_toml(&self.audit_dir, &self.config).await;
+        if let Ok(meta) = tokio::fs::metadata(&self.config_path).await {
+            self.config_mtime = meta.modified().ok();
         }
     }
 }

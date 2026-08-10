@@ -7,12 +7,12 @@ use andler_rpc::convert;
 use andler_rpc::proto::andler_service_server::AndlerService;
 use andler_rpc::proto::{
     AttachDiskRequest, AttachDiskResponse, AttachNetworkRequest, AttachNetworkResponse,
-    CloneInstanceRequest, CreateAndroidInstanceRequest, CreateInstanceRequest,
+    CloneInstanceRequest, ConfigKeyDiff, CreateAndroidInstanceRequest, CreateInstanceRequest,
     CreateInstanceResponse, CreateSnapshotRequest, CreateSnapshotResponse, DeleteSnapshotRequest,
     DetachDiskRequest, DetachNetworkRequest, Empty, ExportInstanceDiskRequest,
-    ExportInstanceDiskResponse, GetAndroidBootModeResponse, GetInstanceConfigResponse,
-    GuestPackageEntry, InstallGuestAgentRequest, InstanceIdRequest, InstanceListEntry,
-    InstanceStatusResponse, ListGuestPackagesResponse, ListInstancesResponse,
+    ExportInstanceDiskResponse, GetAndroidBootModeResponse, GetConfigStatusResponse,
+    GetInstanceConfigResponse, GuestPackageEntry, InstallGuestAgentRequest, InstanceIdRequest,
+    InstanceListEntry, InstanceStatusResponse, ListGuestPackagesResponse, ListInstancesResponse,
     ListSnapshotsResponse, LogLineResponse, RemoveGuestAgentRequest, RemoveInstanceRequest,
     ResourceMetricsResponse, RestoreSnapshotRequest, SetInstanceConfigRequest, SnapshotEntry,
     StopInstanceRequest, SwitchAndroidBootModeRequest, SwitchArmTranslatorRequest,
@@ -223,6 +223,7 @@ impl AndlerService for DaemonService {
                     name: summary.name,
                     state: state as i32,
                     error_message,
+                    broken_reason: summary.broken_reason,
                 }
             })
             .collect();
@@ -239,7 +240,7 @@ impl AndlerService for DaemonService {
             .daemon
             .resolve_instance_id(&request.instance_id)
             .await?;
-        self.daemon.remove_instance(id, request.purge).await?;
+        self.daemon.remove_instance_entry(id, request.purge).await?;
         Ok(Response::new(Empty {}))
     }
 
@@ -253,6 +254,36 @@ impl AndlerService for DaemonService {
             .await?;
         let config = self.daemon.get_instance_config(id).await?;
         Ok(Response::new(config.into()))
+    }
+
+    async fn get_config_status(
+        &self,
+        request: Request<InstanceIdRequest>,
+    ) -> Result<Response<GetConfigStatusResponse>, Status> {
+        let id = self
+            .daemon
+            .resolve_instance_id(&request.into_inner().instance_id)
+            .await?;
+        let (config, diffs, file_error, live_resolution) = self.daemon.config_status(id).await?;
+        let (state, _) = convert::instance_state_to_proto(&self.daemon.status(id).await?.state);
+
+        let mut config_diffs = Vec::with_capacity(diffs.len());
+        for (key, file_value, memory_value) in diffs {
+            config_diffs.push(ConfigKeyDiff {
+                key,
+                file_value,
+                memory_value,
+            });
+        }
+
+        Ok(Response::new(GetConfigStatusResponse {
+            instance_id: id.to_string(),
+            name: config.name,
+            state: state as i32,
+            diffs: config_diffs,
+            live_resolution: live_resolution.map(|r| format!("{}x{}", r.width, r.height)),
+            file_error,
+        }))
     }
 
     async fn update_instance_config(

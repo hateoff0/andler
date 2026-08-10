@@ -40,6 +40,19 @@ pub enum DaemonError {
     #[error("store error: {0}")]
     Store(#[from] StoreError),
 
+    #[error(
+        "cannot migrate instance {instance_id:?}: {file_path} already exists and differs from \
+         the config stored in the database; keeping both would be ambiguous — move or delete \
+         one of them and restart andlerd"
+    )]
+    ConfigMigrationConflict {
+        instance_id: InstanceId,
+        file_path: PathBuf,
+    },
+
+    #[error("config file {path} is invalid: {message}")]
+    ConfigFileInvalid { path: PathBuf, message: String },
+
     #[error("cannot remove instance {0:?}: it is in non-terminal state {1:?}; stop it first")]
     InstanceNotRemovable(InstanceId, InstanceState),
 
@@ -177,6 +190,22 @@ pub enum ErrorKind {
 }
 
 impl DaemonError {
+    pub(crate) fn from_config_key_error(err: andler_core::config::ConfigKeyError) -> DaemonError {
+        use andler_core::config::ConfigKeyError;
+        match err {
+            ConfigKeyError::Unknown(key) => DaemonError::InvalidConfigKey(format!(
+                "unknown config key {key:?}; see `andler config --help` or docs/API.md \
+                 for the list of valid keys"
+            )),
+            ConfigKeyError::Immutable { key, reason } => {
+                DaemonError::InvalidConfigKey(format!("cannot change {key:?}: {reason}"))
+            }
+            ConfigKeyError::InvalidValue { key, value, reason } => DaemonError::InvalidConfigKey(
+                format!("invalid value {value:?} for {key:?}: {reason}"),
+            ),
+        }
+    }
+
     pub fn kind(&self) -> ErrorKind {
         match self {
             DaemonError::InvalidConfig(_) => ErrorKind::InvalidArgument,
@@ -197,6 +226,8 @@ impl DaemonError {
             | DaemonError::Store(_)
             | DaemonError::InstanceSupervisorGone(_) => ErrorKind::Internal,
             DaemonError::InstanceNotRemovable(_, _) => ErrorKind::FailedPrecondition,
+            DaemonError::ConfigMigrationConflict { .. } => ErrorKind::FailedPrecondition,
+            DaemonError::ConfigFileInvalid { .. } => ErrorKind::InvalidArgument,
             DaemonError::InstanceNotClonable(_, _) => ErrorKind::FailedPrecondition,
             DaemonError::InstanceAlreadyStopped(_, _) => ErrorKind::FailedPrecondition,
             DaemonError::SharedBaseNotSupportedForLinuxVm(_) => ErrorKind::FailedPrecondition,

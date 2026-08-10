@@ -7,7 +7,7 @@ ANDLER (**ANDLER** = *Android Linux Emulator & Runtime*) is a Rust monorepo for 
 1. **Domain-driven separation**: Pure domain types in `andler-core` with no infrastructure dependencies. All I/O (QEMU, filesystem, network, database) lives in separate service/backend crates.
 2. **Backend abstraction**: The `HypervisorBackend` trait defines a hypervisor-agnostic interface. Adding a new hypervisor means implementing this trait — no changes to daemon, CLI, or RPC.
 3. **Explicit state machine**: Instance lifecycle is governed by a strict FSM with named states and validated transitions. No implicit state changes.
-4. **Persistence is optional**: The daemon works with or without SQLite persistence. In-memory state is always the source of truth for the current session. Store errors are logged but don't fail operations.
+4. **Persistence is optional**: SQLite holds only snapshot metadata; the daemon works with or without a store. Instance configs live in `instance.toml` files and are re-read on every state transition — the file, not memory, is the source of truth for config. Store errors are logged but don't fail operations.
 5. **No global state**: Each crate has clear responsibilities. `andler-core` knows nothing about QEMU, gRPC, or SQL. `andler-qemu` knows nothing about the daemon or CLI.
 6. **User-mode by default**: All paths under `~/.andler/`. No root/sudo required for normal operation.
 
@@ -97,13 +97,13 @@ Standalone crate for firmware discovery, hardware auto-detection, and GPU metric
 
 ### `services/andler-store` — SQLite Persistence
 
-Two-table SQLite store with JSON columns.
+SQLite store for snapshot metadata only.
 
 **Schema:**
-- `instances(id TEXT PRIMARY KEY, config_json TEXT, state_json TEXT)`
 - `snapshots(id, instance_id, tag, description, created_at)` with `ON DELETE CASCADE`
+- `config_migration` marker: legacy databases (pre-phase-1, with an `instances` table) are migrated on daemon startup — each stored config is written out as `instance.toml` (refusing to overwrite a differing file), then the instances table is dropped. The daemon itself never persists instances to SQLite.
 
-**~20 tests** using in-memory SQLite.
+**~20 tests** using in-memory SQLite, including legacy-database migration.
 
 ### `services/andler-rpc` — gRPC Protocol
 
@@ -117,9 +117,10 @@ Protobuf definitions and generated code via `tonic`/`prost`.
 Orchestrates all operations. Holds backend registry, per-instance supervisors, optional persistence.
 
 **Key design:**
-- `Daemon::new()` / `with_store()` / `restore()` — three construction paths
+- `Daemon::new()` / `Daemon::restore(store)` — two construction paths (restore also takes a root for tests)
+- **Instance registry on disk**: each instance is a directory `~/.andler/instances/<id>/` whose `instance.toml` is the single source of truth for the config; the daemon re-reads it on every state transition (so hand-edits survive daemon restarts). `Daemon::restore()` scans the instances directory, tracks entries with missing/invalid toml as *broken* (listed with the reason, removable, never fatal to startup), migrates legacy store configs, and reconnects to any QEMU process that survived a crash (`adopt`, below). The SQLite store holds only snapshot metadata — instance configs and states never touch it.
 - **Instance supervisor (task per instance)**: each registered instance runs one tokio task that owns the FSM state, the backend handle and the config — the only writer of all three. Everything else reads them through `tokio::sync::watch` snapshots (`SupervisorHandle::state()/backend_handle()/config()`) and mutates them through an mpsc command channel (`transition`, `set_handle`, `set_config`), which acknowledges only after the change is applied and persisted. This replaces the old shared `RwLock<HashMap<…>>` as the daemon's structural state and is the seam where op-queueing and event sourcing grow; QMP/metrics ownership moves under the supervisor in a later phase.
-- **Daemon restart semantics**: a graceful SIGTERM/Ctrl+C is a deliberate shutdown — `shutdown_signal` stops every Running/Paused instance before the daemon exits and `kill_on_drop` guards the rest. Reconnect is therefore a crash-recovery path, not a graceful-restart path: on startup `Daemon::restore()` tries to adopt any instance whose stored state was Running/Paused by connecting to its QMP socket, resolving the surviving QEMU's pid (`query-processes`, falling back to the `/proc` `process=<name>` cmdline marker), verifying identity, and re-creating the backend handle around the pidfd. Only if the process cannot be found/recovered does the instance land in `Error`. Instances stored mid-operation (Starting/Stopping) are never guessed at: they become `Error` with an "unknown result" message pointing at `andler status`/`andler snapshot list`.
+- **Daemon restart semantics**: a graceful SIGTERM/Ctrl+C is a deliberate shutdown — `shutdown_signal` stops every Running/Paused instance before the daemon exits and `kill_on_drop` guards the rest. Reconnect is therefore a crash-recovery path, not a graceful-restart path: on startup `Daemon::restore()` tries to adopt any instance whose QEMU process is still alive by connecting to its QMP socket, resolving the surviving QEMU's pid (`query-processes`, falling back to the `/proc` `process=<name>` cmdline marker), verifying identity, and re-creating the backend handle around the pidfd. Only if the process cannot be found/recovered does the instance land in `Stopped`. Instances that were mid-operation (Starting/Stopping) at crash time are never guessed at: they become `Stopped`, and `start` is the documented recovery path.
 - **Event bus**: the daemon owns a `broadcast::Sender<DaemonEvent>`; supervisors publish `Lifecycle` events on every applied FSM transition (with the `Fail` reason). Consumers subscribe via `Daemon::subscribe_events()` (event types live in `andler-core::events`, pure serde types).
 - Instance lifecycle via FSM transitions (applied by the supervisor)
 - `InstanceDirGuard` RAII for cleanup on partial failure
@@ -160,7 +161,7 @@ andler-qemu (HypervisorBackend)
 QEMU process → VM
   ↓ (/proc + sysfs)
 Metrics poller → broadcast → StreamResourceMetrics → CLI display
-  ↓ (SQLite)
+  ↓ (SQLite, snapshot metadata only)
 andler-store (andlerd.db)
 ```
 
@@ -271,7 +272,7 @@ migration machinery on every accelerated default: `virtio-sound`, `virgl`, and t
    `blockdev-snapshot-delete-internal-sync` `{device, name}`
 4. **List**: `query-block` → extract snapshot metadata
 
-Snapshot metadata (tag, description, created_at) stored in SQLite `snapshots` table with `ON DELETE CASCADE` from `instances`. Maximum 20 snapshots per instance (`MAX_SNAPSHOTS_PER_INSTANCE`); free space is pre-checked via `statvfs(2)` with guest RAM size as a conservative upper bound (`InsufficientDiskSpace`).
+Snapshot metadata (tag, description, created_at) stored in SQLite `snapshots` table, keyed by `instance_id`. Maximum 20 snapshots per instance (`MAX_SNAPSHOTS_PER_INSTANCE`); free space is pre-checked via `statvfs(2)` with guest RAM size as a conservative upper bound (`InsufficientDiskSpace`).
 
 `RestoreSnapshot` on a running instance fails with `FAILED_PRECONDITION` (`InstanceMustBeStopped`) — stop the instance first, then restore, then start again.
 
@@ -279,7 +280,7 @@ Snapshot metadata (tag, description, created_at) stored in SQLite `snapshots` ta
 
 Extra disks and network devices can be attached to a `Running`/`Paused` instance and detached again, and are re-created automatically at the next boot.
 
-1. **Persistence**: attached devices live in `InstanceConfig.extra_disks` / `extra_networks` (serde-defaulted `Vec`s, so old `instance.toml` files load unchanged). The daemon appends to the list *after* the backend confirms the live device, and persists via the same `persist_config_update` path as any config change — the store needs no migration (it stores the full config JSON).
+1. **Persistence**: attached devices live in `InstanceConfig.extra_disks` / `extra_networks` (serde-defaulted `Vec`s, so old `instance.toml` files load unchanged). The daemon appends to the list *after* the backend confirms the live device, and persists via the same `instance.toml` rewrite path as any config change.
 2. **Identity**: devices are addressed by list index; the backend derives QEMU ids from it (`drive-extraN`/`extraN` blockdev/device, `net-extraN` netdev/device, bridge taps `tap<instance-id>-eN` so multiple VMs on one bridge never collide). Detach identifies disks by **path** and networks by **index**, so cmdline wiring at boot and QMP hot-plug always agree.
 3. **Live attach** (QMP): `blockdev-add` (`{"driver":"qcow2","node-name":"drive-extraN",...}`) + `device_add` (virtio-blk-pci), or `netdev_add` (user/tap/passt) + `device_add` (net model). On failure the backend rolls back: `blockdev-del` after a failed `device_add`, host tap teardown after a failed netdev setup.
 4. **Live detach** (QMP): `device_del` is asynchronous — QEMU completes it on its own schedule, so the follow-up `blockdev-del`/`netdev-del` may hit `DeviceInUse`. The daemon retries only while QEMU reports the device in use (`DeviceInUse` class or `in use` description, 250ms × 15s); any other `CommandFailed` fails immediately.

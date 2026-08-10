@@ -120,6 +120,14 @@ pub enum OperationState {
     Cancelled,
 }
 
+impl DaemonEvent {
+    /// Serializes to a single-line JSON record for the per-instance
+    /// `events.jsonl` audit trail (append-only, rotated by size).
+    pub fn to_jsonl_line(&self) -> Result<String, serde_json::Error> {
+        serde_json::to_string(self)
+    }
+}
+
 impl Operation {
     pub fn new(kind: OperationKind, instance_id: InstanceId, op_id: OpId) -> Self {
         Operation {

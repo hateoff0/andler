@@ -21,10 +21,10 @@ thiserror = { workspace = true }
 async-trait = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
-# Human-readable, on-disk instance config file (`instance.toml`) written
-# alongside each instance's disk/OVMF_VARS. SQLite remains the primary
-# source of truth for restore; this is the write-only half.
+# instance.toml is the single source of truth for instance configuration;
+# the daemon scans it on startup and writes it on config changes.
 toml = "0.8"
+libc = "0.2"
 futures-core = "0.3"
 futures-util = "0.3"
 async-stream = "0.3"
@@ -34,6 +34,8 @@ chrono = { version = "0.4", features = ["serde"] }
 [dev-dependencies]
 tokio-stream = { version = "0.1", features = ["net"] }
 uuid = { version = "1" }
+serde_json = "1"
+rusqlite = "0.31"
 
 
 

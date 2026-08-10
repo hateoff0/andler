@@ -1,20 +1,23 @@
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-use andler_core::{InstanceConfig, InstanceId, InstanceState};
+use andler_core::{InstanceConfig, InstanceId};
 use rusqlite::Connection;
 
 use crate::error::StoreError;
 
+/// SQLite store for snapshot metadata only. Instance configuration lives in
+/// `instance.toml` files (daemon registry), never here.
+///
+/// Schema versioning via `PRAGMA user_version`:
+/// - 0: legacy database, `instances` table may exist; the daemon migrates
+///   configs out of it (`load_legacy_instances`) then calls
+///   `finalize_config_migration` (drops `instances`, version -> 2).
+/// - 1: `instances` table still present, waiting for config migration.
+/// - 2: current: `snapshots` only.
 #[derive(Clone)]
 pub struct Store {
     conn: Arc<Mutex<Connection>>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StoredInstance {
-    pub config: InstanceConfig,
-    pub state: InstanceState,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -71,95 +74,49 @@ impl Store {
         })
     }
 
-    pub async fn save_instance(
-        &self,
-        cfg: &InstanceConfig,
-        state: &InstanceState,
-    ) -> Result<(), StoreError> {
-        let id = cfg.id;
-        let config_json = serde_json::to_string(cfg)?;
-        let state_json = serde_json::to_string(state)?;
+    /// Current `PRAGMA user_version`.
+    pub async fn schema_version(&self) -> Result<i64, StoreError> {
+        self.run_blocking(|conn| {
+            let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+            Ok(version)
+        })
+        .await
+    }
 
-        self.run_blocking(move |conn| {
-            conn.execute(
-                "INSERT INTO instances (id, config_json, state_json) VALUES (?1, ?2, ?3) \
-                 ON CONFLICT(id) DO UPDATE SET \
-                     config_json = excluded.config_json, \
-                     state_json = excluded.state_json",
-                (id.to_string(), config_json, state_json),
+    /// Loads instance configs from the legacy `instances` table (pre-phase-1
+    /// databases). Returns an error on any corrupt row so the daemon can fail
+    /// the migration explicitly instead of guessing.
+    pub async fn load_legacy_instances(&self) -> Result<Vec<InstanceConfig>, StoreError> {
+        self.run_blocking(|conn| {
+            let has_table: bool = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'instances')",
+                [],
+                |r| r.get(0),
             )?;
-            Ok(())
-        })
-        .await
-    }
-
-    pub async fn save_state(
-        &self,
-        id: InstanceId,
-        state: &InstanceState,
-    ) -> Result<(), StoreError> {
-        let state_json = serde_json::to_string(state)?;
-
-        let rows_changed = self
-            .run_blocking(move |conn| {
-                let rows = conn.execute(
-                    "UPDATE instances SET state_json = ?1 WHERE id = ?2",
-                    (state_json, id.to_string()),
-                )?;
-                Ok(rows)
-            })
-            .await?;
-
-        if rows_changed == 0 {
-            return Err(StoreError::NotFound(id));
-        }
-
-        Ok(())
-    }
-
-    pub async fn load_instance(&self, id: InstanceId) -> Result<StoredInstance, StoreError> {
-        self.run_blocking(move |conn| {
-            let row = conn
-                .query_row(
-                    "SELECT config_json, state_json FROM instances WHERE id = ?1",
-                    [id.to_string()],
-                    |row| {
-                        let config_json: String = row.get(0)?;
-                        let state_json: String = row.get(1)?;
-                        Ok((config_json, state_json))
-                    },
-                )
-                .map_err(|err| match err {
-                    rusqlite::Error::QueryReturnedNoRows => StoreError::NotFound(id),
-                    other => StoreError::Sqlite(other),
-                })?;
-
-            row_to_stored_instance(row)
-        })
-        .await
-    }
-
-    pub async fn load_all(&self) -> Result<Vec<StoredInstance>, StoreError> {
-        self.run_blocking(move |conn| {
-            let mut stmt = conn.prepare("SELECT config_json, state_json FROM instances")?;
-            let rows = stmt.query_map([], |row| {
-                let config_json: String = row.get(0)?;
-                let state_json: String = row.get(1)?;
-                Ok((config_json, state_json))
-            })?;
-
+            if !has_table {
+                return Ok(Vec::new());
+            }
+            let mut stmt = conn.prepare("SELECT config_json FROM instances")?;
+            let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
             let mut result = Vec::new();
             for row in rows {
-                result.push(row_to_stored_instance(row?)?);
+                let config_json = row?;
+                let config: InstanceConfig = serde_json::from_str(&config_json)?;
+                result.push(config);
             }
             Ok(result)
         })
         .await
     }
 
-    pub async fn delete_instance(&self, id: InstanceId) -> Result<(), StoreError> {
-        self.run_blocking(move |conn| {
-            conn.execute("DELETE FROM instances WHERE id = ?1", [id.to_string()])?;
+    /// Drops the legacy `instances` table and marks the schema current.
+    /// Called once all legacy configs have been written as `instance.toml`
+    /// files. The `snapshots` FK referencing `instances` is dropped together
+    /// with the table (SQLite removes foreign keys of dropped tables; the
+    /// store never enables `foreign_keys`).
+    pub async fn finalize_config_migration(&self) -> Result<(), StoreError> {
+        self.run_blocking(|conn| {
+            conn.execute_batch("DROP TABLE IF EXISTS instances; PRAGMA user_version = 2;")?;
             Ok(())
         })
         .await
@@ -249,14 +206,6 @@ impl Store {
     }
 }
 
-fn row_to_stored_instance(
-    (config_json, state_json): (String, String),
-) -> Result<StoredInstance, StoreError> {
-    let config: InstanceConfig = serde_json::from_str(&config_json)?;
-    let state: InstanceState = serde_json::from_str(&state_json)?;
-    Ok(StoredInstance { config, state })
-}
-
 fn row_to_stored_snapshot(row: &rusqlite::Row<'_>) -> Result<StoredSnapshot, rusqlite::Error> {
     Ok(StoredSnapshot {
         id: uuid::Uuid::parse_str(row.get::<_, String>(0)?.as_str())
@@ -272,25 +221,40 @@ fn row_to_stored_snapshot(row: &rusqlite::Row<'_>) -> Result<StoredSnapshot, rus
 }
 
 fn apply_schema(conn: &Connection) -> Result<(), StoreError> {
-    conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS instances (
-            id          TEXT PRIMARY KEY,
-            config_json TEXT NOT NULL,
-            state_json  TEXT NOT NULL
-        );
+    // Some distro sqlite builds default `foreign_keys` to ON, which would
+    // cascade-delete snapshot rows when the legacy `instances` table is
+    // dropped. The store never relies on FK enforcement, so pin it off.
+    conn.pragma_update(None, "foreign_keys", false)?;
 
-        CREATE TABLE IF NOT EXISTS snapshots (
+    let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+    if version == 2 {
+        return Ok(());
+    }
+
+    let has_legacy_instances: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'instances')",
+        [],
+        |r| r.get(0),
+    )?;
+
+    // Legacy databases already carry a snapshots table (with an FK to
+    // instances); CREATE IF NOT EXISTS leaves it untouched, and dropping
+    // `instances` later removes the FK.
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS snapshots (
             id          TEXT PRIMARY KEY,
             instance_id TEXT NOT NULL,
             tag         TEXT NOT NULL,
             description TEXT,
-            created_at  TEXT NOT NULL,
-            FOREIGN KEY (instance_id) REFERENCES instances(id) ON DELETE CASCADE
+            created_at  TEXT NOT NULL
         );
 
         CREATE UNIQUE INDEX IF NOT EXISTS idx_snapshots_instance_tag
             ON snapshots(instance_id, tag);",
     )?;
+
+    let target = if has_legacy_instances { 1 } else { 2 };
+    conn.execute_batch(&format!("PRAGMA user_version = {target};"))?;
     Ok(())
 }
 
@@ -299,9 +263,35 @@ mod tests {
     use super::*;
     use andler_core::{
         AudioConfig, BackendKind, CpuConfig, DiskConfig, DisplayConfig, FirmwareConfig, GpuConfig,
-        InputConfig, InstanceKind, MemoryConfig, NetworkConfig,
+        InputConfig, InstanceKind, InstanceState, MemoryConfig, NetworkConfig,
     };
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
+
+    /// Simple per-test temp dir, mirroring the daemon tests' helper (no
+    /// tempfile dependency in the workspace).
+    struct TempDir(PathBuf);
+
+    impl TempDir {
+        fn new() -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "andler-store-test-{}-{}",
+                std::process::id(),
+                InstanceId::new().to_string()
+            ));
+            std::fs::create_dir_all(&path).expect("create test temp dir");
+            TempDir(path)
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
 
     fn sample_config() -> InstanceConfig {
         InstanceConfig {
@@ -327,62 +317,122 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn save_and_load_round_trips() {
-        let store = Store::open_in_memory().await.unwrap();
+    /// Builds a legacy (pre-phase-1) database file: `instances` +
+    /// `snapshots` tables with one row each.
+    fn build_legacy_db(path: &Path) -> InstanceConfig {
+        let conn = Connection::open(path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE instances (
+                id          TEXT PRIMARY KEY,
+                config_json TEXT NOT NULL,
+                state_json  TEXT NOT NULL
+            );
+            CREATE TABLE snapshots (
+                id          TEXT PRIMARY KEY,
+                instance_id TEXT NOT NULL,
+                tag         TEXT NOT NULL,
+                description TEXT,
+                created_at  TEXT NOT NULL,
+                FOREIGN KEY (instance_id) REFERENCES instances(id) ON DELETE CASCADE
+            );
+            CREATE UNIQUE INDEX idx_snapshots_instance_tag ON snapshots(instance_id, tag);",
+        )
+        .unwrap();
+
         let cfg = sample_config();
-        let id = cfg.id;
+        conn.execute(
+            "INSERT INTO instances (id, config_json, state_json) VALUES (?1, ?2, ?3)",
+            (
+                cfg.id.to_string(),
+                serde_json::to_string(&cfg).unwrap(),
+                serde_json::to_string(&InstanceState::Running).unwrap(),
+            ),
+        )
+        .unwrap();
 
-        store
-            .save_instance(&cfg, &InstanceState::Created)
-            .await
-            .unwrap();
-
-        let loaded = store.load_instance(id).await.unwrap();
-        assert_eq!(loaded.config, cfg);
-        assert_eq!(loaded.state, InstanceState::Created);
+        conn.execute(
+            "INSERT INTO snapshots (id, instance_id, tag, description, created_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            (
+                uuid::Uuid::new_v4().to_string(),
+                cfg.id.to_string(),
+                "legacy-snap".to_string(),
+                "taken before migration".to_string(),
+                "2026-01-01T00:00:00+00:00".to_string(),
+            ),
+        )
+        .unwrap();
+        cfg
     }
 
     #[tokio::test]
-    async fn load_unknown_instance_returns_not_found() {
+    async fn fresh_store_starts_at_current_schema() {
         let store = Store::open_in_memory().await.unwrap();
-        let err = store.load_instance(InstanceId::new()).await.unwrap_err();
-        assert!(matches!(err, StoreError::NotFound(_)));
+        assert_eq!(store.schema_version().await.unwrap(), 2);
     }
 
     #[tokio::test]
-    async fn save_instance_with_existing_id_overwrites() {
-        let store = Store::open_in_memory().await.unwrap();
-        let mut cfg = sample_config();
-        let id = cfg.id;
+    async fn legacy_store_migrates_configs_then_finalizes() {
+        let dir = TempDir::new();
+        let db_path = dir.path().join("andlerd.db");
+        let expected = build_legacy_db(&db_path);
 
-        store
-            .save_instance(&cfg, &InstanceState::Created)
-            .await
-            .unwrap();
+        let store = Store::open(&db_path).await.unwrap();
+        assert_eq!(store.schema_version().await.unwrap(), 1);
 
-        cfg.name = "renamed".to_string();
-        store
-            .save_instance(&cfg, &InstanceState::Starting)
-            .await
-            .unwrap();
+        let legacy = store.load_legacy_instances().await.unwrap();
+        assert_eq!(legacy.len(), 1);
+        assert_eq!(legacy[0], expected);
+        assert_eq!(legacy[0].name, "test-vm");
 
-        let loaded = store.load_instance(id).await.unwrap();
-        assert_eq!(loaded.config.name, "renamed");
-        assert_eq!(loaded.state, InstanceState::Starting);
+        // Snapshots are readable before and after the migration.
+        let before = store.load_snapshots(expected.id).await.unwrap();
+        assert_eq!(before.len(), 1);
+
+        store.finalize_config_migration().await.unwrap();
+        assert_eq!(store.schema_version().await.unwrap(), 2);
+
+        let legacy = store.load_legacy_instances().await.unwrap();
+        assert!(legacy.is_empty(), "instances table must be dropped");
+
+        let snapshots = store.load_snapshots(expected.id).await.unwrap();
+        assert_eq!(
+            snapshots.len(),
+            1,
+            "migration must not delete snapshot metadata"
+        );
+        assert_eq!(snapshots[0].tag, "legacy-snap");
     }
 
     #[tokio::test]
-    async fn save_instance_does_not_cascade_delete_snapshots() {
+    async fn corrupt_legacy_config_fails_migration() {
+        let dir = TempDir::new();
+        let db_path = dir.path().join("andlerd.db");
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE instances (
+                id          TEXT PRIMARY KEY,
+                config_json TEXT NOT NULL,
+                state_json  TEXT NOT NULL
+            );",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO instances (id, config_json, state_json) VALUES (?1, ?2, ?3)",
+            ("abc".to_string(), "not json".to_string(), "{}".to_string()),
+        )
+        .unwrap();
+        drop(conn);
+
+        let store = Store::open(&db_path).await.unwrap();
+        let err = store.load_legacy_instances().await.unwrap_err();
+        assert!(matches!(err, StoreError::Serde(_)));
+    }
+
+    #[tokio::test]
+    async fn snapshots_round_trip_without_instances_table() {
         let store = Store::open_in_memory().await.unwrap();
-        let mut cfg = sample_config();
-        let id = cfg.id;
-
-        store
-            .save_instance(&cfg, &InstanceState::Created)
-            .await
-            .unwrap();
-
+        let id = InstanceId::new();
         let snapshot = StoredSnapshot {
             id: uuid::Uuid::new_v4(),
             instance_id: id,
@@ -392,311 +442,73 @@ mod tests {
         };
         store.save_snapshot(&snapshot).await.unwrap();
 
-        cfg.name = "renamed".to_string();
+        let loaded = store.load_snapshots(id).await.unwrap();
+        assert_eq!(loaded, vec![snapshot.clone()]);
+
+        let by_tag = store.get_snapshot(id, "snap-first").await.unwrap();
+        assert_eq!(by_tag, Some(snapshot.clone()));
+
+        store.delete_snapshot(id, "snap-first").await.unwrap();
+        assert!(store
+            .get_snapshot(id, "snap-first")
+            .await
+            .unwrap()
+            .is_none());
+        assert!(store.load_snapshots(id).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn save_snapshot_with_existing_tag_replaces() {
+        let store = Store::open_in_memory().await.unwrap();
+        let id = InstanceId::new();
         store
-            .save_instance(&cfg, &InstanceState::Starting)
+            .save_snapshot(&StoredSnapshot {
+                id: uuid::Uuid::new_v4(),
+                instance_id: id,
+                tag: "same-tag".to_string(),
+                description: Some("first".to_string()),
+                created_at: "2026-01-01T00:00:00+00:00".to_string(),
+            })
             .await
             .unwrap();
         store
-            .save_instance(&cfg, &InstanceState::Running)
+            .save_snapshot(&StoredSnapshot {
+                id: uuid::Uuid::new_v4(),
+                instance_id: id,
+                tag: "same-tag".to_string(),
+                description: Some("second".to_string()),
+                created_at: "2026-01-02T00:00:00+00:00".to_string(),
+            })
             .await
             .unwrap();
 
         let snapshots = store.load_snapshots(id).await.unwrap();
-        assert_eq!(
-            snapshots.len(),
-            1,
-            "save_instance must not delete snapshot metadata"
-        );
-        assert_eq!(snapshots[0].tag, "snap-first");
-        assert_eq!(snapshots[0].description.as_deref(), Some("first"));
+        assert_eq!(snapshots.len(), 1);
+        assert_eq!(snapshots[0].description.as_deref(), Some("second"));
     }
 
     #[tokio::test]
-    async fn save_state_updates_only_state_not_config() {
-        let store = Store::open_in_memory().await.unwrap();
-        let cfg = sample_config();
-        let id = cfg.id;
-        store
-            .save_instance(&cfg, &InstanceState::Created)
-            .await
-            .unwrap();
+    async fn reopens_of_current_store_are_idempotent() {
+        let dir = TempDir::new();
+        let db_path = dir.path().join("andlerd.db");
+        let id = InstanceId::new();
 
-        store.save_state(id, &InstanceState::Running).await.unwrap();
+        {
+            let store = Store::open(&db_path).await.unwrap();
+            store
+                .save_snapshot(&StoredSnapshot {
+                    id: uuid::Uuid::new_v4(),
+                    instance_id: id,
+                    tag: "s".to_string(),
+                    description: None,
+                    created_at: "2026-01-01T00:00:00+00:00".to_string(),
+                })
+                .await
+                .unwrap();
+        }
 
-        let loaded = store.load_instance(id).await.unwrap();
-        assert_eq!(loaded.config, cfg);
-        assert_eq!(loaded.state, InstanceState::Running);
-    }
-
-    #[tokio::test]
-    async fn save_state_on_unknown_instance_returns_not_found() {
-        let store = Store::open_in_memory().await.unwrap();
-        let err = store
-            .save_state(InstanceId::new(), &InstanceState::Running)
-            .await
-            .unwrap_err();
-        assert!(matches!(err, StoreError::NotFound(_)));
-    }
-
-    #[tokio::test]
-    async fn load_all_returns_every_saved_instance() {
-        let store = Store::open_in_memory().await.unwrap();
-        let cfg1 = sample_config();
-        let mut cfg2 = sample_config();
-        cfg2.name = "second-vm".to_string();
-
-        store
-            .save_instance(&cfg1, &InstanceState::Created)
-            .await
-            .unwrap();
-        store
-            .save_instance(&cfg2, &InstanceState::Running)
-            .await
-            .unwrap();
-
-        let mut all = store.load_all().await.unwrap();
-        all.sort_by_key(|s| s.config.name.clone());
-
-        assert_eq!(all.len(), 2);
-        assert_eq!(all[0].config.name, "second-vm");
-        assert_eq!(all[0].state, InstanceState::Running);
-        assert_eq!(all[1].config.name, "test-vm");
-        assert_eq!(all[1].state, InstanceState::Created);
-    }
-
-    #[tokio::test]
-    async fn load_all_on_empty_store_returns_empty_vec() {
-        let store = Store::open_in_memory().await.unwrap();
-        let all = store.load_all().await.unwrap();
-        assert!(all.is_empty());
-    }
-
-    #[tokio::test]
-    async fn delete_instance_removes_row() {
-        let store = Store::open_in_memory().await.unwrap();
-        let cfg = sample_config();
-        let id = cfg.id;
-        store
-            .save_instance(&cfg, &InstanceState::Created)
-            .await
-            .unwrap();
-
-        store.delete_instance(id).await.unwrap();
-
-        let err = store.load_instance(id).await.unwrap_err();
-        assert!(matches!(err, StoreError::NotFound(_)));
-    }
-
-    #[tokio::test]
-    async fn delete_unknown_instance_is_not_an_error() {
-        let store = Store::open_in_memory().await.unwrap();
-        store.delete_instance(InstanceId::new()).await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn error_state_with_message_round_trips() {
-        let store = Store::open_in_memory().await.unwrap();
-        let cfg = sample_config();
-        let id = cfg.id;
-        let error_state = InstanceState::Error {
-            message: "qemu exited with status 1".to_string(),
-        };
-
-        store.save_instance(&cfg, &error_state).await.unwrap();
-        let loaded = store.load_instance(id).await.unwrap();
-        assert_eq!(loaded.state, error_state);
-    }
-
-    #[tokio::test]
-    async fn save_and_load_snapshot_round_trips() {
-        let store = Store::open_in_memory().await.unwrap();
-        let cfg = sample_config();
-        let instance_id = cfg.id;
-        store
-            .save_instance(&cfg, &InstanceState::Created)
-            .await
-            .unwrap();
-
-        let snapshot = StoredSnapshot {
-            id: uuid::Uuid::new_v4(),
-            instance_id,
-            tag: "backup1".to_string(),
-            description: Some("Before update".to_string()),
-            created_at: "2024-01-15T10:30:00Z".to_string(),
-        };
-        store.save_snapshot(&snapshot).await.unwrap();
-
-        let loaded = store.load_snapshots(instance_id).await.unwrap();
-        assert_eq!(loaded.len(), 1);
-        assert_eq!(loaded[0].tag, "backup1");
-        assert_eq!(loaded[0].description, Some("Before update".to_string()));
-    }
-
-    #[tokio::test]
-    async fn snapshot_unique_tag_per_instance() {
-        let store = Store::open_in_memory().await.unwrap();
-        let cfg = sample_config();
-        let instance_id = cfg.id;
-        store
-            .save_instance(&cfg, &InstanceState::Created)
-            .await
-            .unwrap();
-
-        let s1 = StoredSnapshot {
-            id: uuid::Uuid::new_v4(),
-            instance_id,
-            tag: "backup".to_string(),
-            description: None,
-            created_at: "2024-01-15T10:30:00Z".to_string(),
-        };
-        store.save_snapshot(&s1).await.unwrap();
-
-        let s2 = StoredSnapshot {
-            id: uuid::Uuid::new_v4(),
-            instance_id,
-            tag: "backup".to_string(),
-            description: Some("Updated".to_string()),
-            created_at: "2024-01-15T11:00:00Z".to_string(),
-        };
-        store.save_snapshot(&s2).await.unwrap();
-
-        let loaded = store.load_snapshots(instance_id).await.unwrap();
-        assert_eq!(loaded.len(), 1);
-        assert_eq!(loaded[0].id, s2.id);
-        assert_eq!(loaded[0].description, Some("Updated".to_string()));
-    }
-
-    #[tokio::test]
-    async fn get_snapshot_by_tag() {
-        let store = Store::open_in_memory().await.unwrap();
-        let cfg = sample_config();
-        let instance_id = cfg.id;
-        store
-            .save_instance(&cfg, &InstanceState::Created)
-            .await
-            .unwrap();
-
-        let snapshot = StoredSnapshot {
-            id: uuid::Uuid::new_v4(),
-            instance_id,
-            tag: "test-snap".to_string(),
-            description: None,
-            created_at: "2024-01-15T10:30:00Z".to_string(),
-        };
-        store.save_snapshot(&snapshot).await.unwrap();
-
-        let found = store.get_snapshot(instance_id, "test-snap").await.unwrap();
-        assert!(found.is_some());
-        assert_eq!(found.unwrap().tag, "test-snap");
-
-        let not_found = store
-            .get_snapshot(instance_id, "nonexistent")
-            .await
-            .unwrap();
-        assert!(not_found.is_none());
-    }
-
-    #[tokio::test]
-    async fn delete_snapshot_removes_row() {
-        let store = Store::open_in_memory().await.unwrap();
-        let cfg = sample_config();
-        let instance_id = cfg.id;
-        store
-            .save_instance(&cfg, &InstanceState::Created)
-            .await
-            .unwrap();
-
-        let snapshot = StoredSnapshot {
-            id: uuid::Uuid::new_v4(),
-            instance_id,
-            tag: "to-delete".to_string(),
-            description: None,
-            created_at: "2024-01-15T10:30:00Z".to_string(),
-        };
-        store.save_snapshot(&snapshot).await.unwrap();
-
-        store
-            .delete_snapshot(instance_id, "to-delete")
-            .await
-            .unwrap();
-
-        let found = store.get_snapshot(instance_id, "to-delete").await.unwrap();
-        assert!(found.is_none());
-    }
-
-    #[tokio::test]
-    async fn delete_nonexistent_snapshot_is_not_an_error() {
-        let store = Store::open_in_memory().await.unwrap();
-        store
-            .delete_snapshot(InstanceId::new(), "nonexistent")
-            .await
-            .unwrap();
-    }
-
-    #[tokio::test]
-    async fn snapshots_cascade_delete_with_instance() {
-        let store = Store::open_in_memory().await.unwrap();
-        let cfg = sample_config();
-        let instance_id = cfg.id;
-        store
-            .save_instance(&cfg, &InstanceState::Created)
-            .await
-            .unwrap();
-
-        let snapshot = StoredSnapshot {
-            id: uuid::Uuid::new_v4(),
-            instance_id,
-            tag: "cascade-test".to_string(),
-            description: None,
-            created_at: "2024-01-15T10:30:00Z".to_string(),
-        };
-        store.save_snapshot(&snapshot).await.unwrap();
-
-        store.delete_instance(instance_id).await.unwrap();
-
-        let loaded = store.load_snapshots(instance_id).await.unwrap();
-        assert!(loaded.is_empty());
-    }
-
-    #[tokio::test]
-    async fn different_instances_can_have_same_tag() {
-        let store = Store::open_in_memory().await.unwrap();
-        let cfg1 = sample_config();
-        let cfg2 = sample_config();
-        let id1 = cfg1.id;
-        let id2 = cfg2.id;
-        store
-            .save_instance(&cfg1, &InstanceState::Created)
-            .await
-            .unwrap();
-        store
-            .save_instance(&cfg2, &InstanceState::Created)
-            .await
-            .unwrap();
-
-        let s1 = StoredSnapshot {
-            id: uuid::Uuid::new_v4(),
-            instance_id: id1,
-            tag: "backup".to_string(),
-            description: None,
-            created_at: "2024-01-15T10:30:00Z".to_string(),
-        };
-        let s2 = StoredSnapshot {
-            id: uuid::Uuid::new_v4(),
-            instance_id: id2,
-            tag: "backup".to_string(),
-            description: None,
-            created_at: "2024-01-15T11:00:00Z".to_string(),
-        };
-        store.save_snapshot(&s1).await.unwrap();
-        store.save_snapshot(&s2).await.unwrap();
-
-        let loaded1 = store.load_snapshots(id1).await.unwrap();
-        let loaded2 = store.load_snapshots(id2).await.unwrap();
-        assert_eq!(loaded1.len(), 1);
-        assert_eq!(loaded2.len(), 1);
-        assert_eq!(loaded1[0].tag, "backup");
-        assert_eq!(loaded2[0].tag, "backup");
+        let reopened = Store::open(&db_path).await.unwrap();
+        assert_eq!(reopened.schema_version().await.unwrap(), 2);
+        assert_eq!(reopened.load_snapshots(id).await.unwrap().len(), 1);
     }
 }

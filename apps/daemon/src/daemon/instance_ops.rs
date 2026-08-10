@@ -61,11 +61,15 @@ impl Daemon {
         }
 
         let supervisors = self.supervisors.read().await;
-        let matches: Vec<InstanceId> = supervisors
+        let broken = self.broken.read().await;
+        let mut matches: Vec<InstanceId> = supervisors
             .keys()
+            .chain(broken.keys())
             .filter(|id| id.to_string().starts_with(&needle))
             .copied()
             .collect();
+        matches.sort_by_key(|id| id.to_string());
+        matches.dedup();
 
         match matches.len() {
             0 => Err(DaemonError::InstanceRefNotFound(raw.to_string())),
@@ -82,35 +86,14 @@ impl Daemon {
         self.backend_for(cfg.backend)?;
 
         let id = cfg.id;
-        {
-            let handle = spawn_supervisor(
-                id,
-                cfg.clone(),
-                InstanceState::Created,
-                None,
-                self.store.clone(),
-                self.event_sender(),
-            );
-            self.supervisors.write().await.insert(id, handle);
-        }
-
-        if let Err(err) = self
-            .persist_new_instance(&cfg, &InstanceState::Created)
-            .await
-        {
-            // Couldn't durably save it — don't leave it lingering in memory only to
-            // silently vanish the next time andlerd restarts. Roll back and report
-            // the real failure instead of claiming success.
-            if let Some(handle) = self.supervisors.write().await.remove(&id) {
-                handle.shutdown().await;
-            }
-            tracing::error!(
-                instance_id = %id,
-                error = %err,
-                "instance creation rolled back: failed to persist to store"
-            );
-            return Err(err);
-        }
+        let handle = spawn_supervisor(
+            id,
+            cfg.clone(),
+            InstanceState::Created,
+            None,
+            self.event_sender(),
+        );
+        self.supervisors.write().await.insert(id, handle);
 
         tracing::info!(instance_id = %id, name = %cfg.name, "instance created");
         Ok(id)
@@ -442,21 +425,59 @@ impl Daemon {
         self.supervisors.write().await.remove(&id);
         handle.shutdown().await;
 
-        if let Some(store) = &self.store {
-            if let Err(err) = store.delete_instance(id).await {
-                tracing::error!(
-                    instance_id = %id,
-                    error = %err,
-                    "failed to delete instance from store after in-memory removal"
-                );
-            }
-        }
-
         if purge {
             super::types::purge_instance_files(id, &config).await;
+        } else {
+            // Non-purge remove forgets the instance (registry entries) but
+            // keeps the disk and firmware files. Without deleting the toml
+            // the next daemon restart would resurrect a removed instance.
+            super::types::remove_registry_entries(&config).await;
         }
 
         tracing::info!(instance_id = %id, purge, "instance removed");
+        Ok(())
+    }
+
+    /// Removes an instance entry regardless of registry health: healthy
+    /// entries go through the normal FSM-guarded path, broken entries (no
+    /// readable instance.toml) through the directory-based one.
+    pub async fn remove_instance_entry(
+        &self,
+        id: InstanceId,
+        purge: bool,
+    ) -> Result<(), DaemonError> {
+        if self.broken.read().await.contains_key(&id) {
+            return self.remove_broken_instance(id, purge).await;
+        }
+        self.remove_instance(id, purge).await
+    }
+
+    /// Removes a broken registry entry (missing/invalid instance.toml) — the
+    /// only operation that works on such entries. `purge` deletes the whole
+    /// instance directory; without it the directory is left in place.
+    pub async fn remove_broken_instance(
+        &self,
+        id: InstanceId,
+        purge: bool,
+    ) -> Result<(), DaemonError> {
+        let reason = self
+            .broken
+            .write()
+            .await
+            .remove(&id)
+            .ok_or(DaemonError::InstanceNotFound(id))?;
+        let instance_dir = andler_core::paths::instances_root().join(id.to_string());
+        if purge {
+            if let Err(err) = tokio::fs::remove_dir_all(&instance_dir).await {
+                tracing::error!(
+                    instance_id = %id,
+                    path = %instance_dir.display(),
+                    error = %err,
+                    "purge: failed to remove broken instance directory"
+                );
+            }
+        }
+        tracing::info!(instance_id = %id, purge, reason = %reason, "broken instance removed");
         Ok(())
     }
 
@@ -833,85 +854,87 @@ impl Daemon {
         Ok(())
     }
 
+    /// `config set`: read-modify-write one key on instance.toml (the source
+    /// of truth), apply it to the running guest when the key is live, then
+    /// push the result into the supervisor's memory. Unknown/immutable keys
+    /// and invalid values are rejected with a reason; manual file edits on
+    /// other keys survive because only the target key is rewritten.
     pub async fn set_instance_config(
         &self,
         id: InstanceId,
         key: &str,
         value: &str,
     ) -> Result<(), DaemonError> {
-        if key == "display.resolution" {
-            return self.set_display_resolution(id, value).await;
+        let handle = self.handle_for(id).await?;
+        let snapshot = handle.reload_config().await?;
+        if let Some(message) = &snapshot.file_error {
+            let path = instance_dir_of(&snapshot.config).join("instance.toml");
+            return Err(DaemonError::ConfigFileInvalid {
+                path,
+                message: message.clone(),
+            });
         }
 
-        let handle = self.handle_for(id).await?;
+        let mut cfg = snapshot.config;
+        let instance_dir = instance_dir_of(&cfg);
         let state = handle.state();
-        if !state.is_disk_idle() {
-            return Err(DaemonError::InstanceMustBeStopped(id, state));
+
+        // Live keys apply to the running guest immediately.
+        let mut applied_live_resolution = None;
+        if key == "display.resolution" {
+            let resolution = parse_resolution(value)?;
+            if matches!(state, InstanceState::Running | InstanceState::Paused) {
+                let (backend, backend_handle) = self.backend_and_handle(id).await?;
+                backend
+                    .set_guest_display_resolution(&backend_handle, &resolution, cfg.kind.clone())
+                    .await?;
+                applied_live_resolution = Some(resolution);
+            }
         }
 
-        match key {
-            "name" => {
-                let mut config = handle.config();
-                config.name = value.to_string();
-                handle.set_config(config).await?;
+        // The ARM translator is applied to the disk image, which requires a
+        // stopped VM; the config file update then records the new value.
+        if key == "kind.android_profile.arm_translator" {
+            if !state.is_disk_idle() {
+                return Err(DaemonError::InstanceMustBeStopped(id, state));
             }
-            "arm_translator" => {
-                let translator: andler_core::android_profile::ArmTranslator = value
-                    .parse()
-                    .map_err(|_| DaemonError::InvalidConfigKey(key.to_string()))?;
-                self.switch_arm_translator(id, translator, None).await?;
-            }
-            _ => return Err(DaemonError::InvalidConfigKey(key.to_string())),
+            let translator: andler_core::android_profile::ArmTranslator = value
+                .parse()
+                .map_err(|_| DaemonError::InvalidConfigKey(key.to_string()))?;
+            self.switch_arm_translator(id, translator, None).await?;
         }
 
+        andler_core::config::set_key(&mut cfg, key, value)
+            .map_err(DaemonError::from_config_key_error)?;
+        cfg.validate().map_err(DaemonError::InvalidConfig)?;
+
+        super::types::write_instance_toml(&instance_dir, &cfg).await;
+        handle.set_config(cfg, applied_live_resolution).await?;
+
+        tracing::info!(instance_id = %id, key, value, "config set");
         Ok(())
     }
+}
 
-    pub async fn set_display_resolution(
-        &self,
-        id: InstanceId,
-        value: &str,
-    ) -> Result<(), DaemonError> {
-        let (width, height) = value
-            .split_once('x')
-            .and_then(|(w, h)| Some((w.parse::<u32>().ok()?, h.parse::<u32>().ok()?)))
-            .filter(|(w, h)| *w > 0 && *h > 0)
-            .ok_or_else(|| {
-                DaemonError::InvalidConfigKey(
-                    "display.resolution expects WxH, e.g. 1920x1080".to_string(),
-                )
-            })?;
-        let resolution = Resolution::new(width, height);
+fn instance_dir_of(cfg: &InstanceConfig) -> std::path::PathBuf {
+    cfg.disk
+        .path
+        .parent()
+        .map(std::path::PathBuf::from)
+        .unwrap_or_default()
+}
 
-        let handle = self.handle_for(id).await?;
-        let (state, backend_handle, backend_kind, kind) = {
-            let config = handle.config();
-            (
-                handle.state(),
-                handle.backend_handle(),
-                config.backend,
-                config.kind.clone(),
+fn parse_resolution(value: &str) -> Result<Resolution, DaemonError> {
+    let (width, height) = value
+        .split_once('x')
+        .and_then(|(w, h)| Some((w.parse::<u32>().ok()?, h.parse::<u32>().ok()?)))
+        .filter(|(w, h)| *w > 0 && *h > 0)
+        .ok_or_else(|| {
+            DaemonError::InvalidConfigKey(
+                "display.resolution expects WxH, e.g. 1920x1080".to_string(),
             )
-        };
-
-        if matches!(state, InstanceState::Running | InstanceState::Paused) {
-            let backend_handle =
-                backend_handle.ok_or_else(|| DaemonError::GuestAgentUnavailable {
-                    instance_id: id,
-                    message: "instance is running but has no backend handle".to_string(),
-                })?;
-            let backend = self.backend_for(backend_kind)?;
-            backend
-                .set_guest_display_resolution(&backend_handle, &resolution, kind)
-                .await?;
-        }
-
-        let mut config = handle.config();
-        config.display.resolution = resolution;
-        handle.set_config(config).await?;
-
-        Ok(())
-    }
+        })?;
+    Ok(Resolution::new(width, height))
 }
 
 fn spawn_compact_on_shutdown(id: InstanceId, disk: andler_core::DiskConfig) {

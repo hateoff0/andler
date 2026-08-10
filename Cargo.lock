@@ -53,6 +53,7 @@ dependencies = [
  "serde_json",
  "thiserror 1.0.69",
  "tokio",
+ "toml",
 ]
 
 [[package]]
@@ -614,6 +615,9 @@ dependencies = [
  "chrono",
  "futures-core",
  "futures-util",
+ "libc",
+ "rusqlite",
+ "serde_json",
  "thiserror 1.0.69",
  "tokio",
  "tokio-stream",
