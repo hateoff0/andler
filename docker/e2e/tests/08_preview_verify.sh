@@ -44,6 +44,12 @@ else
 fi
 
 echo "  [doctor]"
+# doctor exits non-zero on any warning, and a container has no base images
+# by default — seed a fixture so --fix can be asserted to exit 0.
+BIMG_DIR="$HOME/.andler/cache/base-images/android13-vanilla"
+mkdir -p "$BIMG_DIR"
+printf '{"android_major":"13","android_variant":"vanilla","built_at":"e2e-fixture"}' > "$BIMG_DIR/e2e-fake.manifest.json"
+touch "$BIMG_DIR/e2e-fake.qcow2"
 set +e
 andler doctor >"$E2E_LAST_OUT" 2>"$E2E_LAST_ERR"
 DOCTOR_RC=$?
@@ -59,9 +65,10 @@ expect_out_grep "doctor checks /dev/kvm" "/dev/kvm"
 expect_out_grep "doctor checks qemu" "qemu-system-x86_64"
 
 echo "  [doctor --fix installs andler-helper + single rule]"
-# The container runs as root, so the helper check passes trivially; what
-# --fix must still do is place the helper at the canonical path and write a
-# sudoers file containing exactly one rule (no legacy per-binary rules).
+# The container runs as root, so the checks pass trivially; break the
+# helper so --fix actually has to install it and write the sudoers rule
+# (the path `doctor --fix` is for).
+rm -f /usr/local/sbin/andler-helper
 if sudo -n true 2>/dev/null; then
     echo y | andler doctor --fix >"$E2E_LAST_OUT" 2>"$E2E_LAST_ERR" || {
         cat "$E2E_LAST_ERR" >&2

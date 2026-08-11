@@ -193,10 +193,19 @@ echo "  [deep: upper build.prop merges base + translator props]"
 # can't parse the android version, zygote/ART crash). The upper file must
 # contain the base image's props (from system.img) merged with the
 # translator's managed props.
-INST_DISK="$WORK/ai/android-instances/$AID/disk.qcow2"
+# `create` prints the short id, but the instance directory uses the full
+# 64-hex id — resolve the actual disk path instead of composing it.
+INST_DISK="$(ls "$WORK/ai/android-instances/"*/disk.qcow2 2>/dev/null | head -n1)"
+[[ -n "$INST_DISK" ]] || fail "android instance disk not found under $WORK/ai/android-instances/"
 if ! qemu-nbd --connect=/dev/nbd0 "$INST_DISK"; then
     fail "cannot re-connect the android instance disk"
 fi
+# The kernel only rescans a re-used /dev/nbd* when the partition table is
+# rewritten — the first connect got its p1 node from the sfdisk BLKRRPART.
+# Without the reread the second connect's partition never appears (there is
+# no udev in the container to trigger it either).
+blockdev --rereadpt /dev/nbd0
+sleep 1
 NBD_CONNECTED=1
 mkdir -p "$WORK/mnt"
 mount -o ro /dev/nbd0p1 "$WORK/mnt"

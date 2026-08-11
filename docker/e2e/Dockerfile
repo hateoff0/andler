@@ -142,6 +142,9 @@ RUN debootstrap --variant=minbase --include=systemd bookworm /opt/e2e/guest-root
 COPY --from=builder /andler/dist/andler /usr/local/bin/andler
 COPY --from=builder /andler/dist/andlerd /usr/local/bin/andlerd
 COPY --from=builder /andler/dist/andler-helper /usr/local/sbin/andler-helper
+# Also next to the andler binary: `doctor --fix` reinstalls a broken helper
+# from current_exe().parent(), mirroring how the release tarball ships it.
+COPY --from=builder /andler/dist/andler-helper /usr/local/bin/andler-helper
 COPY docker/e2e/e2e.sh /usr/local/bin/andler-e2e
 COPY docker/e2e/tests /usr/local/share/andler-e2e/tests
 
