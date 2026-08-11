@@ -924,4 +924,88 @@ mod tests {
             });
         }
     }
+
+    /// Guards against this table silently drifting out of sync with
+    /// `InstanceConfig` — the exact failure mode this table replaced
+    /// (`config set`'s old 3-key whitelist was a partial, hand-maintained
+    /// copy of the schema that fields quietly fell through). Walks a real
+    /// `InstanceConfig` via its own `Serialize` impl instead of hand-listing
+    /// fields a second time, so it can't itself drift the same way: add a
+    /// field to any nested `*Config` struct without a matching row here and
+    /// this test names exactly which one is missing, instead of the field
+    /// being unreachable through `config set`/`config status` forever.
+    #[test]
+    fn every_leaf_field_has_a_config_key_row() {
+        let cfg = sample_config();
+        let value = serde_json::to_value(&cfg).expect("InstanceConfig must serialize");
+        let object = value
+            .as_object()
+            .expect("InstanceConfig serializes to an object");
+
+        let known_keys: std::collections::HashSet<&str> =
+            config_keys().iter().map(|row| row.key).collect();
+
+        // Top-level fields that aren't part of the generic per-section walk
+        // below, checked by name instead: `kind` is a tagged enum (its own
+        // variant fields are covered separately, see `kind.android_profile.*`
+        // above), `extra_disks`/`extra_networks` are collections — neither
+        // reduces to a flat scalar leaf the way a `*Config` struct's fields
+        // do, so each gets exactly one opaque row instead.
+        let opaque_top_level = [
+            "id",
+            "name",
+            "kind",
+            "backend",
+            "schema_version",
+            "extra_disks",
+            "extra_networks",
+        ];
+        for field in opaque_top_level {
+            assert!(
+                known_keys.contains(field),
+                "InstanceConfig.{field} has no config_keys() row"
+            );
+        }
+
+        // Every other top-level field is a nested `*Config` struct: walk its
+        // serialized leaves generically and require a `section.leaf` row for
+        // each one (settable, or immutable with a reason — either is fine,
+        // silently missing is not).
+        let nested_sections = [
+            "cpu", "memory", "disk", "display", "gpu", "network", "audio", "input", "firmware",
+        ];
+        for section in nested_sections {
+            let section_object = object
+                .get(section)
+                .unwrap_or_else(|| panic!("InstanceConfig has no `{section}` field"))
+                .as_object()
+                .unwrap_or_else(|| panic!("`{section}` did not serialize to a JSON object"));
+            for leaf in section_object.keys() {
+                let dotted = format!("{section}.{leaf}");
+                assert!(
+                    known_keys.contains(dotted.as_str()),
+                    "InstanceConfig.{dotted} has no config_keys() row in keypath.rs — add \
+                     one (settable, or immutable with a reason)"
+                );
+            }
+        }
+
+        // Closes the loop between the two checks above: every top-level
+        // field must be in exactly one of `opaque_top_level` or
+        // `nested_sections`. A brand new top-level field on InstanceConfig
+        // would otherwise fall through both and go unnoticed here too.
+        let accounted_for: std::collections::HashSet<&str> = opaque_top_level
+            .iter()
+            .copied()
+            .chain(nested_sections.iter().copied())
+            .collect();
+        for field in object.keys() {
+            assert!(
+                accounted_for.contains(field.as_str()),
+                "InstanceConfig gained a new top-level field `{field}` this test doesn't \
+                 know about — add it to `opaque_top_level` or `nested_sections` above, and \
+                 give it a config_keys() row"
+            );
+        }
+    }
 }
