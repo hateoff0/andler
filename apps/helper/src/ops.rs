@@ -14,7 +14,7 @@ use std::process::Command;
 use crate::{mountinfo, validate};
 
 const HOST_BIND_SOURCES: [&str; 3] = ["/dev", "/proc", "/sys"];
-const CHROOT_ALLOWLIST: [&str; 5] = ["apt-get", "apt", "dnf", "pacman", "ln"];
+const CHROOT_ALLOWLIST: [&str; 7] = ["apt-get", "apt", "dnf", "pacman", "ln", "dpkg", "rpm"];
 
 fn find_in_path(bin: &str) -> Option<PathBuf> {
     let path: std::ffi::OsString = std::env::var_os("PATH")
@@ -650,6 +650,20 @@ mod tests {
     }
 
     #[test]
+    #[test]
+    fn chroot_allowlist_covers_package_manager_queries() {
+        // offline `guest remove` runs the package manager's own query
+        // binary (`dpkg -l` / `rpm -q`) through chroot-run; a query binary
+        // missing from the allowlist makes every removal report
+        // "package is not installed" while the install path (apt-get) works.
+        for query_bin in ["dpkg", "rpm"] {
+            assert!(
+                CHROOT_ALLOWLIST.contains(&query_bin),
+                "chroot allowlist must include {query_bin}"
+            );
+        }
+    }
+
     fn guest_rel_rejects_escapes_and_relative_paths() {
         let mount = std::env::temp_dir().join(format!("andler-helper-esc-{}", std::process::id()));
         fs::create_dir_all(&mount).unwrap();
