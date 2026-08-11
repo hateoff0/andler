@@ -153,6 +153,13 @@ impl Daemon {
             }
 
             let dir = entry.path();
+            // A directory marked by a non-purge remove keeps its preserved
+            // files but is deliberately not an instance anymore; the
+            // missing toml would otherwise resurface it as broken on every
+            // daemon restart.
+            if dir.join("instance.removed").exists() {
+                continue;
+            }
             let toml_path = dir.join("instance.toml");
             let content = match tokio::fs::read_to_string(&toml_path).await {
                 Ok(content) => content,

@@ -132,7 +132,10 @@ pub(crate) async fn purge_instance_files(
 }
 
 /// Removes the registry entries (instance.toml, events.jsonl) for a removed
-/// instance without touching its disk or firmware files.
+/// instance without touching its disk or firmware files, and marks the
+/// directory so the next daemon scan does not re-report it as a broken
+/// registry entry: the directory survives (it may hold the preserved disk
+/// and vars), but is no longer an instance.
 pub async fn remove_registry_entries(config: &InstanceConfig, instance_dir: &std::path::Path) {
     for file in ["instance.toml", "events.jsonl"] {
         let path = instance_dir.join(file);
@@ -146,6 +149,15 @@ pub async fn remove_registry_entries(config: &InstanceConfig, instance_dir: &std
                 );
             }
         }
+    }
+    let marker = instance_dir.join("instance.removed");
+    if let Err(err) = tokio::fs::write(&marker, "").await {
+        tracing::error!(
+            instance_id = %config.id,
+            path = %marker.display(),
+            error = %err,
+            "remove: failed to mark the instance directory as removed"
+        );
     }
 }
 

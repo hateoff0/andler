@@ -30,6 +30,15 @@ pass "events.jsonl records the stop transition"
 echo "  [daemon restart]"
 ID_CREATED="$(create_linux "$WORK" e2e-persist-created)"
 [[ -n "$ID_CREATED" ]] || fail "empty id from create"
+
+# The broken entry must exist before the daemon starts, so the startup scan
+# sees it: directories created under a live daemon are not rescanned until
+# the next restart.
+BROKEN_ID="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+BROKEN_DIR="$HOME/.andler/instances/$BROKEN_ID"
+mkdir -p "$BROKEN_DIR"
+touch "$BROKEN_DIR/disk.qcow2"
+
 stop_daemon
 start_daemon
 
@@ -44,10 +53,6 @@ expect_out_grep "status Stopped" "Stopped"
 expect_ok "remove --purge" -- andler remove "$ID_CREATED" --purge
 
 echo "  [broken registry entry]"
-BROKEN_ID="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-BROKEN_DIR="$HOME/.andler/instances/$BROKEN_ID"
-mkdir -p "$BROKEN_DIR"
-touch "$BROKEN_DIR/disk.qcow2"
 expect_ok "list shows the broken entry" -- andler list
 expect_out_grep "broken entry with reason" "\[broken:"
 expect_ok "broken entry is removable" -- andler remove "$BROKEN_ID" --purge

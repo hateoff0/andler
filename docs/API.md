@@ -171,7 +171,7 @@ The flag form `andler config --instance <id>` is equivalent to `view`; add `--ed
 andler remove <instance-id> [--purge]
 ```
 
-Without `--purge`: removes the instance record and its registry files (`instance.toml`, `events.jsonl`). Disk and OVMF vars remain on disk.
+Without `--purge`: removes the instance record and its registry files (`instance.toml`, `events.jsonl`) and marks the registry directory with `instance.removed`, so a daemon restart no longer scans it (without the marker, a saved directory missing its toml would resurface as a broken entry). Disk and OVMF vars remain on disk — including inside the registry directory.
 With `--purge`: also deletes `disk.path` and `firmware.ovmf_vars_path`. Never deletes `base_image` or `ovmf_code_path` (shared across instances).
 
 Instance must be in a terminal state (`Created`, `Stopped`, or `Error`). Use `stop` first for running instances.
