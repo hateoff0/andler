@@ -48,13 +48,12 @@ echo "  [config status]"
 expect_ok "config status in sync after set/edit" -- andler config status "$ID"
 expect_out_grep "status shows in sync" "in sync"
 
-# A manual edit visible to the daemon only after a status call: on a stopped
-# instance the file is applied, so the status stays in sync and the loaded
-# config picks the edit up.
-export VISUAL="sed -i s/e2e-edited/e2e-status/ $INSTANCE_TOML"
+# A manual edit visible to the daemon after a status call: on a stopped
+# instance the file is applied on read, so the status stays in sync and the
+# loaded config picks the edit up.
+sed -i s/e2e-edited/e2e-status/ "$INSTANCE_TOML"
 expect_ok "config status after hand edit" -- andler config status "$ID"
 expect_out_grep "hand edit applied, still in sync" "in sync"
-unset VISUAL
 expect_ok "config view sees the hand edit" -- andler config view "$ID"
 expect_out_grep "hand-edited name visible" "e2e-status"
 
