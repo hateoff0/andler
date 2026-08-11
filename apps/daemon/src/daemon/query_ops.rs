@@ -186,10 +186,7 @@ impl Daemon {
         // Deprecated path (CLI `config edit` now edits the file directly):
         // keep file and memory in sync so callers of the RPC still observe
         // the TOML as the source of truth.
-        let instance_dir = new_config.disk.path.parent().map(std::path::PathBuf::from);
-        if let Some(dir) = instance_dir {
-            super::types::write_instance_toml(&dir, &new_config).await;
-        }
+        super::types::write_instance_toml(handle.instance_dir(), &new_config).await;
         handle.set_config(new_config, None).await?;
 
         Ok(())

@@ -200,12 +200,17 @@ async fn remove_instance_with_purge_keeps_non_empty_parent_directory() {
     let mut cfg = sample_config();
     cfg.disk.path = disk_path.clone();
     cfg.firmware.ovmf_vars_path = vars_path.clone();
-    let id = daemon.create_instance(cfg).await.unwrap();
+    let registry_dir = dir.path().join("registry");
+    let id = daemon
+        .create_instance_in(cfg, registry_dir.clone())
+        .await
+        .unwrap();
 
     daemon.remove_instance(id, true).await.unwrap();
 
     assert!(!disk_path.exists());
     assert!(!vars_path.exists());
+    assert!(!registry_dir.exists());
     assert!(dir.path().exists());
     assert!(unrelated_path.exists());
 }
@@ -255,12 +260,17 @@ async fn remove_instance_with_purge_never_deletes_shared_base_image_or_ovmf_code
     cfg.disk.base_image = Some(base_image_path.clone());
     cfg.firmware.ovmf_vars_path = vars_path.clone();
     cfg.firmware.ovmf_code_path = ovmf_code_path.clone();
-    let id = daemon.create_instance(cfg).await.unwrap();
+    let registry_dir = dir.path().join("registry");
+    let id = daemon
+        .create_instance_in(cfg, registry_dir.clone())
+        .await
+        .unwrap();
 
     daemon.remove_instance(id, true).await.unwrap();
 
     assert!(!disk_path.exists());
     assert!(!vars_path.exists());
+    assert!(!registry_dir.exists());
     assert!(base_image_path.exists());
     assert!(ovmf_code_path.exists());
 }

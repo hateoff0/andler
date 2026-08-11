@@ -17,10 +17,17 @@ use super::error::DaemonError;
 #[derive(Clone)]
 pub(crate) struct SupervisorHandle {
     pub(crate) id: InstanceId,
+    pub(crate) instance_dir: std::path::PathBuf,
     pub(crate) cmd_tx: mpsc::Sender<SupervisorCommand>,
     pub(crate) state_rx: watch::Receiver<InstanceState>,
     pub(crate) handle_rx: watch::Receiver<Option<BackendHandle>>,
     pub(crate) config_rx: watch::Receiver<InstanceConfig>,
+}
+
+impl SupervisorHandle {
+    pub(crate) fn instance_dir(&self) -> &std::path::Path {
+        &self.instance_dir
+    }
 }
 
 // commands carry payloads of very different sizes (an event with a message
@@ -188,7 +195,7 @@ pub(crate) fn spawn_supervisor(
     // its disk anywhere (e.g. `create --file` fixtures), so the disk's
     // parent directory is not the instance's registry directory.
     let config_path = instance_dir.join("instance.toml");
-    let audit_dir = instance_dir;
+    let audit_dir = instance_dir.clone();
     let supervisor = InstanceSupervisor {
         id,
         state,
@@ -221,6 +228,7 @@ pub(crate) fn spawn_supervisor(
 
     SupervisorHandle {
         id,
+        instance_dir,
         cmd_tx,
         state_rx,
         handle_rx,

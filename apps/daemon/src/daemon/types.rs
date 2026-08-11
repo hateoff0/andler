@@ -70,7 +70,11 @@ pub(crate) async fn write_instance_toml(instance_dir: &std::path::Path, cfg: &In
     }
 }
 
-pub(crate) async fn purge_instance_files(id: InstanceId, config: &InstanceConfig) {
+pub(crate) async fn purge_instance_files(
+    id: InstanceId,
+    config: &InstanceConfig,
+    instance_dir: &std::path::Path,
+) {
     if let Err(err) = tokio::fs::remove_file(&config.disk.path).await {
         tracing::error!(
             instance_id = %id,
@@ -89,9 +93,8 @@ pub(crate) async fn purge_instance_files(id: InstanceId, config: &InstanceConfig
         );
     }
 
-    let instance_dir = config.disk.path.parent();
     for disk in &config.extra_disks {
-        if disk.path.parent() != instance_dir {
+        if disk.path.parent() != Some(instance_dir) {
             continue;
         }
         if let Err(err) = tokio::fs::remove_file(&disk.path).await {
@@ -105,49 +108,34 @@ pub(crate) async fn purge_instance_files(id: InstanceId, config: &InstanceConfig
     }
 
     for audit_file in ["instance.toml", "events.jsonl"] {
-        if let Some(dir) = instance_dir {
-            let path = dir.join(audit_file);
-            if let Err(err) = tokio::fs::remove_file(&path).await {
-                if err.kind() != std::io::ErrorKind::NotFound {
-                    tracing::error!(
-                        instance_id = %id,
-                        path = %path.display(),
-                        error = %err,
-                        "purge: failed to remove {audit_file}"
-                    );
-                }
+        let path = instance_dir.join(audit_file);
+        if let Err(err) = tokio::fs::remove_file(&path).await {
+            if err.kind() != std::io::ErrorKind::NotFound {
+                tracing::error!(
+                    instance_id = %id,
+                    path = %path.display(),
+                    error = %err,
+                    "purge: failed to remove {audit_file}"
+                );
             }
         }
     }
 
-    if let Some(parent) = config.disk.path.parent() {
-        let is_instance_dir = parent
-            .file_name()
-            .is_some_and(|name| name.to_string_lossy() == id.to_string());
-
-        if is_instance_dir {
-            if let Err(err) = tokio::fs::remove_dir_all(parent).await {
-                tracing::error!(
-                    instance_id = %id,
-                    path = %parent.display(),
-                    error = %err,
-                    "purge: failed to remove instance directory"
-                );
-            }
-        } else {
-            let _ = tokio::fs::remove_dir(parent).await;
-        }
+    if let Err(err) = tokio::fs::remove_dir_all(instance_dir).await {
+        tracing::error!(
+            instance_id = %id,
+            path = %instance_dir.display(),
+            error = %err,
+            "purge: failed to remove instance directory"
+        );
     }
 }
 
 /// Removes the registry entries (instance.toml, events.jsonl) for a removed
 /// instance without touching its disk or firmware files.
-pub async fn remove_registry_entries(config: &InstanceConfig) {
-    let Some(dir) = config.disk.path.parent() else {
-        return;
-    };
+pub async fn remove_registry_entries(config: &InstanceConfig, instance_dir: &std::path::Path) {
     for file in ["instance.toml", "events.jsonl"] {
-        let path = dir.join(file);
+        let path = instance_dir.join(file);
         if let Err(err) = tokio::fs::remove_file(&path).await {
             if err.kind() != std::io::ErrorKind::NotFound {
                 tracing::error!(

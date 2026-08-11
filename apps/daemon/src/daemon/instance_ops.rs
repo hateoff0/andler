@@ -446,16 +446,17 @@ impl Daemon {
         }
 
         let config = handle.config();
+        let instance_dir = handle.instance_dir().to_path_buf();
         self.supervisors.write().await.remove(&id);
         handle.shutdown().await;
 
         if purge {
-            super::types::purge_instance_files(id, &config).await;
+            super::types::purge_instance_files(id, &config, &instance_dir).await;
         } else {
             // Non-purge remove forgets the instance (registry entries) but
             // keeps the disk and firmware files. Without deleting the toml
             // the next daemon restart would resurrect a removed instance.
-            super::types::remove_registry_entries(&config).await;
+            super::types::remove_registry_entries(&config, &instance_dir).await;
         }
 
         tracing::info!(instance_id = %id, purge, "instance removed");

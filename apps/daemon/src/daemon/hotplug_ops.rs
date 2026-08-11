@@ -44,17 +44,7 @@ impl Daemon {
         let sup = self.handle_for(id).await?;
         let (instance_dir, index) = {
             let config = sup.config();
-            let instance_dir = config
-                .disk
-                .path
-                .parent()
-                .map(PathBuf::from)
-                .ok_or_else(|| {
-                    DaemonError::InvalidConfig(format!(
-                        "instance {id:?} disk has no parent directory"
-                    ))
-                })?;
-            (instance_dir, config.extra_disks.len())
+            (sup.instance_dir().to_path_buf(), config.extra_disks.len())
         };
         let disk_path = resolve_extra_disk_path(requested_path, &instance_dir, index)?;
 
