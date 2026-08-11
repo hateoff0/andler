@@ -172,6 +172,7 @@ struct InstanceSupervisor {
 
 pub(crate) fn spawn_supervisor(
     id: InstanceId,
+    instance_dir: std::path::PathBuf,
     config: InstanceConfig,
     state: InstanceState,
     handle: Option<BackendHandle>,
@@ -182,12 +183,12 @@ pub(crate) fn spawn_supervisor(
     let (handle_tx, handle_rx) = watch::channel(handle.clone());
     let (config_tx, config_rx) = watch::channel(config.clone());
 
-    let instance_dir = config.disk.path.parent().map(PathBuf::from);
-    let (config_path, audit_dir) = match &instance_dir {
-        Some(dir) => (dir.join("instance.toml"), dir.clone()),
-        None => (PathBuf::from("instance.toml"), PathBuf::from(".")),
-    };
-
+    // The registry directory (instances_root/<id>) owns instance.toml and
+    // events.jsonl. It is NOT derived from disk.path — a config can point
+    // its disk anywhere (e.g. `create --file` fixtures), so the disk's
+    // parent directory is not the instance's registry directory.
+    let config_path = instance_dir.join("instance.toml");
+    let audit_dir = instance_dir;
     let supervisor = InstanceSupervisor {
         id,
         state,

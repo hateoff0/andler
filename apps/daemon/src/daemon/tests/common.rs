@@ -85,7 +85,14 @@ pub(crate) async fn register_with_state(
     handle: Option<andler_core::BackendHandle>,
 ) -> InstanceId {
     let id = cfg.id;
-    let supervisor = super::spawn_supervisor(id, cfg, state, handle, daemon.event_sender());
+    let instance_dir = cfg
+        .disk
+        .path
+        .parent()
+        .map(std::path::PathBuf::from)
+        .unwrap_or_default();
+    let supervisor =
+        super::spawn_supervisor(id, instance_dir, cfg, state, handle, daemon.event_sender());
     daemon.supervisors.write().await.insert(id, supervisor);
     id
 }

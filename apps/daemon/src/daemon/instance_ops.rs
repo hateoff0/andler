@@ -81,13 +81,37 @@ impl Daemon {
         }
     }
 
+    /// Test/back-compat path: the registry directory is the disk's parent.
+    /// Production registration goes through [`Self::create_instance_in`],
+    /// which receives the registry directory explicitly.
+    #[cfg(test)]
     pub async fn create_instance(&self, cfg: InstanceConfig) -> Result<InstanceId, DaemonError> {
+        let instance_dir = cfg
+            .disk
+            .path
+            .parent()
+            .map(PathBuf::from)
+            .unwrap_or_default();
+        self.create_instance_in(cfg, instance_dir).await
+    }
+
+    /// Registers the instance at the given registry directory, which owns
+    /// instance.toml and events.jsonl. Callers that created the directory
+    /// (create_linux/android, clone, restore scan) pass it explicitly — the
+    /// config's disk path can point anywhere and must not be used to derive
+    /// the registry directory.
+    pub async fn create_instance_in(
+        &self,
+        cfg: InstanceConfig,
+        instance_dir: PathBuf,
+    ) -> Result<InstanceId, DaemonError> {
         cfg.validate().map_err(DaemonError::InvalidConfig)?;
         self.backend_for(cfg.backend)?;
 
         let id = cfg.id;
         let handle = spawn_supervisor(
             id,
+            instance_dir,
             cfg.clone(),
             InstanceState::Created,
             None,
@@ -177,7 +201,7 @@ impl Daemon {
 
         write_instance_toml(&instance_dir, &cfg).await;
 
-        let registered_id = self.create_instance(cfg).await?;
+        let registered_id = self.create_instance_in(cfg, instance_dir.clone()).await?;
 
         dir_guard.disarm();
 
@@ -227,7 +251,7 @@ impl Daemon {
 
         write_instance_toml(&instance_dir, &cfg).await;
 
-        let registered_id = self.create_instance(cfg).await?;
+        let registered_id = self.create_instance_in(cfg, instance_dir).await?;
         dir_guard.disarm();
 
         Ok(registered_id)

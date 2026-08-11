@@ -219,7 +219,14 @@ impl Daemon {
                 }
             }
 
-            let handle = spawn_supervisor(id, cfg, state, recovered_handle.clone(), events.clone());
+            let handle = spawn_supervisor(
+                id,
+                dir.clone(),
+                cfg,
+                state,
+                recovered_handle.clone(),
+                events.clone(),
+            );
             if let Some(backend_handle) = recovered_handle {
                 let backend = backends
                     .get(&handle.config().backend)

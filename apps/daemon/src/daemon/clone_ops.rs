@@ -84,7 +84,7 @@ impl Daemon {
 
         super::types::write_instance_toml(&instance_dir, &new_config).await;
 
-        let registered_id = self.create_instance(new_config).await?;
+        let registered_id = self.create_instance_in(new_config, instance_dir).await?;
         dir_guard.disarm();
 
         Ok(registered_id)
