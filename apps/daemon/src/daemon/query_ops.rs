@@ -2,12 +2,37 @@ use super::error::DaemonError;
 use super::types::InstanceSummary;
 use super::Daemon;
 use andler_core::{
-    BackendStatus, InstanceConfig, InstanceId, InstanceState, LogLine, Resolution, ResourceMetrics,
+    BackendStatus, InstanceConfig, InstanceId, InstanceState, LogLine, Operation, Resolution,
+    ResourceMetrics,
 };
 use futures_core::stream::BoxStream;
 use futures_util::StreamExt;
 
 impl Daemon {
+    /// All currently active long-running operations across instances.
+    pub async fn list_operations(&self) -> Vec<Operation> {
+        let supervisors = self.supervisors.read().await;
+        let mut ops = Vec::new();
+        for handle in supervisors.values() {
+            if let Ok(Some(op)) = handle.active_operation().await {
+                ops.push(op);
+            }
+        }
+        ops
+    }
+
+    /// Requests cooperative cancellation of the operation; returns the
+    /// operation's instance id when found and cancelled.
+    pub async fn cancel_operation(&self, op_id: &str) -> Result<(), DaemonError> {
+        let supervisors = self.supervisors.read().await;
+        for handle in supervisors.values() {
+            if handle.cancel_operation(op_id).await? {
+                return Ok(());
+            }
+        }
+        Err(DaemonError::OperationNotFound(op_id.to_string()))
+    }
+
     pub async fn status(&self, id: InstanceId) -> Result<BackendStatus, DaemonError> {
         let handle = self.handle_for(id).await?;
 

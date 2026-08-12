@@ -2,9 +2,14 @@ use std::path::PathBuf;
 
 use super::disk_chain;
 use super::error::DaemonError;
+use super::ops::OpProgress;
+use super::supervisor::{OpAccept, OpRunner};
 use super::types::SnapshotRecord;
 use super::Daemon;
-use andler_core::{DiskFormat, InstanceId, InstanceState};
+use andler_core::{
+    DiskFormat, InstanceId, InstanceState, Operation, OperationKind, OperationState,
+};
+use andler_store::{Store, StoredSnapshot};
 
 const MAX_SNAPSHOTS_PER_INSTANCE: usize = 20;
 
@@ -165,7 +170,8 @@ impl Daemon {
     /// `--branch` mode archives the whole current chain into a branch and
     /// rebuilds the active disk on top of the target without deleting
     /// anything; if the target lives on an archived branch, that branch
-    /// becomes the main branch again.
+    /// becomes the main branch again. Executes as a tracked operation
+    /// (progress on the event bus, cancelable).
     pub async fn restore_snapshot(
         &self,
         id: InstanceId,
@@ -230,80 +236,6 @@ impl Daemon {
                     branch: branch_name.clone(),
                 });
             }
-
-            for child in disk_chain::descendants_in_branch(&records, target.id, None) {
-                let child_rel = child.layer_path.as_deref().unwrap_or_default();
-                let child_path = instance_dir.join(child_rel);
-                tokio::fs::remove_file(&child_path)
-                    .await
-                    .map_err(|source| DaemonError::Io {
-                        path: child_path.clone(),
-                        source,
-                    })?;
-                store
-                    .delete_snapshot_by_id(id, child.id)
-                    .await
-                    .map_err(DaemonError::Store)?;
-            }
-
-            tokio::fs::remove_file(&disk_path)
-                .await
-                .map_err(|source| DaemonError::Io {
-                    path: disk_path.clone(),
-                    source,
-                })?;
-        } else {
-            let branch_name = format!("branch-{}", chrono::Utc::now().format("%Y%m%d-%H%M%S"));
-
-            let archived_head = disk_chain::main_chain_head(store, id).await?;
-            let arch_uuid = uuid::Uuid::new_v4();
-            let arch_rel = format!("disk.snapshots/{arch_uuid}.qcow2");
-            let arch_path =
-                disk_chain::snapshots_dir(&instance_dir).join(format!("{arch_uuid}.qcow2"));
-
-            tokio::fs::rename(&disk_path, &arch_path)
-                .await
-                .map_err(|source| DaemonError::Io {
-                    path: disk_path.clone(),
-                    source,
-                })?;
-
-            for record in &records {
-                if record.layer_path.is_some() && record.branch.is_none() {
-                    store
-                        .set_snapshot_branch(id, record.id, Some(branch_name.clone()))
-                        .await
-                        .map_err(DaemonError::Store)?;
-                }
-            }
-
-            let archived = andler_store::StoredSnapshot {
-                id: arch_uuid,
-                instance_id: id,
-                tag: format!("pre-{branch_name}"),
-                description: Some(format!(
-                    "active disk archived when branching off snapshot {tag:?}"
-                )),
-                created_at: chrono::Utc::now().to_rfc3339(),
-                layer_path: Some(arch_rel),
-                parent_id: archived_head.map(|record| record.id),
-                branch: Some(branch_name),
-            };
-            store
-                .save_snapshot(&archived)
-                .await
-                .map_err(DaemonError::Store)?;
-
-            if let Some(target_branch) = &target.branch {
-                for ancestor in disk_chain::ancestors(&records, target.id) {
-                    if ancestor.branch.as_deref() == Some(target_branch.as_str()) {
-                        store
-                            .set_snapshot_branch(id, ancestor.id, None)
-                            .await
-                            .map_err(DaemonError::Store)?;
-                    }
-                }
-            }
         }
 
         let actual_size = andler_disk::qcow2::virtual_size_bytes(&disk_path)
@@ -312,11 +244,104 @@ impl Daemon {
             .unwrap_or(0);
         let virtual_size = actual_size.max(configured_size);
 
-        andler_disk::qcow2::create_overlay(&disk_path, &target_path, virtual_size)
-            .await
-            .map_err(DaemonError::Disk)?;
+        let op_id = format!("op-{}", uuid::Uuid::new_v4());
+        let op_id_inner = op_id.clone();
+        let tag_inner = tag.clone();
+        let phases: Vec<(String, f32)> = if branch {
+            vec![
+                ("archiving current chain".to_string(), 0.5),
+                ("rebuilding active disk".to_string(), 0.5),
+            ]
+        } else {
+            vec![
+                ("removing newer layers".to_string(), 0.5),
+                ("rebuilding active disk".to_string(), 0.5),
+            ]
+        };
 
-        Ok(())
+        let store = store.clone();
+        let snap_dir = disk_chain::snapshots_dir(&instance_dir);
+        let target_id = target.id;
+        let target_branch = target.branch.clone();
+        let run: OpRunner = Box::new(move |mut progress| {
+            Box::pin(async move {
+                let result = if branch {
+                    archive_chain_for_restore(
+                        &store,
+                        id,
+                        &disk_path,
+                        &snap_dir,
+                        target_id,
+                        target_branch.as_deref(),
+                        &records,
+                        &tag_inner,
+                        &mut progress,
+                    )
+                    .await
+                } else {
+                    discard_newer_layers(
+                        &store,
+                        id,
+                        &instance_dir,
+                        &disk_path,
+                        target_id,
+                        &records,
+                        &mut progress,
+                    )
+                    .await
+                };
+
+                if let Err(err) = result {
+                    progress.finish(Err(err.to_string()));
+                    return Err(err);
+                }
+                if progress.is_cancelled() {
+                    progress.finish(Err("cancelled".to_string()));
+                    return Err(DaemonError::OperationCancelled(op_id_inner));
+                }
+
+                progress.enter_phase("rebuilding active disk");
+                if let Err(err) =
+                    andler_disk::qcow2::create_overlay(&disk_path, &target_path, virtual_size).await
+                {
+                    let err = DaemonError::Disk(err);
+                    progress.finish(Err(err.to_string()));
+                    return Err(err);
+                }
+                progress.set_progress(1.0);
+                progress.finish(Ok(()));
+                Ok(())
+            })
+        });
+
+        match handle
+            .run_operation(
+                Operation {
+                    op_id: op_id.clone(),
+                    instance_id: id,
+                    kind: OperationKind::SnapshotRestore,
+                    phases: phases.clone(),
+                    progress: 0.0,
+                    state: OperationState::Queued,
+                    error: None,
+                },
+                Some(format!("snapshot-restore:{tag}")),
+                run,
+            )
+            .await?
+        {
+            OpAccept::Started { done } => done
+                .await
+                .map_err(|_| DaemonError::InstanceSupervisorGone(id))?,
+            OpAccept::Joined { op_id: joined } => {
+                tracing::warn!(
+                    instance_id = %id,
+                    joined = %joined,
+                    "restore joined an already-running restore of the same tag"
+                );
+                Ok(())
+            }
+        }
     }
 
     /// Deletes a snapshot layer with the VM stopped. The layer's data is
@@ -498,6 +523,143 @@ impl Daemon {
                 .collect())
         }
     }
+}
+
+/// Deletes every main-branch layer newer than the target (file + metadata)
+/// and the active disk itself. Cooperative: checks the cancel token between
+/// files, so a cancel stops mid-way — the chain stays consistent enough for
+/// reconciliation or a re-run (files already removed have their metadata
+/// removed with them).
+async fn discard_newer_layers(
+    store: &Store,
+    id: InstanceId,
+    instance_dir: &std::path::Path,
+    disk_path: &std::path::Path,
+    target_id: uuid::Uuid,
+    records: &[StoredSnapshot],
+    progress: &mut OpProgress,
+) -> Result<(), DaemonError> {
+    progress.enter_phase("removing newer layers");
+    let descendants = disk_chain::descendants_in_branch(records, target_id, None);
+    let total = descendants.len().max(1) as f32;
+    for (index, child) in descendants.into_iter().enumerate() {
+        if progress.is_cancelled() {
+            return Ok(());
+        }
+        let child_rel = child.layer_path.as_deref().unwrap_or_default();
+        let child_path = instance_dir.join(child_rel);
+        tokio::fs::remove_file(&child_path)
+            .await
+            .map_err(|source| DaemonError::Io {
+                path: child_path.clone(),
+                source,
+            })?;
+        store
+            .delete_snapshot_by_id(id, child.id)
+            .await
+            .map_err(DaemonError::Store)?;
+        progress.set_progress((index + 1) as f32 / total);
+    }
+    if progress.is_cancelled() {
+        return Ok(());
+    }
+    tokio::fs::remove_file(disk_path)
+        .await
+        .map_err(|source| DaemonError::Io {
+            path: disk_path.to_path_buf(),
+            source,
+        })
+}
+
+/// Archives the current chain as a new branch: the active disk becomes the
+/// `pre-branch-<ts>` head layer, every main-branch record moves to the
+/// branch, and — when the target lives on an archived branch — that branch's
+/// ancestors move back to the main branch (switch-back).
+#[allow(clippy::too_many_arguments)] // mirrors the restore operation's captured context
+async fn archive_chain_for_restore(
+    store: &Store,
+    id: InstanceId,
+    disk_path: &std::path::Path,
+    snap_dir: &std::path::Path,
+    target_id: uuid::Uuid,
+    target_branch: Option<&str>,
+    records: &[StoredSnapshot],
+    tag: &str,
+    progress: &mut OpProgress,
+) -> Result<(), DaemonError> {
+    progress.enter_phase("archiving current chain");
+    if progress.is_cancelled() {
+        return Ok(());
+    }
+    let branch_name = format!("branch-{}", chrono::Utc::now().format("%Y%m%d-%H%M%S"));
+
+    let archived_head = disk_chain::main_chain_head(store, id).await?;
+    let arch_uuid = uuid::Uuid::new_v4();
+    let arch_rel = format!("disk.snapshots/{arch_uuid}.qcow2");
+    let arch_path = snap_dir.join(format!("{arch_uuid}.qcow2"));
+
+    tokio::fs::rename(disk_path, &arch_path)
+        .await
+        .map_err(|source| DaemonError::Io {
+            path: disk_path.to_path_buf(),
+            source,
+        })?;
+
+    let mut moved = 0usize;
+    let total = records
+        .iter()
+        .filter(|r| r.layer_path.is_some() && r.branch.is_none())
+        .count()
+        .max(1);
+    for record in records {
+        if record.layer_path.is_some() && record.branch.is_none() {
+            if progress.is_cancelled() {
+                return Ok(());
+            }
+            store
+                .set_snapshot_branch(id, record.id, Some(branch_name.clone()))
+                .await
+                .map_err(DaemonError::Store)?;
+            moved += 1;
+            progress.set_progress(moved as f32 / total as f32);
+        }
+    }
+
+    if progress.is_cancelled() {
+        return Ok(());
+    }
+    let archived = andler_store::StoredSnapshot {
+        id: arch_uuid,
+        instance_id: id,
+        tag: format!("pre-{branch_name}"),
+        description: Some(format!(
+            "active disk archived when branching off snapshot {tag:?}"
+        )),
+        created_at: chrono::Utc::now().to_rfc3339(),
+        layer_path: Some(arch_rel),
+        parent_id: archived_head.map(|record| record.id),
+        branch: Some(branch_name),
+    };
+    store
+        .save_snapshot(&archived)
+        .await
+        .map_err(DaemonError::Store)?;
+
+    if let Some(target_branch) = target_branch {
+        for ancestor in disk_chain::ancestors(records, target_id) {
+            if progress.is_cancelled() {
+                return Ok(());
+            }
+            if ancestor.branch.as_deref() == Some(target_branch) {
+                store
+                    .set_snapshot_branch(id, ancestor.id, None)
+                    .await
+                    .map_err(DaemonError::Store)?;
+            }
+        }
+    }
+
+    Ok(())
 }
 
 fn check_snapshot_limit(

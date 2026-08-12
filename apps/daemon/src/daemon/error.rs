@@ -167,6 +167,22 @@ pub enum DaemonError {
         tag: String,
     },
 
+    #[error(
+        "instance {instance_id} already runs operation {active_op_id:?} ({active_kind:?}); \
+         wait for it to finish or cancel it with `andler op cancel {active_op_id}`"
+    )]
+    OperationAlreadyRunning {
+        instance_id: InstanceId,
+        active_op_id: String,
+        active_kind: andler_core::OperationKind,
+    },
+
+    #[error("operation {0:?} was cancelled")]
+    OperationCancelled(String),
+
+    #[error("no active operation with id {0:?}; `andler op list` shows the running ones")]
+    OperationNotFound(String),
+
     #[error("instance reference must not be empty")]
     EmptyInstanceRef,
 
@@ -315,6 +331,9 @@ impl DaemonError {
             DaemonError::RestoreWouldBreakClones { .. } => ErrorKind::FailedPrecondition,
             DaemonError::DeleteWouldBreakClones { .. } => ErrorKind::FailedPrecondition,
             DaemonError::CannotDeleteBaseLayer { .. } => ErrorKind::FailedPrecondition,
+            DaemonError::OperationAlreadyRunning { .. } => ErrorKind::FailedPrecondition,
+            DaemonError::OperationCancelled(_) => ErrorKind::FailedPrecondition,
+            DaemonError::OperationNotFound(_) => ErrorKind::NotFound,
             DaemonError::EmptyInstanceRef => ErrorKind::InvalidArgument,
             DaemonError::ConfigIdMismatch { .. } => ErrorKind::InvalidArgument,
             DaemonError::ConfigKindChanged(_) => ErrorKind::InvalidArgument,

@@ -3,11 +3,12 @@ use std::time::SystemTime;
 
 use andler_core::{
     BackendHandle, DaemonEvent, EventKind, FsmError, InstanceConfig, InstanceEvent, InstanceId,
-    InstanceState, Resolution,
+    InstanceState, OpId, Operation, Resolution,
 };
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 
 use super::error::DaemonError;
+use super::ops::OpProgress;
 
 /// One task per instance owns the instance's FSM state, backend handle and
 /// config; everything else in the daemon reads those through watch snapshots
@@ -54,8 +55,49 @@ pub(crate) enum SupervisorCommand {
     ReloadConfig {
         ack: oneshot::Sender<Result<ConfigSnapshot, DaemonError>>,
     },
+    /// Runs a long operation as a spawned sub-task (never inline — the first
+    /// long-running command must not freeze status/cancel behind it). One
+    /// active operation per instance; a second one either joins (same
+    /// idempotency key) or is refused.
+    RunOperation {
+        op: Operation,
+        key: Option<String>,
+        run: OpRunner,
+        done_tx: oneshot::Sender<Result<(), DaemonError>>,
+        ack: oneshot::Sender<Result<Option<OpId>, DaemonError>>,
+    },
+    CancelOperation {
+        op_id: OpId,
+        ack: oneshot::Sender<Result<bool, DaemonError>>,
+    },
+    GetActiveOp {
+        ack: oneshot::Sender<Option<Operation>>,
+    },
     Shutdown,
 }
+
+/// Outcome of enqueueing an operation.
+#[derive(Debug)]
+pub(crate) enum OpAccept {
+    /// Fresh operation; the daemon waits on the paired `done_tx` for the
+    /// final result.
+    Started {
+        done: oneshot::Receiver<Result<(), DaemonError>>,
+    },
+    /// An operation with the same idempotency key is already active; the
+    /// caller joins it (progress is visible on the event bus).
+    Joined { op_id: OpId },
+}
+
+/// Long-running operation body: owns its progress handle, checks
+/// `is_cancelled()` cooperatively between steps.
+pub(crate) type OpRunner = Box<
+    dyn FnOnce(
+            OpProgress,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<(), DaemonError>> + Send>,
+        > + Send,
+>;
 
 /// File-vs-memory config picture, produced by `ReloadConfig`.
 #[derive(Debug, Clone)]
@@ -154,6 +196,60 @@ impl SupervisorHandle {
             .map_err(|_| DaemonError::InstanceSupervisorGone(self.id))?
     }
 
+    pub(crate) async fn run_operation(
+        &self,
+        op: Operation,
+        key: Option<String>,
+        run: OpRunner,
+    ) -> Result<OpAccept, DaemonError> {
+        let (done_tx, done_rx) = oneshot::channel();
+        let (ack_tx, ack_rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SupervisorCommand::RunOperation {
+                op,
+                key,
+                run,
+                done_tx,
+                ack: ack_tx,
+            })
+            .await
+            .map_err(|_| DaemonError::InstanceSupervisorGone(self.id))?;
+        match ack_rx
+            .await
+            .map_err(|_| DaemonError::InstanceSupervisorGone(self.id))??
+        {
+            // None = the operation was started fresh (this call owns done_rx);
+            // Some(id) = joined an existing operation with the same key.
+            None => Ok(OpAccept::Started { done: done_rx }),
+            Some(op_id) => Ok(OpAccept::Joined { op_id }),
+        }
+    }
+
+    pub(crate) async fn cancel_operation(&self, op_id: &str) -> Result<bool, DaemonError> {
+        let (ack_tx, ack_rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SupervisorCommand::CancelOperation {
+                op_id: op_id.to_string(),
+                ack: ack_tx,
+            })
+            .await
+            .map_err(|_| DaemonError::InstanceSupervisorGone(self.id))?;
+        ack_rx
+            .await
+            .map_err(|_| DaemonError::InstanceSupervisorGone(self.id))?
+    }
+
+    pub(crate) async fn active_operation(&self) -> Result<Option<Operation>, DaemonError> {
+        let (ack_tx, ack_rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SupervisorCommand::GetActiveOp { ack: ack_tx })
+            .await
+            .map_err(|_| DaemonError::InstanceSupervisorGone(self.id))?;
+        ack_rx
+            .await
+            .map_err(|_| DaemonError::InstanceSupervisorGone(self.id))
+    }
+
     pub(crate) async fn shutdown(&self) {
         let _ = self.cmd_tx.send(SupervisorCommand::Shutdown).await;
     }
@@ -175,6 +271,11 @@ struct InstanceSupervisor {
     file_config: Option<InstanceConfig>,
     file_error: Option<String>,
     live_resolution: Option<Resolution>,
+    active_op: Option<Operation>,
+    active_op_key: Option<String>,
+    op_cancel: Option<watch::Sender<bool>>,
+    op_done_tx: mpsc::UnboundedSender<OpId>,
+    op_done_rx: mpsc::UnboundedReceiver<OpId>,
 }
 
 pub(crate) fn spawn_supervisor(
@@ -189,6 +290,7 @@ pub(crate) fn spawn_supervisor(
     let (state_tx, state_rx) = watch::channel(state.clone());
     let (handle_tx, handle_rx) = watch::channel(handle.clone());
     let (config_tx, config_rx) = watch::channel(config.clone());
+    let (op_done_tx, op_done_rx) = mpsc::unbounded_channel::<OpId>();
 
     // The registry directory (instances_root/<id>) owns instance.toml and
     // events.jsonl. It is NOT derived from disk.path — a config can point
@@ -212,6 +314,11 @@ pub(crate) fn spawn_supervisor(
         file_config: None,
         file_error: None,
         live_resolution: None,
+        active_op: None,
+        active_op_key: None,
+        op_cancel: None,
+        op_done_tx,
+        op_done_rx,
     };
     // Watchdog: never fire-and-forget a task that owns instance
     // state. The JoinHandle is awaited by a tiny watcher so a supervisor
@@ -238,46 +345,144 @@ pub(crate) fn spawn_supervisor(
 
 impl InstanceSupervisor {
     // Intentionally sequential: every command today (FSM transition, handle/
-    // config swap) completes in milliseconds. The first long-running command
-    // (DiskChain ops, provisioning) MUST spawn its own task and ack through
-    // its handle — awaiting it inline freezes status/cancel behind it.
+    // config swap) completes in milliseconds. Long-running commands
+    // (DiskChain ops, provisioning) MUST spawn their own task and ack
+    // through their handle — awaiting them inline freezes status/cancel
+    // behind them. RunOperation below is that path.
     async fn run(mut self) {
-        while let Some(command) = self.inbox.recv().await {
-            match command {
-                SupervisorCommand::Transition { event, ack } => {
-                    self.apply_transition(event, ack).await;
-                }
-                SupervisorCommand::SetHandle { handle, ack } => {
-                    self.handle = handle.clone();
-                    let _ = self.handle_tx.send(handle);
-                    let _ = ack.send(Ok(()));
-                }
-                SupervisorCommand::SetConfig {
-                    config,
-                    applied_live_resolution,
-                    ack,
-                } => {
-                    if let Some(resolution) = applied_live_resolution {
-                        self.live_resolution = Some(resolution);
+        loop {
+            tokio::select! {
+                done = self.op_done_rx.recv() => {
+                    match done {
+                        Some(_op_id) => {
+                            self.active_op = None;
+                            self.active_op_key = None;
+                            self.op_cancel = None;
+                        }
+                        None => break,
                     }
-                    self.config = config.clone();
-                    let _ = self.config_tx.send(config);
-                    self.persist().await;
-                    let _ = ack.send(Ok(()));
                 }
-                SupervisorCommand::ReloadConfig { ack } => {
-                    self.reload_if_changed().await;
-                    let _ = ack.send(Ok(ConfigSnapshot {
-                        config: self.config.clone(),
-                        file_config: self.file_config.clone(),
-                        file_error: self.file_error.clone(),
-                        live_resolution: self.live_resolution,
-                    }));
+                command = self.inbox.recv() => {
+                    let Some(command) = command else { break };
+                    match command {
+                        SupervisorCommand::Transition { event, ack } => {
+                            self.apply_transition(event, ack).await;
+                        }
+                        SupervisorCommand::SetHandle { handle, ack } => {
+                            self.handle = handle.clone();
+                            let _ = self.handle_tx.send(handle);
+                            let _ = ack.send(Ok(()));
+                        }
+                        SupervisorCommand::SetConfig {
+                            config,
+                            applied_live_resolution,
+                            ack,
+                        } => {
+                            if let Some(resolution) = applied_live_resolution {
+                                self.live_resolution = Some(resolution);
+                            }
+                            self.config = config.clone();
+                            let _ = self.config_tx.send(config);
+                            self.persist().await;
+                            let _ = ack.send(Ok(()));
+                        }
+                        SupervisorCommand::ReloadConfig { ack } => {
+                            self.reload_if_changed().await;
+                            let _ = ack.send(Ok(ConfigSnapshot {
+                                config: self.config.clone(),
+                                file_config: self.file_config.clone(),
+                                file_error: self.file_error.clone(),
+                                live_resolution: self.live_resolution,
+                            }));
+                        }
+                        SupervisorCommand::RunOperation {
+                            op,
+                            key,
+                            run,
+                            done_tx,
+                            ack,
+                        } => {
+                            self.start_operation(op, key, run, done_tx, ack).await;
+                        }
+                        SupervisorCommand::CancelOperation { op_id, ack } => {
+                            let cancelled = match &self.active_op {
+                                Some(active) if active.op_id == op_id => {
+                                    if let Some(cancel_tx) = &self.op_cancel {
+                                        let _ = cancel_tx.send(true);
+                                        true
+                                    } else {
+                                        false
+                                    }
+                                }
+                                _ => false,
+                            };
+                            let _ = ack.send(Ok(cancelled));
+                        }
+                        SupervisorCommand::GetActiveOp { ack } => {
+                            let _ = ack.send(self.active_op.clone());
+                        }
+                        SupervisorCommand::Shutdown => break,
+                    }
                 }
-                SupervisorCommand::Shutdown => break,
             }
         }
         tracing::debug!(instance_id = %self.id, "instance supervisor stopped");
+    }
+
+    /// Enqueues a long-running operation and runs it as a spawned sub-task:
+    /// one active operation per instance; a second one either joins (same
+    /// idempotency key) or is refused with an actionable error. The ack is
+    /// sent as soon as the operation is accepted — the caller then waits on
+    /// `done_tx` — so status/cancel/transition commands never queue behind
+    /// the operation's own execution.
+    async fn start_operation(
+        &mut self,
+        op: Operation,
+        key: Option<String>,
+        run: OpRunner,
+        done_tx: oneshot::Sender<Result<(), DaemonError>>,
+        ack: oneshot::Sender<Result<Option<OpId>, DaemonError>>,
+    ) {
+        if let Some(active) = &self.active_op {
+            if key.is_some() && key == self.active_op_key {
+                let _ = ack.send(Ok(Some(active.op_id.clone())));
+                return;
+            }
+            let _ = ack.send(Err(DaemonError::OperationAlreadyRunning {
+                instance_id: self.id,
+                active_op_id: active.op_id.clone(),
+                active_kind: active.kind,
+            }));
+            return;
+        }
+
+        let op_id = op.op_id.clone();
+        let (cancel_tx, cancel_rx) = watch::channel(false);
+        let events = self.events.clone();
+        let audit_dir = self.audit_dir.clone();
+        let op_done_tx = self.op_done_tx.clone();
+        self.active_op = Some(op.clone());
+        self.active_op_key = key;
+        self.op_cancel = Some(cancel_tx);
+
+        tokio::spawn(async move {
+            let mut progress = OpProgress::new(
+                op.kind,
+                op.instance_id,
+                op.op_id,
+                op.phases,
+                events,
+                audit_dir,
+                cancel_rx,
+            );
+            progress.mark_running();
+            // The operation itself calls progress.finish() (it owns the
+            // handle); the sub-task only forwards the result.
+            let result = run(progress).await;
+            let _ = done_tx.send(result);
+            let _ = op_done_tx.send(op_id);
+        });
+        let _ = ack.send(Ok(None));
     }
 
     async fn apply_transition(

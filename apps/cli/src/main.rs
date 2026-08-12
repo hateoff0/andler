@@ -8,6 +8,7 @@ mod helpers;
 mod hotplug;
 mod instance_file;
 mod lifecycle;
+mod op;
 mod preview;
 mod snapshot;
 mod status;
@@ -319,6 +320,15 @@ enum Command {
         json: bool,
     },
 
+    /// Inspect and cancel long-running operations
+    Op {
+        #[command(subcommand)]
+        action: OpAction,
+
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Create, inspect, resize, or compact disk images
     Disk {
         #[command(subcommand)]
@@ -431,6 +441,18 @@ enum SnapshotAction {
 
     List {
         instance_id: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum OpAction {
+    /// List active operations across all instances
+    List {},
+
+    /// Request cooperative cancellation of a running operation
+    Cancel {
+        /// Operation id from `andler op list`
+        op_id: String,
     },
 }
 
@@ -860,6 +882,9 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 SnapshotAction::List { instance_id } => instance_id.clone(),
             };
             snapshot::handle(&mut client, instance_id, action, json).await?;
+        }
+        Some(Command::Op { action, json }) => {
+            crate::op::handle(&mut client, action, json).await?;
         }
         Some(Command::Disk { action, flags }) => {
             let resolved = match action {

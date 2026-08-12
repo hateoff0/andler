@@ -9,6 +9,7 @@ mod events;
 mod health;
 mod hotplug;
 mod list_config;
+mod ops;
 mod persistence;
 mod remove;
 mod resolve_instance_id;

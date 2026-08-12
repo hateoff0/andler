@@ -34,6 +34,8 @@ service AndlerService {
     rpc DetachDisk(DetachDiskRequest) returns (Empty);
     rpc AttachNetwork(AttachNetworkRequest) returns (AttachNetworkResponse);
     rpc DetachNetwork(DetachNetworkRequest) returns (Empty);
+    rpc ListOperations(Empty) returns (OpListResponse);
+    rpc CancelOperation(OpCancelRequest) returns (Empty);
 }
 
 message Empty {}
@@ -418,6 +420,29 @@ message SnapshotEntry {
 
 message ListSnapshotsResponse {
     repeated SnapshotEntry snapshots = 1;
+}
+
+message OperationInfo {
+    string op_id = 1;
+    string instance_id = 2;
+    string kind = 3;
+    repeated OperationPhase phases = 4;
+    double progress = 5;
+    string state = 6;
+    string error = 7;
+}
+
+message OperationPhase {
+    string name = 1;
+    double weight = 2;
+}
+
+message OpListResponse {
+    repeated OperationInfo operations = 1;
+}
+
+message OpCancelRequest {
+    string op_id = 1;
 }
 
 message ResourceMetricsResponse {

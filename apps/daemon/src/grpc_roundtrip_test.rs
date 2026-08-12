@@ -9,7 +9,8 @@ use andler_rpc::proto::{
     CpuConfig, CreateInstanceRequest, DetachDiskRequest, DetachNetworkRequest, DiskConfig,
     DisplayConfig, Empty, ExportInstanceDiskRequest, FirmwareConfig, GetInstanceConfigResponse,
     GpuConfig, InputConfig, InstanceIdRequest, InstanceStateKind, MemoryConfig, NetworkConfig,
-    RemoveInstanceRequest, Resolution, RestoreSnapshotRequest, SetInstanceConfigRequest,
+    OpCancelRequest, RemoveInstanceRequest, Resolution, RestoreSnapshotRequest,
+    SetInstanceConfigRequest,
 };
 use tokio::net::TcpListener;
 use tokio_stream::wrappers::TcpListenerStream;
@@ -1317,6 +1318,30 @@ async fn snapshot_restore_branch_flag_round_trips_and_list_is_empty_for_fresh_in
         .expect("list_snapshots must succeed on a fresh instance")
         .into_inner();
     assert!(listed.snapshots.is_empty());
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn op_list_and_cancel_round_trip_over_real_grpc() {
+    let (mut client, server) = spawn_server_and_connect().await;
+
+    // Fresh daemon: no active operations.
+    let listed = client
+        .list_operations(Empty {})
+        .await
+        .expect("list_operations must succeed")
+        .into_inner();
+    assert!(listed.operations.is_empty());
+
+    // Cancelling an unknown operation is a not-found error, not a panic.
+    let status = client
+        .cancel_operation(OpCancelRequest {
+            op_id: "op-unknown".to_string(),
+        })
+        .await
+        .expect_err("cancelling an unknown operation must fail");
+    assert_eq!(status.code(), tonic::Code::NotFound);
 
     server.abort();
 }

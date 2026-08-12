@@ -5,6 +5,7 @@ mod error;
 mod health_ops;
 mod hotplug_ops;
 mod instance_ops;
+mod ops;
 mod query_ops;
 mod snapshot_ops;
 mod supervisor;

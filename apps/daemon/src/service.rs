@@ -13,10 +13,10 @@ use andler_rpc::proto::{
     ExportInstanceDiskResponse, GetAndroidBootModeResponse, GetConfigStatusResponse,
     GetInstanceConfigResponse, GuestPackageEntry, InstallGuestAgentRequest, InstanceIdRequest,
     InstanceListEntry, InstanceStatusResponse, ListGuestPackagesResponse, ListInstancesResponse,
-    ListSnapshotsResponse, LogLineResponse, RemoveGuestAgentRequest, RemoveInstanceRequest,
-    ResourceMetricsResponse, RestoreSnapshotRequest, SetInstanceConfigRequest, SnapshotEntry,
-    StopInstanceRequest, SwitchAndroidBootModeRequest, SwitchArmTranslatorRequest,
-    UpdateInstanceConfigRequest,
+    ListSnapshotsResponse, LogLineResponse, OpCancelRequest, OpListResponse, OperationInfo,
+    OperationPhase, RemoveGuestAgentRequest, RemoveInstanceRequest, ResourceMetricsResponse,
+    RestoreSnapshotRequest, SetInstanceConfigRequest, SnapshotEntry, StopInstanceRequest,
+    SwitchAndroidBootModeRequest, SwitchArmTranslatorRequest, UpdateInstanceConfigRequest,
 };
 use futures_core::Stream;
 use futures_util::StreamExt;
@@ -592,6 +592,44 @@ impl AndlerService for DaemonService {
         let req = request.into_inner();
         let id = self.daemon.resolve_instance_id(&req.instance_id).await?;
         self.daemon.detach_network(id, req.index as usize).await?;
+        Ok(Response::new(Empty {}))
+    }
+
+    async fn list_operations(
+        &self,
+        _request: Request<Empty>,
+    ) -> Result<Response<OpListResponse>, Status> {
+        let operations = self
+            .daemon
+            .list_operations()
+            .await
+            .into_iter()
+            .map(|op| OperationInfo {
+                op_id: op.op_id,
+                instance_id: op.instance_id.to_string(),
+                kind: format!("{:?}", op.kind),
+                phases: op
+                    .phases
+                    .into_iter()
+                    .map(|(name, weight)| OperationPhase {
+                        name,
+                        weight: weight as f64,
+                    })
+                    .collect(),
+                progress: op.progress as f64,
+                state: format!("{:?}", op.state),
+                error: op.error.unwrap_or_default(),
+            })
+            .collect();
+        Ok(Response::new(OpListResponse { operations }))
+    }
+
+    async fn cancel_operation(
+        &self,
+        request: Request<OpCancelRequest>,
+    ) -> Result<Response<Empty>, Status> {
+        let req = request.into_inner();
+        self.daemon.cancel_operation(&req.op_id).await?;
         Ok(Response::new(Empty {}))
     }
 }
