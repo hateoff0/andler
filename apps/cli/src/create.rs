@@ -23,6 +23,7 @@ pub async fn handle(
     cdrom_bus: CliCdromBus,
     no_uefi: bool,
     quick: bool,
+    template: Option<String>,
     dry_run: bool,
     verify: bool,
     android_version: Option<CliAndroidVersion>,
@@ -165,6 +166,16 @@ pub async fn handle(
     let kind = kind.unwrap();
     let name = name.unwrap();
     let ovmf = ovmf_vars_template.unwrap_or_default();
+    if template.is_some() && kind == CliKind::Android {
+        return Err(
+            "--template is only supported with --kind linux in this phase (Android requests              carry no config sections yet)"
+                .into(),
+        );
+    }
+    let template = match &template {
+        Some(name) => Some(crate::instance_file::TemplateFile::load(name)?),
+        None => None,
+    };
 
     match kind {
         CliKind::Linux => {
@@ -185,6 +196,7 @@ pub async fn handle(
                 cdrom_bus,
                 ovmf,
                 !no_uefi,
+                template.as_ref(),
             );
             if dry_run {
                 return crate::preview::print_linux_preview(&req);
@@ -296,6 +308,7 @@ fn build_linux_request(
     cdrom_bus: CliCdromBus,
     ovmf_vars_template: String,
     enable_uefi: bool,
+    template: Option<&crate::instance_file::TemplateFile>,
 ) -> CreateInstanceRequest {
     let mut disk = andler_core::DiskConfig::reference_default(std::path::PathBuf::from(&disk_path));
     if let Some(gib) = disk_size_gib {
@@ -313,6 +326,10 @@ fn build_linux_request(
         CliCdromBus::Ide => andler_core::CdromBus::Ide,
     };
 
+    // Template sections sit between the reference defaults and the CLI
+    // flags: sections not present in the template keep their defaults, and
+    // sections are only settable through a template, so no flag overwrite
+    // is needed here.
     let mut req = CreateInstanceRequest {
         name,
         iso_path,
@@ -334,6 +351,29 @@ fn build_linux_request(
         input: Some(andler_core::InputConfig::reference_default().into()),
         ..Default::default()
     };
+    if let Some(t) = template {
+        if let Some(cpu) = &t.cpu {
+            req.cpu = Some(cpu.clone().into());
+        }
+        if let Some(memory) = &t.memory {
+            req.memory = Some(memory.clone().into());
+        }
+        if let Some(display) = &t.display {
+            req.display = Some((*display).into());
+        }
+        if let Some(gpu) = &t.gpu {
+            req.gpu = Some(gpu.clone().into());
+        }
+        if let Some(network) = &t.network {
+            req.network = Some(network.clone().into());
+        }
+        if let Some(audio) = &t.audio {
+            req.audio = Some((*audio).into());
+        }
+        if let Some(input) = &t.input {
+            req.input = Some((*input).into());
+        }
+    }
     req.set_cdrom_bus(resolved_cdrom_bus.into());
     req
 }

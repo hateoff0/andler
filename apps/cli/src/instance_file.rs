@@ -24,6 +24,9 @@ pub enum InstanceFileError {
         source: toml::de::Error,
     },
 
+    #[error("template {name:?} not found (no {user_path} and no built-in of that name); built-ins: headless, desktop")]
+    TemplateNotFound { name: String, user_path: PathBuf },
+
     #[error("invalid {field} {path:?}: {source}")]
     InvalidPath {
         field: &'static str,
@@ -124,6 +127,65 @@ pub struct InstanceFile {
 
     #[serde(default)]
     pub snapshot_timeout_secs: Option<u64>,
+}
+
+/// A VM template: partial `InstanceConfig` sections without the identity
+/// fields (name/kind/iso/disk come from the CLI flags) and without flag-
+/// backed scalars (merge order is defaults < template < CLI flags, see
+/// `andler create --template`).
+#[derive(Debug, Default, serde::Deserialize)]
+pub struct TemplateFile {
+    #[serde(default)]
+    pub cpu: Option<CpuConfig>,
+    #[serde(default)]
+    pub memory: Option<MemoryConfig>,
+    #[serde(default)]
+    pub display: Option<DisplayConfig>,
+    #[serde(default)]
+    pub gpu: Option<GpuConfig>,
+    #[serde(default)]
+    pub network: Option<NetworkConfig>,
+    #[serde(default)]
+    pub audio: Option<AudioConfig>,
+    #[serde(default)]
+    pub input: Option<InputConfig>,
+}
+
+impl TemplateFile {
+    /// Loads a template by name: `~/.andler/templates/<name>.toml` when the
+    /// file exists, otherwise one of the built-ins (`headless`, `desktop`).
+    pub fn load(name: &str) -> Result<Self, InstanceFileError> {
+        let user_path = andler_core::paths::andler_home()
+            .join("templates")
+            .join(format!("{name}.toml"));
+        if user_path.exists() {
+            let text =
+                std::fs::read_to_string(&user_path).map_err(|source| InstanceFileError::Read {
+                    path: user_path.clone(),
+                    source,
+                })?;
+            return toml::from_str(&text).map_err(|source| InstanceFileError::Parse {
+                path: user_path,
+                source,
+            });
+        }
+
+        let builtin = match name {
+            "headless" => Some(include_str!("templates/headless.toml")),
+            "desktop" => Some(include_str!("templates/desktop.toml")),
+            _ => None,
+        };
+        match builtin {
+            Some(text) => toml::from_str(text).map_err(|source| InstanceFileError::Parse {
+                path: PathBuf::from(format!("builtin template {name:?}")),
+                source,
+            }),
+            None => Err(InstanceFileError::TemplateNotFound {
+                name: name.to_string(),
+                user_path,
+            }),
+        }
+    }
 }
 
 impl InstanceFile {
@@ -338,6 +400,34 @@ fn default_true() -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn builtin_headless_template_parses() {
+        let template = TemplateFile::load("headless").expect("built-in must parse");
+        let gpu = template.gpu.expect("headless must set gpu");
+        assert_eq!(gpu.render_backend, andler_core::RenderBackend::Cpu);
+        let display = template.display.expect("headless must set display");
+        assert_eq!(display.display_engine, andler_core::DisplayEngine::None);
+        let audio = template.audio.expect("headless must set audio");
+        assert_eq!(audio.backend, andler_core::AudioBackend::None);
+    }
+
+    #[test]
+    fn builtin_desktop_template_parses() {
+        let template = TemplateFile::load("desktop").expect("built-in must parse");
+        let gpu = template.gpu.expect("desktop must set gpu");
+        assert_eq!(gpu.render_backend, andler_core::RenderBackend::Venus);
+        let display = template.display.expect("desktop must set display");
+        assert_eq!(display.display_engine, andler_core::DisplayEngine::Sdl);
+        assert_eq!(display.resolution, andler_core::Resolution::new(1920, 1080));
+    }
+
+    #[test]
+    fn unknown_template_is_rejected_with_list_of_builtins() {
+        let err = TemplateFile::load("definitely-not-a-template").unwrap_err();
+        let text = err.to_string();
+        assert!(text.contains("not found"), "{text}");
+        assert!(text.contains("headless"), "{text}");
+    }
     use super::*;
 
     const MINIMAL_LINUX_TOML: &str = r#"

@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     AudioConfig, CdromBus, CpuConfig, DiskConfig, DisplayConfig, FirmwareConfig, GpuConfig,
-    InputConfig, MemoryConfig, NetworkConfig,
+    InputConfig, MemoryConfig, NetworkConfig, RenderBackend,
 };
 use crate::android_profile::AndroidProfile;
 
@@ -155,6 +155,14 @@ impl InstanceConfig {
         if self.disk.size_bytes == 0 {
             return Err("disk.size_bytes must be greater than 0".to_string());
         }
+        if self.gpu.render_backend != RenderBackend::Cpu {
+            let gpu_mib = self.gpu.hostmem_bytes / GpuConfig::MIB;
+            if !(256..=16384).contains(&gpu_mib) {
+                return Err(format!(
+                    "gpu.hostmem_bytes {gpu_mib} MiB is outside the sane range (256-16384 MiB)"
+                ));
+            }
+        }
         if self.display.resolution.width == 0 || self.display.resolution.height == 0 {
             return Err(format!(
                 "display resolution must be non-zero (got {}x{})",
@@ -293,6 +301,27 @@ mod tests {
         let mut cfg2 = sample_valid_config();
         cfg2.display.resolution = Resolution::new(1920, 0);
         assert!(cfg2.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_out_of_range_gpu_memory_for_hardware_backend() {
+        let mut cfg = sample_valid_config();
+        cfg.gpu.render_backend = RenderBackend::Venus;
+        cfg.gpu.hostmem_bytes = 64 * GpuConfig::MIB;
+        assert!(cfg.validate().is_err());
+
+        let mut cfg2 = sample_valid_config();
+        cfg2.gpu.render_backend = RenderBackend::Venus;
+        cfg2.gpu.hostmem_bytes = 32768 * GpuConfig::MIB;
+        assert!(cfg2.validate().is_err());
+    }
+
+    #[test]
+    fn validate_allows_small_hostmem_for_cpu_backend() {
+        let mut cfg = sample_valid_config();
+        cfg.gpu.render_backend = RenderBackend::Cpu;
+        cfg.gpu.hostmem_bytes = 64 * GpuConfig::MIB;
+        assert!(cfg.validate().is_ok());
     }
 
     #[test]

@@ -35,20 +35,16 @@ fn run_checks(resolved: &Resolved, checks: Vec<Check>) -> bool {
 
 fn check_disk(resolved: &Resolved) -> Check {
     let disk = &resolved.cfg.disk;
-    let result = if disk.size_bytes == 0 {
-        Err("disk size is 0 bytes".to_string())
-    } else {
-        match disk.path.parent() {
-            Some(parent) if !parent.as_os_str().is_empty() && !parent.exists() => {
-                Err(format!("directory does not exist: {}", parent.display()))
-            }
-            _ => Ok(format!(
-                "{:?}, {} GiB, {}",
-                disk.format,
-                disk.size_bytes / andler_core::DiskConfig::GIB,
-                disk.path.display()
-            )),
+    let result = match disk.path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() && !parent.exists() => {
+            Err(format!("directory does not exist: {}", parent.display()))
         }
+        _ => Ok(format!(
+            "{:?}, {} GiB, {}",
+            disk.format,
+            disk.size_bytes / andler_core::DiskConfig::GIB,
+            disk.path.display()
+        )),
     };
     Check {
         name: "Disk",
@@ -88,33 +84,21 @@ fn check_iso(resolved: &Resolved) -> Check {
     }
 }
 
-fn check_gpu_memory(resolved: &Resolved) -> Check {
-    let mib = resolved.cfg.gpu.hostmem_bytes / andler_core::GpuConfig::MIB;
-    let result = if !(256..=16384).contains(&mib) {
-        Err(format!(
-            "{mib} MiB is outside the sane range (256-16384 MiB)"
-        ))
-    } else {
-        Ok(format!("{mib} MiB"))
+/// The single resolver-side sanity gate: the same `InstanceConfig::validate`
+/// the daemon runs on create. Size/range checks live in andler-core, so the
+/// CLI can never pass what the daemon would reject (and vice versa).
+fn check_config_sanity(resolved: &Resolved) -> Check {
+    let result = match resolved.cfg.validate() {
+        Ok(()) => Ok(format!(
+            "{} cores, {} GiB RAM, {} MiB GPU",
+            resolved.cfg.cpu.cores,
+            resolved.cfg.memory.size_bytes / andler_core::MemoryConfig::GIB,
+            resolved.cfg.gpu.hostmem_bytes / andler_core::GpuConfig::MIB
+        )),
+        Err(issue) => Err(issue),
     };
     Check {
-        name: "GPU memory",
-        result,
-    }
-}
-
-fn check_cpu_memory(resolved: &Resolved) -> Check {
-    let cores = resolved.cfg.cpu.cores;
-    let gib = resolved.cfg.memory.size_bytes / andler_core::MemoryConfig::GIB;
-    let result = if cores == 0 {
-        Err("0 CPU cores requested".to_string())
-    } else if gib == 0 {
-        Err("0 GiB memory requested".to_string())
-    } else {
-        Ok(format!("{cores} cores, {gib} GiB"))
-    };
-    Check {
-        name: "CPU/Memory",
+        name: "Config sanity",
         result,
     }
 }
@@ -126,8 +110,7 @@ pub fn verify_linux(req: &CreateInstanceRequest) -> Result<bool, Box<dyn std::er
         check_iso(&resolved),
         check_disk(&resolved),
         check_ovmf(&resolved, false),
-        check_gpu_memory(&resolved),
-        check_cpu_memory(&resolved),
+        check_config_sanity(&resolved),
     ];
 
     Ok(run_checks(&resolved, checks))
@@ -171,8 +154,7 @@ pub fn verify_android(
         disk_mode_check,
         check_disk(&resolved),
         check_ovmf(&resolved, true),
-        check_gpu_memory(&resolved),
-        check_cpu_memory(&resolved),
+        check_config_sanity(&resolved),
     ];
     Ok(run_checks(&resolved, checks))
 }
@@ -223,11 +205,10 @@ mod tests {
     }
 
     #[test]
-    fn check_disk_fails_for_zero_size() {
+    fn config_sanity_fails_on_zero_disk_size() {
         let mut resolved = fixture_resolved(std::env::temp_dir().join("disk.qcow2"));
         resolved.cfg.disk.size_bytes = 0;
-        let check = check_disk(&resolved);
-        assert!(check.result.is_err());
+        assert!(check_config_sanity(&resolved).result.is_err());
     }
 
     #[test]
@@ -293,44 +274,32 @@ mod tests {
     }
 
     #[test]
-    fn check_gpu_memory_passes_within_range() {
-        let mut resolved = fixture_resolved(std::env::temp_dir().join("disk.qcow2"));
-        resolved.cfg.gpu.hostmem_bytes = 4096 * andler_core::GpuConfig::MIB;
-        assert!(check_gpu_memory(&resolved).result.is_ok());
+    fn config_sanity_passes_for_sane_values() {
+        let resolved = fixture_resolved(std::env::temp_dir().join("disk.qcow2"));
+        assert!(check_config_sanity(&resolved).result.is_ok());
     }
 
     #[test]
-    fn check_gpu_memory_fails_below_range() {
+    fn config_sanity_fails_on_out_of_range_gpu_for_hardware_backend() {
         let mut resolved = fixture_resolved(std::env::temp_dir().join("disk.qcow2"));
+        resolved.cfg.gpu.render_backend = andler_core::RenderBackend::Venus;
         resolved.cfg.gpu.hostmem_bytes = 64 * andler_core::GpuConfig::MIB;
-        assert!(check_gpu_memory(&resolved).result.is_err());
+        assert!(check_config_sanity(&resolved).result.is_err());
     }
 
     #[test]
-    fn check_gpu_memory_fails_above_range() {
+    fn config_sanity_allows_small_hostmem_for_cpu_backend() {
         let mut resolved = fixture_resolved(std::env::temp_dir().join("disk.qcow2"));
-        resolved.cfg.gpu.hostmem_bytes = 32768 * andler_core::GpuConfig::MIB;
-        assert!(check_gpu_memory(&resolved).result.is_err());
+        resolved.cfg.gpu.render_backend = andler_core::RenderBackend::Cpu;
+        resolved.cfg.gpu.hostmem_bytes = 64 * andler_core::GpuConfig::MIB;
+        assert!(check_config_sanity(&resolved).result.is_ok());
     }
 
     #[test]
-    fn check_cpu_memory_fails_on_zero_cores() {
+    fn config_sanity_fails_on_zero_cores() {
         let mut resolved = fixture_resolved(std::env::temp_dir().join("disk.qcow2"));
         resolved.cfg.cpu.cores = 0;
-        assert!(check_cpu_memory(&resolved).result.is_err());
-    }
-
-    #[test]
-    fn check_cpu_memory_fails_on_zero_memory() {
-        let mut resolved = fixture_resolved(std::env::temp_dir().join("disk.qcow2"));
-        resolved.cfg.memory.size_bytes = 0;
-        assert!(check_cpu_memory(&resolved).result.is_err());
-    }
-
-    #[test]
-    fn check_cpu_memory_passes_for_sane_values() {
-        let resolved = fixture_resolved(std::env::temp_dir().join("disk.qcow2"));
-        assert!(check_cpu_memory(&resolved).result.is_ok());
+        assert!(check_config_sanity(&resolved).result.is_err());
     }
 
     #[test]

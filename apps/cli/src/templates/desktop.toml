@@ -1,0 +1,17 @@
+# Desktop template: SDL window, GPU-accelerated rendering, audio.
+[gpu]
+render_backend = "Venus"
+hostmem_bytes = 4294967296
+blob = true
+gl = true
+
+[display]
+resolution = { width = 1920, height = 1080 }
+dpi = 96
+fps_limit = 0
+display_engine = "Sdl"
+fullscreen = false
+
+[audio]
+backend = "Pipewire"
+device = "VirtioSound"

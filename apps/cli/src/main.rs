@@ -210,6 +210,13 @@ enum Command {
         #[arg(long, help = "Skip prompts and use wizard defaults (requires --kind)")]
         quick: bool,
 
+        #[arg(
+            long,
+            help = "Start from a template (built-ins: headless, desktop, android-gaming; \
+                    or ~/.andler/templates/<name>.toml); CLI flags override it"
+        )]
+        template: Option<String>,
+
         #[arg(long, help = "Print the request that would be sent, without creating")]
         dry_run: bool,
 
@@ -724,6 +731,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             cdrom_bus,
             no_uefi,
             quick,
+            template,
             dry_run,
             verify,
             android_version,
@@ -748,6 +756,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 cdrom_bus,
                 no_uefi,
                 quick,
+                template,
                 dry_run,
                 verify,
                 android_version,

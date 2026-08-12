@@ -19,6 +19,25 @@ expect_out_grep "dry-run disk line" "^Disk:"
 expect_ok "nothing was created by --dry-run" -- andler list
 expect_out_grep "no instances" "no instances"
 
+echo "  [create --template]"
+expect_ok "headless template applies" -- andler create --kind linux --name tpl --iso-path "$WORK/empty.iso" --disk-path "$WORK/tpl.qcow2" --ovmf-vars-template "$WORK/VARS.fd" --template headless --dry-run
+expect_out_grep "template gpu is Cpu" "GPU:.*Cpu"
+expect_out_grep "template display is headless" "Display:.*None"
+expect_out_grep "template audio is off" "Audio:.*None"
+
+expect_ok "desktop template applies" -- andler create --kind linux --name tpl2 --iso-path "$WORK/empty.iso" --disk-path "$WORK/tpl2.qcow2" --ovmf-vars-template "$WORK/VARS.fd" --template desktop --dry-run
+expect_out_grep "desktop template gpu is Venus" "GPU:.*Venus"
+expect_out_grep "desktop template display is Sdl" "Display:.*Sdl"
+
+expect_fail "unknown template is rejected" -- andler create --kind linux --name tpl3 --iso-path "$WORK/empty.iso" --disk-path "$WORK/tpl3.qcow2" --template not-a-template --dry-run
+expect_err_grep "template error lists builtins" "built-ins: headless, desktop"
+
+expect_fail "template is rejected for android" -- andler create --kind android --name tpl4 --android-version 13 --template headless --dry-run
+expect_err_grep "android template error" "only supported with --kind linux"
+
+expect_ok "nothing was created by templates" -- andler list
+expect_out_grep "no instances" "no instances"
+
 echo "  [create --verify]"
 expect_ok "verify passes on a valid config" -- andler create --kind linux --name ver --iso-path "$WORK/empty.iso" --disk-path "$WORK/disk.qcow2" --ovmf-vars-template "$WORK/VARS.fd" --verify
 expect_out_grep "verify reports all checks passed" "All checks passed"
