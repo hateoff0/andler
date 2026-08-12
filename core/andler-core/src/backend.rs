@@ -89,13 +89,18 @@ pub trait HypervisorBackend: Send + Sync {
 
     async fn status(&self, handle: &BackendHandle) -> Result<BackendStatus, BackendError>;
 
+    /// Takes a live disk snapshot by switching the VM's disk graph to the
+    /// external overlay at `layer_path` (created by the caller with its
+    /// backing reference already pointing at the layer the head will become).
+    /// The caller owns the file: it is the backend's job only to attach the
+    /// overlay to the running graph, not to create or rename files.
     async fn snapshot(
         &self,
         handle: &BackendHandle,
-        tag: &str,
+        layer_path: &std::path::Path,
         timeout: Option<std::time::Duration>,
     ) -> Result<(), BackendError> {
-        let _ = (handle, tag, timeout);
+        let _ = (handle, layer_path, timeout);
         Err(BackendError::NotImplemented {
             backend: self.name(),
             operation: "snapshot",

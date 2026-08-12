@@ -255,22 +255,46 @@ fn display_resolution_fwcfg_args(cfg: &InstanceConfig) -> Option<Vec<String>> {
 
 fn disk_args(cfg: &InstanceConfig) -> Vec<String> {
     let disk = &cfg.disk;
-    let format_str = match disk.format {
-        DiskFormat::Qcow2 => "qcow2",
-        DiskFormat::Raw => "raw",
-        DiskFormat::Vdi => "vdi",
-    };
 
-    let mut args = vec![
-        "-drive".to_string(),
-        format!(
-            "file={},format={},if=none,id=drive-disk0,discard=on,detect-zeroes=on,aio=threads",
-            disk.path.display(),
-            format_str
-        ),
-        "-device".to_string(),
-        "virtio-blk-pci,drive=drive-disk0,id=disk0,bootindex=1,num-queues=4".to_string(),
-    ];
+    let mut args = Vec::new();
+
+    // Main disk uses explicit -blockdev node names: DiskChain live snapshots
+    // and commits address the graph by node (`drive-disk0`), which a
+    // `-drive if=none,id=`-style backend cannot name. The file layer carries
+    // discard (unmap) so host-side hole punching survives the chain.
+    match disk.format {
+        DiskFormat::Qcow2 => {
+            args.push("-blockdev".to_string());
+            args.push(format!(
+                "driver=file,node-name=file-disk0,filename={},aio=threads,discard=unmap",
+                disk.path.display()
+            ));
+            args.push("-blockdev".to_string());
+            args.push(
+                "driver=qcow2,node-name=drive-disk0,file=file-disk0,detect-zeroes=on".to_string(),
+            );
+        }
+        DiskFormat::Raw => {
+            args.push("-blockdev".to_string());
+            args.push(format!(
+                "driver=file,node-name=file-disk0,filename={},aio=threads,discard=unmap",
+                disk.path.display()
+            ));
+            args.push("-blockdev".to_string());
+            args.push("driver=raw,node-name=drive-disk0,file=file-disk0".to_string());
+        }
+        DiskFormat::Vdi => {
+            args.push("-blockdev".to_string());
+            args.push(format!(
+                "driver=file,node-name=file-disk0,filename={},aio=threads",
+                disk.path.display()
+            ));
+            args.push("-blockdev".to_string());
+            args.push("driver=vdi,node-name=drive-disk0,file=file-disk0".to_string());
+        }
+    }
+    args.push("-device".to_string());
+    args.push("virtio-blk-pci,drive=drive-disk0,id=disk0,bootindex=1,num-queues=4".to_string());
 
     for (index, extra) in cfg.extra_disks.iter().enumerate() {
         let extra_format = match extra.format {
@@ -680,8 +704,10 @@ mod tests {
         assert_eq!(
             disk_args(&cfg),
             vec![
-                "-drive",
-                "file=disk.qcow2,format=qcow2,if=none,id=drive-disk0,discard=on,detect-zeroes=on,aio=threads",
+                "-blockdev",
+                "driver=file,node-name=file-disk0,filename=disk.qcow2,aio=threads,discard=unmap",
+                "-blockdev",
+                "driver=qcow2,node-name=drive-disk0,file=file-disk0,detect-zeroes=on",
                 "-device",
                 "virtio-blk-pci,drive=drive-disk0,id=disk0,bootindex=1,num-queues=4",
                 "-drive",
@@ -702,8 +728,10 @@ mod tests {
         assert_eq!(
             disk_args(&cfg),
             vec![
-                "-drive",
-                "file=disk.qcow2,format=qcow2,if=none,id=drive-disk0,discard=on,detect-zeroes=on,aio=threads",
+                "-blockdev",
+                "driver=file,node-name=file-disk0,filename=disk.qcow2,aio=threads,discard=unmap",
+                "-blockdev",
+                "driver=qcow2,node-name=drive-disk0,file=file-disk0,detect-zeroes=on",
                 "-device",
                 "virtio-blk-pci,drive=drive-disk0,id=disk0,bootindex=1,num-queues=4",
                 "-drive",
@@ -907,7 +935,8 @@ mod tests {
             "OVMF_CODE.4m.fd",
             "virtio-gpu-gl,hostmem=4G,blob=true,venus=true",
             "sdl,gl=on,show-cursor=off,window-close=off",
-            "discard=on,detect-zeroes=on,aio=threads",
+            "driver=file,node-name=file-disk0,filename=disk.qcow2,aio=threads,discard=unmap",
+            "driver=qcow2,node-name=drive-disk0,file=file-disk0,detect-zeroes=on",
             "virtio-tablet-pci",
             "qemu-vdagent",
             "user,model=virtio-net-pci",

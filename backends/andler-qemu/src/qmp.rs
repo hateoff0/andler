@@ -69,6 +69,29 @@ struct ProcessInfo {
     pid: u32,
 }
 
+#[derive(Debug, Deserialize)]
+struct NamedBlockNode {
+    #[serde(rename = "node-name")]
+    node_name: String,
+    #[serde(rename = "drv", default)]
+    driver: Option<String>,
+    /// QEMU ≥ 9 reports the backing file path as a plain string here; older
+    /// QEMU nests `{"driver": "file", "filename": <path>}`.
+    #[serde(default)]
+    file: Option<serde_json::Value>,
+}
+
+fn node_file_name(file: &serde_json::Value) -> Option<String> {
+    match file {
+        serde_json::Value::String(path) => Some(path.clone()),
+        serde_json::Value::Object(map) => map
+            .get("filename")
+            .and_then(|f| f.as_str())
+            .map(str::to_string),
+        _ => None,
+    }
+}
+
 pub struct QmpClient {
     stream: BufReader<UnixStream>,
     read_timeout: Option<std::time::Duration>,
@@ -167,6 +190,97 @@ impl QmpClient {
         });
         self.execute_raw("blockdev-snapshot-delete-internal-sync", Some(args))
             .await?;
+        Ok(())
+    }
+
+    /// Attaches an already-created external overlay to the graph without
+    /// opening its backing file (`backing: null`): the parent is bound by
+    /// the subsequent `blockdev_snapshot`. `locking: "off"` is mandatory —
+    /// the default OFD write-lock on the overlay file conflicts with the
+    /// lock QEMU already holds on itself.
+    pub async fn blockdev_add_overlay(
+        &mut self,
+        node_name: &str,
+        file_path: &str,
+    ) -> Result<(), QmpError> {
+        let args = json!({
+            "driver": "qcow2",
+            "node-name": node_name,
+            "discard": "unmap",
+            "detect-zeroes": "on",
+            "backing": null,
+            "file": {
+                "driver": "file",
+                "filename": file_path,
+                "aio": "threads",
+                "locking": "off",
+            },
+        });
+        self.execute_raw("blockdev-add", Some(args)).await?;
+        Ok(())
+    }
+
+    /// Finds the name of the block graph's head node — the qcow2 node whose
+    /// file is `active_filename` (the instance's `disk.qcow2`). After an
+    /// external snapshot the head is the newest overlay node, not
+    /// `drive-disk0` (busy as the overlay's backing), so a second snapshot
+    /// must target the current head.
+    pub async fn query_head_node_name(
+        &mut self,
+        active_filename: &str,
+    ) -> Result<String, QmpError> {
+        let value = self.execute_raw("query-named-block-nodes", None).await?;
+        let nodes: Vec<NamedBlockNode> =
+            serde_json::from_value(value).map_err(QmpError::ParseError)?;
+        for node in nodes {
+            if node.driver.as_deref() != Some("qcow2") {
+                continue;
+            }
+            let Some(filename) = node.file.as_ref().and_then(node_file_name) else {
+                continue;
+            };
+            if filename == active_filename {
+                return Ok(node.node_name);
+            }
+        }
+        Err(QmpError::CommandFailed {
+            command: "query-named-block-nodes".to_string(),
+            class: "GenericError".to_string(),
+            desc: format!("no qcow2 node with file {active_filename}"),
+        })
+    }
+
+    /// Switches the node `node` to write to the overlay `overlay`, making
+    /// the overlay the new head of the chain.
+    pub async fn blockdev_snapshot(&mut self, node: &str, overlay: &str) -> Result<(), QmpError> {
+        let args = json!({
+            "node": node,
+            "overlay": overlay,
+        });
+        self.execute_raw("blockdev-snapshot", Some(args)).await?;
+        Ok(())
+    }
+
+    /// Starts a block-commit job that merges everything between `top_node`
+    /// and `base_node` into `base_node`. Auto-finalize but NOT auto-dismiss:
+    /// the job stays visible in `query-jobs` until `wait_job_completion`
+    /// dismisses it, so completion is observable instead of silently
+    /// vanishing from the job list.
+    pub async fn block_commit(
+        &mut self,
+        job_id: &str,
+        top_node: &str,
+        base_node: &str,
+    ) -> Result<(), QmpError> {
+        let args = json!({
+            "job-id": job_id,
+            "device": top_node,
+            "top-node": top_node,
+            "base-node": base_node,
+            "auto-finalize": true,
+            "auto-dismiss": false,
+        });
+        self.execute_raw("block-commit", Some(args)).await?;
         Ok(())
     }
 
@@ -756,6 +870,168 @@ mod tests {
         assert!(
             args.get("job-id").is_none(),
             "must not send the job-API `job-id`"
+        );
+    }
+
+    #[tokio::test]
+    async fn blockdev_add_overlay_sends_locking_off_and_null_backing() {
+        let (mut client, server) = fake_qmp_pair();
+        let (mut server_read, mut server_write) = tokio::io::split(server);
+
+        let request_fut = tokio::spawn(async move {
+            let mut buf = BufReader::new(&mut server_read);
+            let mut line = String::new();
+            buf.read_line(&mut line).await.expect("read request");
+            let req: Value = serde_json::from_str(&line).expect("valid JSON");
+            server_write
+                .write_all(b"{\"return\": {}}\n")
+                .await
+                .expect("write reply");
+            req
+        });
+
+        client
+            .blockdev_add_overlay("snap-abc123", "/tmp/x/.tmp-abc123.qcow2")
+            .await
+            .expect("blockdev_add_overlay should succeed");
+
+        let req = request_fut.await.expect("server task did not panic");
+        assert_eq!(req["execute"], "blockdev-add");
+        let args = &req["arguments"];
+        assert_eq!(args["driver"], "qcow2");
+        assert_eq!(args["node-name"], "snap-abc123");
+        assert_eq!(args["file"]["filename"], "/tmp/x/.tmp-abc123.qcow2");
+        assert_eq!(
+            args["file"]["locking"], "off",
+            "overlay must not take an OFD write-lock (conflicts with QEMU's own)"
+        );
+        assert!(
+            args.get("backing").is_none() || args["backing"].is_null(),
+            "overlay must attach with backing: null; the parent is bound by blockdev-snapshot"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_head_node_name_finds_node_by_active_filename() {
+        let (mut client, server) = fake_qmp_pair();
+        let (mut server_read, mut server_write) = tokio::io::split(server);
+
+        // QEMU >= 9 shape: `file` is a plain string, `drv` names the driver.
+        let request_fut = tokio::spawn(async move {
+            let mut buf = BufReader::new(&mut server_read);
+            let mut line = String::new();
+            buf.read_line(&mut line).await.expect("read request");
+            let req: Value = serde_json::from_str(&line).expect("valid JSON");
+            server_write
+                .write_all(
+                    b"{\"return\": [{\"node-name\": \"drive-disk0\", \"drv\": \"qcow2\", \"file\": \"/i/disk.qcow2\", \"children\": [{\"node-name\": \"file-disk0\", \"child\": \"file\"}]}, {\"node-name\": \"file-disk0\", \"drv\": \"file\", \"file\": \"/i/disk.qcow2\", \"children\": []}, {\"node-name\": \"snap-abc123\", \"drv\": \"qcow2\", \"file\": \"/i/disk.snapshots/.tmp-abc123.qcow2\", \"children\": []}]}\n",
+                )
+                .await
+                .expect("write reply");
+            req
+        });
+
+        let head = client
+            .query_head_node_name("/i/disk.qcow2")
+            .await
+            .expect("head node must be found");
+        assert_eq!(
+            head, "drive-disk0",
+            "the file driver node must not win over the qcow2 node"
+        );
+
+        let req = request_fut.await.expect("server task did not panic");
+        assert_eq!(req["execute"], "query-named-block-nodes");
+    }
+
+    #[tokio::test]
+    async fn query_head_node_name_accepts_nested_file_object() {
+        let (mut client, server) = fake_qmp_pair();
+        let (mut server_read, mut server_write) = tokio::io::split(server);
+
+        // QEMU <= 8 shape: `file` nests `{"driver": "file", "filename": ...}`.
+        let request_fut = tokio::spawn(async move {
+            let mut buf = BufReader::new(&mut server_read);
+            let mut line = String::new();
+            buf.read_line(&mut line).await.expect("read request");
+            server_write
+                .write_all(
+                    b"{\"return\": [{\"node-name\": \"drive-disk0\", \"drv\": \"qcow2\", \"file\": {\"driver\": \"file\", \"filename\": \"/i/disk.qcow2\"}}]}\n",
+                )
+                .await
+                .expect("write reply");
+        });
+
+        let head = client
+            .query_head_node_name("/i/disk.qcow2")
+            .await
+            .expect("head node must be found");
+        assert_eq!(head, "drive-disk0");
+        request_fut.await.expect("server task did not panic");
+    }
+
+    #[tokio::test]
+    async fn blockdev_snapshot_switches_node_to_overlay() {
+        let (mut client, server) = fake_qmp_pair();
+        let (mut server_read, mut server_write) = tokio::io::split(server);
+
+        let request_fut = tokio::spawn(async move {
+            let mut buf = BufReader::new(&mut server_read);
+            let mut line = String::new();
+            buf.read_line(&mut line).await.expect("read request");
+            let req: Value = serde_json::from_str(&line).expect("valid JSON");
+            server_write
+                .write_all(b"{\"return\": {}}\n")
+                .await
+                .expect("write reply");
+            req
+        });
+
+        client
+            .blockdev_snapshot("drive-disk0", "snap-abc123")
+            .await
+            .expect("blockdev_snapshot should succeed");
+
+        let req = request_fut.await.expect("server task did not panic");
+        assert_eq!(req["execute"], "blockdev-snapshot");
+        let args = &req["arguments"];
+        assert_eq!(args["node"], "drive-disk0");
+        assert_eq!(args["overlay"], "snap-abc123");
+    }
+
+    #[tokio::test]
+    async fn block_commit_sends_job_with_auto_finalize_only() {
+        let (mut client, server) = fake_qmp_pair();
+        let (mut server_read, mut server_write) = tokio::io::split(server);
+
+        let request_fut = tokio::spawn(async move {
+            let mut buf = BufReader::new(&mut server_read);
+            let mut line = String::new();
+            buf.read_line(&mut line).await.expect("read request");
+            let req: Value = serde_json::from_str(&line).expect("valid JSON");
+            server_write
+                .write_all(b"{\"return\": {}}\n")
+                .await
+                .expect("write reply");
+            req
+        });
+
+        client
+            .block_commit("jc1", "snap-mid", "drive-disk0")
+            .await
+            .expect("block_commit should succeed");
+
+        let req = request_fut.await.expect("server task did not panic");
+        assert_eq!(req["execute"], "block-commit");
+        let args = &req["arguments"];
+        assert_eq!(args["job-id"], "jc1");
+        assert_eq!(args["device"], "snap-mid");
+        assert_eq!(args["top-node"], "snap-mid");
+        assert_eq!(args["base-node"], "drive-disk0");
+        assert_eq!(args["auto-finalize"], true);
+        assert_eq!(
+            args["auto-dismiss"], false,
+            "job must stay visible so wait_job_completion can observe it"
         );
     }
 

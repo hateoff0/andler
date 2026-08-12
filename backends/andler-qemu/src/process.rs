@@ -61,13 +61,14 @@ impl QemuProcess {
         args: &[String],
         qmp_socket_path: PathBuf,
         log_file_path: Option<PathBuf>,
+        kill_on_drop: bool,
     ) -> Result<Self, ProcessError> {
         let mut child = Command::new(QEMU_BINARY)
             .args(args)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .stdin(Stdio::null())
-            .kill_on_drop(true)
+            .kill_on_drop(kill_on_drop)
             .spawn()
             .map_err(ProcessError::SpawnFailed)?;
 
@@ -327,7 +328,9 @@ mod tests {
             "-nographic".to_string(),
         ];
 
-        let mut process = QemuProcess::spawn(&args, qmp_path, None).await.unwrap();
+        let mut process = QemuProcess::spawn(&args, qmp_path, None, true)
+            .await
+            .unwrap();
         assert!(process.is_alive());
 
         process.terminate().await.unwrap();
@@ -344,7 +347,9 @@ mod tests {
             "-nographic".to_string(),
         ];
 
-        let mut process = QemuProcess::spawn(&args, qmp_path, None).await.unwrap();
+        let mut process = QemuProcess::spawn(&args, qmp_path, None, true)
+            .await
+            .unwrap();
         process.force_kill().await.unwrap();
         assert!(!process.is_alive());
     }

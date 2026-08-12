@@ -1,5 +1,6 @@
 mod audit;
 mod clone_ops;
+mod disk_chain;
 mod error;
 mod health_ops;
 mod hotplug_ops;
@@ -229,8 +230,8 @@ impl Daemon {
             let handle = spawn_supervisor(
                 id,
                 dir.clone(),
-                cfg,
-                state,
+                cfg.clone(),
+                state.clone(),
                 recovered_handle.clone(),
                 events.clone(),
             );
@@ -241,6 +242,22 @@ impl Daemon {
                 Self::attach_process_exit_watcher(id, &handle, backend.clone(), backend_handle);
             }
             supervisors.insert(id, handle);
+
+            // Reconcile the disk chain against snapshot metadata. When a
+            // QEMU process was adopted and is running, only metadata is
+            // touched (no file moves under a live VM).
+            if matches!(cfg.disk.format, andler_core::DiskFormat::Qcow2) {
+                let files = !matches!(state, InstanceState::Running | InstanceState::Paused);
+                if let Err(err) =
+                    disk_chain::reconcile_chain(&store, id, &dir, &cfg.disk.path, files).await
+                {
+                    tracing::warn!(
+                        instance_id = %id,
+                        error = %err,
+                        "disk chain reconciliation failed"
+                    );
+                }
+            }
         }
 
         Ok(Self {

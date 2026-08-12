@@ -6,20 +6,28 @@ Instance configs are **not** stored here: they live in per-instance `instance.to
 
 ## Schema
 
+Schema version (PRAGMA user_version) 3:
+
 ```sql
 CREATE TABLE IF NOT EXISTS snapshots (
     id          TEXT PRIMARY KEY,
     instance_id TEXT NOT NULL,
     tag         TEXT NOT NULL,
     description TEXT,
-    created_at  TEXT NOT NULL
+    created_at  TEXT NOT NULL,
+    layer_path  TEXT,       -- NULL = legacy internal qcow2 snapshot
+    parent_id   TEXT,       -- snapshot id this layer derives from (NULL = base layer)
+    branch      TEXT        -- branch name; NULL = instance's main branch
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_snapshots_instance_tag
     ON snapshots(instance_id, tag);
 ```
 
-`created_at` is stored as an RFC-3339 string. There is no `instances` table and no FK enforcement (some distro sqlite builds default `foreign_keys` to ON; the store pins it off and never relies on cascades).
+`created_at` is stored as an RFC-3339 string. `layer_path` is relative to the instance
+directory (`disk.snapshots/<uuid>.qcow2`). There is no `instances` table and no FK
+enforcement (some distro sqlite builds default `foreign_keys` to ON; the store pins it off
+and never relies on cascades).
 
 ## Legacy migration
 
@@ -27,7 +35,9 @@ Databases from before the file-based registry (user_version 0/1, carrying an `in
 
 1. `load_legacy_instances()` reads every stored config JSON.
 2. The daemon writes each config as `instance.toml` in the instance's directory — refusing to overwrite a file that already exists with different content (that would silently pick one of two sources of truth).
-3. `finalize_config_migration()` drops the `instances` table and bumps `user_version` to 2; from then on `load_legacy_instances()` returns nothing and the migration is a no-op.
+3. `finalize_config_migration()` drops the `instances` table and bumps `user_version` to 3; from then on `load_legacy_instances()` returns nothing and the migration is a no-op.
+
+Schema v2 → v3 (snapshot chain fields) is a pure column addition: `layer_path`/`parent_id`/`branch` are added via `ALTER TABLE ADD COLUMN` when missing (checked with `pragma_table_info`), existing rows keep `layer_path = NULL` and behave as legacy internal snapshots. A fresh database that never had an `instances` table starts directly at version 3.
 
 ## Public API
 
@@ -39,15 +49,17 @@ Databases from before the file-based registry (user_version 0/1, carrying an `in
 | `open_in_memory` | `async fn() -> Result<Self, StoreError>` | In-memory DB for tests only |
 | `schema_version` | `async fn(&self) -> Result<i64, StoreError>` | `PRAGMA user_version` |
 | `load_legacy_instances` | `async fn(&self) -> Result<Vec<InstanceConfig>, StoreError>` | Configs from the pre-file-registry `instances` table; empty when already migrated |
-| `finalize_config_migration` | `async fn(&self) -> Result<(), StoreError>` | Drop `instances`, set user_version 2 |
-| `save_snapshot` | `async fn(&self, snapshot: &StoredSnapshot) -> Result<(), StoreError>` | Save snapshot metadata |
+| `finalize_config_migration` | `async fn(&self) -> Result<(), StoreError>` | Drop `instances`, set user_version 3 |
+| `save_snapshot` | `async fn(&self, snapshot: &StoredSnapshot) -> Result<(), StoreError>` | Save snapshot metadata (unique per instance+tag) |
 | `load_snapshots` | `async fn(&self, instance_id: InstanceId) -> Result<Vec<StoredSnapshot>, StoreError>` | All snapshots for an instance, ordered by `created_at` |
 | `get_snapshot` | `async fn(&self, instance_id: InstanceId, tag: &str) -> Result<Option<StoredSnapshot>, StoreError>` | One snapshot by tag |
 | `delete_snapshot` | `async fn(&self, instance_id: InstanceId, tag: &str) -> Result<(), StoreError>` | Idempotent delete by tag |
+| `delete_snapshot_by_id` | `async fn(&self, instance_id: InstanceId, id: Uuid) -> Result<(), StoreError>` | Delete by snapshot id (used by chain reconciliation/discard restore) |
+| `set_snapshot_branch` | `async fn(&self, instance_id: InstanceId, id: Uuid, branch: Option<String>) -> Result<(), StoreError>` | Set/clear a snapshot's branch (used by `--branch` restore) |
 
 ### Types
 
-**`StoredSnapshot`**: `id: Uuid` + `instance_id: InstanceId` + `tag: String` + `description: Option<String>` + `created_at: String`.
+**`StoredSnapshot`**: `id: Uuid` + `instance_id: InstanceId` + `tag: String` + `description: Option<String>` + `created_at: String` + `layer_path: Option<String>` + `parent_id: Option<Uuid>` + `branch: Option<String>`.
 
 **`StoreError`**: `NotFound(InstanceId)`, `Sqlite(rusqlite::Error)`, `Serde(serde_json::Error)`, `TaskJoin(tokio::task::JoinError)`.
 
@@ -63,11 +75,12 @@ This crate does NOT contain business logic for state transitions — only persis
 
 ## Tests
 
-~20 tests in `store::tests` using `Store::open_in_memory()`:
+~30 tests in `store::tests` using `Store::open_in_memory()`:
 
-- Fresh store starts at the current schema
+- Fresh store starts at the current schema (v3)
 - Legacy-database migration: configs extracted, `instances` dropped, idempotent re-open
+- v2 → v3 migration: chain columns added, existing rows keep `layer_path = NULL`
 - Corrupt legacy config fails migration loudly
-- Snapshot CRUD: round-trip, unique tag per instance, get/delete, different InstanceIds for same tag
+- Snapshot CRUD: round-trip, unique tag per instance, get/delete, different InstanceIds for same tag, chain fields (layer_path/parent_id/branch) round-trip, `set_snapshot_branch`/`delete_snapshot_by_id`
 
 No `qemu-img` / `/dev/kvm` / network required — only sqlite `:memory:`, so no `#[ignore]` flags. Runs in regular unit-test target.

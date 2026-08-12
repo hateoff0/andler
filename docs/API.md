@@ -242,13 +242,15 @@ GPU fields (vram, gpu) appear when AMD, NVIDIA, or Intel GPU data is available. 
 ### `snapshot`
 
 ```bash
-# Create (live; requires Running/Paused instance)
+# Create (live; requires Running/Paused instance and a qcow2 disk)
 andler snapshot create <instance-id> --tag before-update --description "Pre-upgrade state"
 
-# Restore (offline; requires a stopped instance — fails with FAILED_PRECONDITION if Running/Paused)
+# Restore (offline; requires a stopped instance — fails if Running/Paused)
 andler snapshot restore <instance-id> --tag before-update
+# Branch restore: keep the current chain as an archived branch
+andler snapshot restore <instance-id> --tag before-update --branch
 
-# Delete (live; requires Running/Paused instance)
+# Delete (offline; requires a stopped instance — fails if Running/Paused)
 andler snapshot delete <instance-id> --tag before-update
 
 # List (any state)
@@ -256,15 +258,30 @@ andler snapshot list <instance-id>
 andler snapshot --json list <instance-id>
 ```
 
-Snapshots are disk-only internal qcow2 snapshots: create/delete run live over QMP
-(`blockdev-snapshot-internal-sync`/`-delete-internal-sync`), restore runs offline
-(`qemu-img snapshot -a`) and takes effect on the next start — the guest reboots, RAM is
-not restored. `--timeout` is accepted for CLI compatibility but unused (the operations are
-synchronous).
+Snapshots are disk-only **external** qcow2 snapshots: every create (live, over QMP) turns
+the current `disk.qcow2` into an overlay layer under `disk.snapshots/<uuid>.qcow2` and
+starts a fresh overlay as the new active disk — the guest keeps running and the previous
+state stays addressable by tag. Restore (offline, `qemu-img`-based) rebuilds the active
+disk on top of the target layer and takes effect on the next start — the guest reboots,
+RAM is not restored. Restore **discards** layers newer than the target unless
+`--branch` is passed, which archives the current chain (tagged `pre-branch-<ts>`,
+`branch-<ts>` in the list) and continues from the target; restoring `--branch` onto a
+snapshot of an archived branch switches back to that branch. Non-qcow2 disks cannot be
+snapshotted (`external snapshots need overlay support — convert the disk to qcow2
+first`); legacy internal snapshots can be listed/deleted but not restored
+(`--branch`-independent). `--timeout` is accepted for CLI compatibility but unused (the
+operations are synchronous).
+
+Restore/delete are refused while linked clones derive from the instance's disk chain
+(`remove the clones first`), and deleting a layer is refused while another instance's
+chain contains it. Deleting the base layer (the first snapshot) is refused — there is no
+parent to merge its data into.
 
 `delete` asks for confirmation on an interactive terminal (answering `n` prints `Cancelled.` and keeps the snapshot).
 
-List output shows `tag`, `id`, `created_at` (human-readable local time), and `description`. `--json` (placed before the subcommand) emits a JSON array of `{ "tag", "snapshot_id", "created_at", "description" }`.
+List output shows `tag`, `id`, `created_at` (human-readable local time), `description`,
+and `branch` (only for archived branch snapshots). `--json` (placed before the subcommand)
+emits a JSON array of `{ "tag", "snapshot_id", "created_at", "description", "branch" }`.
 
 ### `disk`
 
@@ -369,7 +386,7 @@ andler attach net <instance-id> --nat-backend passt
 | `--model <model>` | net | Device model (default `virtio-net-pci`) |
 | `--nat-backend <slirp\|passt>` | net | NAT implementation (default `slirp`) |
 
-Prints the resolved disk path + index, or the network index (0-based, in attach order). Attaching an already-attached path (including the primary disk) fails with `already attached`. Extra disks are **not** covered by internal snapshots (`snapshot create` snapshots the primary `drive-disk0` only).
+Prints the resolved disk path + index, or the network index (0-based, in attach order). Attaching an already-attached path (including the primary disk) fails with `already attached`. Extra disks are **not** covered by snapshots (`snapshot create` snapshots the primary `drive-disk0` only).
 
 ### `detach`
 

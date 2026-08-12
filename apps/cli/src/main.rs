@@ -413,6 +413,11 @@ enum SnapshotAction {
 
         #[arg(long)]
         timeout: Option<u64>,
+
+        /// Keep the current disk chain as an archived branch instead of
+        /// discarding layers newer than the target.
+        #[arg(long)]
+        branch: bool,
     },
 
     Delete {

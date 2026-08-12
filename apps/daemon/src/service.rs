@@ -401,7 +401,7 @@ impl AndlerService for DaemonService {
         let id = self.daemon.resolve_instance_id(&req.instance_id).await?;
 
         self.daemon
-            .restore_snapshot(id, req.tag, req.timeout_secs)
+            .restore_snapshot(id, req.tag, req.branch)
             .await?;
 
         Ok(Response::new(Empty {}))
@@ -439,6 +439,7 @@ impl AndlerService for DaemonService {
                 tag: r.tag,
                 description: r.description.unwrap_or_default(),
                 created_at: r.created_at,
+                branch: r.branch.unwrap_or_default(),
             })
             .collect();
 

@@ -100,7 +100,7 @@ Standalone crate for firmware discovery, hardware auto-detection, and GPU metric
 SQLite store for snapshot metadata only.
 
 **Schema:**
-- `snapshots(id, instance_id, tag, description, created_at)` with `ON DELETE CASCADE`
+- `snapshots(id, instance_id, tag, description, created_at, layer_path, parent_id, branch)` — chain metadata (layer path, parent, branch)
 - `config_migration` marker: legacy databases (pre-phase-1, with an `instances` table) are migrated on daemon startup — each stored config is written out as `instance.toml` (refusing to overwrite a differing file), then the instances table is dropped. The daemon itself never persists instances to SQLite.
 
 **~20 tests** using in-memory SQLite, including legacy-database migration.
@@ -258,23 +258,84 @@ work (QMP/QGA subscription); the contract above is the stable interface.
 
 ## Snapshot Mechanism
 
-Disk-only internal qcow2 snapshots — no VM-state (RAM) serialization, so they work on any
-GPU/audio/CPU configuration (the old `snapshot-save` VM-state path is blocked by QEMU's
-migration machinery on every accelerated default: `virtio-sound`, `virgl`, and the
-`invtsc` CPU flag are all non-migratable by design).
+Disk-only **external** qcow2 snapshots — no VM-state (RAM) serialization, so they work on
+any GPU/audio/CPU configuration (the old `snapshot-save` VM-state path is blocked by QEMU's
+migration machinery on every accelerated default: `virtio-sound`, `virgl`, and the `invtsc`
+CPU flag are all non-migratable by design). Every snapshot of a qcow2 disk creates an
+overlay **layer file**; the disk the VM actually uses is always `disk.qcow2`, and layers
+live in `<instance-dir>/disk.snapshots/<uuid>.qcow2` (staging files are
+`disk.snapshots/.tmp-<uuid>.qcow2` and are never scanned as layers).
 
-1. **Create** (live, instance must be Running/Paused): QMP `blockdev-snapshot-internal-sync`
-   `{device, name}` — synchronous, writes a qcow2 internal snapshot of `drive-disk0`
-2. **Restore** (offline, instance must NOT be Running/Paused): `qemu-img snapshot -a <tag> <disk>`
-   via `andler_disk::qcow2::restore_internal_snapshot` — the guest boots from the snapshot
-   state on next start; RAM is not restored (no live revert exists in QEMU)
-3. **Delete** (live, instance must be Running/Paused): QMP
-   `blockdev-snapshot-delete-internal-sync` `{device, name}`
-4. **List**: `query-block` → extract snapshot metadata
+1. **Create** (live, instance must be Running/Paused): the primary disk must be qcow2
+   (`SnapshotRequiresQcow2` otherwise — convert first). A staging overlay is created
+   (`qemu-img create`), its backing reference is pointed at the *future* layer path with
+   `qemu-img rebase -u -F qcow2` (the file does not exist yet), then QMP
+   `blockdev-add` (overlay node with `backing:null`, `file.locking:off`) +
+   `blockdev-snapshot {node: drive-disk0, overlay: snap-<uuid>}` switches the live disk
+   graph. Finally a rename pair moves the old active file into
+   `disk.snapshots/<uuid>.qcow2` and the overlay into place as the new `disk.qcow2`.
+   Metadata is persisted *last*; a crash anywhere before that leaves a recoverable state
+   (see Reconciliation below).
+2. **Restore** (offline, instance must NOT be Running/Paused):
+   - **Default (discard)**: the target must be on the main branch
+     (`RestoreTargetOnArchivedBranch` otherwise — pass `--branch` to switch to it).
+     Every layer newer than the target on the main branch is deleted (file + metadata),
+     the active disk is removed, and a fresh `disk.qcow2` overlay is created on top of the
+     target — the linear history continues from the target.
+   - **`--branch`**: nothing is deleted. The current active chain is archived as a branch:
+     the active disk becomes a layer tagged `pre-branch-<ts>`, and every main-branch
+     layer record is marked with `branch-<ts>`. A new `disk.qcow2` overlay is created on
+     top of the target. If the target lives on an archived branch, that branch's ancestors
+     are moved back to the main branch (its layers become restorable again) and the new
+     active disk continues from the target. Branches are read-only in this phase: layers
+     on archived branches can be listed and deleted, but discard-restore refuses them.
+3. **Delete** (offline, instance must NOT be Running/Paused): deleting a layer commits its
+   data into its parent (`qemu-img commit`), re-points its direct children at the parent
+   (`qemu-img rebase -u`, including the active disk when it backs onto the layer), then
+   removes the layer file and its metadata entry. The base layer (no parent) cannot be
+   deleted (`CannotDeleteBaseLayer`). Legacy internal snapshots (created before this
+   phase) are still deleted with `qemu-img snapshot -d`; they are read-only for restore
+   (`SnapshotInternalNotRestorable`).
+4. **List**: metadata rows (all branches) merged with internal snapshots still reported by
+   QEMU `query-block`; each entry carries its `branch` (empty = main branch).
+5. **Clone protection**: linked clones derive their disk from the source's active file,
+   so their backing chain reaches the source's layers. Restore is refused while live
+   clones exist (`RestoreWouldBreakClones` — the active disk is rebuilt, orphaning them),
+   and deleting a layer is refused while another instance's chain contains it
+   (`DeleteWouldBreakClones`, discovered by walking qcow2 backing files).
 
-Snapshot metadata (tag, description, created_at) stored in SQLite `snapshots` table, keyed by `instance_id`. Maximum 20 snapshots per instance (`MAX_SNAPSHOTS_PER_INSTANCE`); free space is pre-checked via `statvfs(2)` with guest RAM size as a conservative upper bound (`InsufficientDiskSpace`).
+Snapshot metadata (id, tag, description, created_at, layer path, parent layer id, branch)
+is stored in SQLite `snapshots` (schema v3; legacy v0–v2 tables migrate in place). Maximum
+20 snapshots per instance (`MAX_SNAPSHOTS_PER_INSTANCE`); free space is pre-checked via
+`statvfs(2)` with guest RAM size as a conservative upper bound (`InsufficientDiskSpace`).
 
-`RestoreSnapshot` on a running instance fails with `FAILED_PRECONDITION` (`InstanceMustBeStopped`) — stop the instance first, then restore, then start again.
+`RestoreSnapshot`/`DeleteSnapshot` on a running instance fails with
+`FAILED_PRECONDITION` (`InstanceMustBeStopped`) — stop the instance first, then restore or
+delete, then start again.
+
+### Chain Reconciliation
+
+On every daemon startup the daemon reconciles each qcow2 instance's on-disk chain against
+the store (`disk_chain::reconcile_chain`). With a live adopted VM only metadata is touched;
+otherwise the disk is repaired too:
+
+- `disk.qcow2` missing + an orphaned `.tmp-*` overlay present → the overlay becomes the
+  active disk (crash between the rename pair; the chain is fully recoverable).
+- `disk.qcow2` missing + layers present → a fresh active disk is rebuilt on top of the
+  newest layer (crash mid-restore).
+- Layer file without a metadata entry → entry is inserted as `recovered-<uuid8>`.
+- Metadata entry whose layer file vanished → entry is deleted (tampering/accidental
+  removal is not silently re-created).
+- Stray `.tmp-*` files are removed. A chain that cannot be inspected is left alone with a
+  warning; orphaned layer files not referenced by any record are also left alone.
+
+**Known limitation (serialization)**: snapshot operations are only serialized by the state
+machine — `create` requires Running/Paused, `restore`/`delete` require Stopped — so
+`create` never races `restore`/`delete`. Two simultaneous `restore` (or `delete`) calls on
+a stopped instance are not yet guarded by a per-instance op-mutex; the single-writer
+discipline for chains lands with the DiskOps phase (see `docs/ROADMAP.md`). Until then the
+daemon's RPC handler processes restore/delete synchronously, which makes the window
+negligible but not formally excluded.
 
 ## Hotplug Mechanism
 
@@ -285,7 +346,7 @@ Extra disks and network devices can be attached to a `Running`/`Paused` instance
 3. **Live attach** (QMP): `blockdev-add` (`{"driver":"qcow2","node-name":"drive-extraN",...}`) + `device_add` (virtio-blk-pci), or `netdev_add` (user/tap/passt) + `device_add` (net model). On failure the backend rolls back: `blockdev-del` after a failed `device_add`, host tap teardown after a failed netdev setup.
 4. **Live detach** (QMP): `device_del` is asynchronous — QEMU completes it on its own schedule, so the follow-up `blockdev-del`/`netdev-del` may hit `DeviceInUse`. The daemon retries only while QEMU reports the device in use (`DeviceInUse` class or `in use` description, 250ms × 15s); any other `CommandFailed` fails immediately.
 5. **Boot re-attach**: the cmdline builder emits the extra `-drive`/`-device`/`-netdev` args in list order; host taps for bridge mode are created before spawn and torn down on stop.
-6. **Limitations**: internal snapshots (`snapshot create`) cover the primary `drive-disk0` only — extra disks are not snapshotted. Attached disks are identified by absolute path; a relative or bare-name path resolves into the instance directory at attach time.
+6. **Limitations**: snapshots (`snapshot create`) cover the primary `drive-disk0` only — extra disks are not snapshotted. Attached disks are identified by absolute path; a relative or bare-name path resolves into the instance directory at attach time.
 
 ## Metrics Collection
 

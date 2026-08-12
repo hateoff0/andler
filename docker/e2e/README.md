@@ -74,7 +74,7 @@ Coverage by suite:
 | `01_lifecycle.sh` | create (`--file`, flag negatives), list/status (text + `--json`, short-id resolution, not-found), start/pause/resume/stop with FSM negatives, metrics (`--once`, `--json`), log streaming (SIGTERM line, empty after stop), remove with/without `--purge` + file semantics |
 | `02_config.sh` | `config view`, `config set` (name, `display.resolution`, malformed value, unknown key), `config edit` via `$VISUAL` (success + broken TOML), `config status` (in sync, hand-edit applied on idle instance) |
 | `03_disk.sh` | disk create/info/resize (grow + shrink refusal)/compact (qcow2 + raw), zero-size and unparsable-size negatives |
-| `04_snapshot.sh` | live create (incl. duplicate tag)/list/`--json`, offline restore, restore-while-running, create/delete-while-stopped, remove-while-running, live config-set without a guest agent |
+| `04_snapshot.sh` | external overlay snapshots: live create (incl. duplicate tag)/list/`--json` + layer files on disk, offline discard restore (newer layer removed), offline delete of a middle layer (commit + prune, active re-pointed at the parent) and base-layer delete refusal, restore/delete-while-running, create-while-stopped, `--branch` restore (archived `pre-branch-*` head, `branch=*` in list, switch-back, all layers kept), remove-while-running |
 | `05_clone_export.sh` | Android create (incl. missing base image), clone linked/full-standalone/shared-base, live-clone removal protection, export (file + no new instance), nonexistent-source negatives |
 | `07_guest.sh` | Guest error paths always; deep tests (needs the `nbd` kernel module + privileged container): offline `guest list`/`install`/`remove` against a real Debian rootfs via qemu-nbd, Android boot-mode switching, translator install failure |
 | `08_preview_verify.sh` | `create --dry-run` (nothing created), `--verify` pass/fail, wizard non-TTY refusal, shell completions, `andler doctor` sections, `doctor --fix` installing `andler-helper` at the canonical path + exactly one helper sudoers rule and zero legacy per-binary rules |
@@ -82,6 +82,7 @@ Coverage by suite:
 | `10_base_images.sh` | Android base-image auto-discovery (`cache/base-images/<major>-<variant>/` subdir layout + legacy flat-root fallback) |
 | `11_process_supervision.sh` | `kill -9` of the live qemu process → instance lands in `Error { QEMU process exited unexpectedly }` promptly via pidfd death notification, restart-from-Error recovery, clean stop/remove |
 | `12_process_reconnect.sh` | SIGKILL of the daemon while the instance is Running → qemu survives, restarted daemon adopts it (`Running`, not `Error`), stop terminates the adopted process, remove leaves no strays |
+| `13_chain_reconcile.sh` | chain reconciliation across daemon restarts: clone protection (restore/delete refused while a linked clone consumes the chain, `remove the clones first`), crash-mid-restore rebuild of `disk.qcow2` on the chain head, crash-between-rename-pair promotion of the staging overlay (plus its `recovered-<uuid8>` entry), orphaned `.tmp-*` removal, crash-after-rename-pair layer recovery, metadata-entry-without-layer-file drop (archived branch head deleted behind the daemon's back), `--branch` switch-back returning ancestors to the main branch, final cleanup |
 
 ### Deep guest tests
 

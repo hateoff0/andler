@@ -203,7 +203,7 @@ async fn restore_migrates_legacy_store_configs_to_toml() {
     );
 
     // Database finalized: instances table gone, schema current.
-    assert_eq!(store.schema_version().await.unwrap(), 2);
+    assert_eq!(store.schema_version().await.unwrap(), 3);
     assert!(store.load_legacy_instances().await.unwrap().is_empty());
 }
 

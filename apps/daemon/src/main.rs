@@ -46,6 +46,14 @@ async fn shutdown_signal(daemon: Arc<Daemon>) {
 
     tracing::info!("shutdown signal received, stopping running instances gracefully");
 
+    let dev_restart = std::env::var("ANDLERD_DEV_RESTART")
+        .map(|value| value == "1")
+        .unwrap_or(false);
+    if dev_restart {
+        tracing::info!("ANDLERD_DEV_RESTART=1: leaving VMs running for daemon restart");
+        return;
+    }
+
     let running_ids: Vec<andler_core::InstanceId> = {
         let supervisors = daemon.supervisors.read().await;
         supervisors

@@ -53,6 +53,83 @@ pub async fn create_with_backing_file(
     .await
 }
 
+/// Creates an overlay whose backing reference points at `backing_file`
+/// without requiring that file to exist yet. DiskChain snapshots rely on
+/// this: the overlay is created while the previous head still occupies the
+/// snapshot layer's future path, and the backing reference only becomes
+/// resolvable after the head is renamed into place.
+pub async fn create_overlay(
+    path: &Path,
+    backing_file: &Path,
+    size_bytes: u64,
+) -> Result<(), DiskError> {
+    ensure_parent_dir_exists(path).await?;
+
+    run_qemu_img(&[
+        "create",
+        "-f",
+        "qcow2",
+        "-F",
+        "qcow2",
+        "-b",
+        &backing_file.to_string_lossy(),
+        &path.to_string_lossy(),
+        &size_bytes.to_string(),
+    ])
+    .await
+}
+
+/// Rewrites a layer's backing reference without copying data (`rebase -u`).
+/// Used to point an overlay at a parent that did not exist when the overlay
+/// was created, and to re-point a deleted layer's children at its parent.
+pub async fn rebase_unchanged(path: &Path, new_backing: &Path) -> Result<(), DiskError> {
+    run_qemu_img(&[
+        "rebase",
+        "-u",
+        "-F",
+        "qcow2",
+        "-b",
+        &new_backing.to_string_lossy(),
+        &path.to_string_lossy(),
+    ])
+    .await
+}
+
+/// Merges a layer's data into its backing file (`qemu-img commit`).
+pub async fn commit_layer(path: &Path) -> Result<(), DiskError> {
+    run_qemu_img(&["commit", &path.to_string_lossy()]).await
+}
+
+pub async fn delete_internal_snapshot(path: &Path, tag: &str) -> Result<(), DiskError> {
+    run_qemu_img(&["snapshot", "-d", tag, &path.to_string_lossy()]).await
+}
+
+/// Walks the backing chain of `head`, returning every file from `head` down
+/// to the base. Relative backing references resolve against the directory of
+/// the layer that references them.
+pub async fn chain_from_head(head: &Path) -> Result<Vec<std::path::PathBuf>, DiskError> {
+    let mut chain = Vec::new();
+    let mut current = head.to_path_buf();
+    loop {
+        chain.push(current.clone());
+        let info = info(&current).await?;
+        let Some(backing) = info.backing_file else {
+            break;
+        };
+        let backing_path = std::path::PathBuf::from(&backing);
+        let resolved = if backing_path.is_absolute() {
+            backing_path
+        } else {
+            current
+                .parent()
+                .unwrap_or_else(|| std::path::Path::new(""))
+                .join(backing_path)
+        };
+        current = resolved;
+    }
+    Ok(chain)
+}
+
 pub async fn clone_full(source: &Path, dest: &Path) -> Result<(), DiskError> {
     ensure_parent_dir_exists(dest).await?;
 

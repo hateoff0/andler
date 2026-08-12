@@ -3,6 +3,7 @@ pub mod backend;
 pub mod base_image;
 pub mod clone;
 pub mod config;
+pub mod disk_chain;
 pub mod error;
 pub mod events;
 pub mod fsm;
@@ -33,6 +34,7 @@ pub use config::{
     InstanceConfig, InstanceId, InstanceKind, MemoryConfig, NatBackend, NetworkConfig, NetworkMode,
     PointerMode, RenderBackend, Resolution, INSTANCE_ID_HEX_LEN,
 };
+pub use disk_chain::{DiskChain, DiskLayer, LayerKind};
 pub use error::{BackendError, FsmError};
 pub use events::{
     DaemonEvent, EventKind, EventLogLevel, GuestReadinessLevel, OpId, Operation, OperationKind,

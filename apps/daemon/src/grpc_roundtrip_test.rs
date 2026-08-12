@@ -9,7 +9,7 @@ use andler_rpc::proto::{
     CpuConfig, CreateInstanceRequest, DetachDiskRequest, DetachNetworkRequest, DiskConfig,
     DisplayConfig, Empty, ExportInstanceDiskRequest, FirmwareConfig, GetInstanceConfigResponse,
     GpuConfig, InputConfig, InstanceIdRequest, InstanceStateKind, MemoryConfig, NetworkConfig,
-    RemoveInstanceRequest, Resolution, SetInstanceConfigRequest,
+    RemoveInstanceRequest, Resolution, RestoreSnapshotRequest, SetInstanceConfigRequest,
 };
 use tokio::net::TcpListener;
 use tokio_stream::wrappers::TcpListenerStream;
@@ -1279,6 +1279,44 @@ async fn config_round_trip_preserves_extra_devices_over_real_grpc() {
         .expect("get_instance_config must succeed")
         .into_inner();
     assert_eq!(config_after.extra_disks.len(), 1);
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn snapshot_restore_branch_flag_round_trips_and_list_is_empty_for_fresh_instance() {
+    let (mut client, server) = spawn_server_and_connect().await;
+
+    let response = client
+        .create_instance(sample_create_instance_request())
+        .await
+        .expect("a fully-populated CreateInstanceRequest must be accepted")
+        .into_inner();
+
+    // RestoreSnapshotRequest.branch reaches the daemon through the wire.
+    // The instance has no store and no internal snapshot, so restore must
+    // fail — but with a daemon-side error, not a transport/parse failure.
+    let status = client
+        .restore_snapshot(RestoreSnapshotRequest {
+            instance_id: response.instance_id.clone(),
+            tag: "roundtrip-branch-test".to_string(),
+            timeout_secs: None,
+            branch: true,
+        })
+        .await
+        .expect_err("restore of a nonexistent snapshot must fail server-side");
+    assert_ne!(status.code(), tonic::Code::Ok);
+    assert_ne!(status.code(), tonic::Code::Unimplemented);
+
+    // SnapshotEntry.branch serializes on the wire; fresh instance has none.
+    let listed = client
+        .list_snapshots(InstanceIdRequest {
+            instance_id: response.instance_id,
+        })
+        .await
+        .expect("list_snapshots must succeed on a fresh instance")
+        .into_inner();
+    assert!(listed.snapshots.is_empty());
 
     server.abort();
 }

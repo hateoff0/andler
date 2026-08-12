@@ -12,9 +12,12 @@ use crate::error::StoreError;
 /// Schema versioning via `PRAGMA user_version`:
 /// - 0: legacy database, `instances` table may exist; the daemon migrates
 ///   configs out of it (`load_legacy_instances`) then calls
-///   `finalize_config_migration` (drops `instances`, version -> 2).
+///   `finalize_config_migration` (drops `instances`, version -> 3).
 /// - 1: `instances` table still present, waiting for config migration.
-/// - 2: current: `snapshots` only.
+/// - 2: `snapshots` only, pre-DiskChain columns.
+/// - 3: current: `snapshots` with layer metadata (`layer_path`, `parent_id`,
+///   `branch`). A NULL `layer_path` marks a legacy internal qcow2 snapshot
+///   (read-only compat).
 #[derive(Clone)]
 pub struct Store {
     conn: Arc<Mutex<Connection>>,
@@ -27,6 +30,13 @@ pub struct StoredSnapshot {
     pub tag: String,
     pub description: Option<String>,
     pub created_at: String,
+    /// Path of the external overlay layer relative to the instance
+    /// directory; `None` for legacy internal (qcow2) snapshots.
+    pub layer_path: Option<String>,
+    /// Snapshot id of the layer this one derives from (chain parent).
+    pub parent_id: Option<uuid::Uuid>,
+    /// Branch name; `None` = the instance's main (linear) branch.
+    pub branch: Option<String>,
 }
 
 impl Store {
@@ -116,7 +126,7 @@ impl Store {
     /// store never enables `foreign_keys`).
     pub async fn finalize_config_migration(&self) -> Result<(), StoreError> {
         self.run_blocking(|conn| {
-            conn.execute_batch("DROP TABLE IF EXISTS instances; PRAGMA user_version = 2;")?;
+            conn.execute_batch("DROP TABLE IF EXISTS instances; PRAGMA user_version = 3;")?;
             Ok(())
         })
         .await
@@ -128,12 +138,45 @@ impl Store {
         let tag = snapshot.tag.clone();
         let description = snapshot.description.clone();
         let created_at = snapshot.created_at.clone();
+        let layer_path = snapshot.layer_path.clone();
+        let parent_id = snapshot.parent_id.map(|id| id.to_string());
+        let branch = snapshot.branch.clone();
 
         self.run_blocking(move |conn| {
             conn.execute(
-                "INSERT OR REPLACE INTO snapshots (id, instance_id, tag, description, created_at) \
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
-                (id, instance_id, tag, description, created_at),
+                "INSERT OR REPLACE INTO snapshots \
+                 (id, instance_id, tag, description, created_at, layer_path, parent_id, branch) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                (
+                    id,
+                    instance_id,
+                    tag,
+                    description,
+                    created_at,
+                    layer_path,
+                    parent_id,
+                    branch,
+                ),
+            )?;
+            Ok(())
+        })
+        .await
+    }
+
+    /// Moves a snapshot to a branch (or back to the main branch with `None`).
+    pub async fn set_snapshot_branch(
+        &self,
+        instance_id: InstanceId,
+        snapshot_id: uuid::Uuid,
+        branch: Option<String>,
+    ) -> Result<(), StoreError> {
+        let instance_id_str = instance_id.to_string();
+        let snapshot_id = snapshot_id.to_string();
+
+        self.run_blocking(move |conn| {
+            conn.execute(
+                "UPDATE snapshots SET branch = ?1 WHERE instance_id = ?2 AND id = ?3",
+                (branch, instance_id_str, snapshot_id),
             )?;
             Ok(())
         })
@@ -148,7 +191,7 @@ impl Store {
 
         self.run_blocking(move |conn| {
             let mut stmt = conn.prepare(
-                "SELECT id, instance_id, tag, description, created_at \
+                "SELECT id, instance_id, tag, description, created_at, layer_path, parent_id, branch \
                  FROM snapshots WHERE instance_id = ?1 ORDER BY created_at",
             )?;
             let rows = stmt.query_map([instance_id_str], row_to_stored_snapshot)?;
@@ -172,7 +215,7 @@ impl Store {
 
         self.run_blocking(move |conn| {
             let result = conn.query_row(
-                "SELECT id, instance_id, tag, description, created_at \
+                "SELECT id, instance_id, tag, description, created_at, layer_path, parent_id, branch \
                  FROM snapshots WHERE instance_id = ?1 AND tag = ?2",
                 (instance_id_str, tag),
                 row_to_stored_snapshot,
@@ -204,6 +247,24 @@ impl Store {
         })
         .await
     }
+
+    pub async fn delete_snapshot_by_id(
+        &self,
+        instance_id: InstanceId,
+        snapshot_id: uuid::Uuid,
+    ) -> Result<(), StoreError> {
+        let instance_id_str = instance_id.to_string();
+        let snapshot_id = snapshot_id.to_string();
+
+        self.run_blocking(move |conn| {
+            conn.execute(
+                "DELETE FROM snapshots WHERE instance_id = ?1 AND id = ?2",
+                (instance_id_str, snapshot_id),
+            )?;
+            Ok(())
+        })
+        .await
+    }
 }
 
 fn row_to_stored_snapshot(row: &rusqlite::Row<'_>) -> Result<StoredSnapshot, rusqlite::Error> {
@@ -217,6 +278,15 @@ fn row_to_stored_snapshot(row: &rusqlite::Row<'_>) -> Result<StoredSnapshot, rus
         tag: row.get(2)?,
         description: row.get(3)?,
         created_at: row.get(4)?,
+        layer_path: row.get(5)?,
+        parent_id: row
+            .get::<_, Option<String>>(6)?
+            .map(|s| {
+                uuid::Uuid::parse_str(&s)
+                    .map_err(|e| rusqlite::Error::InvalidParameterName(e.to_string()))
+            })
+            .transpose()?,
+        branch: row.get(7)?,
     })
 }
 
@@ -227,7 +297,7 @@ fn apply_schema(conn: &Connection) -> Result<(), StoreError> {
     conn.pragma_update(None, "foreign_keys", false)?;
 
     let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-    if version == 2 {
+    if version >= 3 {
         return Ok(());
     }
 
@@ -246,14 +316,33 @@ fn apply_schema(conn: &Connection) -> Result<(), StoreError> {
             instance_id TEXT NOT NULL,
             tag         TEXT NOT NULL,
             description TEXT,
-            created_at  TEXT NOT NULL
+            created_at  TEXT NOT NULL,
+            layer_path  TEXT,
+            parent_id   TEXT,
+            branch      TEXT
         );
 
         CREATE UNIQUE INDEX IF NOT EXISTS idx_snapshots_instance_tag
             ON snapshots(instance_id, tag);",
     )?;
 
-    let target = if has_legacy_instances { 1 } else { 2 };
+    // Pre-DiskChain tables lack the layer columns; add them one at a time
+    // (ALTER TABLE ADD COLUMN fails when the column already exists).
+    for column in ["layer_path", "parent_id", "branch"] {
+        let exists: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('snapshots') WHERE name = ?1",
+            [column],
+            |r| r.get(0),
+        )?;
+        if exists == 0 {
+            conn.execute(
+                &format!("ALTER TABLE snapshots ADD COLUMN {column} TEXT"),
+                [],
+            )?;
+        }
+    }
+
+    let target = if has_legacy_instances { 1 } else { 3 };
     conn.execute_batch(&format!("PRAGMA user_version = {target};"))?;
     Ok(())
 }
@@ -368,7 +457,7 @@ mod tests {
     #[tokio::test]
     async fn fresh_store_starts_at_current_schema() {
         let store = Store::open_in_memory().await.unwrap();
-        assert_eq!(store.schema_version().await.unwrap(), 2);
+        assert_eq!(store.schema_version().await.unwrap(), 3);
     }
 
     #[tokio::test]
@@ -390,7 +479,7 @@ mod tests {
         assert_eq!(before.len(), 1);
 
         store.finalize_config_migration().await.unwrap();
-        assert_eq!(store.schema_version().await.unwrap(), 2);
+        assert_eq!(store.schema_version().await.unwrap(), 3);
 
         let legacy = store.load_legacy_instances().await.unwrap();
         assert!(legacy.is_empty(), "instances table must be dropped");
@@ -439,6 +528,9 @@ mod tests {
             tag: "snap-first".to_string(),
             description: Some("first".to_string()),
             created_at: "2026-01-01T00:00:00+00:00".to_string(),
+            layer_path: Some("disk.snapshots/s1.qcow2".to_string()),
+            parent_id: None,
+            branch: None,
         };
         store.save_snapshot(&snapshot).await.unwrap();
 
@@ -468,6 +560,9 @@ mod tests {
                 tag: "same-tag".to_string(),
                 description: Some("first".to_string()),
                 created_at: "2026-01-01T00:00:00+00:00".to_string(),
+                layer_path: None,
+                parent_id: None,
+                branch: None,
             })
             .await
             .unwrap();
@@ -478,6 +573,9 @@ mod tests {
                 tag: "same-tag".to_string(),
                 description: Some("second".to_string()),
                 created_at: "2026-01-02T00:00:00+00:00".to_string(),
+                layer_path: None,
+                parent_id: None,
+                branch: None,
             })
             .await
             .unwrap();
@@ -502,13 +600,113 @@ mod tests {
                     tag: "s".to_string(),
                     description: None,
                     created_at: "2026-01-01T00:00:00+00:00".to_string(),
+                    layer_path: None,
+                    parent_id: None,
+                    branch: None,
                 })
                 .await
                 .unwrap();
         }
 
         let reopened = Store::open(&db_path).await.unwrap();
-        assert_eq!(reopened.schema_version().await.unwrap(), 2);
+        assert_eq!(reopened.schema_version().await.unwrap(), 3);
         assert_eq!(reopened.load_snapshots(id).await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn v2_schema_migrates_to_v3_keeping_rows() {
+        let dir = TempDir::new();
+        let db_path = dir.path().join("andlerd.db");
+        let id = InstanceId::new();
+        {
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE snapshots (
+                    id          TEXT PRIMARY KEY,
+                    instance_id TEXT NOT NULL,
+                    tag         TEXT NOT NULL,
+                    description TEXT,
+                    created_at  TEXT NOT NULL
+                );
+                PRAGMA user_version = 2;",
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO snapshots (id, instance_id, tag, description, created_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                (
+                    "00000000-0000-0000-0000-000000000001",
+                    id.to_string(),
+                    "old-internal",
+                    None::<String>,
+                    "2026-01-01T00:00:00+00:00",
+                ),
+            )
+            .unwrap();
+        }
+
+        let store = Store::open(&db_path).await.unwrap();
+        assert_eq!(store.schema_version().await.unwrap(), 3);
+
+        let loaded = store.load_snapshots(id).await.unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].tag, "old-internal");
+        assert_eq!(loaded[0].layer_path, None, "legacy rows stay internal");
+        assert_eq!(loaded[0].parent_id, None);
+        assert_eq!(loaded[0].branch, None);
+    }
+
+    #[tokio::test]
+    async fn layer_metadata_and_branch_round_trip() {
+        let store = Store::open_in_memory().await.unwrap();
+        let id = InstanceId::new();
+        let parent = uuid::Uuid::new_v4();
+        let child = uuid::Uuid::new_v4();
+        store
+            .save_snapshot(&StoredSnapshot {
+                id: parent,
+                instance_id: id,
+                tag: "parent".to_string(),
+                description: None,
+                created_at: "2026-01-01T00:00:00+00:00".to_string(),
+                layer_path: Some("disk.snapshots/p.qcow2".to_string()),
+                parent_id: None,
+                branch: None,
+            })
+            .await
+            .unwrap();
+        store
+            .save_snapshot(&StoredSnapshot {
+                id: child,
+                instance_id: id,
+                tag: "child".to_string(),
+                description: None,
+                created_at: "2026-01-02T00:00:00+00:00".to_string(),
+                layer_path: Some("disk.snapshots/c.qcow2".to_string()),
+                parent_id: Some(parent),
+                branch: None,
+            })
+            .await
+            .unwrap();
+
+        let loaded = store.load_snapshots(id).await.unwrap();
+        assert_eq!(loaded.len(), 2);
+        assert_eq!(loaded[0].parent_id, None);
+        assert_eq!(loaded[1].parent_id, Some(parent));
+
+        store
+            .set_snapshot_branch(id, parent, Some("branch-x".to_string()))
+            .await
+            .unwrap();
+        let by_tag = store.get_snapshot(id, "parent").await.unwrap().unwrap();
+        assert_eq!(by_tag.branch.as_deref(), Some("branch-x"));
+
+        store.set_snapshot_branch(id, parent, None).await.unwrap();
+        let by_tag = store.get_snapshot(id, "parent").await.unwrap().unwrap();
+        assert_eq!(by_tag.branch, None);
+
+        store.delete_snapshot_by_id(id, child).await.unwrap();
+        assert!(store.get_snapshot(id, "child").await.unwrap().is_none());
+        assert_eq!(store.load_snapshots(id).await.unwrap().len(), 1);
     }
 }

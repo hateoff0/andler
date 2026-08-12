@@ -24,9 +24,14 @@ fn qmp_socket_dir() -> PathBuf {
 struct RunningInstance {
     process: QemuProcess,
     qmp_client: Option<QmpClient>,
+    /// Name of the block graph's head node (the node whose file is the
+    /// instance's `disk.qcow2`). After each live snapshot this becomes the
+    /// new overlay's node; the next snapshot must target it, because
+    /// `drive-disk0` is busy as the overlay's backing.
+    head_node_name: String,
 
     network_info: NetworkInfo,
-    /// (netdev id, host-side info) for every hotplugged extra NIC, so `stop` and
+    /// (netdev id, host-side info) for every hotplugged extra NIC, so `stop` a…
     /// `detach_network` can tear down their taps/veths like the primary NIC's.
     extra_network_infos: Vec<(String, NetworkInfo)>,
 }
@@ -73,12 +78,17 @@ impl QemuBackend {
                     return Ok(());
                 }
                 Err(err) => {
-                    let is_missing_socket = matches!(
-                        &err,
-                        QmpError::ConnectFailed { source, .. }
-                            if source.kind() == std::io::ErrorKind::NotFound
-                    );
-                    if is_missing_socket {
+                    let retryable = match &err {
+                        QmpError::ConnectFailed { source, .. } => matches!(
+                            source.kind(),
+                            std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
+                        ),
+                        _ => false,
+                    };
+                    if retryable {
+                        if !instance.process.is_alive() {
+                            return Err(err);
+                        }
                         last_connect_error = Some(err);
                         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                     } else {
@@ -87,8 +97,8 @@ impl QemuBackend {
                 }
             }
         }
-        // The loop only exits through a successful connect or a non-NotFound
-        // error, so this runs exactly after 300 NotFound retries (~30s).
+        // The loop only exits through a successful connect or a non-retryable
+        // error, so this runs exactly after 300 retries (~30s).
         Err(last_connect_error.expect("retry loop always records its last error"))
     }
 
@@ -375,6 +385,20 @@ async fn wait_for_detection_exit(
 
 const DISK_DEVICE: &str = "drive-disk0";
 
+/// QMP node name for an overlay file. The daemon names live-snapshot
+/// overlays `.tmp-<uuid>.qcow2`; the uuid keeps node names unique per
+/// instance session. QEMU caps node names at 31 chars, so the uuid is
+/// truncated to 24 hex digits (96 bits of uniqueness).
+fn snapshot_node_name(layer_path: &std::path::Path) -> String {
+    let stem = layer_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("overlay");
+    let stem = stem.strip_prefix(".tmp-").unwrap_or(stem);
+    let stem: String = stem.chars().take(24).collect();
+    format!("snap-{stem}")
+}
+
 async fn read_log_history(path: &std::path::Path) -> Vec<LogLine> {
     let content = match tokio::fs::read_to_string(path).await {
         Ok(content) => content,
@@ -585,7 +609,12 @@ impl HypervisorBackend for QemuBackend {
             }
         }
 
-        let process = QemuProcess::spawn(&args, qmp_socket_path, log_file_path).await;
+        // ANDLERD_DEV_RESTART=1 keeps the QEMU process alive when the daemon
+        // exits, so a dev loop can restart the daemon without losing VMs.
+        let dev_restart = std::env::var("ANDLERD_DEV_RESTART")
+            .map(|value| value == "1")
+            .unwrap_or(false);
+        let process = QemuProcess::spawn(&args, qmp_socket_path, log_file_path, !dev_restart).await;
         if let Err(err) = process {
             self.teardown_network_info(&network_info).await;
             for (_, info) in &extra_network_infos {
@@ -601,6 +630,7 @@ impl HypervisorBackend for QemuBackend {
             RunningInstance {
                 process,
                 qmp_client: None,
+                head_node_name: DISK_DEVICE.to_string(),
                 network_info,
                 extra_network_infos,
             },
@@ -655,12 +685,22 @@ impl HypervisorBackend for QemuBackend {
             NetworkMode::Isolated | NetworkMode::Nat => NetworkInfo::Nat,
         };
 
+        // The adopted QEMU may have live snapshot overlays from before the
+        // daemon died: the head node is the one whose file is the active
+        // disk (snapshots keep the file open under their staging name).
+        let active_disk = cfg.disk.path.to_string_lossy().into_owned();
+        let head_node_name = qmp
+            .query_head_node_name(&active_disk)
+            .await
+            .map_err(qmp_error_to_backend_error)?;
+
         let mut instances = self.instances.lock().await;
         instances.insert(
             handle.clone(),
             RunningInstance {
                 process,
                 qmp_client: Some(qmp),
+                head_node_name,
                 network_info,
                 extra_network_infos: Vec::new(),
             },
@@ -894,7 +934,7 @@ impl HypervisorBackend for QemuBackend {
     async fn snapshot(
         &self,
         handle: &BackendHandle,
-        tag: &str,
+        layer_path: &std::path::Path,
         _timeout: Option<std::time::Duration>,
     ) -> Result<(), BackendError> {
         let mut instances = self.instances.lock().await;
@@ -906,10 +946,17 @@ impl HypervisorBackend for QemuBackend {
             .await
             .map_err(qmp_error_to_backend_error)?;
 
+        let node_name = snapshot_node_name(layer_path);
+        let path = layer_path.to_string_lossy().into_owned();
+        let head = instance.head_node_name.clone();
         let qmp = instance.qmp_client.as_mut().expect("just connected");
-        qmp.snapshot_save(DISK_DEVICE, tag)
+        qmp.blockdev_add_overlay(&node_name, &path)
             .await
             .map_err(qmp_error_to_backend_error)?;
+        qmp.blockdev_snapshot(&head, &node_name)
+            .await
+            .map_err(qmp_error_to_backend_error)?;
+        instance.head_node_name = node_name;
 
         Ok(())
     }
@@ -1336,6 +1383,11 @@ mod tests {
         let mut gpu = GpuConfig::reference_default();
         gpu.render_backend = render_backend;
 
+        // The shared /tmp/test-disk.qcow2 is left as a 0-byte stub by other
+        // crates' tests; QEMU's -blockdev validates the qcow2 header at
+        // startup and dies on it, so the fixture must be a real image.
+        ensure_test_disk();
+
         InstanceConfig {
             id: InstanceId::new(),
             name: "test-vm".to_string(),
@@ -1699,5 +1751,42 @@ mod tests {
             verify_cmdline_marker(std::process::id(), "no-such-instance").is_err(),
             "a process without the marker must be rejected"
         );
+    }
+
+    fn ensure_test_disk() {
+        const DISK: &str = "/tmp/test-disk.qcow2";
+        const VARS: &str = "test-vm_VARS.fd";
+        let valid = std::fs::metadata(DISK)
+            .map(|m| m.len() > 0)
+            .unwrap_or(false);
+        if !valid {
+            let status = std::process::Command::new("qemu-img")
+                .args(["create", "-f", "qcow2", DISK, "512M"])
+                .status()
+                .expect("qemu-img must be available for ignored backend tests");
+            assert!(status.success(), "qemu-img create of the test disk failed");
+        }
+        if std::fs::metadata(VARS).is_err() {
+            let status = std::process::Command::new("qemu-img")
+                .args(["create", "-f", "raw", VARS, "4M"])
+                .status()
+                .expect("qemu-img must be available for ignored backend tests");
+            assert!(
+                status.success(),
+                "qemu-img create of the VARS fixture failed"
+            );
+        }
+        let _ = std::fs::File::create("/tmp/test.iso");
+    }
+
+    #[test]
+    fn snapshot_node_name_strips_tmp_and_fits_qemu_limit() {
+        let long_id = format!("{:032x}", 0xdead_beef_u64); // 32 hex chars, uuid-like
+        let name = snapshot_node_name(&PathBuf::from(format!(
+            "/i/disk.snapshots/.tmp-{long_id}.qcow2"
+        )));
+        assert_eq!(name, format!("snap-{}", &long_id[..24]));
+        assert!(name.len() <= 31, "QEMU node names are capped at 31 chars");
+        assert!(!name.contains(".tmp-"));
     }
 }

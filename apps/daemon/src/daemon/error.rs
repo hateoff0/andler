@@ -41,7 +41,7 @@ pub enum DaemonError {
     Store(#[from] StoreError),
 
     #[error(
-        "cannot migrate instance {instance_id:?}: {file_path} already exists and differs from \
+        "cannot migrate instance {instance_id}: {file_path} already exists and differs from \
          the config stored in the database; keeping both would be ambiguous — move or delete \
          one of them and restart andlerd"
     )]
@@ -73,13 +73,13 @@ pub enum DaemonError {
     #[error("cannot purge instance {0:?}: it has live linked clones {1:?}; remove them first")]
     InstanceHasLiveClones(InstanceId, Vec<InstanceId>),
 
-    #[error("snapshot {tag:?} not found for instance {instance_id:?}")]
+    #[error("snapshot {tag:?} not found for instance {instance_id}")]
     SnapshotNotFound {
         instance_id: InstanceId,
         tag: String,
     },
 
-    #[error("snapshot {tag:?} already exists for instance {instance_id:?}")]
+    #[error("snapshot {tag:?} already exists for instance {instance_id}")]
     SnapshotAlreadyExists {
         instance_id: InstanceId,
         tag: String,
@@ -89,12 +89,82 @@ pub enum DaemonError {
     SnapshotOperationRequiresRunningInstance(InstanceId, InstanceState),
 
     #[error(
-        "instance {instance_id:?} already has {current} snapshots (limit {limit}); delete one before creating another"
+        "instance {instance_id} already has {current} snapshots (limit {limit}); delete one before creating another"
     )]
     SnapshotLimitExceeded {
         instance_id: InstanceId,
         current: usize,
         limit: usize,
+    },
+
+    #[error(
+        "snapshot of instance {instance_id} requires a qcow2 disk (current format: {format}); \
+         external snapshots need overlay support — convert the disk to qcow2 first"
+    )]
+    SnapshotRequiresQcow2 {
+        instance_id: InstanceId,
+        format: String,
+    },
+
+    #[error(
+        "snapshot layer file {path} of instance {instance_id} is missing; \
+         the chain may have been tampered with — restart the daemon to reconcile"
+    )]
+    SnapshotLayerMissing {
+        instance_id: InstanceId,
+        path: PathBuf,
+    },
+
+    #[error(
+        "snapshot {tag:?} of instance {instance_id} is a legacy internal qcow2 snapshot: \
+         restoring it is not supported; create a new snapshot instead"
+    )]
+    SnapshotInternalNotRestorable {
+        instance_id: InstanceId,
+        tag: String,
+    },
+
+    #[error(
+        "snapshot {tag:?} of instance {instance_id} is on archived branch {branch:?}; \
+         restoring it would destroy the branch's newer layers — pass --branch to switch to it instead"
+    )]
+    RestoreTargetOnArchivedBranch {
+        instance_id: InstanceId,
+        tag: String,
+        branch: String,
+    },
+
+    #[error(
+        "cannot restore snapshot {tag:?} of instance {instance_id}: the instance has live \
+         linked clones {} whose disks derive from the current disk; removing their source \
+         would orphan them — remove the clones first",
+        short_ids(clones)
+    )]
+    RestoreWouldBreakClones {
+        instance_id: InstanceId,
+        tag: String,
+        clones: Vec<InstanceId>,
+    },
+
+    #[error(
+        "cannot delete snapshot {tag:?} of instance {instance_id}: the layer is read by \
+         linked clones {}; deleting it would break their disk chains — remove the clones \
+         first",
+        short_ids(clones)
+    )]
+    DeleteWouldBreakClones {
+        instance_id: InstanceId,
+        tag: String,
+        clones: Vec<InstanceId>,
+    },
+
+    #[error(
+        "cannot delete snapshot {tag:?} of instance {instance_id}: the layer has no backing \
+         file to merge its data into (it is the chain's base)"
+    )]
+    CannotDeleteBaseLayer {
+        instance_id: InstanceId,
+        tag: String,
     },
 
     #[error("instance reference must not be empty")]
@@ -127,7 +197,7 @@ pub enum DaemonError {
         candidates: Vec<InstanceId>,
     },
 
-    #[error("guest agent unavailable for instance {instance_id:?}: {message}")]
+    #[error("guest agent unavailable for instance {instance_id}: {message}")]
     GuestAgentUnavailable {
         instance_id: InstanceId,
         message: String,
@@ -163,7 +233,7 @@ pub enum DaemonError {
     DiskNotAttached(InstanceId, PathBuf),
 
     #[error(
-        "network device {index} is not attached to instance {instance_id:?} \
+        "network device {index} is not attached to instance {instance_id} \
          (only {attached} extra network(s) present); \
          see `andler config <id>` for the extra_networks list"
     )]
@@ -238,6 +308,13 @@ impl DaemonError {
                 ErrorKind::FailedPrecondition
             }
             DaemonError::SnapshotLimitExceeded { .. } => ErrorKind::FailedPrecondition,
+            DaemonError::SnapshotRequiresQcow2 { .. } => ErrorKind::FailedPrecondition,
+            DaemonError::SnapshotLayerMissing { .. } => ErrorKind::NotFound,
+            DaemonError::SnapshotInternalNotRestorable { .. } => ErrorKind::FailedPrecondition,
+            DaemonError::RestoreTargetOnArchivedBranch { .. } => ErrorKind::FailedPrecondition,
+            DaemonError::RestoreWouldBreakClones { .. } => ErrorKind::FailedPrecondition,
+            DaemonError::DeleteWouldBreakClones { .. } => ErrorKind::FailedPrecondition,
+            DaemonError::CannotDeleteBaseLayer { .. } => ErrorKind::FailedPrecondition,
             DaemonError::EmptyInstanceRef => ErrorKind::InvalidArgument,
             DaemonError::ConfigIdMismatch { .. } => ErrorKind::InvalidArgument,
             DaemonError::ConfigKindChanged(_) => ErrorKind::InvalidArgument,
@@ -255,5 +332,21 @@ impl DaemonError {
             DaemonError::DiskNotAttached(_, _) => ErrorKind::NotFound,
             DaemonError::NetworkNotAttached { .. } => ErrorKind::NotFound,
         }
+    }
+}
+
+/// Compact, human-friendly instance ids for error text: the 8-hex prefix,
+/// like the CLI's partial-id resolution. The full 64-hex Debug rendering of
+/// an id alone can exceed the 384-char gRPC message truncation and swallow
+/// the actionable tail of the message.
+fn short_ids(ids: &[InstanceId]) -> String {
+    let short: Vec<String> = ids
+        .iter()
+        .map(|id| id.to_string().chars().take(8).collect())
+        .collect();
+    if short.is_empty() {
+        "[]".to_string()
+    } else {
+        format!("[{}]", short.join(", "))
     }
 }

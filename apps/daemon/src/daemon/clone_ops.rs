@@ -139,4 +139,31 @@ impl Daemon {
 
         Ok(clones)
     }
+
+    /// Finds instances other than `id` whose disk chain (walked file by file
+    /// through qcow2 backing references) contains `layer_path`. A linked
+    /// clone derives from the source's disk, so after a snapshot renamed the
+    /// source head into a layer, the clone's chain reaches that layer —
+    /// deleting the layer would orphan the clone.
+    pub async fn find_chain_consumers(
+        &self,
+        id: InstanceId,
+        layer_path: &std::path::Path,
+    ) -> Result<Vec<InstanceId>, DaemonError> {
+        let supervisors = self.supervisors.read().await;
+        let mut consumers = Vec::new();
+        for (other_id, handle) in supervisors.iter() {
+            if *other_id == id {
+                continue;
+            }
+            let other_disk = handle.config().disk.path.clone();
+            let Ok(chain) = andler_disk::qcow2::chain_from_head(&other_disk).await else {
+                continue;
+            };
+            if chain.iter().any(|path| path == layer_path) {
+                consumers.push(*other_id);
+            }
+        }
+        Ok(consumers)
+    }
 }

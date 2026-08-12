@@ -84,8 +84,11 @@ QMP client over a unix socket. Handles handshake, command execution, and async j
 | `pause` | `async fn(&mut self) -> Result<(), QmpError>` | Sends `stop` command |
 | `resume` | `async fn(&mut self) -> Result<(), QmpError>` | Sends `cont` command |
 | `query_status` | `async fn(&mut self) -> Result<VmStatus, QmpError>` | Sends `query-status` |
-| `snapshot_save` | `async fn(&mut self, device, tag) -> Result<(), QmpError>` | Synchronous `blockdev-snapshot-internal-sync` (disk-only internal snapshot) |
-| `snapshot_delete` | `async fn(&mut self, device, tag) -> Result<(), QmpError>` | Synchronous `blockdev-snapshot-delete-internal-sync` |
+| `snapshot_save` | `async fn(&mut self, device, tag) -> Result<(), QmpError>` | Synchronous `blockdev-snapshot-internal-sync` (legacy internal snapshot) |
+| `snapshot_delete` | `async fn(&mut self, device, tag) -> Result<(), QmpError>` | Synchronous `blockdev-snapshot-delete-internal-sync` (legacy internal snapshot) |
+| `blockdev_add_overlay` | `async fn(&mut self, node_name, file_path) -> Result<(), QmpError>` | `blockdev-add` of a qcow2 overlay node (`backing: null`, `file.locking: off`, `discard: unmap`, `detect-zeroes: on`, `aio: threads`) |
+| `blockdev_snapshot` | `async fn(&mut self, node, overlay) -> Result<(), QmpError>` | `blockdev-snapshot` — switches a live node's backing to an overlay |
+| `block_commit` | `async fn(&mut self, job_id, top_node, base_node) -> Result<(), QmpError>` | `block-commit` with `auto-finalize: true`, `auto-dismiss: false` (the job stays visible in `query-jobs` until `job-dismiss`, so `wait_job_completion` finds it) |
 | `wait_job_completion` | `async fn(&mut self, job_id, timeout) -> Result<(), QmpError>` | Polls `query-jobs` until `"concluded"`, then `job-dismiss` |
 | `guest_ping` | `async fn(&mut self) -> Result<(), QmpError>` | Check if guest agent is reachable (agent socket only) |
 | `guest_exec` | `async fn(&mut self, path: &str, args: &[String]) -> Result<u64, QmpError>` | Execute command in guest (agent socket only) |
@@ -104,20 +107,33 @@ QMP client over a unix socket. Handles handshake, command execution, and async j
 
 **`GuestExecStatus`**: `exitcode: i64`, `exited: bool`, `out_data: String`, `err_data: String`.
 
-**QMP wire schema for snapshots (disk-only, no VM state)**:
+**QMP wire schema for external snapshots (disk-only, no VM state)**:
 
 ```text
-blockdev-snapshot-internal-sync:        {"device": <node-name>, "name": <tag>}
-blockdev-snapshot-delete-internal-sync: {"device": <node-name>, "name": <tag>}
+blockdev-add:  {"driver": "qcow2", "node-name": "snap-<uuid>", "file":
+               {"driver": "file", "filename": <overlay-path>, "locking": "off",
+                "aio": "threads"}, "backing": null, "discard": "unmap",
+               "detect-zeroes": "on"}
+blockdev-snapshot: {"node": "drive-disk0", "overlay": "snap-<uuid>"}
+block-commit:  {"job-id": <id>, "device": <top-node>, "top-node": <top-node>,
+                "base-node": "drive-disk0", "auto-finalize": true,
+                "auto-dismiss": false}
 ```
 
-These are synchronous commands — no job-id, no `vmstate`, no `devices` array. This is a deliberate
-design decision: the full vmstate path (`snapshot-save` with a mandatory `vmstate` node) serializes
-VM state through the migration machinery, which QEMU blocks on every default component of an
-andler VM (`virtio-sound`, `virgl`, and the `invtsc` CPU flag are all non-migratable by design).
-Disk-only snapshots work on any configuration, at the cost that **restore is an offline operation**
-(`qemu-img snapshot -a` via the daemon, requires a stopped instance) — there is no live revert
-command in QEMU's block-layer API.
+`blockdev-add` must supply `backing: null` — the overlay's backing file is wired up by
+`blockdev-snapshot` itself (the file header already references the future layer path, set
+with `qemu-img rebase -u -F qcow2` before the QMP call). `file.locking: off` is required:
+the layer file is also reachable through the daemon's `qemu-img` helper processes, and
+QEMU's default OFD lock would reject their access. The main disk must be launched with
+`-blockdev` (nodes `file-disk0`/`drive-disk0`); `-drive` creates an unnamed
+block-backend that cannot be used as a `blockdev-snapshot` node. `block-commit` with
+`auto-dismiss: false` keeps the job in `query-jobs` until dismissed, so the existing
+`wait_job_completion` polling loop observes `concluded` without a race. The full vmstate
+path (`snapshot-save`) is deliberately unused — it serializes VM state through the
+migration machinery, which QEMU blocks on every default component of an andler VM
+(`virtio-sound`, `virgl`, and the `invtsc` CPU flag are all non-migratable by design).
+External snapshots work on any configuration, at the cost that **restore/delete are
+offline operations** (stopped instance, `qemu-img` helpers via the daemon).
 
 **QMP wire schema for hotplug (extra disks/networks)**:
 
@@ -201,7 +217,7 @@ GPU metrics (AMD/NVIDIA/Intel sysfs + NVML) live in `services/andler-firmware/sr
 ## Tests
 
 - **`cmdline`** (~30 tests): All argument blocks tested independently against reference configuration. Includes edge cases: `Passthrough` panic, `None` display engine, clipboard disabled, size suffixes.
-- **`qmp`**: JSON parsing of QMP responses (`QmpReply`, `VmStatus`, `QueryStatusReturn`, `SnapshotInfo`, `QueryJobInfo`), plus `UnixStream::pair`-based fake-QMP-peer tests covering the real `blockdev-snapshot-internal-sync`/`-delete-internal-sync` wire schema (`device`+`name`, no job-id/vmstate/devices), `wait_job_completion`'s `"concluded"`+`error` semantics, `job-dismiss`, and async-event skipping during polling.
+- **`qmp`**: JSON parsing of QMP responses (`QmpReply`, `VmStatus`, `QueryStatusReturn`, `SnapshotInfo`, `QueryJobInfo`), plus `UnixStream::pair`-based fake-QMP-peer tests covering the real external-snapshot wire schema (`blockdev-add` overlay node, `blockdev-snapshot`, `block-commit` with `auto-finalize`/`auto-dismiss`), the legacy `blockdev-snapshot-internal-sync`/`-delete-internal-sync` wire schema (`device`+`name`, no job-id/vmstate/devices), `wait_job_completion`'s `"concluded"`+`error` semantics, `job-dismiss`, and async-event skipping during polling.
 - **`backend`** (~20 tests): `name_returns_qemu`, `Passthrough` validation, unknown handle handling, `VmStatus → InstanceState` mapping, empty `metrics_stream`/`log_stream`.
 - **`process`**: `SpawnFailed` via missing binary, `drain_to_tracing` line publishing, subscriber tolerance, multiple subscribers fan-out.
 - **`metrics`**: CPU stat parsing, CPU% computation, I/O rates, RSS parsing, net_dev parsing.
@@ -227,11 +243,12 @@ All marked `#[ignore]` with reason — run separately in `integration-test` Dock
   - Venus/virgl display → `virgl is not yet migratable`
   - CPU (`-cpu host,kvm=on,+topoext,migratable=no` in `cmdline.rs`, intentional) → `State blocked by non-migratable CPU device (invtsc flag)`
 
-  `snapshot-save` with an empty `vmstate` never completes either (the job enters `running` and stays there forever). Snapshots are therefore **disk-only** (internal qcow2): `snapshot_save`/`snapshot_delete` are synchronous `blockdev-snapshot-internal-sync`/`-delete-internal-sync`; restore is an offline `qemu-img snapshot -a` performed by the daemon (`andler_disk::qcow2::restore_internal_snapshot`) and requires a stopped instance — QEMU's block API has no live revert. Don't reintroduce the vmstate job API.
-- **`qemu-img snapshot` must not run against a live disk** (QEMU holds exclusive locks; `qemu-img snapshot -l` on a running instance fails or blocks). List snapshots via QMP `query-block` (`query_block_snapshots` / `andler snapshot list`); restore requires the instance stopped.
+  `snapshot-save` with an empty `vmstate` never completes either (the job enters `running` and stays there forever). Snapshots are therefore **disk-only external overlays**: live create switches the disk graph over QMP (`blockdev-add` + `blockdev-snapshot`); restore/delete are offline `qemu-img` operations performed by the daemon and require a stopped instance — QEMU's block API has no live revert. Don't reintroduce the vmstate job API.
+- **`qemu-img` must not run against a live disk** (QEMU holds OFD locks; layer files are opened with `file.locking: off` so the daemon's offline helpers can touch them, but the active `disk.qcow2` of a running VM stays exclusive to QEMU). List snapshots via QMP `query-block` (`query_block_snapshots` / `andler snapshot list`); restore/delete require the instance stopped.
 - **`guest-*` commands are NOT registered on QMP (QEMU ≥ 9)** — online guest operations (package install/remove, file writes, `set_guest_display_resolution`) must go through the QGA chardev socket (`*.qga.sock`, `org.qemu.guest_agent.0`) with `connect_agent`. The QMP socket is VM control only. See "Agent socket exclusivity" above: a chardev delivers to the *last* client only, so parallel readers starve the daemon — never probe these sockets from a second client while the daemon is attached (a 30s hang was reproduced that way).
-- **Hardcoded snapshot device name**: `drive-disk0`. Will need parameterization if multi-disk support is added.
-- **Internal snapshots cover only the primary disk**: extra hotplugged disks (`drive-extraN`) are not included in `blockdev-snapshot-internal-sync` — `snapshot create` snapshots `drive-disk0` alone.
+- **Hardcoded snapshot node name**: `drive-disk0` (and `file-disk0` for the file node). Will need parameterization if multi-disk support is added.
+- **Snapshots cover only the primary disk**: extra hotplugged disks (`drive-extraN`) are not snapshotted — `snapshot create` snapshots `drive-disk0` alone.
+- **`block-commit` via QMP is only used for offline delete in this phase**: the daemon commits layer data with `qemu-img commit` on a stopped instance. The QMP `block_commit` helper exists and is wire-tested, but live commit of a layer under a running VM is not exercised end-to-end yet (the offline path is strictly simpler and crash-safe).
 - **`device_del` is asynchronous**: the detach path retries `blockdev-del`/`netdev-del` only while QEMU reports the device in use; a guest that keeps the device busy (open files on an attached disk, active sockets on a NIC) can delay or fail the detach — the config entry is only removed after the backend confirms.
 - **Disk hot-unplug is guest-driven**: PCIe unplug of a `virtio-blk-pci` device needs a guest-side ack, so with no booted OS (headless test VM, stuck firmware) `detach disk` fails after the 15s retry window with `GuestUnplugTimeout` ("unplug is guest-driven...") — verified live on QEMU 11.0.3: `DEVICE_DELETED` never arrives without a guest. The backing file is never touched on failure. This is QEMU's PCIe hot-unplug protocol, not a daemon bug.
 - **q35 hotplug requires `pcie-root-port` bridges**: `pcie.0` rejects `device_add` ("Bus 'pcie.0' does not support hotplugging"), so the command line always reserves 16 root ports (slots 0-7 extra disks, 8-15 extra networks); `device_add` and boot-time re-attach target the same `root-port-N` bus. Removing the bridges removes hotplug entirely.

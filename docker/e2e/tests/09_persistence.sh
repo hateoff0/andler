@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# 09 — daemon restart persistence and final cleanup. Must run last: it
-# restarts the shared daemon process.
+# 09 — daemon restart persistence and final cleanup. Restarts the shared
+# daemon process (13 also restarts it and runs after this suite).
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 

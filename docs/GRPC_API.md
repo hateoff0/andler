@@ -626,23 +626,24 @@ Response after snapshot creation.
 
 ### `RestoreSnapshotRequest`
 
-Request to restore a snapshot.
+Request to restore a snapshot. The instance must be stopped.
 
 | Field | Type | Description |
 |-------|------|-------------|
 | `instance_id` | `string` | Instance ID. |
 | `tag` | `string` | Snapshot tag. |
-| `timeout_secs` | `optional uint64` | Operation timeout. |
+| `timeout_secs` | `optional uint64` | Accepted for compatibility; unused — snapshot operations are synchronous. |
+| `branch` | `bool` | True: keep the current chain as an archived branch and continue from the target. False (default): discard layers newer than the target. |
 
 ### `DeleteSnapshotRequest`
 
-Request to delete a snapshot.
+Request to delete a snapshot. The instance must be stopped.
 
 | Field | Type | Description |
 |-------|------|-------------|
 | `instance_id` | `string` | Instance ID. |
 | `tag` | `string` | Snapshot tag. |
-| `timeout_secs` | `optional uint64` | Operation timeout. |
+| `timeout_secs` | `optional uint64` | Accepted for compatibility; unused — snapshot operations are synchronous. |
 
 ### `SnapshotEntry`
 
@@ -654,6 +655,7 @@ Entry in the snapshot list.
 | `tag` | `string` | Snapshot tag. |
 | `description` | `string` | Description. |
 | `created_at` | `string` | Timestamp. |
+| `branch` | `string` | Branch name for archived (non-main) branch snapshots; empty = main branch. |
 
 ### `ListSnapshotsResponse`
 
@@ -741,9 +743,9 @@ Single package entry.
 
 | gRPC Status | Daemon Error | When |
 |-------------|--------------|------|
-| `NOT_FOUND` | `InstanceNotFound`, `SnapshotNotFound`, `InstanceRefNotFound`, `DiskNotAttached`, `NetworkNotAttached` | Unknown instance/snapshot/ref, or detaching a device that is not attached. |
+| `NOT_FOUND` | `InstanceNotFound`, `SnapshotNotFound`, `SnapshotLayerMissing`, `InstanceRefNotFound`, `DiskNotAttached`, `NetworkNotAttached` | Unknown instance/snapshot/layer/ref, or detaching a device that is not attached. |
 | `UNIMPLEMENTED` | `NoBackendRegistered`, `Backend(NotImplemented)` | Backend kind not available. |
-| `FAILED_PRECONDITION` | `InvalidTransition`, `InstanceNotRemovable`, `InstanceNotClonable`, `InstanceAlreadyStopped`, `SharedBaseNotSupportedForLinuxVm`, `InstanceHasLiveClones`, `SnapshotOperationRequiresRunningInstance`, `SnapshotLimitExceeded`, `GuestAgentUnavailable`, `NotAndroid`, `InstanceMustBeStopped`, `HotplugRequiresRunningInstance`, `Backend(HandleNotFound)`, `Backend(ProcessNotRunning)` | Wrong lifecycle state, resource limit, guest agent unavailable, wrong instance kind. |
+| `FAILED_PRECONDITION` | `InvalidTransition`, `InstanceNotRemovable`, `InstanceNotClonable`, `InstanceAlreadyStopped`, `SharedBaseNotSupportedForLinuxVm`, `InstanceHasLiveClones`, `SnapshotOperationRequiresRunningInstance`, `SnapshotLimitExceeded`, `SnapshotRequiresQcow2`, `SnapshotInternalNotRestorable`, `RestoreTargetOnArchivedBranch`, `RestoreWouldBreakClones`, `DeleteWouldBreakClones`, `CannotDeleteBaseLayer`, `GuestAgentUnavailable`, `NotAndroid`, `InstanceMustBeStopped`, `HotplugRequiresRunningInstance`, `Backend(HandleNotFound)`, `Backend(ProcessNotRunning)` | Wrong lifecycle state, resource limit, snapshot chain constraint, guest agent unavailable, wrong instance kind. |
 | `ALREADY_EXISTS` | `SnapshotAlreadyExists`, `DiskAlreadyAttached` | Duplicate snapshot tag, or attaching a disk image that is already attached (including the primary disk). |
 | `INVALID_ARGUMENT` | `ConvertError`, `EmptyInstanceRef`, `MalformedInstanceRef`, `AmbiguousInstanceId`, `ConfigIdMismatch`, `ConfigKindChanged`, `ConfigDiskPathChanged`, `InvalidConfig`, `InvalidConfigKey`, `MissingOvmfVarsTemplate` | Malformed request or invalid arguments |
 | `RESOURCE_EXHAUSTED` | `InsufficientDiskSpace` | Not enough free space for a snapshot operation |

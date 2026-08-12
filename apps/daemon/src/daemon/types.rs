@@ -9,6 +9,13 @@ pub struct SnapshotRecord {
     pub tag: String,
     pub description: Option<String>,
     pub created_at: String,
+    /// Path of the external overlay layer relative to the instance
+    /// directory; `None` for legacy internal (qcow2) snapshots.
+    pub layer_path: Option<String>,
+    /// Snapshot id of the layer this one derives from.
+    pub parent_id: Option<uuid::Uuid>,
+    /// Branch name; `None` = the instance's main (linear) branch.
+    pub branch: Option<String>,
 }
 
 pub(crate) struct InstanceDirGuard {

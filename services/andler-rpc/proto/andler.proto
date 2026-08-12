@@ -396,6 +396,9 @@ message RestoreSnapshotRequest {
     string instance_id = 1;
     string tag = 2;
     optional uint64 timeout_secs = 3;
+    // True: keep the current chain as an archived branch and continue from
+    // the target. False (default): discard layers newer than the target.
+    bool branch = 4;
 }
 
 message DeleteSnapshotRequest {
@@ -409,6 +412,8 @@ message SnapshotEntry {
     string tag = 2;
     string description = 3;
     string created_at = 4;
+    // Branch name for archived (non-main) branch snapshots; empty = main.
+    string branch = 5;
 }
 
 message ListSnapshotsResponse {

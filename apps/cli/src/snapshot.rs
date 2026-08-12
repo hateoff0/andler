@@ -55,6 +55,7 @@ pub async fn handle(
             instance_id: _,
             tag,
             timeout,
+            branch,
         } => {
             let pb = spinner(&format!("Restoring snapshot \"{tag}\"..."));
             let result = client
@@ -62,6 +63,7 @@ pub async fn handle(
                     instance_id,
                     tag: tag.clone(),
                     timeout_secs: timeout,
+                    branch,
                 })
                 .await;
             pb.finish_and_clear();
@@ -107,6 +109,7 @@ pub async fn handle(
                     snapshot_id: &'a str,
                     created_at: &'a str,
                     description: &'a str,
+                    branch: &'a str,
                 }
                 let entries: Vec<SnapshotJson> = response
                     .snapshots
@@ -116,6 +119,7 @@ pub async fn handle(
                         snapshot_id: &snap.snapshot_id,
                         created_at: &snap.created_at,
                         description: &snap.description,
+                        branch: &snap.branch,
                     })
                     .collect();
                 println!("{}", serde_json::to_string(&entries)?);
@@ -125,8 +129,13 @@ pub async fn handle(
                 println!("no snapshots");
             } else {
                 for snap in &response.snapshots {
+                    let branch_suffix = if snap.branch.is_empty() {
+                        String::new()
+                    } else {
+                        format!(", branch={}", snap.branch)
+                    };
                     println!(
-                        "tag={}, id={}, created_at={}, description={}",
+                        "tag={}, id={}, created_at={}, description={}{}",
                         snap.tag,
                         snap.snapshot_id,
                         crate::helpers::format_timestamp(&snap.created_at),
@@ -134,7 +143,8 @@ pub async fn handle(
                             "-"
                         } else {
                             &snap.description
-                        }
+                        },
+                        branch_suffix
                     );
                 }
             }

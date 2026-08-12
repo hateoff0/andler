@@ -434,6 +434,7 @@ A multi-phase architecture rework (see Branching) is tracked by a plan file crea
 | `ANDLERD_OVMF_CODE` | daemon | Override OVMF code path |
 | `ANDLERD_OVMF_VARS` | daemon | Override OVMF_VARS template path |
 | `ANDLERD_HEALTH_CHECK_INTERVAL_SECS` | daemon | Health-check interval (default 30s, `0` disables) |
+| `ANDLERD_DEV_RESTART=1` | daemon | Dev restart mode: SIGTERM/Ctrl+C leaves VMs running (QEMU survives the daemon and is adopted on the next start) |
 | `RUST_LOG` | daemon | tracing filter (overrides `-v`/`-vv` verbosity) |
 | `ANDLERD_ADDR` | cli | Daemon address (default `http://127.0.0.1:50051`); `--daemon-addr` flag overrides |
 | `ANDLER_HOME` | both | Root of all andler data (default `~/.andler`) |
@@ -444,6 +445,7 @@ A multi-phase architecture rework (see Branching) is tracked by a plan file crea
 | Path | Purpose |
 |------|---------|
 | `~/.andler/instances/<id>/` | Instance home: `instance.toml`, `disk.qcow2`, `VARS.fd`, `console.log`, `qemu.log` |
+| `~/.andler/instances/<id>/disk.snapshots/` | External snapshot layers: `<uuid>.qcow2` files; staging `.tmp-<uuid>.qcow2` overlays are never scanned as layers |
 | `~/.andler/cache/base-images/` | Android/Linux base images (flat root or `android<version>-<variant>/` subdirs; manifest.json + qcow2 pairs) |
 | `~/.andler/andlerd.db` | Default SQLite store |
 | `$XDG_RUNTIME_DIR/andler/qmp/<id>.sock` | Per-instance QMP control socket |
