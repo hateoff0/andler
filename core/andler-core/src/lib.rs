@@ -7,6 +7,7 @@ pub mod disk_chain;
 pub mod error;
 pub mod events;
 pub mod fsm;
+pub mod package_manager;
 pub mod paths;
 
 // Tests that mutate ANDLER_HOME must serialize on this single lock — a
@@ -35,6 +36,7 @@ pub use config::{
     PointerMode, RenderBackend, Resolution, INSTANCE_ID_HEX_LEN,
 };
 pub use disk_chain::{DiskChain, DiskLayer, LayerKind};
+pub use package_manager::PackageManager;
 pub use error::{BackendError, FsmError};
 pub use events::{
     DaemonEvent, EventKind, EventLogLevel, GuestReadinessLevel, OpId, Operation, OperationKind,

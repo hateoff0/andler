@@ -146,20 +146,19 @@ exit 30";
             .await
             .map_err(qmp_error_to_backend_error)?;
 
+        // The command shapes come from andler-core (the same single source
+        // the offline chroot path uses) — the online QGA path must never
+        // drift from the offline one.
+        let pm = match pkg_bin {
+            "apt-get" => andler_core::package_manager::PackageManager::Apt,
+            "dnf" => andler_core::package_manager::PackageManager::Dnf,
+            "pacman" => andler_core::package_manager::PackageManager::Pacman,
+            _ => andler_core::package_manager::PackageManager::Apt,
+        };
         let cmd_args: Vec<&str> = if install {
-            match pkg_bin {
-                "apt-get" => vec!["apt-get", "install", "-y", package],
-                "dnf" => vec!["dnf", "install", "-y", package],
-                "pacman" => vec!["pacman", "-S", "--noconfirm", package],
-                _ => vec!["apt-get", "install", "-y", package],
-            }
+            pm.install_args(package)
         } else {
-            match pkg_bin {
-                "apt-get" => vec!["apt-get", "remove", "-y", package],
-                "dnf" => vec!["dnf", "remove", "-y", package],
-                "pacman" => vec!["pacman", "-R", "--noconfirm", package],
-                _ => vec!["apt-get", "remove", "-y", package],
-            }
+            pm.remove_args(package)
         };
 
         let pid = qga

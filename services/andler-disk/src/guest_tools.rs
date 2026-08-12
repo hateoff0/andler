@@ -3,52 +3,7 @@ use std::path::Path;
 use crate::error::DiskError;
 use crate::nbd;
 use andler_core::config::InstanceKind;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PackageManager {
-    Apt,
-
-    Dnf,
-
-    Pacman,
-}
-
-impl PackageManager {
-    pub fn binary_name(&self) -> &'static str {
-        match self {
-            PackageManager::Apt => "apt-get",
-            PackageManager::Dnf => "dnf",
-            PackageManager::Pacman => "pacman",
-        }
-    }
-
-    pub fn install_args<'a>(&self, package: &'a str) -> Vec<&'a str> {
-        match self {
-            PackageManager::Apt => vec!["install", "-y", package],
-            PackageManager::Dnf => vec!["install", "-y", package],
-            PackageManager::Pacman => vec!["-S", "--noconfirm", package],
-        }
-    }
-
-    pub fn remove_args<'a>(&self, package: &'a str) -> Vec<&'a str> {
-        match self {
-            PackageManager::Apt => vec!["remove", "-y", package],
-            PackageManager::Dnf => vec!["remove", "-y", package],
-            PackageManager::Pacman => vec!["-R", "--noconfirm", package],
-        }
-    }
-
-    pub fn check_installed_command<'a>(&self, package: &'a str) -> (&'static str, Vec<&'a str>) {
-        match self {
-            // The query binary is not the package manager itself: `apt-get`
-            // has no `dpkg` subcommand, so the check runs `dpkg`/`rpm`
-            // directly inside the chroot.
-            PackageManager::Apt => ("dpkg", vec!["-l", package]),
-            PackageManager::Dnf => ("rpm", vec!["-q", package]),
-            PackageManager::Pacman => ("pacman", vec!["-Qi", package]),
-        }
-    }
-}
+pub use andler_core::package_manager::PackageManager;
 
 pub fn detect_package_manager(mount_point: &Path) -> Option<PackageManager> {
     if mount_point.join("usr/bin/apt-get").exists() {
