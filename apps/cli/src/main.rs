@@ -1,4 +1,5 @@
 mod clone;
+mod connect;
 mod create;
 mod disk;
 mod doctor;
@@ -73,6 +74,14 @@ macro_rules! dual_id_args {
             }
         }
     };
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum ConnectLevel {
+    /// Pick the best available level automatically
+    Auto,
+    /// Serial console (works on any running VM)
+    Console,
 }
 
 dual_id_args!(StartArgs);
@@ -246,6 +255,15 @@ enum Command {
 
         #[arg(long)]
         linked_overlay: bool,
+    },
+
+    /// Connect to a guest: serial console, ssh, adb, or exec (auto-picks
+    /// the best available level)
+    Connect {
+        instance_id: String,
+
+        #[arg(long, value_enum, default_value = "auto")]
+        level: ConnectLevel,
     },
 
     /// Start a stopped instance (boots QEMU)
@@ -769,6 +787,9 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 linked_overlay,
             )
             .await?;
+        }
+        Some(Command::Connect { instance_id, level }) => {
+            connect::handle_connect(&mut client, instance_id, level).await?;
         }
         Some(Command::Start(args)) => {
             let id = args.resolve_id()?;

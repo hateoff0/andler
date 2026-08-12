@@ -562,6 +562,14 @@ impl HypervisorBackend for QemuBackend {
                 .map_err(|e| BackendError::Io(e.to_string()))?;
         }
 
+        // QEMU does not create parent directories for its own sockets; the
+        // serial console chardev needs its directory provisioned up front.
+        if let Some(parent) = andler_core::paths::console_socket_path(&cfg.id).parent() {
+            andler_core::paths::ensure_private_dir(parent)
+                .await
+                .map_err(|e| BackendError::Io(e.to_string()))?;
+        }
+
         let _ = tokio::fs::remove_file(&qmp_socket_path).await;
 
         let args = cmdline::build_args(cfg, &qmp_socket_path)?;

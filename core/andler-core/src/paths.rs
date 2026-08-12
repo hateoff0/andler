@@ -1,5 +1,7 @@
 use std::path::PathBuf;
 
+use crate::InstanceId;
+
 pub const ANDLER_HOME_ENV: &str = "ANDLER_HOME";
 
 pub fn andler_home() -> PathBuf {
@@ -42,6 +44,15 @@ pub fn runtime_dir() -> PathBuf {
     }
 
     std::env::temp_dir()
+}
+
+/// Per-instance serial console socket (`andler connect --level console`).
+/// Lives next to the QMP sockets so all instance IPC shares one private
+/// directory.
+pub fn console_socket_path(id: &InstanceId) -> PathBuf {
+    runtime_dir()
+        .join("andler/console")
+        .join(format!("{id}.sock"))
 }
 
 pub fn current_uid() -> u32 {

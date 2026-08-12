@@ -110,10 +110,20 @@ fn serial_args(cfg: &InstanceConfig) -> Vec<String> {
     let Some(instance_dir) = cfg.disk.path.parent() else {
         return Vec::new();
     };
+    // The serial console is an attachable unix socket (`andler connect
+    // --level console`); the chardev's logfile keeps console.log as the
+    // historical serial log alongside live attach sessions.
     let console_log_path = instance_dir.join("console.log");
+    let console_socket_path = andler_core::paths::console_socket_path(&cfg.id);
     vec![
+        "-chardev".to_string(),
+        format!(
+            "socket,id=console0,path={},server=on,wait=off,logfile={},logappend=on",
+            console_socket_path.display(),
+            console_log_path.display()
+        ),
         "-serial".to_string(),
-        format!("file:{}", console_log_path.display()),
+        "chardev:console0".to_string(),
     ]
 }
 
@@ -943,7 +953,11 @@ mod tests {
             "pipewire",
             "unix:/tmp/andler/linux/qmp.sock,server,nowait",
             "-serial",
-            "file:console.log",
+            "chardev:console0",
+            &format!(
+                "console0,path={},server=on,wait=off",
+                andler_core::paths::console_socket_path(&cfg.id).display()
+            ),
         ] {
             assert!(
                 joined.contains(expected_fragment),
@@ -1000,11 +1014,18 @@ mod tests {
     fn serial_args_places_console_log_next_to_disk() {
         let mut cfg = start_sh_equivalent_config();
         cfg.disk.path = PathBuf::from("/home/user/.andler/instances/abc123/disk.qcow2");
+        let args = serial_args(&cfg);
         assert_eq!(
-            serial_args(&cfg),
+            args,
             vec![
+                "-chardev",
+                &format!(
+                    "socket,id=console0,path={},server=on,wait=off,logfile={},logappend=on",
+                    andler_core::paths::console_socket_path(&cfg.id).display(),
+                    "/home/user/.andler/instances/abc123/console.log"
+                ),
                 "-serial",
-                "file:/home/user/.andler/instances/abc123/console.log",
+                "chardev:console0",
             ]
         );
     }

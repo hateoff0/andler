@@ -57,7 +57,10 @@ mod tests {
         assert_eq!(pm.binary_name(), "apt-get");
         assert_eq!(pm.install_args("vim"), vec!["install", "-y", "vim"]);
         assert_eq!(pm.remove_args("vim"), vec!["remove", "-y", "vim"]);
-        assert_eq!(pm.check_installed_command("vim"), ("dpkg", vec!["-l", "vim"]));
+        assert_eq!(
+            pm.check_installed_command("vim"),
+            ("dpkg", vec!["-l", "vim"])
+        );
     }
 
     #[test]
@@ -65,7 +68,10 @@ mod tests {
         let pm = PackageManager::Dnf;
         assert_eq!(pm.binary_name(), "dnf");
         assert_eq!(pm.install_args("vim"), vec!["install", "-y", "vim"]);
-        assert_eq!(pm.check_installed_command("vim"), ("rpm", vec!["-q", "vim"]));
+        assert_eq!(
+            pm.check_installed_command("vim"),
+            ("rpm", vec!["-q", "vim"])
+        );
     }
 
     #[test]
@@ -74,6 +80,9 @@ mod tests {
         assert_eq!(pm.binary_name(), "pacman");
         assert_eq!(pm.install_args("vim"), vec!["-S", "--noconfirm", "vim"]);
         assert_eq!(pm.remove_args("vim"), vec!["-R", "--noconfirm", "vim"]);
-        assert_eq!(pm.check_installed_command("vim"), ("pacman", vec!["-Qi", "vim"]));
+        assert_eq!(
+            pm.check_installed_command("vim"),
+            ("pacman", vec!["-Qi", "vim"])
+        );
     }
 }
