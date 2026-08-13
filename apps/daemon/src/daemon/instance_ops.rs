@@ -269,9 +269,12 @@ impl Daemon {
 
     pub async fn start_instance(&self, id: InstanceId) -> Result<(), DaemonError> {
         let handle = self.handle_for(id).await?;
+        let cfg = handle.config();
+        // Checked before the Start transition so a refused start leaves the
+        // instance in Created, not stuck in Starting.
+        self.check_port_forward_conflicts(id, &cfg).await?;
         handle.transition(InstanceEvent::Start).await?;
 
-        let cfg = handle.config();
         let backend = self.backend_for(cfg.backend)?.clone();
 
         let spawn_result = match validate_instance_files(&cfg) {
@@ -303,6 +306,55 @@ impl Daemon {
                 Err(DaemonError::Backend(backend_err))
             }
         }
+    }
+
+    /// Refuses to start an instance whose `network.port_forwards` host
+    /// ports are already forwarded by another instance that is running
+    /// (or starting) right now. Two QEMU slirp netdevs bound to the same
+    /// host port would otherwise fail with an opaque QEMU error at best
+    /// and silently misroute traffic at worst — the host port is a shared
+    /// resource across instances (PLAN §12.B).
+    async fn check_port_forward_conflicts(
+        &self,
+        id: InstanceId,
+        cfg: &InstanceConfig,
+    ) -> Result<(), DaemonError> {
+        let wanted: Vec<u16> = std::iter::once(&cfg.network)
+            .chain(cfg.extra_networks.iter())
+            .flat_map(|net| net.port_forwards.iter().map(|f| f.host_port))
+            .collect();
+        if wanted.is_empty() {
+            return Ok(());
+        }
+
+        let supervisors = self.supervisors.read().await;
+        for (other_id, other) in supervisors.iter() {
+            if *other_id == id {
+                continue;
+            }
+            let state = other.state();
+            if !matches!(
+                state,
+                InstanceState::Running | InstanceState::Paused | InstanceState::Starting
+            ) {
+                continue;
+            }
+            let other_cfg = other.config();
+            let held: Vec<u16> = std::iter::once(&other_cfg.network)
+                .chain(other_cfg.extra_networks.iter())
+                .flat_map(|net| net.port_forwards.iter().map(|f| f.host_port))
+                .collect();
+            for port in &wanted {
+                if held.contains(port) {
+                    return Err(DaemonError::PortForwardConflict {
+                        port: *port,
+                        instance: id,
+                        held_by: *other_id,
+                    });
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Watches the backend's process-exit stream and turns an unexpected

@@ -183,6 +183,15 @@ pub enum DaemonError {
     #[error("no active operation with id {0:?}; `andler op list` shows the running ones")]
     OperationNotFound(String),
 
+    #[error(
+        "port {port} is already forwarded by running instance {held_by};          stop it first or pick another host_port in network.port_forwards"
+    )]
+    PortForwardConflict {
+        port: u16,
+        instance: InstanceId,
+        held_by: InstanceId,
+    },
+
     #[error("instance reference must not be empty")]
     EmptyInstanceRef,
 
@@ -334,6 +343,7 @@ impl DaemonError {
             DaemonError::OperationAlreadyRunning { .. } => ErrorKind::FailedPrecondition,
             DaemonError::OperationCancelled(_) => ErrorKind::FailedPrecondition,
             DaemonError::OperationNotFound(_) => ErrorKind::NotFound,
+            DaemonError::PortForwardConflict { .. } => ErrorKind::FailedPrecondition,
             DaemonError::EmptyInstanceRef => ErrorKind::InvalidArgument,
             DaemonError::ConfigIdMismatch { .. } => ErrorKind::InvalidArgument,
             DaemonError::ConfigKindChanged(_) => ErrorKind::InvalidArgument,

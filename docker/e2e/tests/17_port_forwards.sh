@@ -79,8 +79,26 @@ else
     expect_err_grep "ssh missing" "is it installed"
 fi
 
+echo "  [host port conflicts across instances]"
+# A second instance forwarding the same host port must be refused at start
+# with an actionable message, not left to QEMU's opaque bind error.
+WORK2="$WORK/second"
+mkdir -p "$WORK2"
+for f in disk.qcow2 empty.iso VARS.fd; do
+    cp "$WORK/$f" "$WORK2/$f"
+done
+cp "$WORK/instance.toml" "$WORK2/instance.toml"
+sed -i "s/name = \"e2e-portfwd\"/name = \"e2e-portfwd-2\"/; s|$WORK/|$WORK2/|g" "$WORK2/instance.toml"
+expect_ok "create second instance" -- andler create --file "$WORK2/instance.toml"
+ID2="$(andler list | awk '$3 == "e2e-portfwd-2" { print $1 }' | head -1)"
+[[ -n "$ID2" ]] || fail "empty second id"
+expect_fail "start with a conflicting host port" -- andler start "$ID2"
+expect_err_grep "conflict message names the port" "port 2222 is already forwarded"
+expect_err_grep "conflict message names the holder" "running instance"
+
 echo "  [cleanup]"
 expect_ok "stop" -- andler stop "$ID" --graceful
+expect_ok "remove --purge second" -- andler remove "$ID2" --purge
 expect_ok "remove --purge" -- andler remove "$ID" --purge
 expect_ok "list empty" -- andler list
 expect_out_grep "no instances" "no instances"
