@@ -92,20 +92,9 @@ fn node_file_name(file: &serde_json::Value) -> Option<String> {
     }
 }
 
-/// An asynchronous QMP/guest-agent event as published by the reader task.
-#[derive(Debug, Clone)]
-pub struct QmpEvent {
-    pub event: String,
-    pub data: Option<Value>,
-}
-
 pub struct QmpClient {
-    writer: tokio::sync::Mutex<tokio::net::unix::OwnedWriteHalf>,
-    pending: std::sync::Arc<tokio::sync::Mutex<Option<tokio::sync::oneshot::Sender<QmpReply>>>>,
-    events: tokio::sync::broadcast::Sender<QmpEvent>,
+    stream: BufReader<UnixStream>,
     read_timeout: Option<std::time::Duration>,
-    next_id: std::sync::atomic::AtomicU64,
-    reader: tokio::task::JoinHandle<()>,
 }
 
 impl QmpClient {
@@ -118,17 +107,12 @@ impl QmpClient {
                     source,
                 })?;
 
-        // The greeting arrives unsolicited before any command; read it
-        // before the reader task takes over the socket.
-        let mut greeting_reader = BufReader::new(raw_stream);
-        let mut greeting = String::new();
-        greeting_reader
-            .read_line(&mut greeting)
-            .await
-            .map_err(QmpError::Io)?;
+        let mut client = QmpClient {
+            stream: BufReader::new(raw_stream),
+            read_timeout: None,
+        };
 
-        let (read_half, write_half) = greeting_reader.into_inner().into_split();
-        let client = Self::from_parts(read_half, write_half, None);
+        let _greeting: Value = client.read_line_as_json().await?;
 
         client.execute_raw("qmp_capabilities", None).await?;
 
@@ -147,43 +131,10 @@ impl QmpClient {
                     source,
                 })?;
 
-        let (read_half, write_half) = raw_stream.into_split();
-        Ok(Self::from_parts(
-            read_half,
-            write_half,
-            Some(std::time::Duration::from_secs(15)),
-        ))
-    }
-
-    /// Builds a client around an already-connected socket pair and spawns
-    /// the reader task. The reader owns the read half, publishes async
-    /// events to the broadcast channel and delivers command replies to the
-    /// single pending oneshot (commands are serialized through the writer
-    /// mutex, so at most one reply can be outstanding at a time).
-    pub(crate) fn from_parts(
-        read_half: tokio::net::unix::OwnedReadHalf,
-        write_half: tokio::net::unix::OwnedWriteHalf,
-        read_timeout: Option<std::time::Duration>,
-    ) -> Self {
-        let (events_tx, _) = tokio::sync::broadcast::channel(256);
-        let pending = std::sync::Arc::new(tokio::sync::Mutex::new(None));
-        let reader = tokio::spawn(reader_loop(read_half, events_tx.clone(), pending.clone()));
-        QmpClient {
-            writer: tokio::sync::Mutex::new(write_half),
-            pending,
-            events: events_tx,
-            read_timeout,
-            next_id: std::sync::atomic::AtomicU64::new(1),
-            reader,
-        }
-    }
-
-    /// Subscribes to asynchronous QMP events (SHUTDOWN, DEVICE_DELETED,
-    /// VSERPORT_CHANGED, BLOCK_IO_ERROR, ...). Events are published by the
-    /// reader task whenever they arrive; command replies never surface
-    /// here.
-    pub fn subscribe_events(&self) -> tokio::sync::broadcast::Receiver<QmpEvent> {
-        self.events.subscribe()
+        Ok(QmpClient {
+            stream: BufReader::new(raw_stream),
+            read_timeout: Some(std::time::Duration::from_secs(15)),
+        })
     }
 
     pub async fn pause(&mut self) -> Result<(), QmpError> {
@@ -640,14 +591,11 @@ impl QmpClient {
     }
 
     async fn execute_raw(
-        &self,
+        &mut self,
         command: &str,
         arguments: Option<Value>,
     ) -> Result<Value, QmpError> {
-        let id = self
-            .next_id
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let mut request = json!({ "execute": command, "id": id });
+        let mut request = json!({ "execute": command });
         if let Some(args) = arguments {
             request["arguments"] = args;
         }
@@ -655,36 +603,26 @@ impl QmpClient {
         let mut line = serde_json::to_string(&request).map_err(QmpError::ParseError)?;
         line.push('\n');
 
-        // Register the pending reply before writing: the reader task can
-        // deliver the response the moment the write lands, and an early
-        // arrival must not be dropped.
-        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-        *self.pending.lock().await = Some(reply_tx);
-
-        {
-            let mut writer = self.writer.lock().await;
-            writer
-                .write_all(line.as_bytes())
-                .await
-                .map_err(QmpError::Io)?;
-            writer.flush().await.map_err(QmpError::Io)?;
-        }
+        self.stream
+            .write_all(line.as_bytes())
+            .await
+            .map_err(QmpError::Io)?;
+        self.stream.flush().await.map_err(QmpError::Io)?;
 
         let reply: QmpReply = match self.read_timeout {
-            Some(timeout) => match tokio::time::timeout(timeout, reply_rx).await {
-                Ok(Ok(reply)) => reply,
-                Ok(Err(_)) => {
-                    return Err(QmpError::ConnectionClosed);
+            Some(timeout) => {
+                match tokio::time::timeout(timeout, self.read_reply_skipping_events()).await {
+                    Ok(result) => result?,
+                    Err(_) => {
+                        return Err(QmpError::CommandFailed {
+                            command: command.to_string(),
+                            class: "Timeout".to_string(),
+                            desc: format!("no reply from QEMU within {timeout:?}"),
+                        })
+                    }
                 }
-                Err(_) => {
-                    return Err(QmpError::CommandFailed {
-                        command: command.to_string(),
-                        class: "Timeout".to_string(),
-                        desc: format!("no reply from QEMU within {timeout:?}"),
-                    })
-                }
-            },
-            None => reply_rx.await.map_err(|_| QmpError::ConnectionClosed)?,
+            }
+            None => self.read_reply_skipping_events().await?,
         };
 
         match (reply.return_value, reply.error) {
@@ -702,46 +640,96 @@ impl QmpClient {
             }
         }
     }
-}
 
-/// Background reader task: owns the socket's read half, forwards async
-/// events to the broadcast channel and command replies to the single
-/// pending oneshot. Ends when the peer closes the connection.
-async fn reader_loop(
-    read_half: tokio::net::unix::OwnedReadHalf,
-    events: tokio::sync::broadcast::Sender<QmpEvent>,
-    pending: std::sync::Arc<tokio::sync::Mutex<Option<tokio::sync::oneshot::Sender<QmpReply>>>>,
-) {
-    let mut reader = BufReader::new(read_half);
-    loop {
-        let mut line = String::new();
-        match reader.read_line(&mut line).await {
-            Ok(0) | Err(_) => break,
-            Ok(_) => {
-                let raw: Value = match serde_json::from_str(&line) {
-                    Ok(value) => value,
-                    Err(_) => continue,
-                };
-                if let Some(event) = raw.get("event").and_then(|e| e.as_str()) {
-                    let _ = events.send(QmpEvent {
-                        event: event.to_string(),
-                        data: raw.get("data").cloned(),
-                    });
-                    continue;
-                }
-                let reply: QmpReply = match serde_json::from_value(raw) {
-                    Ok(reply) => reply,
-                    Err(_) => continue,
-                };
-                if let Some(tx) = pending.lock().await.take() {
-                    let _ = tx.send(reply);
-                }
+    async fn read_reply_skipping_events(&mut self) -> Result<QmpReply, QmpError> {
+        loop {
+            let raw: Value = self.read_line_as_json().await?;
+            if raw.get("event").is_some() {
+                continue;
             }
+            let reply: QmpReply = serde_json::from_value(raw).map_err(QmpError::ParseError)?;
+            return Ok(reply);
         }
+    }
+
+    async fn read_line_as_json<T: for<'de> Deserialize<'de>>(&mut self) -> Result<T, QmpError> {
+        let mut line = String::new();
+        let bytes_read = self
+            .stream
+            .read_line(&mut line)
+            .await
+            .map_err(QmpError::Io)?;
+
+        if bytes_read == 0 {
+            return Err(QmpError::ConnectionClosed);
+        }
+
+        serde_json::from_str(&line).map_err(QmpError::ParseError)
     }
 }
 
-impl Drop for QmpClient {
+/// An asynchronous QMP event as delivered by the dedicated events
+/// monitor. The reader task owns an exclusive socket (the second `-qmp`
+/// monitor), so events never interleave with command/reply traffic.
+#[derive(Debug, Clone)]
+pub struct QmpEvent {
+    pub event: String,
+    pub data: Option<Value>,
+}
+
+/// Event-only QMP client. Connects to the events monitor and publishes
+/// every async event to a broadcast channel; it never sends commands, so
+/// its reader task cannot interfere with the command client.
+pub struct QmpEventReader {
+    events: tokio::sync::broadcast::Sender<QmpEvent>,
+    reader: tokio::task::JoinHandle<()>,
+}
+
+impl QmpEventReader {
+    pub async fn connect(socket_path: &Path) -> Result<Self, QmpError> {
+        let raw_stream =
+            UnixStream::connect(socket_path)
+                .await
+                .map_err(|source| QmpError::ConnectFailed {
+                    path: socket_path.display().to_string(),
+                    source,
+                })?;
+
+        let (read_half, _write_half) = raw_stream.into_split();
+        let (events, _) = tokio::sync::broadcast::channel(256);
+        let reader = {
+            let events = events.clone();
+            tokio::spawn(async move {
+                let mut reader = BufReader::new(read_half);
+                loop {
+                    let mut line = String::new();
+                    match reader.read_line(&mut line).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(_) => {
+                            let raw: Value = match serde_json::from_str(&line) {
+                                Ok(value) => value,
+                                Err(_) => continue,
+                            };
+                            if let Some(event) = raw.get("event").and_then(|e| e.as_str()) {
+                                let _ = events.send(QmpEvent {
+                                    event: event.to_string(),
+                                    data: raw.get("data").cloned(),
+                                });
+                            }
+                        }
+                    }
+                }
+            })
+        };
+        Ok(QmpEventReader { events, reader })
+    }
+
+    pub fn subscribe(&self) -> tokio::sync::broadcast::Receiver<QmpEvent> {
+        self.events.subscribe()
+    }
+}
+
+impl Drop for QmpEventReader {
     fn drop(&mut self) {
         self.reader.abort();
     }
@@ -912,11 +900,11 @@ mod tests {
 
     fn fake_qmp_pair() -> (QmpClient, UnixStream) {
         let (client_side, server_side) = UnixStream::pair().expect("unix socket pair");
-        let (read_half, write_half) = client_side.into_split();
-        (
-            QmpClient::from_parts(read_half, write_half, None),
-            server_side,
-        )
+        let client = QmpClient {
+            stream: BufReader::new(client_side),
+            read_timeout: None,
+        };
+        (client, server_side)
     }
 
     #[tokio::test]
@@ -1375,26 +1363,29 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn async_events_reach_subscribers_and_replies_still_land() {
-        let (mut client, server) = fake_qmp_pair();
-        let (mut server_read, mut server_write) = tokio::io::split(server);
-        let mut events = client.subscribe_events();
+    async fn event_reader_subscribes_via_listener_socket() {
+        use tokio::net::UnixListener;
 
-        let server_task = tokio::spawn(async move {
-            let mut buf = BufReader::new(&mut server_read);
-            let mut line = String::new();
-            buf.read_line(&mut line).await.unwrap();
-            // An async event interleaved before the command reply.
-            server_write
-                .write_all(b"{\"event\": \"DEVICE_DELETED\", \"data\": {\"device\": \"disk1\"}}\n")
-                .await
-                .unwrap();
-            server_write.write_all(b"{\"return\": {}}\n").await.unwrap();
+        let sock =
+            std::env::temp_dir().join(format!("andler-events-test-{}.sock", std::process::id()));
+        let _ = std::fs::remove_file(&sock);
+        let listener = UnixListener::bind(&sock).unwrap();
+
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            tokio::io::AsyncWriteExt::write_all(
+                &mut stream,
+                b"{\"event\": \"DEVICE_DELETED\", \"data\": {\"device\": \"disk1\"}}\n{\"return\": {}}\n",
+            )
+            .await
+            .unwrap();
+            // Hold the connection open until the reader side drops it.
+            std::future::pending::<()>().await;
         });
 
-        client.guest_ping().await.unwrap();
-
-        let event = tokio::time::timeout(std::time::Duration::from_secs(2), events.recv())
+        let reader = QmpEventReader::connect(&sock).await.unwrap();
+        let mut rx = reader.subscribe();
+        let event = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
             .await
             .expect("event must arrive")
             .expect("channel open");
@@ -1408,7 +1399,9 @@ mod tests {
             Some("disk1")
         );
 
-        server_task.await.unwrap();
+        drop(reader);
+        server.abort();
+        let _ = std::fs::remove_file(&sock);
     }
 
     #[tokio::test]

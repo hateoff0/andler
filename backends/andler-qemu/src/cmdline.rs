@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use andler_core::{
     AudioBackend, AudioDevice, BackendError, CdromBus, DiskFormat, DisplayEngine, InstanceConfig,
@@ -38,10 +38,29 @@ fn name_args(cfg: &InstanceConfig) -> Vec<String> {
 }
 
 fn qmp_args(qmp_socket_path: &Path) -> Vec<String> {
-    vec![
+    let mut args = vec![
         "-qmp".to_string(),
         format!("unix:{},server,nowait", qmp_socket_path.display()),
-    ]
+    ];
+    // A second QMP monitor dedicated to async events: the daemon's event
+    // reader consumes this socket exclusively, so event delivery can never
+    // interleave with command/reply traffic on the main monitor.
+    let events_path = events_socket_path_for(qmp_socket_path);
+    args.extend([
+        "-qmp".to_string(),
+        format!("unix:{},server,nowait", events_path.display()),
+    ]);
+    args
+}
+
+/// The events monitor socket lives next to the command monitor as
+/// `<name>.events.sock`.
+pub(crate) fn events_socket_path_for(qmp_socket_path: &Path) -> PathBuf {
+    let name = qmp_socket_path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "qmp.sock".to_string());
+    qmp_socket_path.with_file_name(format!("{name}.events.sock"))
 }
 
 /// QEMU ids for hotplugged block devices, derived from the device's position in
@@ -1073,6 +1092,8 @@ mod tests {
             vec![
                 "-qmp",
                 "unix:/run/andler/instance-abc/qmp.sock,server,nowait",
+                "-qmp",
+                "unix:/run/andler/instance-abc/qmp.sock.events.sock,server,nowait",
             ]
         );
     }

@@ -51,6 +51,10 @@ start_daemon
 TOTAL=0
 FAILED=0
 SUITE=0
+# Per-suite wall-clock budget. A suite that hangs (daemon wedged, CLI stuck
+# on a dead connection) is killed here instead of stalling the whole run —
+# with a diagnostics dump so the wedged state is inspectable in the log.
+SUITE_TIMEOUT="${E2E_SUITE_TIMEOUT:-300}"
 for script in "$E2E_ROOT"/tests/[0-9][0-9]_*.sh; do
     name="$(basename "$script")"
     echo
@@ -61,13 +65,34 @@ for script in "$E2E_ROOT"/tests/[0-9][0-9]_*.sh; do
     export E2E_STORE_PATH="$E2E_WORKDIR/store.$SUITE.db"
     stop_daemon
     start_daemon
-    if bash "$script"; then
-        echo "=== $name: PASS ==="
+    START_TS=$(date +%s%N)
+    if timeout -k 10 "$SUITE_TIMEOUT" bash "$script"; then
+        ELAPSED=$(awk -v a="$START_TS" -v b="$(date +%s%N)" 'BEGIN { printf "%.1f", (b-a)/1e9 }')
+        echo "=== $name: PASS (${ELAPSED}s) ==="
         TOTAL=$((TOTAL + 1))
     else
-        echo "=== $name: FAIL ==="
+        RC=$?
+        ELAPSED=$(awk -v a="$START_TS" -v b="$(date +%s%N)" 'BEGIN { printf "%.1f", (b-a)/1e9 }')
+        if [[ "$RC" -eq 124 ]]; then
+            echo "=== $name: FAIL (timed out after ${ELAPSED}s, killed by watchdog) ==="
+            echo "    --- remaining processes (possible wedge) ---"
+            pgrep -af "andlerd|andler |qemu-system" | sed 's/^/      /' || true
+            echo "    --- daemon.log tail ---"
+            tail -20 "$E2E_WORKDIR/daemon.log" 2>/dev/null | sed 's/^/      /' || true
+        else
+            echo "=== $name: FAIL (${ELAPSED}s) ==="
+        fi
         TOTAL=$((TOTAL + 1))
         FAILED=$((FAILED + 1))
+    fi
+    # A wedged suite may have left the daemon unkillable by SIGTERM; make
+    # sure the next suite starts on a clean slate.
+    if [[ -f "$E2E_DAEMON_PID_FILE" ]]; then
+        local_pid="$(cat "$E2E_DAEMON_PID_FILE")"
+        if [[ -n "$local_pid" ]] && kill -0 "$local_pid" 2>/dev/null; then
+            kill -9 "$local_pid" 2>/dev/null || true
+        fi
+        rm -f "$E2E_DAEMON_PID_FILE"
     fi
 done
 
