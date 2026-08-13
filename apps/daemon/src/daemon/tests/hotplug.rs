@@ -326,6 +326,7 @@ async fn attach_network_appends_to_config() {
         mode: NetworkMode::Nat,
         device_model: "virtio-net-pci".to_string(),
         nat_backend: NatBackend::Slirp,
+        port_forwards: vec![],
     };
     let index = daemon.attach_network(id, net.clone()).await.unwrap();
     assert_eq!(index, 0);
@@ -339,6 +340,7 @@ async fn attach_network_appends_to_config() {
         mode: NetworkMode::Isolated,
         device_model: "virtio-net-pci".to_string(),
         nat_backend: NatBackend::Slirp,
+        port_forwards: vec![],
     };
     let index = daemon.attach_network(id, net2).await.unwrap();
     assert_eq!(index, 1);
@@ -352,6 +354,7 @@ async fn attach_network_rejects_empty_model() {
         mode: NetworkMode::Nat,
         device_model: String::new(),
         nat_backend: NatBackend::Slirp,
+        port_forwards: vec![],
     };
     let err = daemon.attach_network(id, net).await.unwrap_err();
     assert!(matches!(err, DaemonError::InvalidConfig(_)));
@@ -365,6 +368,7 @@ async fn detach_network_removes_by_index() {
         mode: NetworkMode::Nat,
         device_model: "virtio-net-pci".to_string(),
         nat_backend: NatBackend::Slirp,
+        port_forwards: vec![],
     };
     daemon.attach_network(id, net.clone()).await.unwrap();
     let net2 = NetworkConfig {
@@ -373,6 +377,7 @@ async fn detach_network_removes_by_index() {
         },
         device_model: "e1000e".to_string(),
         nat_backend: NatBackend::Slirp,
+        port_forwards: vec![],
     };
     daemon.attach_network(id, net2).await.unwrap();
 
@@ -416,6 +421,7 @@ async fn attach_disk_detaches_propagate_backend_errors() {
                 mode: NetworkMode::Nat,
                 device_model: "virtio-net-pci".to_string(),
                 nat_backend: NatBackend::Slirp,
+                port_forwards: vec![],
             },
         )
         .await
