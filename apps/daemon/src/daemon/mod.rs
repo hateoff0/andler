@@ -18,8 +18,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use andler_core::{
-    BackendError, BackendHandle, BackendKind, DaemonEvent, HypervisorBackend, InstanceEvent,
-    InstanceId, InstanceState,
+    BackendError, BackendHandle, BackendKind, DaemonEvent, EventKind, HypervisorBackend,
+    InstanceEvent, InstanceId, InstanceState,
 };
 use andler_qemu::QemuBackend;
 use andler_store::Store;
@@ -34,7 +34,7 @@ fn default_backends() -> HashMap<BackendKind, Arc<dyn HypervisorBackend>> {
 
 pub struct Daemon {
     pub(crate) backends: HashMap<BackendKind, Arc<dyn HypervisorBackend>>,
-    pub(crate) supervisors: RwLock<HashMap<InstanceId, SupervisorHandle>>,
+    pub(crate) supervisors: std::sync::Arc<RwLock<HashMap<InstanceId, SupervisorHandle>>>,
     /// Registry entries whose instance.toml is missing/unreadable; kept so
     /// list/resolve/remove still see them, with the reason attached.
     pub(crate) broken: RwLock<HashMap<InstanceId, String>>,
@@ -43,6 +43,46 @@ pub struct Daemon {
 }
 
 const EVENT_CHANNEL_CAPACITY: usize = 256;
+
+/// Forwards QMP events from every backend's event channel onto the daemon
+/// bus as `DaemonEvent::Qmp`, resolving the backend handle to the instance
+/// id. Runs for the daemon's lifetime; each relay task ends when its
+/// backend drops (daemon teardown).
+fn spawn_qmp_relays(
+    daemon_events: broadcast::Sender<DaemonEvent>,
+    backends: &HashMap<BackendKind, Arc<dyn HypervisorBackend>>,
+    supervisors: std::sync::Arc<RwLock<HashMap<InstanceId, SupervisorHandle>>>,
+) {
+    for backend in backends.values() {
+        let Some(mut rx) = backend.subscribe_qmp_events() else {
+            continue;
+        };
+        let events = daemon_events.clone();
+        let supervisors = supervisors.clone();
+        tokio::spawn(async move {
+            while let Ok(record) = rx.recv().await {
+                let instance_id = {
+                    let map = supervisors.read().await;
+                    map.iter()
+                        .find(|(_, handle)| handle.backend_handle() == Some(record.handle.clone()))
+                        .map(|(id, _)| *id)
+                };
+                if let Some(instance_id) = instance_id {
+                    let event = DaemonEvent {
+                        ts_ms: chrono::Utc::now().timestamp_millis() as u64,
+                        instance_id: Some(instance_id),
+                        kind: EventKind::Qmp {
+                            event: record.event,
+                            data: record.data,
+                        },
+                    };
+                    tracing::debug!(instance_id = %instance_id, event = ?record.event, "qmp event");
+                    let _ = events.send(event);
+                }
+            }
+        });
+    }
+}
 
 impl Daemon {
     // consumed by the upcoming events-RPC work and tests
@@ -261,13 +301,19 @@ impl Daemon {
             }
         }
 
-        Ok(Self {
+        let daemon = Daemon {
             backends,
-            supervisors: RwLock::new(supervisors),
+            supervisors: std::sync::Arc::new(RwLock::new(supervisors)),
             broken: RwLock::new(broken),
             store: Some(store),
             events,
-        })
+        };
+        spawn_qmp_relays(
+            daemon.events.clone(),
+            &daemon.backends,
+            daemon.supervisors.clone(),
+        );
+        Ok(daemon)
     }
 
     fn with_backends_and_store(
@@ -275,13 +321,19 @@ impl Daemon {
         store: Option<Store>,
     ) -> Self {
         let (events, _) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
-        Daemon {
+        let daemon = Daemon {
             backends,
-            supervisors: RwLock::new(HashMap::new()),
+            supervisors: std::sync::Arc::new(RwLock::new(HashMap::new())),
             broken: RwLock::new(HashMap::new()),
             store,
             events,
-        }
+        };
+        spawn_qmp_relays(
+            daemon.events.clone(),
+            &daemon.backends,
+            daemon.supervisors.clone(),
+        );
+        daemon
     }
 
     pub(crate) fn backend_for(

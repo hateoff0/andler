@@ -200,6 +200,15 @@ pub trait HypervisorBackend: Send + Sync {
 
     fn log_stream(&self, handle: &BackendHandle) -> BoxStream<'_, LogLine>;
 
+    /// Streams raw QMP events from the backend (QEMU only). The daemon
+    /// relays these onto its event bus as `DaemonEvent::Qmp`; the default
+    /// returns `None` for backends without a QMP channel.
+    fn subscribe_qmp_events(
+        &self,
+    ) -> Option<tokio::sync::broadcast::Receiver<crate::events::QmpEventRecord>> {
+        None
+    }
+
     /// Stream that yields once per process exit (the process is gone after
     /// the first item). Defaults to an empty stream for backends that do not
     /// supervise an external process; the QEMU backend implements it via

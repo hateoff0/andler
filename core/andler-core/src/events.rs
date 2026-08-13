@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 
+use crate::backend::BackendHandle;
 use crate::fsm::InstanceState;
 use crate::InstanceId;
 
@@ -35,6 +36,16 @@ pub enum EventKind {
         level: EventLogLevel,
         message: String,
     },
+}
+
+/// A raw QMP event forwarded from a backend, tagged with the handle of the
+/// instance it belongs to. The daemon relay maps the handle back to an
+/// instance id and republishes the event on the daemon bus.
+#[derive(Debug, Clone)]
+pub struct QmpEventRecord {
+    pub handle: BackendHandle,
+    pub event: QmpEvent,
+    pub data: String,
 }
 
 /// Raw QEMU QMP events the daemon can react to.

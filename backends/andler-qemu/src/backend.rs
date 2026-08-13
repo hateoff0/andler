@@ -24,6 +24,10 @@ fn qmp_socket_dir() -> PathBuf {
 struct RunningInstance {
     process: QemuProcess,
     qmp_client: Option<QmpClient>,
+    /// QMP event relay task (spawned with the first QMP connection); ends
+    /// itself when the client's reader closes, which happens on instance
+    /// teardown via the QmpClient Drop impl.
+    event_task: Option<tokio::task::JoinHandle<()>>,
     /// Name of the block graph's head node (the node whose file is the
     /// instance's `disk.qcow2`). After each live snapshot this becomes the
     /// new overlay's node; the next snapshot must target it, because
@@ -46,13 +50,34 @@ enum NetworkInfo {
 pub struct QemuBackend {
     instances: Mutex<HashMap<BackendHandle, RunningInstance>>,
     network_service: Arc<DefaultNetworkService>,
+    qmp_events: tokio::sync::broadcast::Sender<andler_core::QmpEventRecord>,
 }
 
 impl QemuBackend {
     pub fn new() -> Self {
+        let (qmp_events, _) = tokio::sync::broadcast::channel(256);
         QemuBackend {
             instances: Mutex::new(HashMap::new()),
             network_service: Arc::new(DefaultNetworkService::new()),
+            qmp_events,
+        }
+    }
+
+    /// Maps a raw QMP event name onto the domain enum.
+    fn map_qmp_event(name: &str) -> andler_core::QmpEvent {
+        match name {
+            "VSERPORT_CHANGED" => andler_core::QmpEvent::VserportChanged,
+            "SHUTDOWN" => andler_core::QmpEvent::Shutdown,
+            "RESET" => andler_core::QmpEvent::Reset,
+            "POWERDOWN" => andler_core::QmpEvent::Powerdown,
+            "DEVICE_DELETED" => andler_core::QmpEvent::DeviceDeleted,
+            "BLOCK_IO_ERROR" => andler_core::QmpEvent::BlockIoError,
+            "GUEST_PANICKED" => andler_core::QmpEvent::GuestPanicked,
+            "WATCHDOG" => andler_core::QmpEvent::Watchdog,
+            "STOP" => andler_core::QmpEvent::Stopped,
+            "RESUME" => andler_core::QmpEvent::Resumed,
+            name if name.starts_with("BLOCK_JOB") => andler_core::QmpEvent::BlockJob,
+            _ => andler_core::QmpEvent::Other,
         }
     }
 
@@ -64,7 +89,11 @@ impl QemuBackend {
         qmp_socket_dir().join(format!("{}.sock", cfg.id))
     }
 
-    async fn ensure_qmp_connected(instance: &mut RunningInstance) -> Result<(), QmpError> {
+    async fn ensure_qmp_connected(
+        &self,
+        instance: &mut RunningInstance,
+        event_tx: tokio::sync::broadcast::Sender<andler_core::QmpEventRecord>,
+    ) -> Result<(), QmpError> {
         if instance.qmp_client.is_some() {
             return Ok(());
         }
@@ -74,6 +103,30 @@ impl QemuBackend {
         for _ in 0..300 {
             match QmpClient::connect(&path).await {
                 Ok(client) => {
+                    // The first QMP connection also starts the event relay:
+                    // async events (SHUTDOWN, DEVICE_DELETED, ...) flow from
+                    // the client's reader task to the backend's broadcast.
+                    let handle = BackendHandle(format!(
+                        "qemu:{}",
+                        path.file_stem()
+                            .and_then(|stem| stem.to_str())
+                            .unwrap_or("unknown")
+                    ));
+                    let mut rx = client.subscribe_events();
+                    let tx = event_tx.clone();
+                    let task = tokio::spawn(async move {
+                        while let Ok(ev) = rx.recv().await {
+                            let record = andler_core::QmpEventRecord {
+                                handle: handle.clone(),
+                                event: Self::map_qmp_event(&ev.event),
+                                data: ev.data.map(|d| d.to_string()).unwrap_or_default(),
+                            };
+                            if tx.send(record).is_err() {
+                                break;
+                            }
+                        }
+                    });
+                    instance.event_task = Some(task);
                     instance.qmp_client = Some(client);
                     return Ok(());
                 }
@@ -245,7 +298,9 @@ exit 30";
     /// more. `op` must be callable twice (recoverable connection errors), so
     /// closures should clone their captured values per call.
     async fn run_qmp_operation<T, F>(
+        &self,
         instance: &mut RunningInstance,
+        event_tx: tokio::sync::broadcast::Sender<andler_core::QmpEventRecord>,
         mut op: F,
     ) -> Result<T, BackendError>
     where
@@ -255,7 +310,7 @@ exit 30";
             Box<dyn std::future::Future<Output = Result<T, QmpError>> + Send + 'a>,
         >,
     {
-        Self::ensure_qmp_connected(instance)
+        self.ensure_qmp_connected(instance, event_tx.clone())
             .await
             .map_err(qmp_error_to_backend_error)?;
 
@@ -279,7 +334,7 @@ exit 30";
                 if let Some(err) = Self::diagnose_and_reset_qmp(instance).await {
                     return Err(err);
                 }
-                Self::ensure_qmp_connected(instance)
+                self.ensure_qmp_connected(instance, event_tx.clone())
                     .await
                     .map_err(qmp_error_to_backend_error)?;
                 op(instance
@@ -542,6 +597,12 @@ impl HypervisorBackend for QemuBackend {
         ]
     }
 
+    fn subscribe_qmp_events(
+        &self,
+    ) -> Option<tokio::sync::broadcast::Receiver<andler_core::QmpEventRecord>> {
+        Some(self.qmp_events.subscribe())
+    }
+
     async fn spawn(&self, cfg: &InstanceConfig) -> Result<BackendHandle, BackendError> {
         if !cfg.gpu.render_backend.is_implemented() {
             return Err(BackendError::InvalidConfig {
@@ -637,6 +698,7 @@ impl HypervisorBackend for QemuBackend {
             RunningInstance {
                 process,
                 qmp_client: None,
+                event_task: None,
                 head_node_name: DISK_DEVICE.to_string(),
                 network_info,
                 extra_network_infos,
@@ -707,6 +769,7 @@ impl HypervisorBackend for QemuBackend {
             RunningInstance {
                 process,
                 qmp_client: Some(qmp),
+                event_task: None,
                 head_node_name,
                 network_info,
                 extra_network_infos: Vec::new(),
@@ -722,7 +785,7 @@ impl HypervisorBackend for QemuBackend {
             .get_mut(handle)
             .ok_or_else(|| BackendError::HandleNotFound(handle.0.clone()))?;
 
-        Self::ensure_qmp_connected(instance)
+        self.ensure_qmp_connected(instance, self.qmp_events.clone())
             .await
             .map_err(qmp_error_to_backend_error)?;
 
@@ -747,7 +810,7 @@ impl HypervisorBackend for QemuBackend {
                 if let Some(err) = Self::diagnose_and_reset_qmp(instance).await {
                     return Err(err);
                 }
-                Self::ensure_qmp_connected(instance)
+                self.ensure_qmp_connected(instance, self.qmp_events.clone())
                     .await
                     .map_err(qmp_error_to_backend_error)?;
                 instance
@@ -767,7 +830,7 @@ impl HypervisorBackend for QemuBackend {
             .get_mut(handle)
             .ok_or_else(|| BackendError::HandleNotFound(handle.0.clone()))?;
 
-        Self::ensure_qmp_connected(instance)
+        self.ensure_qmp_connected(instance, self.qmp_events.clone())
             .await
             .map_err(qmp_error_to_backend_error)?;
 
@@ -792,7 +855,7 @@ impl HypervisorBackend for QemuBackend {
                 if let Some(err) = Self::diagnose_and_reset_qmp(instance).await {
                     return Err(err);
                 }
-                Self::ensure_qmp_connected(instance)
+                self.ensure_qmp_connected(instance, self.qmp_events.clone())
                     .await
                     .map_err(qmp_error_to_backend_error)?;
                 instance
@@ -883,7 +946,10 @@ impl HypervisorBackend for QemuBackend {
             });
         }
 
-        match Self::ensure_qmp_connected(instance).await {
+        match self
+            .ensure_qmp_connected(instance, self.qmp_events.clone())
+            .await
+        {
             Ok(()) => {
                 let qmp_status = instance
                     .qmp_client
@@ -949,7 +1015,7 @@ impl HypervisorBackend for QemuBackend {
             .get_mut(handle)
             .ok_or_else(|| BackendError::HandleNotFound(handle.0.clone()))?;
 
-        Self::ensure_qmp_connected(instance)
+        self.ensure_qmp_connected(instance, self.qmp_events.clone())
             .await
             .map_err(qmp_error_to_backend_error)?;
 
@@ -991,7 +1057,7 @@ impl HypervisorBackend for QemuBackend {
             .get_mut(handle)
             .ok_or_else(|| BackendError::HandleNotFound(handle.0.clone()))?;
 
-        Self::ensure_qmp_connected(instance)
+        self.ensure_qmp_connected(instance, self.qmp_events.clone())
             .await
             .map_err(qmp_error_to_backend_error)?;
 
@@ -1012,7 +1078,7 @@ impl HypervisorBackend for QemuBackend {
             .get_mut(handle)
             .ok_or_else(|| BackendError::HandleNotFound(handle.0.clone()))?;
 
-        Self::ensure_qmp_connected(instance)
+        self.ensure_qmp_connected(instance, self.qmp_events.clone())
             .await
             .map_err(qmp_error_to_backend_error)?;
 
@@ -1052,7 +1118,7 @@ impl HypervisorBackend for QemuBackend {
             DiskFormat::Vdi => "vdi",
         };
 
-        Self::run_qmp_operation(instance, move |qmp| {
+        self.run_qmp_operation(instance, self.qmp_events.clone(), move |qmp| {
             let drive_id = drive_id.clone();
             let device_id = device_id.clone();
             let path = path.clone();
@@ -1081,7 +1147,7 @@ impl HypervisorBackend for QemuBackend {
         let drive_id = cmdline::extra_disk_drive_id(index);
         let device_id = cmdline::extra_disk_device_id(index);
 
-        Self::run_qmp_operation(instance, move |qmp| {
+        self.run_qmp_operation(instance, self.qmp_events.clone(), move |qmp| {
             let drive_id = drive_id.clone();
             let device_id = device_id.clone();
             Box::pin(async move {
@@ -1111,31 +1177,32 @@ impl HypervisorBackend for QemuBackend {
 
         let network = network.clone();
         let model = network.device_model.clone();
-        let result = Self::run_qmp_operation(instance, move |qmp| {
-            let model = model.clone();
-            let network = network.clone();
-            let instance_id = instance_id.clone();
-            Box::pin(async move {
-                let netdev_id = cmdline::extra_net_id(index);
-                match &network.mode {
-                    NetworkMode::Nat => match network.nat_backend {
-                        NatBackend::Slirp => qmp.netdev_add_user(&netdev_id).await?,
-                        NatBackend::Passt => qmp.netdev_add_passt(&netdev_id).await?,
-                    },
-                    NetworkMode::Bridge { .. } => {
-                        let ifname = cmdline::extra_net_bridge_tap_iface(&instance_id, index);
-                        qmp.netdev_add_tap(&netdev_id, &ifname).await?
+        let result = self
+            .run_qmp_operation(instance, self.qmp_events.clone(), move |qmp| {
+                let model = model.clone();
+                let network = network.clone();
+                let instance_id = instance_id.clone();
+                Box::pin(async move {
+                    let netdev_id = cmdline::extra_net_id(index);
+                    match &network.mode {
+                        NetworkMode::Nat => match network.nat_backend {
+                            NatBackend::Slirp => qmp.netdev_add_user(&netdev_id).await?,
+                            NatBackend::Passt => qmp.netdev_add_passt(&netdev_id).await?,
+                        },
+                        NetworkMode::Bridge { .. } => {
+                            let ifname = cmdline::extra_net_bridge_tap_iface(&instance_id, index);
+                            qmp.netdev_add_tap(&netdev_id, &ifname).await?
+                        }
+                        NetworkMode::Isolated => {
+                            let ifname = cmdline::extra_net_isolated_iface(index);
+                            qmp.netdev_add_tap(&netdev_id, &ifname).await?
+                        }
                     }
-                    NetworkMode::Isolated => {
-                        let ifname = cmdline::extra_net_isolated_iface(index);
-                        qmp.netdev_add_tap(&netdev_id, &ifname).await?
-                    }
-                }
-                qmp.device_add_net(&netdev_id, &netdev_id, &model, index)
-                    .await
+                    qmp.device_add_net(&netdev_id, &netdev_id, &model, index)
+                        .await
+                })
             })
-        })
-        .await;
+            .await;
 
         match result {
             Ok(()) => {
@@ -1160,7 +1227,7 @@ impl HypervisorBackend for QemuBackend {
             .get_mut(handle)
             .ok_or_else(|| BackendError::HandleNotFound(handle.0.clone()))?;
 
-        Self::run_qmp_operation(instance, move |qmp| {
+        self.run_qmp_operation(instance, self.qmp_events.clone(), move |qmp| {
             Box::pin(async move {
                 let netdev_id = cmdline::extra_net_id(index);
                 qmp.detach_net_device(&netdev_id, &netdev_id, std::time::Duration::from_secs(15))
