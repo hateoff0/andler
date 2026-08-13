@@ -6,9 +6,9 @@ use andler_core::{
     AudioDevice, BackendKind, CdromBus, CloneMode, CpuConfig, CpuPriority, DiskConfig, DiskFormat,
     DisplayConfig, DisplayEngine, FirmwareConfig, GpuConfig, InputConfig, InstanceConfig,
     InstanceId, InstanceKind, InstanceState, LogLine, LogStreamSource, MemoryConfig, NatBackend,
-    NetworkConfig, NetworkMode, PointerMode, RenderBackend, Resolution, ResourceMetrics,
+    NetworkConfig, NetworkMode, PointerMode, PortForward, PortForwardProtocol, RenderBackend,
+    Resolution, ResourceMetrics,
 };
-
 #[derive(Debug, thiserror::Error)]
 pub enum ConvertError {
     #[error("missing or unspecified android_version")]
@@ -33,6 +33,8 @@ pub enum ConvertError {
     MissingCloneMode,
     #[error("missing or unspecified backend_kind")]
     MissingBackendKind,
+    #[error("missing or unspecified port_forward_protocol")]
+    MissingPortForwardProtocol,
     #[error("missing field `{0}` in request")]
     MissingField(&'static str),
 }
@@ -474,7 +476,6 @@ impl From<NatBackend> for proto::NatBackend {
         }
     }
 }
-
 impl TryFrom<proto::NetworkConfig> for NetworkConfig {
     type Error = ConvertError;
 
@@ -485,10 +486,17 @@ impl TryFrom<proto::NetworkConfig> for NetworkConfig {
             .ok_or(ConvertError::MissingField("network.mode"))?
             .try_into()?;
 
+        let port_forwards = value
+            .port_forwards
+            .into_iter()
+            .map(TryInto::try_into)
+            .collect::<Result<Vec<_>, _>>()?;
+
         Ok(NetworkConfig {
             mode,
             device_model: value.device_model,
             nat_backend,
+            port_forwards,
         })
     }
 }
@@ -498,9 +506,62 @@ impl From<NetworkConfig> for proto::NetworkConfig {
         let mut msg = proto::NetworkConfig {
             mode: Some(value.mode.into()),
             device_model: value.device_model,
+            port_forwards: value.port_forwards.into_iter().map(Into::into).collect(),
             ..Default::default()
         };
         msg.set_nat_backend(value.nat_backend.into());
+        msg
+    }
+}
+
+impl TryFrom<proto::PortForwardProtocol> for PortForwardProtocol {
+    type Error = ConvertError;
+    fn try_from(value: proto::PortForwardProtocol) -> Result<Self, Self::Error> {
+        match value {
+            proto::PortForwardProtocol::Tcp => Ok(PortForwardProtocol::Tcp),
+            proto::PortForwardProtocol::Udp => Ok(PortForwardProtocol::Udp),
+            proto::PortForwardProtocol::Unspecified => {
+                Err(ConvertError::MissingPortForwardProtocol)
+            }
+        }
+    }
+}
+
+impl From<PortForwardProtocol> for proto::PortForwardProtocol {
+    fn from(value: PortForwardProtocol) -> Self {
+        match value {
+            PortForwardProtocol::Tcp => proto::PortForwardProtocol::Tcp,
+            PortForwardProtocol::Udp => proto::PortForwardProtocol::Udp,
+        }
+    }
+}
+
+impl TryFrom<proto::PortForward> for PortForward {
+    type Error = ConvertError;
+    fn try_from(value: proto::PortForward) -> Result<Self, Self::Error> {
+        let protocol = value.protocol().try_into()?;
+        Ok(PortForward {
+            protocol,
+            host_port: value.host_port as u16,
+            guest_port: value.guest_port as u16,
+            host_address: if value.host_address.is_empty() {
+                None
+            } else {
+                Some(value.host_address)
+            },
+        })
+    }
+}
+
+impl From<PortForward> for proto::PortForward {
+    fn from(value: PortForward) -> Self {
+        let mut msg = proto::PortForward {
+            host_port: value.host_port as u32,
+            guest_port: value.guest_port as u32,
+            host_address: value.host_address.unwrap_or_default(),
+            ..Default::default()
+        };
+        msg.set_protocol(value.protocol.into());
         msg
     }
 }
@@ -1617,11 +1678,13 @@ mod tests {
             mode: NetworkMode::Nat,
             device_model: "virtio-net-pci".to_string(),
             nat_backend: NatBackend::Slirp,
+            port_forwards: vec![],
         });
         cfg.extra_networks.push(NetworkConfig {
             mode: NetworkMode::Isolated,
             device_model: "e1000".to_string(),
             nat_backend: NatBackend::Passt,
+            port_forwards: vec![],
         });
 
         let response: proto::GetInstanceConfigResponse = cfg.clone().into();

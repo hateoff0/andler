@@ -177,6 +177,7 @@ impl InstanceConfig {
                 ));
             }
         }
+        self.network.validate()?;
         Ok(())
     }
 }

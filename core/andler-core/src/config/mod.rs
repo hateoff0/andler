@@ -26,7 +26,7 @@ pub use keypath::{
 };
 pub use loader::{instance_config_to_toml, parse_instance_config_toml};
 pub use memory::MemoryConfig;
-pub use network::{NatBackend, NetworkConfig, NetworkMode};
+pub use network::{NatBackend, NetworkConfig, NetworkMode, PortForward, PortForwardProtocol};
 
 /// Current on-disk config schema version. Bump it when `InstanceConfig` gains
 /// a field that old files must migrate; add the migration step to

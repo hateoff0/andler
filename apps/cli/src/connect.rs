@@ -36,7 +36,72 @@ pub async fn handle_connect(
 
     match level {
         ConnectLevel::Console | ConnectLevel::Auto => connect_console(&full_id).await,
+        ConnectLevel::Ssh => connect_via_port_forward(client, &full_id, 22, "ssh").await,
+        ConnectLevel::Adb => connect_via_port_forward(client, &full_id, 5555, "adb").await,
     }
+}
+
+/// Spawns an external client (ssh / adb) pointed at the guest's forwarded
+/// port. The port forwarding must have been configured at create time via
+/// `network.port_forwards`; the daemon's QEMU `-netdev hostfwd=` does the
+/// actual plumbing. The client inherits this process's stdio so it stays
+/// interactive.
+async fn connect_via_port_forward(
+    client: &mut AndlerServiceClient<Channel>,
+    full_id: &str,
+    guest_port: u16,
+    what: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let config = client
+        .get_instance_config(InstanceIdRequest {
+            instance_id: full_id.to_string(),
+        })
+        .await?
+        .into_inner()
+        .network
+        .ok_or_else(|| "daemon returned no network config".to_string())?;
+
+    let host_port = config
+        .port_forwards
+        .iter()
+        .find(|f| f.guest_port == guest_port as u32)
+        .map(|f| f.host_port)
+        .ok_or_else(|| {
+            format!(
+                "no port forward to guest port {guest_port} on {full_id}; add \
+                 `network.port_forwards = [\"tcp:2222->{guest_port}\"]` (host:guest) to \
+                 instance.toml before starting, then `andler connect --level {what}`"
+            )
+        })?;
+
+    let (cmd, args): (&str, Vec<String>) = match what {
+        "ssh" => (
+            "ssh",
+            vec![
+                "-p".to_string(),
+                host_port.to_string(),
+                format!("user@localhost"),
+            ],
+        ),
+        "adb" => {
+            // adb connect switches the daemon's target; passing the device
+            // through as an argument keeps multiple guests usable.
+            (
+                "adb",
+                vec!["connect".to_string(), format!("localhost:{host_port}")],
+            )
+        }
+        _ => unreachable!(),
+    };
+
+    let status = std::process::Command::new(cmd)
+        .args(&args)
+        .status()
+        .map_err(|e| format!("cannot run `{cmd}`: {e} (is it installed and on PATH?)"))?;
+    if !status.success() {
+        std::process::exit(status.code().unwrap_or(1));
+    }
+    Ok(())
 }
 
 /// Resolves a partial/64-hex id to the full id through the instance list

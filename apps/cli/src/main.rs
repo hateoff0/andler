@@ -83,6 +83,10 @@ enum ConnectLevel {
     Auto,
     /// Serial console (works on any running VM)
     Console,
+    /// Open an ssh session to the guest's forwarded port 22
+    Ssh,
+    /// Connect adb to the guest's forwarded port 5555
+    Adb,
 }
 
 dual_id_args!(StartArgs);

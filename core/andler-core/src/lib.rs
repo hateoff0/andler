@@ -33,7 +33,7 @@ pub use config::{
     AudioBackend, AudioConfig, AudioDevice, BackendKind, CdromBus, CpuConfig, CpuPriority,
     DiskConfig, DiskFormat, DisplayConfig, DisplayEngine, FirmwareConfig, GpuConfig, InputConfig,
     InstanceConfig, InstanceId, InstanceKind, MemoryConfig, NatBackend, NetworkConfig, NetworkMode,
-    PointerMode, RenderBackend, Resolution, INSTANCE_ID_HEX_LEN,
+    PointerMode, PortForward, PortForwardProtocol, RenderBackend, Resolution, INSTANCE_ID_HEX_LEN,
 };
 pub use disk_chain::{DiskChain, DiskLayer, LayerKind};
 pub use error::{BackendError, FsmError};

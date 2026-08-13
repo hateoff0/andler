@@ -419,16 +419,22 @@ fn network_args(cfg: &InstanceConfig) -> Vec<String> {
 fn primary_network_args(cfg: &InstanceConfig) -> Vec<String> {
     match &cfg.network.mode {
         NetworkMode::Nat => match cfg.network.nat_backend {
-            NatBackend::Slirp => vec![
-                "-nic".to_string(),
-                format!("user,model={}", cfg.network.device_model),
-            ],
-            NatBackend::Passt => vec![
-                "-netdev".to_string(),
-                "passt,id=net0".to_string(),
-                "-device".to_string(),
-                format!("{},netdev=net0", cfg.network.device_model),
-            ],
+            NatBackend::Slirp => {
+                let hostfwds = hostfwd_args(&cfg.network.port_forwards);
+                vec![
+                    "-nic".to_string(),
+                    format!("user,model={}{}", cfg.network.device_model, hostfwds),
+                ]
+            }
+            NatBackend::Passt => {
+                let hostfwds = passt_port_args(&cfg.network.port_forwards);
+                vec![
+                    "-netdev".to_string(),
+                    format!("passt,id=net0{hostfwds}"),
+                    "-device".to_string(),
+                    format!("{},netdev=net0", cfg.network.device_model),
+                ]
+            }
         },
         NetworkMode::Bridge { interface: bridge } => {
             let tap_iface = primary_net_bridge_tap_iface(&cfg.id.to_string());
@@ -452,6 +458,46 @@ fn primary_network_args(cfg: &InstanceConfig) -> Vec<String> {
             ]
         }
     }
+}
+
+/// Build the `hostfwd=…` fragment for QEMU's `user` netdev (Slirp).
+/// Format: `,hostfwd=tcp::2222-:22,hostfwd=udp::5353-:53`
+fn hostfwd_args(forwards: &[andler_core::PortForward]) -> String {
+    forwards
+        .iter()
+        .map(|fwd| {
+            let proto = match fwd.protocol {
+                andler_core::PortForwardProtocol::Tcp => "tcp",
+                andler_core::PortForwardProtocol::Udp => "udp",
+            };
+            match &fwd.host_address {
+                Some(addr) => format!(
+                    ",hostfwd={proto}:{addr}:{}-:{}",
+                    fwd.host_port, fwd.guest_port
+                ),
+                None => format!(",hostfwd={proto}::{}-:{}", fwd.host_port, fwd.guest_port),
+            }
+        })
+        .collect()
+}
+
+/// Build the `-,hostfwd=…` fragment for passt. Passt takes a per-port
+/// comma-joined list of `proto:host_port:guest_port` triples after a `,-`.
+fn passt_port_args(forwards: &[andler_core::PortForward]) -> String {
+    if forwards.is_empty() {
+        return String::new();
+    }
+    let items: Vec<String> = forwards
+        .iter()
+        .map(|fwd| {
+            let proto = match fwd.protocol {
+                andler_core::PortForwardProtocol::Tcp => "tcp",
+                andler_core::PortForwardProtocol::Udp => "udp",
+            };
+            format!("{proto}:{}:{}", fwd.host_port, fwd.guest_port)
+        })
+        .collect();
+    format!(",-{}", items.join(","))
 }
 
 fn audio_args(cfg: &InstanceConfig) -> Vec<String> {
@@ -874,6 +920,58 @@ mod tests {
     }
 
     #[test]
+    fn network_args_hostfwd_slirp_appends_port_forwards() {
+        use andler_core::{PortForward, PortForwardProtocol};
+        let mut cfg = start_sh_equivalent_config();
+        cfg.network.port_forwards = vec![
+            PortForward {
+                protocol: PortForwardProtocol::Tcp,
+                host_port: 2222,
+                guest_port: 22,
+                host_address: None,
+            },
+            PortForward {
+                protocol: PortForwardProtocol::Udp,
+                host_port: 5353,
+                guest_port: 53,
+                host_address: Some("127.0.0.1".to_string()),
+            },
+        ];
+        let args = network_args(&cfg);
+        assert_eq!(
+            args,
+            vec![
+                "-nic".to_string(),
+                "user,model=virtio-net-pci,hostfwd=tcp::2222-:22,hostfwd=udp:127.0.0.1:5353-:53"
+                    .to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn network_args_hostfwd_passt_uses_comma_separated_ports() {
+        use andler_core::{PortForward, PortForwardProtocol};
+        let mut cfg = start_sh_equivalent_config();
+        cfg.network.nat_backend = NatBackend::Passt;
+        cfg.network.port_forwards = vec![PortForward {
+            protocol: PortForwardProtocol::Tcp,
+            host_port: 2222,
+            guest_port: 22,
+            host_address: None,
+        }];
+        let args = network_args(&cfg);
+        assert_eq!(
+            args,
+            vec![
+                "-netdev".to_string(),
+                "passt,id=net0,-tcp:2222:22".to_string(),
+                "-device".to_string(),
+                "virtio-net-pci,netdev=net0".to_string(),
+            ]
+        );
+    }
+
+    #[test]
     fn audio_args_match_reference_default_virtio_sound() {
         let cfg = start_sh_equivalent_config();
         assert_eq!(
@@ -1090,6 +1188,7 @@ mod tests {
             mode: NetworkMode::Nat,
             device_model: "virtio-net-pci".to_string(),
             nat_backend: NatBackend::Slirp,
+            port_forwards: vec![],
         });
         cfg.extra_networks.push(NetworkConfig {
             mode: NetworkMode::Bridge {
@@ -1097,13 +1196,14 @@ mod tests {
             },
             device_model: "e1000e".to_string(),
             nat_backend: NatBackend::Slirp,
+            port_forwards: vec![],
         });
         cfg.extra_networks.push(NetworkConfig {
             mode: NetworkMode::Isolated,
             device_model: "virtio-net-pci".to_string(),
             nat_backend: NatBackend::Slirp,
+            port_forwards: vec![],
         });
-
         let args = network_args(&cfg);
         let primary_len = primary_network_args(&cfg).len();
         assert_eq!(
@@ -1135,6 +1235,7 @@ mod tests {
             mode: NetworkMode::Nat,
             device_model: "virtio-net-pci".to_string(),
             nat_backend: NatBackend::Passt,
+            port_forwards: vec![],
         });
         let args = network_args(&cfg);
         assert!(args.contains(&"passt,id=net-extra0".to_string()));

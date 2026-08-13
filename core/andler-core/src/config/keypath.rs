@@ -12,7 +12,7 @@
 
 use crate::config::{
     AudioBackend, AudioDevice, CpuPriority, DisplayEngine, InstanceConfig, InstanceKind,
-    NatBackend, NetworkMode, PointerMode, RenderBackend,
+    NatBackend, NetworkMode, PointerMode, PortForwardProtocol, RenderBackend,
 };
 use crate::sizes::{format_size, parse_size};
 
@@ -598,6 +598,30 @@ pub fn config_keys() -> &'static [ConfigKey] {
                 Ok(())
             }),
             immutable_reason: None,
+            live: false,
+        },
+        ConfigKey {
+            key: "network.port_forwards",
+            get: |cfg| {
+                cfg.network
+                    .port_forwards
+                    .iter()
+                    .map(|f| {
+                        format!(
+                            "{}:{}->{}",
+                            match f.protocol {
+                                PortForwardProtocol::Tcp => "tcp",
+                                PortForwardProtocol::Udp => "udp",
+                            },
+                            f.host_port,
+                            f.guest_port
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(",")
+            },
+            set: None,
+            immutable_reason: Some("port forwards are fixed at create time (QEMU netdev hostfwd)"),
             live: false,
         },
         ConfigKey {

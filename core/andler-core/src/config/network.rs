@@ -24,10 +24,29 @@ pub struct NetworkConfig {
 
     #[serde(default = "default_nat_backend")]
     pub nat_backend: NatBackend,
+
+    #[serde(default)]
+    pub port_forwards: Vec<PortForward>,
 }
 
-fn default_nat_backend() -> NatBackend {
-    NatBackend::Slirp
+/// A host→guest TCP or UDP port forwarding entry (`-netdev hostfwd=`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PortForward {
+    pub protocol: PortForwardProtocol,
+
+    pub host_port: u16,
+
+    pub guest_port: u16,
+
+    #[serde(default)]
+    pub host_address: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PortForwardProtocol {
+    Tcp,
+
+    Udp,
 }
 
 impl NetworkConfig {
@@ -36,8 +55,41 @@ impl NetworkConfig {
             mode: NetworkMode::Nat,
             device_model: "virtio-net-pci".to_string(),
             nat_backend: NatBackend::Slirp,
+            port_forwards: Vec::new(),
         }
     }
+
+    pub fn validate(&self) -> Result<(), String> {
+        for fwd in &self.port_forwards {
+            if fwd.host_port == 0 {
+                return Err(format!(
+                    "network.port_forwards[{}]: host_port must be 1..=65535 (got 0)",
+                    fwd.guest_port
+                ));
+            }
+            if fwd.guest_port == 0 {
+                return Err(format!(
+                    "network.port_forwards[{}]: guest_port must be 1..=65535 (got 0)",
+                    fwd.host_port
+                ));
+            }
+        }
+        if !self.port_forwards.is_empty() {
+            match &self.mode {
+                NetworkMode::Nat => {}
+                NetworkMode::Bridge { .. } | NetworkMode::Isolated => {
+                    return Err(
+                        "network.port_forwards are only supported with mode = nat".to_string()
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+fn default_nat_backend() -> NatBackend {
+    NatBackend::Slirp
 }
 
 #[cfg(test)]

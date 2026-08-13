@@ -153,11 +153,24 @@ enum NatBackend {
     SLIRP = 1;
     PASST = 2;
 }
+enum PortForwardProtocol {
+    PORT_FORWARD_PROTOCOL_UNSPECIFIED = 0;
+    TCP = 1;
+    UDP = 2;
+}
+
+message PortForward {
+    PortForwardProtocol protocol = 1;
+    uint32 host_port = 2;
+    uint32 guest_port = 3;
+    string host_address = 4;
+}
 
 message NetworkConfig {
     NetworkMode mode = 1;
     string device_model = 2;
     NatBackend nat_backend = 3;
+    repeated PortForward port_forwards = 4;
 }
 
 message FirmwareConfig {
