@@ -1,6 +1,7 @@
 pub mod backend;
 pub mod cmdline;
 pub mod metrics;
+pub mod mutator;
 pub mod pidfd;
 pub mod process;
 pub mod qmp;

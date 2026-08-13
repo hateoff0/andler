@@ -42,5 +42,7 @@ pub use events::{
     OperationState, QmpEvent,
 };
 pub use fsm::{InstanceEvent, InstanceState};
+pub use guest_mutator::{GuestMutator, MutatorError, MutatorOp};
+pub mod guest_mutator;
 pub use package_manager::PackageManager;
 pub mod sizes;

@@ -8,6 +8,7 @@ members = [
     "services/andler-net",
     "services/andler-store",
     "services/andler-rpc",
+    "services/andler-guestfs",
     "apps/daemon",
     "apps/cli",
     "apps/helper",

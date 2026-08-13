@@ -542,7 +542,11 @@ impl QmpClient {
         serde_json::from_value(value).map_err(QmpError::ParseError)
     }
 
-    pub async fn guest_file_write(&mut self, path: &str, content: &str) -> Result<(), QmpError> {
+    pub async fn guest_file_write_bytes(
+        &mut self,
+        path: &str,
+        content: &[u8],
+    ) -> Result<(), QmpError> {
         let handle_value = self
             .execute_raw(
                 "guest-file-open",
@@ -557,7 +561,7 @@ impl QmpClient {
                 desc: "response missing 'handle' field".to_string(),
             })?;
 
-        let encoded = base64::engine::general_purpose::STANDARD.encode(content.as_bytes());
+        let encoded = base64::engine::general_purpose::STANDARD.encode(content);
         let write_value = self
             .execute_raw(
                 "guest-file-write",
@@ -576,6 +580,10 @@ impl QmpClient {
         self.execute_raw("guest-file-close", Some(json!({ "handle": handle })))
             .await?;
         Ok(())
+    }
+
+    pub async fn guest_file_write(&mut self, path: &str, content: &str) -> Result<(), QmpError> {
+        self.guest_file_write_bytes(path, content.as_bytes()).await
     }
 
     pub async fn is_guest_agent_available(&mut self) -> bool {

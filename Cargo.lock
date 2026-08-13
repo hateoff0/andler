@@ -84,6 +84,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "andler-guestfs"
+version = "0.1.0"
+dependencies = [
+ "andler-core",
+ "async-trait",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "andler-helper"
 version = "0.1.0"
 dependencies = [
@@ -493,6 +504,7 @@ dependencies = [
  "clap_complete",
  "indicatif",
  "inquire",
+ "libc",
  "regex",
  "serde",
  "serde_json",

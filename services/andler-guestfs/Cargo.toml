@@ -1,0 +1,16 @@
+[package]
+name = "andler-guestfs"
+description = "Offline guest mutation via the libguestfs appliance (zero root)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+andler-core = { path = "../../core/andler-core" }
+async-trait = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+
+[lints]
+workspace = true
