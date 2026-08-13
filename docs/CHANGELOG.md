@@ -11,6 +11,20 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 
 #### CLI
 
+- **`andler events [<id>] [--follow] [--json]`**: streams daemon events from the live bus — lifecycle transitions, operation state changes, raw QMP events, diagnostic log lines. Exits after the first event unless `--follow`; instance filter resolves full/prefix ids. Instance creation now emits a log event, so `(create &); andler events` shows the creation line.
+
+#### Daemon
+
+- **`StreamEvents` RPC**: server-streaming events with an optional instance filter; each event carries `ts_ms`, `instance_id`, `kind` and a JSON `detail` payload.
+- **QMP event relay**: `QmpClient` gained a background reader task (async events → broadcast channel, command replies → pending oneshot); `QemuBackend` republishes mapped events per instance and the daemon forwards them on the bus as `DaemonEvent::Qmp`. `SHUTDOWN`/`DEVICE_DELETED`/`VSERPORT_CHANGED`/`BLOCK_IO_ERROR` are now observable without polling.
+
+#### Structure
+
+- **`GuestMutator` trait + `MutatorOp` batch in `andler-core`**: uniform guest-filesystem mutation layer (`read_file`/`apply`) with a batch contract that lets offline backends run one session per staging run.
+- **`QgaMutator` (`backends/andler-qemu`)**: online backend over the guest agent — argv-style `guest-exec` (no shell) plus `guest-file-write` for binary content.
+- **New crate `services/andler-guestfs`**: offline `GuestfsMutator` over the libguestfs appliance (one `guestfish` session per batch, staged uploads, quoted paths, exclusive image lock). Zero root; package install/remove remains on the chroot kitchen (spike-verified suspended variant).
+- **Conformance suite for `GuestMutator`**: the same assertion sequence runs against both real implementations (`cargo test -- --ignored`), so behavioral drift between QGA and guestfs fails in the shared suite.
+
 - **`andler op list [--json]` / `andler op cancel <op-id>`**: long-running operations (snapshot restore is the first one) are tracked per instance and visible with their current phase and progress; cancel asks the operation to stop at its next cancel point (`OperationCancelled`). One operation per instance; a second one is rejected with `OperationAlreadyRunning`.
 - **`andler connect <id> [--level console|auto|ssh|adb]`**: single entry point to the guest. `console` attaches to the VM's serial console in raw terminal mode (works headless on any running VM — the serial moves to an attachable unix-socket chardev with `console.log` kept as a tee). `ssh`/`adb` spawn the external client against the configured `network.port_forwards` (guest port 22/5555). `auto` picks by effective profile: Android VMs booted into linux mode go to ssh, everything else to the serial console.
 - **`andler exec <id> -- <cmd> [args…]`**: runs a command in the guest through the guest agent and relays stdout/stderr plus the exit code; no guest network setup needed.

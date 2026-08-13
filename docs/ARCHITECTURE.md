@@ -55,7 +55,7 @@ Implements `HypervisorBackend` for QEMU via process management, QMP communicatio
 **Key components:**
 - `cmdline.rs`: Pure function translating `InstanceConfig` to QEMU CLI arguments (argument blocks, each tested independently against reference configuration). Includes the guest-agent block: a `socket` chardev (`*.qga.sock`, `server=on,wait=off`) wired to a `virtserialport` named `org.qemu.guest_agent.0`, plus a `-fw_cfg name=opt/andler/display-resolution,string=WxH` entry when a resolution is configured
 - `process.rs`: `QemuProcess` — spawn, terminate, force-kill, log/metrics broadcast channels, `qga_socket_path()`
-- `qmp.rs`: `QmpClient` — QMP protocol over unix socket (handshake, pause/resume/status, snapshot job API) **and** the QEMU guest agent (QGA) protocol via `connect_agent()` on the `*.qga.sock` chardev (`guest-ping`/`guest-exec`/`guest-exec-status`/`guest-file-open`/...)
+- `qmp.rs`: `QmpClient` — QMP protocol over unix socket (handshake, pause/resume/status, snapshot job API) **and** the QEMU guest agent (QGA) protocol via `connect_agent()` on the `*.qga.sock` chardev (`guest-ping`/`guest-exec`/`guest-exec-status`/`guest-file-open`/...). A background reader task owns the socket's read half: async events (SHUTDOWN, DEVICE_DELETED, VSERPORT_CHANGED, BLOCK_IO_ERROR, ...) publish to a broadcast channel (`subscribe_events`), command replies land on the single pending oneshot (commands serialize through the writer mutex; the pending slot registers before the write, so a fast reply is never dropped). The QEMU backend relays events per instance onto its own broadcast; the daemon maps the handle back to the instance id and emits `DaemonEvent::Qmp` on the bus (`StreamEvents` RPC / `andler events`).
 - `backend.rs`: `QemuBackend` — ties everything together, manages `RunningInstance` registry; guest operations (`guest_exec_package`, `set_guest_display_resolution`, ...) talk to the agent chardev socket, **not** the QMP monitor (QEMU ≥ 9 no longer registers `guest-*` commands on QMP)
 - `metrics.rs`: Background poller reading `/proc/<pid>/stat`, `/proc/<pid>/status`, `/sys/block/*/stat`, `/proc/<net/dev` (per-VM); calls into `andler-firmware::metrics` for the GPU fields (host-level, not per-VM — moved there to sit next to GPU vendor detection). Sample collection runs in `tokio::task::spawn_blocking` — the `/proc` and sysfs reads are synchronous I/O and must not block the async runtime.
 
@@ -76,6 +76,18 @@ Wrapper around `qemu-img` for disk creation/cloning/resizing, plus guest tools o
 - `diskspace.rs`: free-space pre-check before snapshots
 
 **~45 unit tests** (+ ignored integration tests requiring qemu-img).
+
+### `services/andler-guestfs` — Offline Guest Mutation
+
+`GuestfsMutator`, one of the two real implementations of
+`andler_core::GuestMutator` (the other is `QgaMutator` in
+`backends/andler-qemu`). Drives the libguestfs appliance (`guestfish`)
+against a guest image: the appliance boots its own unprivileged QEMU,
+mounts the filesystem under an exclusive qemu image lock and applies a
+batch of `MutatorOp` mutations in one session. Zero root; the package
+install/remove path stays on the chroot kitchen (spike-verified
+suspended variant, §6). The trait + batch contract + shared conformance
+suite live in `andler-core`.
 
 ### `services/andler-net` — Network Configuration
 

@@ -72,6 +72,9 @@
 - [x] Package managers in `andler-core` — `PackageManager` enum + command specifications moved out of `andler-disk` (online QGA path and offline path share one spec).
 - [x] Core: add VM template system for quick VM creation — `andler create --template <name>` (built-ins `headless`/`desktop`, user templates in `~/.andler/templates/`), merged defaults < template < CLI flags, `--kind linux` only in this phase.
 
+- [x] GuestMutator abstraction — `MutatorOp` batch + `GuestMutator` trait in `andler-core`, `QgaMutator` (online, QGA, zero root) and `GuestfsMutator` (new crate `services/andler-guestfs`, libguestfs appliance, zero root), with a shared conformance suite that runs the same assertions against both real implementations. Package install stays on the chroot kitchen (spike-verified suspended variant, §6).
+- [x] QMP event subscription — `QmpClient` background reader task (async events → broadcast, replies → pending oneshot), `QemuBackend` per-instance relay, daemon forwards `DaemonEvent::Qmp`; `StreamEvents` RPC + `andler events [<id>] [--follow] [--json]`.
+
 ## In Progress
 
 - [x] Instance registry on files, not SQLite — `instance.toml` per instance under `~/.andler/instances/<id>/` is the single source of truth for config: the daemon re-reads it on every state transition (hand-edited TOML is honored, `config view` shows the file), `Daemon::restore()` scans the instances directory (broken entries are listed and removable, never fatal), and legacy databases are migrated to toml on first start (a conflicting pre-existing toml refuses startup). SQLite keeps only snapshot metadata. Non-purge `remove` deletes the registry entries and keeps the disk; `--purge` deletes everything.

@@ -89,6 +89,7 @@ Coverage by suite:
 | `17_port_forwards.sh` | `network.port_forwards` round-trip: `create --file` with the key, `--dry-run` cmdline contains `hostfwd=tcp::2222-:22`, live TCP connect to the forwarded port while the VM runs, `connect --level ssh` degraded branch |
 | `18_boot_mode.sh` | P31: `config view` surfaces `boot_mode: android` from the config (no disk mount), `config set` refuses the key (immutable), `guest boot-mode` get is config-backed |
 | `19_version.sh` | version handshake: a matching CLI/daemon pair passes through |
+| `20_events.sh` | `andler events`: lifecycle log event on create, instance-filtered stream during start/stop (JSON), cleanup |
 
 ### Deep guest tests
 

@@ -367,6 +367,30 @@ The console socket is a chardev under `$XDG_RUNTIME_DIR/andler/console/<id>.sock
 (`server=on,wait=off`); the serial log still lands in `console.log` next to
 the instance disk, so attach sessions never lose the historical log.
 
+### `events`
+
+Streams daemon events from the live bus — lifecycle transitions,
+operation state changes, raw QMP events and diagnostic log lines.
+Exits after the first event unless `--follow` keeps streaming, which
+makes one-shot invocation scriptable.
+
+```bash
+# One event (e.g. the instance-created line right after a create)
+andler events
+
+# Stream events for one instance as JSON lines
+andler events <instance-id> --json --follow
+
+# One lifecycle event for a specific instance (prefix resolution works)
+andler events <instance-id>
+```
+
+| Flag | Description |
+|------|-------------|
+| `<instance-id>` | Optional filter (full id or unique prefix); all instances when omitted |
+| `--follow` | Keep streaming instead of exiting after the first event |
+| `--json` | JSON-lines output (`ts_ms`, `instance_id`, `kind`, `detail`) |
+
 ### `exec`
 
 Runs a command inside the guest through the guest agent and relays its exit

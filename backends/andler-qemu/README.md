@@ -22,6 +22,7 @@ Pure function `build_args(&InstanceConfig, &Path) -> Vec<String>` that translate
 | Network | `network_args` | `-nic user,model=virtio-net-pci` (Slirp/NAT), `-netdev passt` + `-device` (Passt), or Bridge/Isolated modes; extra hotplugged networks append as `net-extraN` netdevs + devices |
 | Audio | `audio_args` | `-audiodev`, `-device` for PipeWire/PulseAudio |
 | QMP | `qmp_args` | `-qmp unix:<path>,server,nowait` |
+| Events | `QmpClient::subscribe_events` | Async QMP events (SHUTDOWN, DEVICE_DELETED, VSERPORT_CHANGED, BLOCK_IO_ERROR, ...) flow from a background reader task to a broadcast channel; the daemon relays them as `DaemonEvent::Qmp` (`andler events`) |
 | Serial | `serial_args` | `-chardev socket,id=console0,path=<runtime>/andler/console/<id>.sock,server=on,wait=off,logfile=<instance>/console.log,logappend=on` + `-serial chardev:console0` — attachable serial console (`andler connect --level console`) with the historical log kept as a tee next to the instance disk. The console socket is exclusive like the QGA socket (one client; the daemon never touches it) |
 
 Always ends with `-boot menu=on`.

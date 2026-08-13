@@ -48,6 +48,7 @@ The core service exposing all instance management operations.
 | `CancelOperation` | `OpCancelRequest` | `Empty` | Unary | Requests cancellation of a running operation; the operation stops at its next cancel point and reports `OperationCancelled`. |
 | `ExecCommand` | `ExecCommandRequest` | `ExecCommandResponse` | Unary | Runs an arbitrary command in the guest via the guest agent and returns its exit code plus captured stdout/stderr. |
 | `GetVersion` | `Empty` | `VersionResponse` | Unary | Returns the daemon's build version (the CLI handshakes on this before every command, §13.19). |
+| `StreamEvents` | `EventStreamRequest` | `stream DaemonEventMessage` | Server-streaming | Streams daemon events (lifecycle transitions, operations, QMP events, log lines) from the live bus, optionally filtered to one instance. |
 
 ---
 
@@ -619,6 +620,23 @@ Runs a command in the guest through the guest agent (`andler exec`).
 | `exit_code` | `int32` | Guest process exit code. |
 | `stdout` | `string` | Captured guest stdout. |
 | `stderr` | `string` | Captured guest stderr. |
+
+### `EventStreamRequest`
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `instance_id` | `string` | Filter to one instance (full or prefix); empty = all instances. |
+
+### `DaemonEventMessage`
+
+One event from the daemon bus (`andler events`).
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `ts_ms` | `uint64` | Wall-clock milliseconds since the UNIX epoch. |
+| `instance_id` | `string` | Instance the event belongs to; empty for daemon-wide events. |
+| `kind` | `string` | `Lifecycle` / `Operation` / `Qmp` / `Readiness` / `Log`. |
+| `detail` | `string` | JSON serialization of the event payload (e.g. `{"Lifecycle":{"from":"Created","to":"Starting","reason":null}}`). |
 
 ### `VersionResponse`
 
