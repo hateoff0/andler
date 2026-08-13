@@ -86,6 +86,13 @@ fn spawn_qmp_relays(
 }
 
 impl Daemon {
+    // Live event-bus subscription for the daemon's own tests (events.rs);
+    // the StreamEvents RPC goes through stream_events below.
+    #[allow(dead_code)]
+    pub fn subscribe_events(&self) -> broadcast::Receiver<DaemonEvent> {
+        self.events.subscribe()
+    }
+
     /// Streams daemon events (live bus), optionally filtered to one
     /// instance. Backs the `StreamEvents` RPC / `andler events`.
     pub fn stream_events(&self, filter: Option<InstanceId>) -> BoxStream<'static, DaemonEvent> {
