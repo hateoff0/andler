@@ -12,7 +12,7 @@ suite that drives the real daemon, CLI, QEMU/KVM, and SQLite.
 | `compose.yaml` | Compose shortcuts; every service builds with context `../..` (repository root). |
 | `e2e.sh` | Suite orchestrator: fresh daemon, runs each `tests/NN_*.sh` suite, prints a per-suite summary. |
 | `tests/common.sh` | Assertion helpers (`expect_ok`, `expect_fail`, `expect_out_grep`, …), daemon lifecycle, fixture builders. |
-| `tests/NN_*.sh` | One self-contained suite per functional area (lifecycle, config, disk, snapshots, clone/export, guest, preview/verify, persistence). |
+| `tests/NN_*.sh` | One self-contained suite per functional area (lifecycle, config, disk, snapshots, clone/export, guest, preview/verify, persistence, ops, connect, exec, port forwards, boot mode, version, events). |
 
 All commands below run from the **repository root**.
 
@@ -65,7 +65,7 @@ docker builder prune --filter type=exec.cachemount
 `e2e.sh` starts a fresh `andlerd` on an isolated sqlite store and runs every
 `tests/NN_*.sh` suite in order. Each suite is self-contained (creates and
 removes its own instances) and prints an assertion count; the orchestrator
-prints a summary and exits non-zero when any suite fails.
+prints a summary and exits non-zero when any suite fails. Each suite runs under a wall-clock watchdog (`E2E_SUITE_TIMEOUT`, default 300s): a hung suite is killed, its remaining processes and daemon.log tail are dumped for diagnosis, and the next suite still starts on a clean daemon. PASS/FAIL lines carry the suite's elapsed time.
 
 Coverage by suite:
 

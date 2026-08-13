@@ -16,7 +16,7 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 #### Daemon
 
 - **`StreamEvents` RPC**: server-streaming events with an optional instance filter; each event carries `ts_ms`, `instance_id`, `kind` and a JSON `detail` payload.
-- **QMP event relay**: `QmpClient` gained a background reader task (async events → broadcast channel, command replies → pending oneshot); `QemuBackend` republishes mapped events per instance and the daemon forwards them on the bus as `DaemonEvent::Qmp`. `SHUTDOWN`/`DEVICE_DELETED`/`VSERPORT_CHANGED`/`BLOCK_IO_ERROR` are now observable without polling.
+- **QMP event relay**: events arrive on a dedicated second QMP monitor (`-qmp <qmp.sock>.events.sock`); `QmpEventReader` consumes it exclusively (never sends commands) and publishes to a broadcast, `QemuBackend` relays per instance and the daemon forwards them as `DaemonEvent::Qmp`. `SHUTDOWN`/`DEVICE_DELETED`/`VSERPORT_CHANGED`/`BLOCK_IO_ERROR` are observable without polling. The monitor is separate from the command socket on purpose: a reader task sharing the command socket wedged one gRPC connection when QEMU died.
 
 #### Structure
 
