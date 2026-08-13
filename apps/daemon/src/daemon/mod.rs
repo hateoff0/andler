@@ -14,6 +14,7 @@ mod types;
 pub use error::{DaemonError, ErrorKind};
 pub(crate) use supervisor::{spawn_supervisor, SupervisorHandle};
 
+use futures_core::stream::BoxStream;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -85,10 +86,18 @@ fn spawn_qmp_relays(
 }
 
 impl Daemon {
-    // consumed by the upcoming events-RPC work and tests
-    #[allow(dead_code)]
-    pub fn subscribe_events(&self) -> broadcast::Receiver<DaemonEvent> {
-        self.events.subscribe()
+    /// Streams daemon events (live bus), optionally filtered to one
+    /// instance. Backs the `StreamEvents` RPC / `andler events`.
+    pub fn stream_events(&self, filter: Option<InstanceId>) -> BoxStream<'static, DaemonEvent> {
+        let mut rx = self.events.subscribe();
+        Box::pin(async_stream::stream! {
+            while let Ok(event) = rx.recv().await {
+                match &filter {
+                    Some(id) if event.instance_id.as_ref() != Some(id) => continue,
+                    _ => yield event,
+                }
+            }
+        })
     }
 }
 

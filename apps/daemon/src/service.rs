@@ -1,26 +1,28 @@
 use std::path::PathBuf;
-use std::pin::Pin;
 use std::sync::Arc;
 
+use andler_core::EventKind;
 use andler_core::{CloneMode, InstanceConfig};
 use andler_rpc::convert;
 use andler_rpc::proto::andler_service_server::AndlerService;
 use andler_rpc::proto::{
     AttachDiskRequest, AttachDiskResponse, AttachNetworkRequest, AttachNetworkResponse,
     CloneInstanceRequest, ConfigKeyDiff, CreateAndroidInstanceRequest, CreateInstanceRequest,
-    CreateInstanceResponse, CreateSnapshotRequest, CreateSnapshotResponse, DeleteSnapshotRequest,
-    DetachDiskRequest, DetachNetworkRequest, Empty, ExecCommandRequest, ExecCommandResponse,
-    ExportInstanceDiskRequest, ExportInstanceDiskResponse, GetAndroidBootModeResponse,
-    GetConfigStatusResponse, GetInstanceConfigResponse, GuestPackageEntry,
-    InstallGuestAgentRequest, InstanceIdRequest, InstanceListEntry, InstanceStatusResponse,
-    ListGuestPackagesResponse, ListInstancesResponse, ListSnapshotsResponse, LogLineResponse,
-    OpCancelRequest, OpListResponse, OperationInfo, OperationPhase, RemoveGuestAgentRequest,
-    RemoveInstanceRequest, ResourceMetricsResponse, RestoreSnapshotRequest,
-    SetInstanceConfigRequest, SnapshotEntry, StopInstanceRequest, SwitchAndroidBootModeRequest,
-    SwitchArmTranslatorRequest, UpdateInstanceConfigRequest, VersionResponse,
+    CreateInstanceResponse, CreateSnapshotRequest, CreateSnapshotResponse, DaemonEventMessage,
+    DeleteSnapshotRequest, DetachDiskRequest, DetachNetworkRequest, Empty, EventStreamRequest,
+    ExecCommandRequest, ExecCommandResponse, ExportInstanceDiskRequest, ExportInstanceDiskResponse,
+    GetAndroidBootModeResponse, GetConfigStatusResponse, GetInstanceConfigResponse,
+    GuestPackageEntry, InstallGuestAgentRequest, InstanceIdRequest, InstanceListEntry,
+    InstanceStatusResponse, ListGuestPackagesResponse, ListInstancesResponse,
+    ListSnapshotsResponse, LogLineResponse, OpCancelRequest, OpListResponse, OperationInfo,
+    OperationPhase, RemoveGuestAgentRequest, RemoveInstanceRequest, ResourceMetricsResponse,
+    RestoreSnapshotRequest, SetInstanceConfigRequest, SnapshotEntry, StopInstanceRequest,
+    SwitchAndroidBootModeRequest, SwitchArmTranslatorRequest, UpdateInstanceConfigRequest,
+    VersionResponse,
 };
 use futures_core::Stream;
 use futures_util::StreamExt;
+use std::pin::Pin;
 use tonic::{Request, Response, Status};
 
 use crate::daemon::{Daemon, DaemonError, ErrorKind};
@@ -641,6 +643,44 @@ impl AndlerService for DaemonService {
         Ok(Response::new(VersionResponse {
             version: env!("CARGO_PKG_VERSION").to_string(),
         }))
+    }
+
+    type StreamEventsStream =
+        Pin<Box<dyn Stream<Item = Result<DaemonEventMessage, Status>> + Send>>;
+
+    async fn stream_events(
+        &self,
+        request: Request<EventStreamRequest>,
+    ) -> Result<Response<Self::StreamEventsStream>, Status> {
+        let req = request.into_inner();
+        let filter = if req.instance_id.is_empty() {
+            None
+        } else {
+            Some(self.daemon.resolve_instance_id(&req.instance_id).await?)
+        };
+        let inner = self.daemon.stream_events(filter);
+        // tonic::Status in the stream error slot is required by the gRPC API — boxing it
+        // would add indirection for no gain, so silence the size lint here.
+        #[allow(clippy::result_large_err)]
+        let mapped = inner.map(|event| {
+            let kind = match &event.kind {
+                EventKind::Lifecycle { .. } => "Lifecycle",
+                EventKind::Operation { .. } => "Operation",
+                EventKind::Qmp { .. } => "Qmp",
+                EventKind::Readiness { .. } => "Readiness",
+                EventKind::Log { .. } => "Log",
+            };
+            Ok(DaemonEventMessage {
+                ts_ms: event.ts_ms,
+                instance_id: event
+                    .instance_id
+                    .map(|id| id.to_string())
+                    .unwrap_or_default(),
+                kind: kind.to_string(),
+                detail: serde_json::to_string(&event.kind).unwrap_or_default(),
+            })
+        });
+        Ok(Response::new(Box::pin(mapped)))
     }
 
     async fn exec_command(

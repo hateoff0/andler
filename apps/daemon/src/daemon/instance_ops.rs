@@ -7,8 +7,9 @@ use super::types::{write_instance_toml, InstanceDirGuard};
 use super::Daemon;
 use super::SupervisorHandle;
 use andler_core::{
-    BackendError, BackendHandle, DiskFormat, HypervisorBackend, InstanceConfig, InstanceEvent,
-    InstanceId, InstanceKind, InstanceState, Resolution, INSTANCE_ID_HEX_LEN,
+    BackendError, BackendHandle, DaemonEvent, DiskFormat, EventKind, EventLogLevel,
+    HypervisorBackend, InstanceConfig, InstanceEvent, InstanceId, InstanceKind, InstanceState,
+    Resolution, INSTANCE_ID_HEX_LEN,
 };
 
 /// Checks that the files this instance needs to boot are still present on disk.
@@ -118,6 +119,15 @@ impl Daemon {
             self.event_sender(),
         );
         self.supervisors.write().await.insert(id, handle);
+
+        let _ = self.event_sender().send(DaemonEvent {
+            ts_ms: chrono::Utc::now().timestamp_millis() as u64,
+            instance_id: Some(id),
+            kind: EventKind::Log {
+                level: EventLogLevel::Info,
+                message: format!("instance created ({})", cfg.name),
+            },
+        });
 
         tracing::info!(instance_id = %id, name = %cfg.name, "instance created");
         Ok(id)

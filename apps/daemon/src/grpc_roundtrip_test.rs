@@ -7,10 +7,10 @@ use andler_rpc::proto::andler_service_server::AndlerServiceServer;
 use andler_rpc::proto::{
     AttachDiskRequest, AttachNetworkRequest, AudioConfig, CloneInstanceRequest, CloneMode,
     CpuConfig, CreateInstanceRequest, DetachDiskRequest, DetachNetworkRequest, DiskConfig,
-    DisplayConfig, Empty, ExecCommandRequest, ExportInstanceDiskRequest, FirmwareConfig,
-    GetInstanceConfigResponse, GpuConfig, InputConfig, InstanceIdRequest, InstanceStateKind,
-    MemoryConfig, NetworkConfig, OpCancelRequest, RemoveInstanceRequest, Resolution,
-    RestoreSnapshotRequest, SetInstanceConfigRequest,
+    DisplayConfig, Empty, EventStreamRequest, ExecCommandRequest, ExportInstanceDiskRequest,
+    FirmwareConfig, GetInstanceConfigResponse, GpuConfig, InputConfig, InstanceIdRequest,
+    InstanceStateKind, MemoryConfig, NetworkConfig, OpCancelRequest, RemoveInstanceRequest,
+    Resolution, RestoreSnapshotRequest, SetInstanceConfigRequest,
 };
 use tokio::net::TcpListener;
 use tokio_stream::wrappers::TcpListenerStream;
@@ -1395,6 +1395,38 @@ async fn get_version_round_trips_and_matches_build() {
         .into_inner()
         .version;
     assert_eq!(version, env!("CARGO_PKG_VERSION"));
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn stream_events_delivers_lifecycle_events_over_real_grpc() {
+    let (mut client, server) = spawn_server_and_connect().await;
+
+    let mut events = client
+        .stream_events(EventStreamRequest {
+            instance_id: String::new(),
+        })
+        .await
+        .expect("subscribe before creating")
+        .into_inner();
+
+    client
+        .create_instance(sample_create_instance_request())
+        .await
+        .expect("create must succeed");
+
+    let message = tokio::time::timeout(std::time::Duration::from_secs(3), events.message())
+        .await
+        .expect("a lifecycle event must arrive")
+        .expect("stream must stay open")
+        .expect("message must be ok");
+    assert_eq!(message.kind, "Log");
+    assert!(
+        message.detail.contains("instance created"),
+        "detail: {}",
+        message.detail
+    );
 
     server.abort();
 }

@@ -4,6 +4,7 @@ mod create;
 mod disk;
 mod doctor;
 mod edit;
+mod events;
 mod exec;
 mod guest;
 mod helpers;
@@ -107,6 +108,20 @@ dual_id_args!(RemoveArgs,
     #[arg(long, help = "Also delete the disk image and instance directory")]
     pub purge: bool,
 );
+
+#[derive(Args)]
+pub struct EventsArgs {
+    /// Instance id filter (full or prefix); all instances when omitted
+    instance_id: Option<String>,
+
+    /// Keep streaming (default: exit after the first event)
+    #[arg(long)]
+    follow: bool,
+
+    /// JSON-lines output
+    #[arg(long)]
+    json: bool,
+}
 
 dual_id_args!(LogsArgs,
     #[arg(long, value_enum)]
@@ -326,6 +341,9 @@ enum Command {
 
     /// Stream an instance's QEMU stdout/stderr
     Logs(LogsArgs),
+
+    /// Stream daemon events (lifecycle, operations, QMP); optional instance filter
+    Events(EventsArgs),
 
     /// Stream per-instance metrics (CPU, memory, disk, network, GPU)
     Metrics(MetricsArgs),
@@ -921,6 +939,9 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         },
+        Some(Command::Events(args)) => {
+            crate::events::handle(&mut client, args.instance_id, args.follow, args.json).await?;
+        }
         Some(Command::Logs(args)) => {
             let id = args.resolve_id()?;
             status::handle_logs(

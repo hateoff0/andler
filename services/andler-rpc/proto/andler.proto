@@ -37,6 +37,7 @@ service AndlerService {
     rpc ListOperations(Empty) returns (OpListResponse);
     rpc ExecCommand(ExecCommandRequest) returns (ExecCommandResponse);
     rpc GetVersion(Empty) returns (VersionResponse);
+    rpc StreamEvents(EventStreamRequest) returns (stream DaemonEventMessage);
     rpc CancelOperation(OpCancelRequest) returns (Empty);
 }
 
@@ -476,6 +477,17 @@ message ExecCommandResponse {
 
 message VersionResponse {
     string version = 1;
+}
+
+message EventStreamRequest {
+    string instance_id = 1;
+}
+
+message DaemonEventMessage {
+    uint64 ts_ms = 1;
+    string instance_id = 2;
+    string kind = 3;
+    string detail = 4;
 }
 
 message ResourceMetricsResponse {

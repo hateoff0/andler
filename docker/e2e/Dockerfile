@@ -41,12 +41,13 @@ COPY services/andler-net/Cargo.toml services/andler-net/Cargo.toml
 COPY services/andler-firmware/Cargo.toml services/andler-firmware/Cargo.toml
 COPY services/andler-store/Cargo.toml services/andler-store/Cargo.toml
 COPY services/andler-rpc/Cargo.toml services/andler-rpc/Cargo.toml
+COPY services/andler-guestfs/Cargo.toml services/andler-guestfs/Cargo.toml
 COPY apps/daemon/Cargo.toml apps/daemon/Cargo.toml
 COPY apps/cli/Cargo.toml apps/cli/Cargo.toml
 COPY apps/helper/Cargo.toml apps/helper/Cargo.toml
 
 # Stub sources so `cargo fetch` can resolve the workspace graph
-RUN for crate in andler-core andler-qemu andler-disk andler-net andler-firmware andler-store andler-rpc; do \
+RUN for crate in andler-core andler-qemu andler-disk andler-net andler-firmware andler-store andler-rpc andler-guestfs; do \
         dir="core/$crate"; [ -d "backends/$crate" ] && dir="backends/$crate"; [ -d "services/$crate" ] && dir="services/$crate"; \
         mkdir -p "$dir/src" && echo "// placeholder" > "$dir/src/lib.rs"; \
     done && \
