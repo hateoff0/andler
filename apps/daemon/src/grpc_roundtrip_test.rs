@@ -7,10 +7,10 @@ use andler_rpc::proto::andler_service_server::AndlerServiceServer;
 use andler_rpc::proto::{
     AttachDiskRequest, AttachNetworkRequest, AudioConfig, CloneInstanceRequest, CloneMode,
     CpuConfig, CreateInstanceRequest, DetachDiskRequest, DetachNetworkRequest, DiskConfig,
-    DisplayConfig, Empty, ExportInstanceDiskRequest, FirmwareConfig, GetInstanceConfigResponse,
-    GpuConfig, InputConfig, InstanceIdRequest, InstanceStateKind, MemoryConfig, NetworkConfig,
-    OpCancelRequest, RemoveInstanceRequest, Resolution, RestoreSnapshotRequest,
-    SetInstanceConfigRequest,
+    DisplayConfig, Empty, ExecCommandRequest, ExportInstanceDiskRequest, FirmwareConfig,
+    GetInstanceConfigResponse, GpuConfig, InputConfig, InstanceIdRequest, InstanceStateKind,
+    MemoryConfig, NetworkConfig, OpCancelRequest, RemoveInstanceRequest, Resolution,
+    RestoreSnapshotRequest, SetInstanceConfigRequest,
 };
 use tokio::net::TcpListener;
 use tokio_stream::wrappers::TcpListenerStream;
@@ -1342,6 +1342,42 @@ async fn op_list_and_cancel_round_trip_over_real_grpc() {
         .await
         .expect_err("cancelling an unknown operation must fail");
     assert_eq!(status.code(), tonic::Code::NotFound);
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn exec_command_round_trips_and_requires_running_instance() {
+    let (mut client, server) = spawn_server_and_connect().await;
+
+    let response = client
+        .create_instance(sample_create_instance_request())
+        .await
+        .expect("a fully-populated CreateInstanceRequest must be accepted")
+        .into_inner();
+
+    // Exec on a fresh (not started) instance fails with a state error —
+    // proving the ExecCommandRequest wire path reaches the daemon.
+    let status = client
+        .exec_command(ExecCommandRequest {
+            instance_id: response.instance_id.clone(),
+            argv: vec!["echo".to_string(), "hi".to_string()],
+            timeout_secs: None,
+        })
+        .await
+        .expect_err("exec on a stopped instance must fail");
+    assert_eq!(status.code(), tonic::Code::FailedPrecondition);
+
+    // Empty argv is rejected as invalid.
+    let status = client
+        .exec_command(ExecCommandRequest {
+            instance_id: response.instance_id,
+            argv: vec![],
+            timeout_secs: None,
+        })
+        .await
+        .expect_err("empty argv must fail");
+    assert_eq!(status.code(), tonic::Code::InvalidArgument);
 
     server.abort();
 }

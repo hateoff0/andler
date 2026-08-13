@@ -9,14 +9,15 @@ use andler_rpc::proto::{
     AttachDiskRequest, AttachDiskResponse, AttachNetworkRequest, AttachNetworkResponse,
     CloneInstanceRequest, ConfigKeyDiff, CreateAndroidInstanceRequest, CreateInstanceRequest,
     CreateInstanceResponse, CreateSnapshotRequest, CreateSnapshotResponse, DeleteSnapshotRequest,
-    DetachDiskRequest, DetachNetworkRequest, Empty, ExportInstanceDiskRequest,
-    ExportInstanceDiskResponse, GetAndroidBootModeResponse, GetConfigStatusResponse,
-    GetInstanceConfigResponse, GuestPackageEntry, InstallGuestAgentRequest, InstanceIdRequest,
-    InstanceListEntry, InstanceStatusResponse, ListGuestPackagesResponse, ListInstancesResponse,
-    ListSnapshotsResponse, LogLineResponse, OpCancelRequest, OpListResponse, OperationInfo,
-    OperationPhase, RemoveGuestAgentRequest, RemoveInstanceRequest, ResourceMetricsResponse,
-    RestoreSnapshotRequest, SetInstanceConfigRequest, SnapshotEntry, StopInstanceRequest,
-    SwitchAndroidBootModeRequest, SwitchArmTranslatorRequest, UpdateInstanceConfigRequest,
+    DetachDiskRequest, DetachNetworkRequest, Empty, ExecCommandRequest, ExecCommandResponse,
+    ExportInstanceDiskRequest, ExportInstanceDiskResponse, GetAndroidBootModeResponse,
+    GetConfigStatusResponse, GetInstanceConfigResponse, GuestPackageEntry,
+    InstallGuestAgentRequest, InstanceIdRequest, InstanceListEntry, InstanceStatusResponse,
+    ListGuestPackagesResponse, ListInstancesResponse, ListSnapshotsResponse, LogLineResponse,
+    OpCancelRequest, OpListResponse, OperationInfo, OperationPhase, RemoveGuestAgentRequest,
+    RemoveInstanceRequest, ResourceMetricsResponse, RestoreSnapshotRequest,
+    SetInstanceConfigRequest, SnapshotEntry, StopInstanceRequest, SwitchAndroidBootModeRequest,
+    SwitchArmTranslatorRequest, UpdateInstanceConfigRequest,
 };
 use futures_core::Stream;
 use futures_util::StreamExt;
@@ -631,5 +632,22 @@ impl AndlerService for DaemonService {
         let req = request.into_inner();
         self.daemon.cancel_operation(&req.op_id).await?;
         Ok(Response::new(Empty {}))
+    }
+
+    async fn exec_command(
+        &self,
+        request: Request<ExecCommandRequest>,
+    ) -> Result<Response<ExecCommandResponse>, Status> {
+        let req = request.into_inner();
+        let id = self.daemon.resolve_instance_id(&req.instance_id).await?;
+        let output = self
+            .daemon
+            .guest_exec_command(id, req.argv, req.timeout_secs)
+            .await?;
+        Ok(Response::new(ExecCommandResponse {
+            exit_code: output.exit_code,
+            stdout: output.stdout,
+            stderr: output.stderr,
+        }))
     }
 }

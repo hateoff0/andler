@@ -20,8 +20,8 @@ pub mod test_lock {
 
 pub use android_profile::{AndroidBootMode, AndroidProfile, AndroidVersion, ArmTranslator};
 pub use backend::{
-    BackendHandle, BackendStatus, HypervisorBackend, LogLine, LogStreamSource, ResourceMetrics,
-    SnapshotInfo,
+    BackendHandle, BackendStatus, GuestExecOutput, HypervisorBackend, LogLine, LogStreamSource,
+    ResourceMetrics, SnapshotInfo,
 };
 pub use clone::CloneMode;
 pub use config::{

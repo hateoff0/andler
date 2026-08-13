@@ -4,6 +4,7 @@ mod create;
 mod disk;
 mod doctor;
 mod edit;
+mod exec;
 mod guest;
 mod helpers;
 mod hotplug;
@@ -264,6 +265,14 @@ enum Command {
 
         #[arg(long, value_enum, default_value = "auto")]
         level: ConnectLevel,
+    },
+
+    /// Run a command in the guest through the guest agent (exit code relayed)
+    Exec {
+        instance_id: String,
+        /// Command and arguments to run in the guest
+        #[arg(last = true, required = true, num_args = 1..)]
+        argv: Vec<String>,
     },
 
     /// Start a stopped instance (boots QEMU)
@@ -790,6 +799,9 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
         Some(Command::Connect { instance_id, level }) => {
             connect::handle_connect(&mut client, instance_id, level).await?;
+        }
+        Some(Command::Exec { instance_id, argv }) => {
+            exec::handle_exec(&mut client, instance_id, argv).await?;
         }
         Some(Command::Start(args)) => {
             let id = args.resolve_id()?;

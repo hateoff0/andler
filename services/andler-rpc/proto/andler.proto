@@ -35,6 +35,7 @@ service AndlerService {
     rpc AttachNetwork(AttachNetworkRequest) returns (AttachNetworkResponse);
     rpc DetachNetwork(DetachNetworkRequest) returns (Empty);
     rpc ListOperations(Empty) returns (OpListResponse);
+    rpc ExecCommand(ExecCommandRequest) returns (ExecCommandResponse);
     rpc CancelOperation(OpCancelRequest) returns (Empty);
 }
 
@@ -443,6 +444,18 @@ message OpListResponse {
 
 message OpCancelRequest {
     string op_id = 1;
+}
+
+message ExecCommandRequest {
+    string instance_id = 1;
+    repeated string argv = 2;
+    optional uint64 timeout_secs = 3;
+}
+
+message ExecCommandResponse {
+    int32 exit_code = 1;
+    string stdout = 2;
+    string stderr = 3;
 }
 
 message ResourceMetricsResponse {

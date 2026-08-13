@@ -1296,6 +1296,56 @@ impl HypervisorBackend for QemuBackend {
         self.guest_exec_package(handle, package, false).await
     }
 
+    async fn guest_exec_command(
+        &self,
+        handle: &BackendHandle,
+        argv: &[String],
+        timeout: Option<std::time::Duration>,
+    ) -> Result<andler_core::GuestExecOutput, BackendError> {
+        if argv.is_empty() {
+            return Err(BackendError::Io(
+                "guest exec needs at least a program".to_string(),
+            ));
+        }
+        let mut instances = self.instances.lock().await;
+        let instance = instances
+            .get_mut(handle)
+            .ok_or_else(|| BackendError::HandleNotFound(handle.0.clone()))?;
+
+        let mut qga = Self::guest_agent_client(instance).await?;
+
+        let args: Vec<&str> = argv[1..].iter().map(String::as_str).collect();
+        let pid = qga
+            .guest_exec(&argv[0], &args)
+            .await
+            .map_err(qmp_error_to_backend_error)?;
+
+        let timeout = timeout.unwrap_or(std::time::Duration::from_secs(60));
+        use std::time::Instant;
+        let start = Instant::now();
+        loop {
+            let status = qga
+                .guest_exec_status(pid)
+                .await
+                .map_err(qmp_error_to_backend_error)?;
+            if status.exited {
+                return Ok(andler_core::GuestExecOutput {
+                    exit_code: status.exitcode.unwrap_or(-1) as i32,
+                    stdout: crate::qmp::decode_guest_exec_data(status.out_data).unwrap_or_default(),
+                    stderr: crate::qmp::decode_guest_exec_data(status.err_data).unwrap_or_default(),
+                });
+            }
+            if start.elapsed() > timeout {
+                return Err(qmp_error_to_backend_error(QmpError::CommandFailed {
+                    command: format!("guest-exec pid={pid}"),
+                    class: "Timeout".to_string(),
+                    desc: format!("guest command did not finish within {timeout:?}"),
+                }));
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+    }
+
     async fn set_guest_display_resolution(
         &self,
         handle: &BackendHandle,

@@ -258,4 +258,27 @@ pub trait HypervisorBackend: Send + Sync {
         let _ = (handle, binary_path);
         Ok(false)
     }
+
+    /// Runs an arbitrary command in the guest through the guest agent and
+    /// returns its exit code plus captured stdout/stderr.
+    async fn guest_exec_command(
+        &self,
+        handle: &BackendHandle,
+        argv: &[String],
+        timeout: Option<std::time::Duration>,
+    ) -> Result<GuestExecOutput, BackendError> {
+        let _ = (handle, argv, timeout);
+        Err(BackendError::NotImplemented {
+            backend: self.name(),
+            operation: "guest_exec_command",
+        })
+    }
+}
+
+/// Result of a guest-exec command.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GuestExecOutput {
+    pub exit_code: i32,
+    pub stdout: String,
+    pub stderr: String,
 }

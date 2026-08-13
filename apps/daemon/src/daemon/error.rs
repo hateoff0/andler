@@ -234,7 +234,7 @@ pub enum DaemonError {
     MissingOvmfVarsTemplate,
 
     #[error(
-        "hotplug requires instance {0:?} to be running or paused (currently {1:?}); \
+        "hotplug requires instance {0} to be running or paused (currently {1:?}); \
          start it first"
     )]
     HotplugRequiresRunningInstance(InstanceId, InstanceState),

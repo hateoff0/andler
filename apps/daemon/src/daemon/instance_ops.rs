@@ -506,6 +506,58 @@ impl Daemon {
         Ok(())
     }
 
+    /// Runs a command in the running guest via the guest agent (`andler
+    /// exec`). Requires the instance Running with a responsive QGA.
+    pub async fn guest_exec_command(
+        &self,
+        id: InstanceId,
+        argv: Vec<String>,
+        timeout_secs: Option<u64>,
+    ) -> Result<andler_core::GuestExecOutput, DaemonError> {
+        if argv.is_empty() {
+            return Err(DaemonError::InvalidConfigKey(
+                "exec needs at least a program".to_string(),
+            ));
+        }
+        let handle = self.handle_for(id).await?;
+        let (state, backend_handle, backend_kind) = {
+            (
+                handle.state(),
+                handle.backend_handle(),
+                handle.config().backend,
+            )
+        };
+        if !matches!(state, InstanceState::Running | InstanceState::Paused) {
+            return Err(DaemonError::HotplugRequiresRunningInstance(id, state));
+        }
+        let backend_handle = backend_handle.ok_or_else(|| DaemonError::GuestAgentUnavailable {
+            instance_id: id,
+            message: "instance is running but has no backend handle".to_string(),
+        })?;
+        let backend = self.backend_for(backend_kind)?;
+        let agent_unavailable = || DaemonError::GuestAgentUnavailable {
+            instance_id: id,
+            message:
+                "guest agent is not available (is the VM booted and qemu-guest-agent running?)"
+                    .to_string(),
+        };
+        // A missing/broken QGA socket surfaces as a connect error, not a
+        // `false` — map it to the same actionable message instead of a raw
+        // backend I/O error.
+        let agent_available = backend
+            .is_guest_agent_available(&backend_handle)
+            .await
+            .map_err(|_| agent_unavailable())?;
+        if !agent_available {
+            return Err(agent_unavailable());
+        }
+        let timeout = timeout_secs.map(std::time::Duration::from_secs);
+        backend
+            .guest_exec_command(&backend_handle, &argv, timeout)
+            .await
+            .map_err(|_| agent_unavailable())
+    }
+
     pub async fn install_guest_agent(
         &self,
         id: InstanceId,
