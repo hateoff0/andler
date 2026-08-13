@@ -11,13 +11,31 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 
 #### CLI
 
+- **`andler op list [--json]` / `andler op cancel <op-id>`**: long-running operations (snapshot restore is the first one) are tracked per instance and visible with their current phase and progress; cancel asks the operation to stop at its next cancel point (`OperationCancelled`). One operation per instance; a second one is rejected with `OperationAlreadyRunning`.
+- **`andler connect <id> [--level console|auto|ssh|adb]`**: single entry point to the guest. `console` attaches to the VM's serial console in raw terminal mode (works headless on any running VM — the serial moves to an attachable unix-socket chardev with `console.log` kept as a tee). `ssh`/`adb` spawn the external client against the configured `network.port_forwards` (guest port 22/5555). `auto` picks by effective profile: Android VMs booted into linux mode go to ssh, everything else to the serial console.
+- **`andler exec <id> -- <cmd> [args…]`**: runs a command in the guest through the guest agent and relays stdout/stderr plus the exit code; no guest network setup needed.
+- **`andler create --template <name>`**: VM templates merged as defaults < template < CLI flags. Built-ins `headless` and `desktop`; user templates in `~/.andler/templates/<name>.toml`. Only `--kind linux` in this phase.
+- **`network.port_forwards` in TOML files**: `[[network.port_forwards]]` entries (`protocol`/`host_port`/`guest_port`, optional `host_address`) become QEMU `hostfwd=` rules for nat-mode instances — the plumbing behind `connect --level ssh/adb`. Bridge/isolated configs reject the key at validation.
+- **`andler doctor`**: new `CAP_NET_ADMIN` check — bridge networking runs `ip link` directly in andlerd and fails without the capability; the check warns with a fix (`setcap` or `Nat` mode).
+- **Version handshake**: every command queries the daemon's build version first; a daemon from a different build is rejected with `daemon is version X, this CLI was built for Y; restart the daemon …` instead of an opaque protobuf error.
+- **`config view`** prints `boot_mode` for Android VMs; `guest boot-mode <id>` reads the mode from `instance.toml` (config-backed since P31, no offline disk mount) and works in any state.
+
+#### Daemon
+
+- **boot_mode is config-backed (P31)**: `switch_android_boot_mode` records the new mode in both `instance.toml` and the in-memory config after applying it to the disk; `get_android_boot_mode` reads the config and no longer requires a stopped instance (the `connect` level decision needs it on a Running VM).
+- **`guest_exec_command` on `HypervisorBackend`**: generic guest-agent command execution with a per-command timeout and exit-code/stderr returns (the existing `wait_for_guest_exec` keeps its install-path semantics).
+
+#### Backend (`andler-qemu`)
+
+- **Attachable serial console**: serial moves from `-serial file:` to a socket chardev (`server=on,wait=off`, `logfile`/`logappend` keeps `console.log` as the historical tee); `andler connect --level console` attaches directly to the socket.
+- **`network.port_forwards` in the QEMU command line**: slirp gets comma-joined `hostfwd=` entries on the primary `-nic`; passt gets its port list.
+
 - **`andler config status`**: reports how `instance.toml` and the daemon's loaded config relate — the per-key diff list (`file and memory are in sync` when identical), the live-applied resolution, and any file read/parse error. Manual file edits are applied on read for idle instances (Created/Stopped/Error) and never silently for Running/Paused ones — there they show up as a pending diff (next stop/start or `config set`/`edit` applies them). `andler list` annotates registry directories whose toml is missing/invalid/mismatched with `[broken: reason]` (and `broken_reason` in `--json`).
 - **`andler doctor` command**: Checks local environment health — KVM, QEMU, OVMF, nbd module, passwordless sudo, daemon reachability, base images. `--fix` flag offers to write missing sudoers rules via `visudo`.
 - **`andler attach` / `andler detach`**: Hot-plug extra disks (`attach disk --path <p> --size <s>` / `detach disk <p>`) and network devices (`attach net [--mode nat|bridge|isolated] [--bridge <if>] [--model <m>] [--nat-backend slirp|passt]` / `detach net <index>`) into a running/paused instance. Attached devices are persisted in `instance.toml` (`extra_disks`/`extra_networks`) and re-created automatically on the next start. Detaching a disk never deletes the image file.
 
 #### Backend (`andler-qemu`)
 
-- **Serial console logging**: `-serial file:console.log` captures QEMU serial output to a file next to the instance disk for debugging.
 - **`window-close=off`**: SDL and GTK display windows no longer close the VM when the window is closed — prevents accidental shutdown.
 - **Device hot-plug**: `blockdev-add`/`device_add` (virtio-blk-pci, virtio-net-pci) and `netdev-add` (user/tap/passt) over QMP for extra disks and networks, plus async-aware `device_del` (retries `blockdev-del`/`netdev-del` only while QEMU reports the device in use). Extra devices are also wired into the boot command line (`drive-extraN`/`net-extraN`, bridge taps embed the first 8 hex chars of the instance id), so attached devices reappear after a restart. Host tap/veth lifecycle for bridge mode is set up before spawn and torn down on stop, with rollback on failure.
 - **Happy-path hotplug on q35 without a display-less guest quirk**: `pcie.0` rejects `device_add`, so the QEMU command line reserves 16 `pcie-root-port` bridges (slots 0–7 for extra disks, 8–15 for extra networks); `device_add` and boot-time re-attach target the same bus. Detaching a disk is guest-driven — without a booted guest the unplug is never acknowledged and the operation fails after a 15s retry with an explicit "unplug was not acknowledged by the guest" error instead of a raw QEMU string; the image file is never touched. Attach itself works on a headless VM.

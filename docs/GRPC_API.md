@@ -44,6 +44,10 @@ The core service exposing all instance management operations.
 | `DetachDisk` | `DetachDiskRequest` | `Empty` | Unary | Hot-unplugs an extra disk (the image file is kept). |
 | `AttachNetwork` | `AttachNetworkRequest` | `AttachNetworkResponse` | Unary | Hot-plugs an extra network device into a running/paused instance and persists it in the config. |
 | `DetachNetwork` | `DetachNetworkRequest` | `Empty` | Unary | Hot-unplugs an extra network device by index. |
+| `ListOperations` | `Empty` | `OpListResponse` | Unary | Lists the long-running operation currently executing per instance. |
+| `CancelOperation` | `OpCancelRequest` | `Empty` | Unary | Requests cancellation of a running operation; the operation stops at its next cancel point and reports `OperationCancelled`. |
+| `ExecCommand` | `ExecCommandRequest` | `ExecCommandResponse` | Unary | Runs an arbitrary command in the guest via the guest agent and returns its exit code plus captured stdout/stderr. |
+| `GetVersion` | `Empty` | `VersionResponse` | Unary | Returns the daemon's build version (the CLI handshakes on this before every command, §13.19). |
 
 ---
 
@@ -205,6 +209,24 @@ Network configuration.
 | `mode` | `NetworkMode` | Network mode (nat/bridge/isolated). |
 | `device_model` | `string` | Virtual network device model (e.g., `virtio-net`). |
 | `nat_backend` | `NatBackend` | NAT implementation (ignored for bridge/isolated). |
+| `port_forwards` | `repeated PortForward` | Host→guest TCP/UDP port forwards, applied as QEMU `hostfwd=` entries (`mode = nat` only; bridge/isolated configs are rejected at validation). |
+
+### `PortForwardProtocol`
+
+| Value | Description |
+|-------|-------------|
+| `PORT_FORWARD_PROTOCOL_UNSPECIFIED` | Rejected on request paths. |
+| `TCP` | TCP forwarding (`hostfwd=tcp::<host_port>-:<guest_port>`). |
+| `UDP` | UDP forwarding (`hostfwd=udp::<host_port>-:<guest_port>`). |
+
+### `PortForward`
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `protocol` | `PortForwardProtocol` | L4 protocol of the forward. |
+| `host_port` | `uint32` | Port on the host that accepts connections. |
+| `guest_port` | `uint32` | Port inside the guest the traffic is forwarded to. |
+| `host_address` | `string` | Optional bind address on the host (empty = all interfaces). |
 
 ### `FirmwareConfig`
 
@@ -317,6 +339,7 @@ Android VM profile.
 | `gapps` | `bool` | Include Google Apps. |
 | `microg` | `bool` | Include microG. |
 | `arm_translator` | `ArmTranslator` | ARM translation layer. |
+| `boot_mode` | `AndroidBootMode` | What the guest boots into (default Android; `UNSPECIFIED` maps to Android). |
 
 ### `CreateAndroidInstanceRequest`
 
@@ -449,6 +472,7 @@ Full configuration of an instance (read-only).
 | `firmware` | `FirmwareConfig` | Firmware config. |
 | `audio` | `AudioConfig` | Audio config. |
 | `input` | `InputConfig` | Input config. |
+| `boot_mode` | `AndroidBootMode` | Effective boot mode of an Android VM (config-backed since P31; `UNSPECIFIED` for Linux VMs). |
 
 ### `UpdateInstanceConfigRequest`
 
@@ -544,6 +568,63 @@ Request to hot-unplug an extra network device.
 |-------|------|-------------|
 | `instance_id` | `string` | Instance ID (full or prefix). |
 | `index` | `uint32` | Index in the `extra_networks` list; out-of-range → `NOT_FOUND`. |
+
+### `OpListResponse`
+
+Lists the long-running operations currently tracked per instance.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `operations` | `repeated OperationInfo` | Active operations (one per instance; empty when nothing is running). |
+
+### `OperationInfo`
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `op_id` | `string` | Unique operation id (used by `CancelOperation`). |
+| `instance_id` | `string` | Instance the operation belongs to. |
+| `kind` | `string` | What the operation does (e.g. `SnapshotRestore`). |
+| `phases` | `repeated OperationPhase` | Weighted progress phases; the running phase is the progress label. |
+| `progress` | `double` | 0..1 completion estimate. |
+| `state` | `string` | `Running`/`Done`/`Cancelled`/`Failed`. |
+| `error` | `string` | Failure message when `state` is `Failed`. |
+
+### `OperationPhase`
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `name` | `string` | Phase label (e.g. `removing newer layers`). |
+| `weight` | `double` | Phase share of the operation's total weight. |
+
+### `OpCancelRequest`
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `op_id` | `string` | Operation to cancel. Unknown id → `NOT_FOUND`; an already-finished operation is reported as `OperationCancelled`. |
+
+### `ExecCommandRequest`
+
+Runs a command in the guest through the guest agent (`andler exec`).
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `instance_id` | `string` | Instance ID (full or prefix); must be Running/Paused. |
+| `argv` | `repeated string` | Command and arguments; empty → `INVALID_ARGUMENT`. |
+| `timeout_secs` | `optional uint64` | Per-command timeout (default 60s; a timeout reports the command as failed). |
+
+### `ExecCommandResponse`
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `exit_code` | `int32` | Guest process exit code. |
+| `stdout` | `string` | Captured guest stdout. |
+| `stderr` | `string` | Captured guest stderr. |
+
+### `VersionResponse`
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `version` | `string` | Daemon build version (`CARGO_PKG_VERSION`); the CLI refuses to run commands when it differs from its own build. |
 
 ### `LogStreamSource`
 
@@ -743,9 +824,9 @@ Single package entry.
 
 | gRPC Status | Daemon Error | When |
 |-------------|--------------|------|
-| `NOT_FOUND` | `InstanceNotFound`, `SnapshotNotFound`, `SnapshotLayerMissing`, `InstanceRefNotFound`, `DiskNotAttached`, `NetworkNotAttached` | Unknown instance/snapshot/layer/ref, or detaching a device that is not attached. |
+| `NOT_FOUND` | `InstanceNotFound`, `SnapshotNotFound`, `SnapshotLayerMissing`, `InstanceRefNotFound`, `DiskNotAttached`, `NetworkNotAttached`, `OperationNotFound` | Unknown instance/snapshot/layer/ref, detaching a device that is not attached, or cancelling an unknown operation. |
 | `UNIMPLEMENTED` | `NoBackendRegistered`, `Backend(NotImplemented)` | Backend kind not available. |
-| `FAILED_PRECONDITION` | `InvalidTransition`, `InstanceNotRemovable`, `InstanceNotClonable`, `InstanceAlreadyStopped`, `SharedBaseNotSupportedForLinuxVm`, `InstanceHasLiveClones`, `SnapshotOperationRequiresRunningInstance`, `SnapshotLimitExceeded`, `SnapshotRequiresQcow2`, `SnapshotInternalNotRestorable`, `RestoreTargetOnArchivedBranch`, `RestoreWouldBreakClones`, `DeleteWouldBreakClones`, `CannotDeleteBaseLayer`, `GuestAgentUnavailable`, `NotAndroid`, `InstanceMustBeStopped`, `HotplugRequiresRunningInstance`, `Backend(HandleNotFound)`, `Backend(ProcessNotRunning)` | Wrong lifecycle state, resource limit, snapshot chain constraint, guest agent unavailable, wrong instance kind. |
+| `FAILED_PRECONDITION` | `InvalidTransition`, `InstanceNotRemovable`, `InstanceNotClonable`, `InstanceAlreadyStopped`, `SharedBaseNotSupportedForLinuxVm`, `InstanceHasLiveClones`, `SnapshotOperationRequiresRunningInstance`, `SnapshotLimitExceeded`, `SnapshotRequiresQcow2`, `SnapshotInternalNotRestorable`, `RestoreTargetOnArchivedBranch`, `RestoreWouldBreakClones`, `DeleteWouldBreakClones`, `CannotDeleteBaseLayer`, `GuestAgentUnavailable`, `NotAndroid`, `InstanceMustBeStopped`, `HotplugRequiresRunningInstance`, `OperationAlreadyRunning`, `OperationCancelled`, `Backend(HandleNotFound)`, `Backend(ProcessNotRunning)` | Wrong lifecycle state, resource limit, snapshot chain constraint, guest agent unavailable, wrong instance kind, operation conflicts (one long op per instance; cancelled op). |
 | `ALREADY_EXISTS` | `SnapshotAlreadyExists`, `DiskAlreadyAttached` | Duplicate snapshot tag, or attaching a disk image that is already attached (including the primary disk). |
 | `INVALID_ARGUMENT` | `ConvertError`, `EmptyInstanceRef`, `MalformedInstanceRef`, `AmbiguousInstanceId`, `ConfigIdMismatch`, `ConfigKindChanged`, `ConfigDiskPathChanged`, `InvalidConfig`, `InvalidConfigKey`, `MissingOvmfVarsTemplate` | Malformed request or invalid arguments |
 | `RESOURCE_EXHAUSTED` | `InsufficientDiskSpace` | Not enough free space for a snapshot operation |

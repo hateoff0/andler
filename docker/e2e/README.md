@@ -83,6 +83,12 @@ Coverage by suite:
 | `11_process_supervision.sh` | `kill -9` of the live qemu process → instance lands in `Error { QEMU process exited unexpectedly }` promptly via pidfd death notification, restart-from-Error recovery, clean stop/remove |
 | `12_process_reconnect.sh` | SIGKILL of the daemon while the instance is Running → qemu survives, restarted daemon adopts it (`Running`, not `Error`), stop terminates the adopted process, remove leaves no strays |
 | `13_chain_reconcile.sh` | chain reconciliation across daemon restarts: clone protection (restore/delete refused while a linked clone consumes the chain, `remove the clones first`), crash-mid-restore rebuild of `disk.qcow2` on the chain head, crash-between-rename-pair promotion of the staging overlay (plus its `recovered-<uuid8>` entry), orphaned `.tmp-*` removal, crash-after-rename-pair layer recovery, metadata-entry-without-layer-file drop (archived branch head deleted behind the daemon's back), `--branch` switch-back returning ancestors to the main branch, final cleanup |
+| `14_op_progress.sh` | snapshot restore runs as a tracked operation: operation events in `events.jsonl` (kind/state/phase), `op list`/`op list --json`, `op cancel` of an unknown id, final cleanup |
+| `15_connect.sh` | `andler connect --level console`: stopped-instance negative (`start it first`), live attach relays OVMF serial output (BdsDxe), unknown-instance rejection, `console.log` tee next to the disk |
+| `16_exec.sh` | `andler exec`: stopped/unknown negatives (`requires instance … to be running`), running-without-guest-agent negative (`guest agent is not available`) |
+| `17_port_forwards.sh` | `network.port_forwards` round-trip: `create --file` with the key, `--dry-run` cmdline contains `hostfwd=tcp::2222-:22`, live TCP connect to the forwarded port while the VM runs, `connect --level ssh` degraded branch |
+| `18_boot_mode.sh` | P31: `config view` surfaces `boot_mode: android` from the config (no disk mount), `config set` refuses the key (immutable), `guest boot-mode` get is config-backed |
+| `19_version.sh` | version handshake: a matching CLI/daemon pair passes through |
 
 ### Deep guest tests
 

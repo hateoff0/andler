@@ -64,6 +64,7 @@ andler create \
 | `--overlay-size-gib <size>` | No | Overlay disk size in GiB (default: 128, Android only) |
 | `--linked-overlay` | No | Use a linked (backing-file) overlay instead of a standalone copy (Android only) |
 | `--instances-root <path>` | No | Instance directory root (default: `~/.andler/instances`) |
+| `--template <name>` | No | VM template applied over the defaults and under the CLI flags (merge order: defaults < template < flags). Built-ins: `headless` (CPU renderer, no display/audio) and `desktop` (Venus GPU, SDL display, audio). User templates live in `~/.andler/templates/<name>.toml` and accept the same partial sections. Only supported with `--kind linux` in this phase. |
 
 On success both file and CLI modes print `Created instance <name> (<id>)`. TOML mode requires `disk_path` and `iso_path`; a missing field is a clean error (`missing required field disk_path in instance file`), and an unknown `android_version` is rejected (`unsupported value for android_version: 12`).
 
@@ -157,6 +158,8 @@ andler config --instance <instance-id> [--edit]
 | `display.dpi` / `display.fps_limit` / `display.display_engine` / `display.fullscreen` | int / engine name / boolean | Instance must be stopped |
 | `gpu.render_backend` / `gpu.hostmem_bytes` / `gpu.blob` / `gpu.gl` | backend name / bytes / boolean | Instance must be stopped |
 | `network.mode` / `network.device_model` / `network.nat_backend` | mode / model / backend name | Instance must be stopped |
+| `network.port_forwards` | read-only | Immutable: fixed at create time (QEMU netdev `hostfwd=`) |
+| `kind.android_profile.boot_mode` / `kind.android_profile.arm_translator` / `kind.android_profile.android_version` | read-only | Immutable: use the dedicated `guest boot-mode` / `guest install <translator>` commands |
 | `audio.backend` / `audio.device` | backend / device name | Instance must be stopped |
 | `input.pointer_mode` / `input.hide_host_cursor` / `input.clipboard_enabled` | mode / boolean | Instance must be stopped |
 | `firmware.enable_uefi` | `true`\|`false` | Instance must be stopped |
@@ -314,6 +317,68 @@ andler disk compact /path/to/disk.qcow2
 | `compact <path>` | Compact a disk (reclaim unused space via `qemu-img convert`, only works on qcow2) |
 
 The flag form (`andler disk --create --path <p> --size <s>`, `--info`, `--resize`, `--compact`) is also accepted; the action flags are mutually exclusive (`disk: actions are mutually exclusive, got --create and --info`), and at least one is required.
+
+### `op`
+
+Long-running operation inspection and cancellation. Snapshot restores and
+other multi-phase operations run as tracked operations (one per instance);
+`op list` shows the running phase, `op cancel` asks the operation to stop at
+its next cancel point.
+
+```bash
+# List active operations (human-readable or --json)
+andler op list
+andler op list --json
+
+# Cancel a running operation (operation stops at its next cancel point)
+andler op cancel <op-id>
+```
+
+| Command | Description |
+|---------|-------------|
+| `list [--json]` | List active operations: op id, instance, kind, current phase, progress, state |
+| `cancel <op-id>` | Cancel a running operation; unknown id is an error |
+
+### `connect`
+
+Single entry point to the guest. `--level` selects the access method;
+`auto` picks by effective profile — Android VMs booted into `linux` mode go
+to ssh, everything else to the serial console.
+
+| Level | Mechanism | Requires |
+|-------|-----------|----------|
+| `console` | Direct attach to the VM's serial console (raw terminal; works headless, no guest OS needed) | Instance running |
+| `ssh` | Spawns `ssh -p <host_port> user@localhost` using the configured `network.port_forwards` entry for guest port 22 | Running guest with sshd; `network.port_forwards` set at create |
+| `adb` | Spawns `adb connect localhost:<host_port>` using the forward for guest port 5555 | Running Android guest with adb; forward configured |
+| `auto` | `console` for Linux VMs and Android-in-android mode; `ssh` for Android VMs booted into linux mode | — |
+
+```bash
+# Attach to the serial console (raw mode; Ctrl-C detaches)
+andler connect <instance-id> --level console
+
+# Interactive ssh session to the forwarded guest port
+andler connect <instance-id> --level ssh
+
+# Point adb at the forwarded guest port
+andler connect <instance-id> --level adb
+```
+
+The console socket is a chardev under `$XDG_RUNTIME_DIR/andler/console/<id>.sock`
+(`server=on,wait=off`); the serial log still lands in `console.log` next to
+the instance disk, so attach sessions never lose the historical log.
+
+### `exec`
+
+Runs a command inside the guest through the guest agent and relays its exit
+code — a programmatic access level that needs no guest network setup.
+
+```bash
+andler exec <instance-id> -- uname -a
+andler exec <instance-id> -- sh -c 'echo hi > /tmp/marker'
+```
+
+Requires the instance Running/Paused with a responsive `qemu-guest-agent`;
+stdout/stderr are relayed and the CLI exits with the guest's exit code.
 
 ### `guest`
 
@@ -516,6 +581,10 @@ gl = true
 [network]
 mode = "Nat"
 device_model = "virtio-net-pci"
+[[network.port_forwards]]
+protocol = "Tcp"
+host_port = 2222
+guest_port = 22
 
 [firmware]
 ovmf_code_path = "/usr/share/edk2/x64/OVMF_CODE.4m.fd"
