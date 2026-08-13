@@ -209,7 +209,38 @@ fn hypervisor_checks() -> Vec<Check> {
         ),
     });
 
+    checks.push(cap_net_admin_check());
+
     checks
+}
+
+/// CAP_NET_ADMIN (bit 12) is required for bridge mode: `ip link add ... type
+/// tap` / `master <bridge>` run directly in andlerd, with no sudo hop (see
+/// services/andler-net). Users without it can still use nat/isolated modes.
+fn parse_cap_eff(status: &str) -> Option<u64> {
+    status
+        .lines()
+        .find(|line| line.starts_with("CapEff:"))
+        .and_then(|line| line.split_whitespace().nth(1))
+        .and_then(|hex| u64::from_str_radix(hex, 16).ok())
+}
+
+fn cap_net_admin_check() -> Check {
+    let caps = std::fs::read_to_string("/proc/self/status")
+        .ok()
+        .as_deref()
+        .and_then(parse_cap_eff);
+    match caps {
+        Some(eff) if eff & (1u64 << 12) != 0 => {
+            ok("CAP_NET_ADMIN", "present — bridge networking available")
+        }
+        _ => warn(
+            "CAP_NET_ADMIN",
+            "absent — bridge networking (network mode = \"Bridge\") will fail",
+            "grant the capability or run andlerd under a user that has it: \
+             sudo setcap cap_net_admin+ep $(which andlerd), or use mode = \"Nat\"",
+        ),
+    }
 }
 
 fn nbd_checks() -> Vec<Check> {
@@ -763,5 +794,36 @@ mod tests {
         assert!(changed);
         assert!(content.contains(&"alice ALL=(root) NOPASSWD: /usr/bin/mkdir"));
         assert!(content.contains(&format!("bob ALL=(root) NOPASSWD: {HELPER_PATH}").as_str()));
+    }
+
+    #[cfg(test)]
+    mod cap_tests {
+        use super::parse_cap_eff;
+
+        #[test]
+        fn parse_cap_eff_reads_hex_mask() {
+            assert_eq!(
+                parse_cap_eff("Name:	foo\nCapEff:\t000001ffffffffff\nCapBnd:\t000001ffffffffff\n"),
+                Some(0x000001ffffffffff)
+            );
+        }
+
+        #[test]
+        fn parse_cap_eff_missing_line_is_none() {
+            assert_eq!(parse_cap_eff("Name:\tfoo\n"), None);
+        }
+
+        #[test]
+        fn parse_cap_eff_garbage_hex_is_none() {
+            assert_eq!(parse_cap_eff("CapEff:\tzebra\n"), None);
+        }
+
+        #[test]
+        fn cap_net_admin_bit_is_detected() {
+            // bit 12 = 0x1000
+            let status = format!("CapEff:\t{:x}\n", 1u64 << 12);
+            let caps = parse_cap_eff(&status).unwrap();
+            assert_ne!(caps & (1u64 << 12), 0);
+        }
     }
 }

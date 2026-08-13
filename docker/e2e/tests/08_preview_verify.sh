@@ -82,6 +82,7 @@ expect_out_grep "doctor hypervisor section" "^Hypervisor"
 expect_out_grep "doctor daemon section" "^Daemon"
 expect_out_grep "doctor checks /dev/kvm" "/dev/kvm"
 expect_out_grep "doctor checks qemu" "qemu-system-x86_64"
+expect_out_grep "doctor checks CAP_NET_ADMIN" "CAP_NET_ADMIN"
 
 echo "  [doctor --fix installs andler-helper + single rule]"
 # The container runs as root, so the checks pass trivially; break the
