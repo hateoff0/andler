@@ -17,7 +17,7 @@ use andler_rpc::proto::{
     OpCancelRequest, OpListResponse, OperationInfo, OperationPhase, RemoveGuestAgentRequest,
     RemoveInstanceRequest, ResourceMetricsResponse, RestoreSnapshotRequest,
     SetInstanceConfigRequest, SnapshotEntry, StopInstanceRequest, SwitchAndroidBootModeRequest,
-    SwitchArmTranslatorRequest, UpdateInstanceConfigRequest,
+    SwitchArmTranslatorRequest, UpdateInstanceConfigRequest, VersionResponse,
 };
 use futures_core::Stream;
 use futures_util::StreamExt;
@@ -632,6 +632,15 @@ impl AndlerService for DaemonService {
         let req = request.into_inner();
         self.daemon.cancel_operation(&req.op_id).await?;
         Ok(Response::new(Empty {}))
+    }
+
+    async fn get_version(
+        &self,
+        _request: Request<Empty>,
+    ) -> Result<Response<VersionResponse>, Status> {
+        Ok(Response::new(VersionResponse {
+            version: env!("CARGO_PKG_VERSION").to_string(),
+        }))
     }
 
     async fn exec_command(

@@ -19,10 +19,11 @@ mod wizard;
 
 use andler_rpc::proto::andler_service_client::AndlerServiceClient;
 use andler_rpc::proto::{
-    AndroidVersion as ProtoAndroidVersion, ArmTranslator as ProtoArmTranslator,
+    AndroidVersion as ProtoAndroidVersion, ArmTranslator as ProtoArmTranslator, Empty,
 };
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
+use tonic::transport::Channel;
 
 const DEFAULT_DAEMON_ADDR: &str = "http://127.0.0.1:50051";
 
@@ -695,6 +696,28 @@ fn looks_like_daemon_not_running(err: &(dyn std::error::Error + 'static)) -> boo
     false
 }
 
+/// Queries the daemon's version and fails with an actionable message when
+/// it differs from this CLI's build (§13.19). Stale daemons from an earlier
+/// refactor phase produce opaque protobuf errors; name the mismatch instead.
+async fn check_daemon_version(client: &mut AndlerServiceClient<Channel>) -> Result<(), String> {
+    let cli_version = env!("CARGO_PKG_VERSION");
+    let daemon_version = client
+        .get_version(Empty {})
+        .await
+        .map_err(|e| format!("cannot query daemon version: {e}"))?
+        .into_inner()
+        .version;
+    if daemon_version == cli_version {
+        Ok(())
+    } else {
+        Err(format!(
+            "daemon is version {daemon_version}, this CLI was built for {cli_version}; \
+             restart the daemon (`systemctl --user restart andlerd` or kill andlerd) so \
+             both sides speak the same protocol"
+        ))
+    }
+}
+
 #[tokio::main]
 async fn main() -> std::process::ExitCode {
     let addr = std::env::var("ANDLERD_ADDR").unwrap_or_else(|_| DEFAULT_DAEMON_ADDR.to_string());
@@ -742,6 +765,14 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let mut client = AndlerServiceClient::connect(addr).await?;
+
+    // Version handshake (§13.19): a CLI and daemon built from different
+    // refactor phases would otherwise surface as an opaque protobuf error
+    // mid-RPC. Report the mismatch explicitly and point at the fix.
+    if let Err(msg) = check_daemon_version(&mut client).await {
+        eprintln!("{msg}");
+        return Err("incompatible daemon version".into());
+    }
 
     match cli.command {
         None => {

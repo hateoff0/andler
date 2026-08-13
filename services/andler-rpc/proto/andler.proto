@@ -36,6 +36,7 @@ service AndlerService {
     rpc DetachNetwork(DetachNetworkRequest) returns (Empty);
     rpc ListOperations(Empty) returns (OpListResponse);
     rpc ExecCommand(ExecCommandRequest) returns (ExecCommandResponse);
+    rpc GetVersion(Empty) returns (VersionResponse);
     rpc CancelOperation(OpCancelRequest) returns (Empty);
 }
 
@@ -471,6 +472,10 @@ message ExecCommandResponse {
     int32 exit_code = 1;
     string stdout = 2;
     string stderr = 3;
+}
+
+message VersionResponse {
+    string version = 1;
 }
 
 message ResourceMetricsResponse {

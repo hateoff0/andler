@@ -165,6 +165,7 @@ fn sample_create_instance_request() -> CreateInstanceRequest {
         }),
         device_model: "virtio-net-pci".to_string(),
         nat_backend: andler_rpc::proto::NatBackend::Slirp as i32,
+        port_forwards: vec![],
     };
 
     let firmware = FirmwareConfig {
@@ -305,6 +306,7 @@ async fn create_instance_with_bridge_network_round_trips_over_real_grpc() {
         }),
         device_model: "virtio-net-pci".to_string(),
         nat_backend: andler_rpc::proto::NatBackend::Slirp as i32,
+        port_forwards: vec![],
     });
 
     let response = client
@@ -1378,6 +1380,21 @@ async fn exec_command_round_trips_and_requires_running_instance() {
         .await
         .expect_err("empty argv must fail");
     assert_eq!(status.code(), tonic::Code::InvalidArgument);
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn get_version_round_trips_and_matches_build() {
+    let (mut client, server) = spawn_server_and_connect().await;
+
+    let version = client
+        .get_version(Empty {})
+        .await
+        .expect("get_version must succeed over real gRPC")
+        .into_inner()
+        .version;
+    assert_eq!(version, env!("CARGO_PKG_VERSION"));
 
     server.abort();
 }
