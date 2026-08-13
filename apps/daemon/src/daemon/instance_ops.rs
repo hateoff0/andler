@@ -833,12 +833,13 @@ impl Daemon {
         mode: andler_core::AndroidBootMode,
     ) -> Result<(), DaemonError> {
         let handle = self.handle_for(id).await?;
-        let (overlay_path, state, kind) = {
+        let (overlay_path, state, kind, instance_dir) = {
             let config = handle.config();
             (
                 config.disk.path.clone(),
                 handle.state(),
                 config.kind.clone(),
+                handle.instance_dir().to_path_buf(),
             )
         };
 
@@ -853,6 +854,18 @@ impl Daemon {
 
         andler_disk::boot_mode::switch_boot_mode(&overlay_path, mode).await?;
 
+        // The instance.toml is the source of truth for the effective
+        // profile (P31): record the new boot mode so `get` and `connect`
+        // never need an offline disk mount. Both the file and the in-memory
+        // config are updated — a get right after switch must see the new
+        // value without a daemon restart.
+        let mut cfg = handle.config().clone();
+        if let InstanceKind::AndroidVm { android_profile } = &mut cfg.kind {
+            android_profile.boot_mode = mode;
+        }
+        write_instance_toml(&instance_dir, &cfg).await;
+        handle.set_config(cfg, None).await?;
+
         tracing::info!(instance_id = %id, mode = ?mode, "android boot mode switched successfully");
         Ok(())
     }
@@ -862,25 +875,12 @@ impl Daemon {
         id: InstanceId,
     ) -> Result<andler_core::AndroidBootMode, DaemonError> {
         let handle = self.handle_for(id).await?;
-        let (overlay_path, state, kind) = {
-            let config = handle.config();
-            (
-                config.disk.path.clone(),
-                handle.state(),
-                config.kind.clone(),
-            )
-        };
+        let kind = handle.config().kind.clone();
 
         match &kind {
-            InstanceKind::AndroidVm { .. } => {}
-            _ => return Err(DaemonError::NotAndroid(id)),
+            InstanceKind::AndroidVm { android_profile } => Ok(android_profile.boot_mode),
+            _ => Err(DaemonError::NotAndroid(id)),
         }
-
-        if !state.is_disk_idle() {
-            return Err(DaemonError::InstanceMustBeStopped(id, state));
-        }
-
-        Ok(andler_disk::boot_mode::current_boot_mode(&overlay_path)?)
     }
 
     pub async fn switch_arm_translator(

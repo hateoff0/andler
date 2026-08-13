@@ -425,6 +425,7 @@ fn print_instance_config(config: GetInstanceConfigResponse) {
         crate::helpers::backend_kind_name(config.backend())
     );
 
+    let boot_mode = config.boot_mode();
     match config.kind.and_then(|k| k.kind) {
         Some(instance_kind::Kind::LinuxVm(linux_vm)) => {
             println!("kind: LinuxVm");
@@ -438,6 +439,14 @@ fn print_instance_config(config: GetInstanceConfigResponse) {
                 println!("  gapps: {}", profile.gapps);
                 println!("  microg: {}", profile.microg);
                 println!("  arm_translator: {:?}", profile.arm_translator());
+                println!(
+                    "  boot_mode: {}",
+                    match boot_mode {
+                        andler_rpc::proto::AndroidBootMode::Android => "android",
+                        andler_rpc::proto::AndroidBootMode::Linux => "linux",
+                        andler_rpc::proto::AndroidBootMode::Unspecified => "unknown",
+                    }
+                );
             }
         }
         None => println!("kind: <missing>"),

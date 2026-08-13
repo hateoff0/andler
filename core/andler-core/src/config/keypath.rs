@@ -274,6 +274,13 @@ fn android_arm_translator_get(cfg: &InstanceConfig) -> String {
     }
 }
 
+fn android_boot_mode_get(cfg: &InstanceConfig) -> String {
+    match &cfg.kind {
+        InstanceKind::AndroidVm { android_profile } => android_profile.boot_mode.to_string(),
+        InstanceKind::LinuxVm { .. } => String::new(),
+    }
+}
+
 fn android_version_get(cfg: &InstanceConfig) -> String {
     match &cfg.kind {
         InstanceKind::AndroidVm { android_profile } => {
@@ -718,6 +725,15 @@ pub fn config_keys() -> &'static [ConfigKey] {
             live: false,
         },
         ConfigKey {
+            key: "kind.android_profile.boot_mode",
+            get: android_boot_mode_get,
+            set: None,
+            immutable_reason: Some(
+                "use the dedicated boot-mode command; switching rewrites the guest image",
+            ),
+            live: false,
+        },
+        ConfigKey {
             key: "kind.android_profile.android_version",
             get: android_version_get,
             set: None,
@@ -797,7 +813,7 @@ pub fn is_live_key(key: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::android_profile::{AndroidProfile, AndroidVersion, ArmTranslator};
+    use crate::android_profile::{AndroidBootMode, AndroidProfile, AndroidVersion, ArmTranslator};
     use crate::config::{
         CdromBus, CpuConfig, DiskConfig, DisplayConfig, FirmwareConfig, GpuConfig, InputConfig,
         InstanceId, MemoryConfig, NetworkConfig,
@@ -836,6 +852,7 @@ mod tests {
                 gapps: true,
                 microg: false,
                 arm_translator: ArmTranslator::Libndk,
+                boot_mode: AndroidBootMode::Android,
             },
         };
         cfg

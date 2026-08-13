@@ -166,7 +166,7 @@ pub fn resolve(profile: &AndroidProfile) -> Result<PathBuf, BaseImageError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::android_profile::{AndroidVersion, ArmTranslator};
+    use crate::android_profile::{AndroidBootMode, AndroidVersion, ArmTranslator};
     use crate::config::InstanceId;
     use crate::paths::ANDLER_HOME_ENV;
     use crate::test_lock::ENV_LOCK;
@@ -177,6 +177,7 @@ mod tests {
             gapps,
             microg: false,
             arm_translator: ArmTranslator::None,
+            boot_mode: AndroidBootMode::Android,
         }
     }
 

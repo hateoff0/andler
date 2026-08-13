@@ -73,6 +73,19 @@ impl TryFrom<proto::CloneMode> for CloneMode {
     }
 }
 
+impl TryFrom<proto::AndroidBootMode> for AndroidBootMode {
+    type Error = ConvertError;
+    fn try_from(value: proto::AndroidBootMode) -> Result<Self, Self::Error> {
+        // Unspecified maps to the default boot mode (Android), mirroring
+        // the serde default on the domain side; the request paths that
+        // require an explicit choice check their own fields.
+        match value {
+            proto::AndroidBootMode::Android => Ok(AndroidBootMode::Android),
+            proto::AndroidBootMode::Linux => Ok(AndroidBootMode::Linux),
+            proto::AndroidBootMode::Unspecified => Ok(AndroidBootMode::Android),
+        }
+    }
+}
 impl From<proto::ArmTranslator> for ArmTranslator {
     fn from(value: proto::ArmTranslator) -> Self {
         match value {
@@ -102,6 +115,7 @@ impl TryFrom<proto::AndroidProfile> for AndroidProfile {
             gapps: value.gapps,
             microg: value.microg,
             arm_translator: value.arm_translator().into(),
+            boot_mode: value.boot_mode().try_into()?,
         })
     }
 }
@@ -113,6 +127,7 @@ impl From<AndroidProfile> for proto::AndroidProfile {
             microg: value.microg,
             ..Default::default()
         };
+        msg.set_boot_mode(value.boot_mode.into());
         msg.set_android_version(value.android_version.into());
         msg.set_arm_translator(value.arm_translator.into());
         msg
@@ -788,6 +803,10 @@ impl From<InstanceKind> for proto::InstanceKind {
 
 impl From<InstanceConfig> for proto::GetInstanceConfigResponse {
     fn from(value: InstanceConfig) -> Self {
+        let boot_mode = match &value.kind {
+            InstanceKind::AndroidVm { android_profile } => android_profile.boot_mode.into(),
+            InstanceKind::LinuxVm { .. } => proto::AndroidBootMode::Unspecified,
+        };
         proto::GetInstanceConfigResponse {
             instance_id: value.id.to_string(),
             name: value.name,
@@ -804,6 +823,7 @@ impl From<InstanceConfig> for proto::GetInstanceConfigResponse {
             firmware: Some(value.firmware.into()),
             audio: Some(value.audio.into()),
             input: Some(value.input.into()),
+            boot_mode: boot_mode as i32,
         }
     }
 }
@@ -1151,6 +1171,7 @@ mod tests {
             gapps: true,
             microg: false,
             arm_translator: ArmTranslator::Libndk,
+            boot_mode: AndroidBootMode::Android,
         };
 
         let msg: proto::AndroidProfile = profile.clone().into();
@@ -1461,6 +1482,7 @@ mod tests {
                 gapps: true,
                 microg: false,
                 arm_translator: ArmTranslator::None,
+                boot_mode: AndroidBootMode::Android,
             },
         };
         let response: proto::GetInstanceConfigResponse = cfg.into();
@@ -1705,6 +1727,7 @@ mod tests {
                 gapps: true,
                 microg: false,
                 arm_translator: ArmTranslator::Libndk,
+                boot_mode: AndroidBootMode::Android,
             },
         };
         let response: proto::GetInstanceConfigResponse = cfg.clone().into();

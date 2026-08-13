@@ -177,6 +177,7 @@ pub fn ask_base_image(
         gapps,
         microg: false,
         arm_translator: andler_core::ArmTranslator::None,
+        boot_mode: andler_core::AndroidBootMode::Android,
     };
     let suggested = andler_core::base_image::resolve(&quick_profile)
         .ok()

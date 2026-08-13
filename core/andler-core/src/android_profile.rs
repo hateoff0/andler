@@ -32,8 +32,9 @@ pub enum ArmTranslator {
     Libhoudini,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AndroidBootMode {
+    #[default]
     Android,
     Linux,
 }
@@ -54,6 +55,9 @@ pub struct AndroidProfile {
     pub microg: bool,
 
     pub arm_translator: ArmTranslator,
+
+    #[serde(default)]
+    pub boot_mode: AndroidBootMode,
 }
 
 impl AndroidProfile {
@@ -128,6 +132,7 @@ mod tests {
             gapps: true,
             microg: false,
             arm_translator: ArmTranslator::Libndk,
+            boot_mode: AndroidBootMode::Android,
         }
     }
 

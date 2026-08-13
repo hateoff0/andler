@@ -1,6 +1,6 @@
 use super::common::*;
 use super::*;
-use andler_core::{AndroidProfile, ArmTranslator, InstanceKind};
+use andler_core::{AndroidBootMode, AndroidProfile, ArmTranslator, InstanceKind};
 
 #[tokio::test]
 async fn create_instance_registers_with_created_state() {
@@ -95,6 +95,7 @@ async fn create_android_instance_resolves_profile_and_creates_overlay() {
         gapps: true,
         microg: false,
         arm_translator: ArmTranslator::Libndk,
+        boot_mode: AndroidBootMode::Android,
     };
 
     let id = daemon
@@ -158,6 +159,7 @@ async fn create_android_instance_fails_when_base_image_missing() {
         gapps: false,
         microg: true,
         arm_translator: ArmTranslator::None,
+        boot_mode: AndroidBootMode::Android,
     };
 
     let err = daemon
@@ -202,6 +204,7 @@ async fn create_android_instance_cleans_up_instance_dir_on_missing_ovmf_template
         gapps: false,
         microg: true,
         arm_translator: ArmTranslator::None,
+        boot_mode: AndroidBootMode::Android,
     };
 
     let err = daemon

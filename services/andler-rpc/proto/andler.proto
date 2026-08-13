@@ -245,6 +245,7 @@ message AndroidProfile {
     reserved 4;
     reserved "libndk";
     ArmTranslator arm_translator = 6;
+    AndroidBootMode boot_mode = 7;
 }
 
 message CreateAndroidInstanceRequest {
@@ -341,6 +342,7 @@ message GetInstanceConfigResponse {
     InputConfig input = 13;
     repeated DiskConfig extra_disks = 14;
     repeated NetworkConfig extra_networks = 15;
+    AndroidBootMode boot_mode = 16;
 }
 
 message UpdateInstanceConfigRequest {

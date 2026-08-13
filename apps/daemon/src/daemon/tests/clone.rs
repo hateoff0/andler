@@ -1,6 +1,6 @@
 use super::common::*;
 use super::*;
-use andler_core::{AndroidProfile, ArmTranslator, CloneMode};
+use andler_core::{AndroidBootMode, AndroidProfile, ArmTranslator, CloneMode};
 use std::path::PathBuf;
 
 #[tokio::test]
@@ -397,6 +397,7 @@ async fn clone_instance_with_linked_mode_creates_overlay_pointing_at_source_disk
         gapps: false,
         microg: false,
         arm_translator: ArmTranslator::None,
+        boot_mode: AndroidBootMode::Android,
     };
     let source_id = daemon
         .create_android_instance(
@@ -472,6 +473,7 @@ async fn clone_instance_with_full_standalone_mode_has_no_base_image() {
         gapps: false,
         microg: false,
         arm_translator: ArmTranslator::None,
+        boot_mode: AndroidBootMode::Android,
     };
     let source_id = daemon
         .create_android_instance(
@@ -528,6 +530,7 @@ async fn clone_instance_with_shared_base_mode_survives_source_purge() {
         gapps: false,
         microg: false,
         arm_translator: ArmTranslator::None,
+        boot_mode: AndroidBootMode::Android,
     };
     let source_id = daemon
         .create_android_instance(
@@ -585,6 +588,7 @@ async fn clone_instance_of_a_clone_is_allowed() {
         gapps: false,
         microg: false,
         arm_translator: ArmTranslator::None,
+        boot_mode: AndroidBootMode::Android,
     };
     let source_id = daemon
         .create_android_instance(
@@ -660,6 +664,7 @@ async fn export_instance_disk_creates_standalone_file_without_registering_instan
         gapps: false,
         microg: false,
         arm_translator: ArmTranslator::None,
+        boot_mode: AndroidBootMode::Android,
     };
     let source_id = daemon
         .create_android_instance(

@@ -64,7 +64,10 @@ async fn get_android_boot_mode_rejects_non_android_instance() {
 }
 
 #[tokio::test]
-async fn get_android_boot_mode_rejects_running_instance() {
+async fn get_android_boot_mode_reads_config_while_running() {
+    // P31: boot_mode lives in instance.toml, so `get` must work in any
+    // state — the connect level decision needs it on a Running VM and
+    // must never require an offline disk mount.
     let daemon = Daemon::new();
     let cfg = sample_android_config(
         PathBuf::from("/tmp/test-android-disk-2.qcow2"),
@@ -73,9 +76,6 @@ async fn get_android_boot_mode_rejects_running_instance() {
     let id = cfg.id;
     register_with_state(&daemon, cfg, InstanceState::Running, None).await;
 
-    let err = daemon.get_android_boot_mode(id).await.unwrap_err();
-    assert!(matches!(
-        err,
-        DaemonError::InstanceMustBeStopped(_, InstanceState::Running)
-    ));
+    let mode = daemon.get_android_boot_mode(id).await.unwrap();
+    assert_eq!(mode, andler_core::AndroidBootMode::Android);
 }

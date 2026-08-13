@@ -35,9 +35,32 @@ pub async fn handle_connect(
     }
 
     match level {
-        ConnectLevel::Console | ConnectLevel::Auto => connect_console(&full_id).await,
+        ConnectLevel::Console => connect_console(&full_id).await,
         ConnectLevel::Ssh => connect_via_port_forward(client, &full_id, 22, "ssh").await,
         ConnectLevel::Adb => connect_via_port_forward(client, &full_id, 5555, "adb").await,
+        // Effective profile (kind × boot_mode, PLAN §12.A): an Android
+        // instance booted into linux mode is reached over ssh, one booted
+        // into android over adb; plain Linux VMs keep the serial console.
+        ConnectLevel::Auto => {
+            let config = client
+                .get_instance_config(InstanceIdRequest {
+                    instance_id: full_id.clone(),
+                })
+                .await?
+                .into_inner();
+            let is_android_booted_linux = config.kind.as_ref().is_some_and(|kind| {
+                matches!(
+                    kind.kind,
+                    Some(andler_rpc::proto::instance_kind::Kind::AndroidVm(_))
+                )
+            }) && config.boot_mode
+                == andler_rpc::proto::AndroidBootMode::Linux as i32;
+            if is_android_booted_linux {
+                connect_via_port_forward(client, &full_id, 22, "ssh").await
+            } else {
+                connect_console(&full_id).await
+            }
+        }
     }
 }
 
