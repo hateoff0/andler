@@ -7,7 +7,7 @@ use std::ffi::CString;
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::{symlink, MetadataExt, PermissionsExt};
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -111,24 +111,6 @@ fn validated_parent(root: &Path, path: &Path) -> Result<(), String> {
         .ok_or_else(|| format!("{} has no parent", path.display()))?;
     canonicalize_ancestor_under(root, parent)
 }
-
-/// A *fully existing* path whose canonical form sits inside the guest root.
-fn validated_existing(root: &Path, path: &Path) -> Result<PathBuf, String> {
-    if !path.is_absolute() {
-        return Err(format!("{} is not an absolute path", path.display()));
-    }
-    let canon =
-        fs::canonicalize(path).map_err(|e| format!("cannot resolve {}: {e}", path.display()))?;
-    if !validate::same_or_under(&canon, root) {
-        return Err(format!(
-            "{} escapes the managed guest mount {}",
-            path.display(),
-            root.display()
-        ));
-    }
-    Ok(canon)
-}
-
 fn sys_block(name: &str) -> PathBuf {
     Path::new("/sys/class/block").join(name)
 }
@@ -409,132 +391,6 @@ pub fn guest_write(mount: &str, path: &str) -> Result<i32, String> {
     Ok(0)
 }
 
-fn remove_guest_path(path: &Path) -> Result<(), String> {
-    let meta = match fs::symlink_metadata(path) {
-        Ok(m) => m,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(e) => return Err(format!("cannot stat {}: {e}", path.display())),
-    };
-    // With symlink_metadata a symlink is never a dir, so remove_dir_all only
-    // ever sees real directories; links are removed with remove_file.
-    if meta.is_dir() {
-        fs::remove_dir_all(path).map_err(|e| format!("cannot remove {}: {e}", path.display()))?;
-    } else {
-        fs::remove_file(path).map_err(|e| format!("cannot remove {}: {e}", path.display()))?;
-    }
-    Ok(())
-}
-
-/// A `cp -a`-equivalent guest copy: preserves files, directories, modes and
-/// symlinks. mtime/ownership parity is not needed for translator staging.
-fn copy_tree(src: &Path, dst: &Path) -> Result<(), String> {
-    let meta =
-        fs::symlink_metadata(src).map_err(|e| format!("cannot stat {}: {e}", src.display()))?;
-    if meta.file_type().is_symlink() {
-        let target =
-            fs::read_link(src).map_err(|e| format!("cannot read link {}: {e}", src.display()))?;
-        symlink(&target, dst).map_err(|e| format!("cannot create {}: {e}", dst.display()))?;
-        return Ok(());
-    }
-    if meta.is_dir() {
-        fs::create_dir_all(dst).map_err(|e| format!("cannot create {}: {e}", dst.display()))?;
-        for entry in fs::read_dir(src)
-            .map_err(|e| format!("cannot read {}: {e}", src.display()))?
-            .flatten()
-        {
-            copy_tree(&entry.path(), &dst.join(entry.file_name()))?;
-        }
-        let mode = meta.permissions().mode() & 0o7777;
-        fs::set_permissions(dst, fs::Permissions::from_mode(mode))
-            .map_err(|e| format!("cannot chmod {}: {e}", dst.display()))?;
-        return Ok(());
-    }
-    fs::copy(src, dst)
-        .map_err(|e| format!("cannot copy {} -> {}: {e}", src.display(), dst.display()))?;
-    Ok(())
-}
-
-fn one_path<'a>(op: &str, paths: &'a [String]) -> Result<&'a str, String> {
-    match paths {
-        [p] => Ok(p),
-        _ => Err(format!(
-            "file {op} expects exactly one path, got {}",
-            paths.len()
-        )),
-    }
-}
-
-fn two_paths<'a>(op: &str, paths: &'a [String]) -> Result<(&'a str, &'a str), String> {
-    match paths {
-        [a, b] => Ok((a, b)),
-        _ => Err(format!(
-            "file {op} expects exactly two paths, got {}",
-            paths.len()
-        )),
-    }
-}
-
-pub fn file_op(mount: &str, op: &str, paths: &[String]) -> Result<i32, String> {
-    let m = Path::new(mount);
-    ensure_guest_root(m)?;
-
-    match op {
-        "mkdir-p" => {
-            let p = Path::new(one_path(op, paths)?);
-            let rel = guest_rel(m, p)?;
-            let full = m.join(&rel);
-            validated_parent(m, &full)?;
-            fs::create_dir_all(&full).map_err(|e| format!("mkdir {}: {e}", p.display()))?;
-        }
-        "rm-rf" => {
-            let p = Path::new(one_path(op, paths)?);
-            let rel = guest_rel(m, p)?;
-            let full = m.join(&rel);
-            validated_parent(m, &full)?;
-            remove_guest_path(&full)?;
-        }
-        "mv" => {
-            let (src, dst) = two_paths(op, paths)?;
-            let src_rel = guest_rel(m, Path::new(src))?;
-            let dst_rel = guest_rel(m, Path::new(dst))?;
-            let full_src = m.join(&src_rel);
-            let full_dst = m.join(&dst_rel);
-            validated_parent(m, &full_src)?;
-            validated_parent(m, &full_dst)?;
-            fs::rename(&full_src, &full_dst)
-                .map_err(|e| format!("cannot move {} -> {}: {e}", src, dst))?;
-        }
-        "cp-a" => {
-            // The source is a *host* path (the translator cache lives under
-            // ~/.andler, outside any guest mount) and is only read; the
-            // destination is inside the guest. Writing stays restricted to
-            // the managed mount; the read side is bounded by the daemon being
-            // the only caller (a compromised daemon is root anyway).
-            let (src, dst) = two_paths(op, paths)?;
-            let src = Path::new(src);
-            if !src.is_absolute() {
-                return Err(format!("cp source must be absolute, got {src:?}"));
-            }
-            fs::symlink_metadata(src).map_err(|e| format!("cp source {}: {e}", src.display()))?;
-            let rel = guest_rel(m, Path::new(dst))?;
-            let full = m.join(&rel);
-            validated_parent(m, &full)?;
-            copy_tree(src, &full)?;
-        }
-        "chmod" => {
-            let (mode_str, path) = two_paths(op, paths)?;
-            let mode = validate::parse_octal_mode(mode_str)?;
-            let rel = guest_rel(m, Path::new(path))?;
-            let full = m.join(&rel);
-            let canon = validated_existing(m, &full)?;
-            fs::set_permissions(&canon, fs::Permissions::from_mode(mode))
-                .map_err(|e| format!("cannot chmod {}: {e}", path))?;
-        }
-        other => return Err(format!("unknown file operation {other:?}")),
-    }
-    Ok(0)
-}
-
 pub fn sudoers_print() -> Result<i32, String> {
     let path = Path::new("/etc/sudoers.d/andler");
     if let Ok(content) = fs::read_to_string(path) {
@@ -562,65 +418,6 @@ mod tests {
         fs::write(base.join("dir/file.txt"), b"content").unwrap();
         fs::write(base.join("top.txt"), b"top").unwrap();
         symlink("dir", base.join("linkdir")).unwrap();
-    }
-
-    #[test]
-    fn copy_tree_preserves_files_dirs_and_symlinks() {
-        let base = std::env::temp_dir().join(format!("andler-helper-cp-{}", std::process::id()));
-        let src = base.join("src");
-        let dst = base.join("dst");
-        make_tree(&src);
-
-        copy_tree(&src, &dst).expect("copy must succeed");
-
-        assert_eq!(
-            fs::read_to_string(dst.join("dir/file.txt")).unwrap(),
-            "content"
-        );
-        assert_eq!(fs::read_to_string(dst.join("top.txt")).unwrap(), "top");
-        assert!(fs::symlink_metadata(dst.join("linkdir"))
-            .unwrap()
-            .file_type()
-            .is_symlink());
-        assert_eq!(
-            fs::read_link(dst.join("linkdir")).unwrap(),
-            Path::new("dir")
-        );
-
-        fs::remove_dir_all(&base).ok();
-    }
-
-    #[test]
-    fn copy_tree_copies_symlink_targets_as_links() {
-        let base = std::env::temp_dir().join(format!("andler-helper-cpl-{}", std::process::id()));
-        let src = base.join("src");
-        fs::create_dir_all(&src).unwrap();
-        symlink("elsewhere", src.join("l")).unwrap();
-        let dst = base.join("dst");
-
-        copy_tree(&src, &dst).expect("copy must succeed");
-        assert!(fs::symlink_metadata(dst.join("l"))
-            .unwrap()
-            .file_type()
-            .is_symlink());
-
-        fs::remove_dir_all(&base).ok();
-    }
-
-    #[test]
-    fn remove_guest_path_is_idempotent_and_handles_links() {
-        let base = std::env::temp_dir().join(format!("andler-helper-rm-{}", std::process::id()));
-        fs::create_dir_all(base.join("sub")).unwrap();
-        fs::write(base.join("f"), b"x").unwrap();
-        symlink("f", base.join("l")).unwrap();
-
-        remove_guest_path(&base.join("l")).expect("remove link");
-        assert!(!base.join("l").exists());
-        assert!(base.join("f").exists());
-        remove_guest_path(&base.join("sub")).expect("remove dir");
-        remove_guest_path(&base.join("nope")).expect("missing is a no-op");
-
-        fs::remove_dir_all(&base).ok();
     }
 
     #[test]

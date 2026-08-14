@@ -31,7 +31,6 @@ Subcommands:
   umount <dir>                lazy-unmount one of our mounts
   chroot-run <dir> <cmd> ...  run a command chrooted into the guest root
   guest-write <dir> <path>    write stdin into a file in the guest root
-  file <dir> <op> <paths...>  mkdir-p | cp-a | mv | rm-rf | chmod under the guest
   sudoers-print               print /etc/sudoers.d/andler (for doctor --fix)
   --version | --help          print and exit 0
 
@@ -69,7 +68,6 @@ fn main() -> ExitCode {
         "umount" => run_exact(&args, 2, |a| ops::umount(&a[1])),
         "chroot-run" => run_chroot_run(&args),
         "guest-write" => run_exact(&args, 3, |a| ops::guest_write(&a[1], &a[2])),
-        "file" => run_file_op(&args),
         "sudoers-print" => finish(ops::sudoers_print()),
         other => {
             eprintln!("andler-helper: unknown subcommand {other:?}\n{USAGE}");
@@ -100,14 +98,6 @@ fn run_chroot_run(args: &[String]) -> ExitCode {
         return ExitCode::from(2);
     }
     finish(ops::chroot_run(&args[1], &args[2], &args[3..]))
-}
-
-fn run_file_op(args: &[String]) -> ExitCode {
-    if args.len() < 3 {
-        eprintln!("andler-helper: file expects <op> <dir> <paths...>");
-        return ExitCode::from(2);
-    }
-    finish(ops::file_op(&args[1], &args[2], &args[3..]))
 }
 
 fn finish(result: Result<i32, String>) -> ExitCode {

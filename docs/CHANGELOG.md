@@ -15,6 +15,8 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 
 - **ARM translator staging через GuestMutator**: `switch_translator_with` мигрировал staging (upload/chmod), замену старого транслятора (rm), перенос (mv) и запись build.prop/init.rc (write) на `GuestMutator`; один appliance-батч на фазу. `MutatorOp` получил `UploadFile` (host→guest), trait — `exists`. Чтение base build.prop: plain-путь через мутатор, waydroid `system.img` — read_file + debugfs на хостовой копии (без root). Helper-пути `file`/`guest-write` из arm_translator удалены.
 
+- **helper file-субкоманда удалена**: `file <dir> <op> <paths...>` (mkdir-p/cp-a/mv/rm-rf/chmod) больше не используется — translator staging мигрировал на GuestMutator. Удалены `file_op`, `copy_tree`, `remove_guest_path` и их тесты; helper урезан до package/nbd-путей (chroot-run, guest-write, mount/umount, nbd-connect/disconnect, modprobe-nbd).
+
 #### E2E
 
 - e2e-образ: `guestfs-tools` + `libguestfs-tools` + `linux-image-amd64` (ядро appliance); `/lib/modules` хост-маунт убран — appliance грузит Debian-ядро с Debian-модулями, а nbd-устройства приходят из общего с хостом ядра (`/dev/nbd*` уже существует; `modprobe` в контейнере не нужен).
