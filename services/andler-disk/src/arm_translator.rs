@@ -133,21 +133,36 @@ pub async fn switch_translator_with(
             );
             continue;
         }
-        let staged = Path::new(&staging).join(rel);
-        if let Some(parent) = staged.parent() {
-            staging_ops.push(MutatorOp::MkdirP {
-                path: parent.to_string_lossy().into_owned(),
+        // A resolved entry may be a single file or a directory tree —
+        // directories are walked recursively and every file uploaded.
+        let mut stack = vec![(src.clone(), Path::new(&staging).join(rel))];
+        while let Some((host_path, guest_path)) = stack.pop() {
+            if host_path.is_dir() {
+                for entry in std::fs::read_dir(&host_path).map_err(|e| {
+                    DiskError::FileSystem(format!("failed to read {}: {e}", host_path.display()))
+                })? {
+                    let entry = entry.map_err(|e| {
+                        DiskError::FileSystem(format!("failed to read dir entry: {e}"))
+                    })?;
+                    stack.push((entry.path(), guest_path.join(entry.file_name())));
+                }
+                continue;
+            }
+            if let Some(parent) = guest_path.parent() {
+                staging_ops.push(MutatorOp::MkdirP {
+                    path: parent.to_string_lossy().into_owned(),
+                });
+            }
+            staging_ops.push(MutatorOp::UploadFile {
+                path: guest_path.to_string_lossy().into_owned(),
+                host_path: host_path.clone(),
             });
-        }
-        staging_ops.push(MutatorOp::UploadFile {
-            path: staged.to_string_lossy().into_owned(),
-            host_path: src,
-        });
-        if rel.components().any(|c| c.as_os_str() == "bin") {
-            staging_ops.push(MutatorOp::Chmod {
-                path: staged.to_string_lossy().into_owned(),
-                mode: 0o755,
-            });
+            if guest_path.components().any(|c| c.as_os_str() == "bin") {
+                staging_ops.push(MutatorOp::Chmod {
+                    path: guest_path.to_string_lossy().into_owned(),
+                    mode: 0o755,
+                });
+            }
         }
     }
     mutator
