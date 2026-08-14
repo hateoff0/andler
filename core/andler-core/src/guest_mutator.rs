@@ -6,13 +6,36 @@ use thiserror::Error;
 /// instead of one per file (a staging run touches hundreds of files).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MutatorOp {
-    WriteFile { path: String, content: Vec<u8> },
-    MkdirP { path: String },
-    CpA { src: String, dst: String },
-    Mv { src: String, dst: String },
-    RmRf { path: String },
-    Chmod { path: String, mode: u32 },
-    Symlink { target: String, link: String },
+    WriteFile {
+        path: String,
+        content: Vec<u8>,
+    },
+    UploadFile {
+        path: String,
+        host_path: std::path::PathBuf,
+    },
+    MkdirP {
+        path: String,
+    },
+    CpA {
+        src: String,
+        dst: String,
+    },
+    Mv {
+        src: String,
+        dst: String,
+    },
+    RmRf {
+        path: String,
+    },
+    Chmod {
+        path: String,
+        mode: u32,
+    },
+    Symlink {
+        target: String,
+        link: String,
+    },
 }
 
 #[derive(Debug, Error)]
@@ -41,6 +64,9 @@ pub trait GuestMutator: Send + Sync {
 
     /// Reads a file's full content as raw bytes.
     async fn read_file(&self, path: &str) -> Result<Vec<u8>, MutatorError>;
+
+    /// Whether the path exists in the guest (file or directory).
+    async fn exists(&self, path: &str) -> Result<bool, MutatorError>;
 }
 
 /// Conformance suite shared by both real implementations. Each backend's
@@ -85,6 +111,22 @@ pub mod conformance {
             .expect("read back must succeed");
         assert_eq!(content, b"hello world\n");
 
+        let host_file = std::env::temp_dir().join("andler-mutator-upload.bin");
+        std::fs::write(&host_file, b"uploaded\x00bytes").expect("write host fixture");
+        m.apply(&[MutatorOp::UploadFile {
+            path: format!("{dir}/uploaded.bin"),
+            host_path: host_file.clone(),
+        }])
+        .await
+        .expect("upload must succeed");
+        assert_eq!(
+            m.read_file(&format!("{dir}/uploaded.bin"))
+                .await
+                .expect("uploaded read back"),
+            b"uploaded\x00bytes"
+        );
+        let _ = std::fs::remove_file(&host_file);
+
         m.apply(&[MutatorOp::CpA {
             src: format!("{dir}/hello.txt"),
             dst: format!("{dir}/copy.txt"),
@@ -106,11 +148,20 @@ pub mod conformance {
         .expect("mv must succeed");
         let err = m.read_file(&format!("{dir}/copy.txt")).await;
         assert!(err.is_err(), "source must be gone after mv");
+        assert!(
+            m.exists(&format!("{dir}/moved.txt")).await.unwrap(),
+            "moved file must exist"
+        );
+        assert!(
+            !m.exists(&format!("{dir}/copy.txt")).await.unwrap(),
+            "source must be gone after mv"
+        );
 
         m.apply(&[MutatorOp::RmRf {
             path: dir.to_string(),
         }])
         .await
         .expect("rm -rf must succeed");
+        assert!(!m.exists(dir).await.unwrap(), "removed dir must not exist");
     }
 }

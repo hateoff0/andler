@@ -66,6 +66,13 @@ impl QgaMutator {
                 .guest_file_write_bytes(path, content)
                 .await
                 .map_err(|e| MutatorError::Io(format!("write {path}: {e}"))),
+            MutatorOp::UploadFile { path, host_path } => {
+                let content = std::fs::read(host_path)
+                    .map_err(|e| MutatorError::Io(format!("read {}: {e}", host_path.display())))?;
+                qga.guest_file_write_bytes(path, &content)
+                    .await
+                    .map_err(|e| MutatorError::Io(format!("upload {path}: {e}")))
+            }
             MutatorOp::MkdirP { path } => {
                 self.exec_ok(qga, "mkdir", &["-p", path]).await?;
                 Ok(())
@@ -114,6 +121,28 @@ impl GuestMutator for QgaMutator {
         let out = self.exec_ok(&mut qga, "cat", &[path]).await?;
         out.map(|s| s.into_bytes())
             .ok_or_else(|| MutatorError::Io(format!("cat {path} produced no output")))
+    }
+
+    async fn exists(&self, path: &str) -> Result<bool, MutatorError> {
+        let mut qga = self.qga.lock().await;
+        let pid = qga
+            .guest_exec("test", &["-e", path])
+            .await
+            .map_err(|e| MutatorError::Io(e.to_string()))?;
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            let status = qga
+                .guest_exec_status(pid)
+                .await
+                .map_err(|e| MutatorError::Io(e.to_string()))?;
+            if status.exited {
+                return Ok(status.exitcode.unwrap_or(-1) == 0);
+            }
+            if std::time::Instant::now() > deadline {
+                return Err(MutatorError::Io(format!("guest test -e {path} timed out")));
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
     }
 }
 

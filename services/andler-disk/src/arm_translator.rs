@@ -2,9 +2,9 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use andler_core::android_profile::ArmTranslator;
+use andler_core::{GuestMutator, MutatorOp};
 
 use crate::error::DiskError;
-use crate::nbd;
 use crate::translator::{dir_name, resolve, MANAGED_PROP_KEYS};
 use crate::translator_download;
 
@@ -55,8 +55,8 @@ fn resolve_entry_paths(root: &Path, files: &[&str]) -> Vec<PathBuf> {
     out
 }
 
-pub async fn switch_translator(
-    overlay_path: &Path,
+pub async fn switch_translator_with(
+    mutator: &dyn GuestMutator,
     translator: ArmTranslator,
     translator_dir: Option<PathBuf>,
     android_version: &str,
@@ -72,17 +72,7 @@ pub async fn switch_translator(
         None => Some(translator_download::ensure_translator(translator, android_version).await?),
     };
 
-    let nbd_guard = nbd::connect_nbd(overlay_path)?;
-    let partitions = nbd::wait_for_partitions(nbd_guard.path())?;
-    let root_partition = nbd::find_root_partition(&partitions)?;
-    let mount_guard = nbd::mount_partition(&root_partition)?;
-
-    // andlerd runs unprivileged: even though the partition is mounted rw, the
-    // guest's root-owned directories reject raw std::fs writes with EPERM. All
-    // mutations go through `sudo -n` (same pattern as guest_tools.rs and
-    // boot_mode.rs); reads stay unprivileged.
-    let mount = mount_guard.path();
-    let waydroid_dir = match detect_waydroid_system_dir(mount)? {
+    let waydroid_dir = match detect_waydroid_system_dir_with(mutator).await? {
         Some(dir) => dir,
         None => {
             // A freshly created Android instance may have never booted, so
@@ -90,35 +80,44 @@ pub async fn switch_translator(
             // boot) has not run yet. The overlay upper dir is just a directory
             // tree bind-mounted over /system by the waydroid container —
             // creating it early is safe and lets installs work pre-first-boot.
-            let dir = mount.join("var/lib/waydroid/overlay");
-            helper_mkdir_p(mount, &dir.join("system"))?;
+            let dir = "/var/lib/waydroid/overlay".to_string();
+            mutator
+                .apply(&[MutatorOp::MkdirP {
+                    path: format!("{dir}/system"),
+                }])
+                .await
+                .map_err(|e| DiskError::FileSystem(format!("failed to create overlay dir: {e}")))?;
             dir
         }
     };
-    let system_dir = waydroid_dir.join("system");
+    let system_dir = format!("{waydroid_dir}/system");
 
-    let current = detect_current_translator(&system_dir)?;
+    let current = detect_current_translator_with(mutator, &system_dir).await?;
     if current == Some(translator) {
         tracing::info!(translator = ?translator, "translator already installed, skipping");
         return Ok(());
     }
 
-    // Stage the new translator's files in a temp dir first and verify the copy
-    // fully succeeds *before* touching the currently-installed (working) translator.
-    // Previously this removed the old translator's files first and only then copied
-    // the new ones in — if that copy failed partway through (disk full, permission
-    // error, missing source file), the guest was left with neither translator fully
-    // installed and no way to recover short of manual intervention.
-    let staging_dir = system_dir.join(".andler-translator-staging");
-    if staging_dir.exists() {
-        helper_rm_rf(mount, &staging_dir)?;
-    }
-    helper_mkdir_p(mount, &staging_dir)?;
-
+    // Stage the new translator's files first and verify every upload fully
+    // succeeds *before* touching the currently-installed (working) translator.
+    // Previously this removed the old translator's files first and only then
+    // copied the new ones in — a partial failure left the guest with neither
+    // translator fully installed and no way to recover short of manual
+    // intervention. One appliance session per batch (phase 4 requirement).
+    let staging = format!("{system_dir}/.andler-translator-staging");
     let rel_paths: Vec<PathBuf> = match &translator_files {
         Some(files) => resolve_entry_paths(files, info.files),
         None => Vec::new(),
     };
+
+    let mut staging_ops = vec![
+        MutatorOp::RmRf {
+            path: staging.clone(),
+        },
+        MutatorOp::MkdirP {
+            path: staging.clone(),
+        },
+    ];
     for rel in &rel_paths {
         // None has no payload, so rel_paths is empty — the source never
         // resolves to a real directory in that case.
@@ -126,86 +125,129 @@ pub async fn switch_translator(
             Some(files) => files.join(rel),
             None => continue,
         };
-        let staged = staging_dir.join(rel);
-        if src.exists() {
-            if let Some(parent) = staged.parent() {
-                helper_mkdir_p(mount, parent)?;
-            }
-            helper_cp_a(mount, &src, &staged)?;
-            if rel.components().any(|c| c.as_os_str() == "bin") {
-                helper_chmod(mount, 0o755, &staged)?;
-            }
-        } else {
+        if !src.exists() {
             tracing::warn!(
                 translator = ?translator,
                 file = %rel.display(),
                 "translator file missing from source, skipping"
             );
+            continue;
+        }
+        let staged = Path::new(&staging).join(rel);
+        if let Some(parent) = staged.parent() {
+            staging_ops.push(MutatorOp::MkdirP {
+                path: parent.to_string_lossy().into_owned(),
+            });
+        }
+        staging_ops.push(MutatorOp::UploadFile {
+            path: staged.to_string_lossy().into_owned(),
+            host_path: src,
+        });
+        if rel.components().any(|c| c.as_os_str() == "bin") {
+            staging_ops.push(MutatorOp::Chmod {
+                path: staged.to_string_lossy().into_owned(),
+                mode: 0o755,
+            });
         }
     }
+    mutator
+        .apply(&staging_ops)
+        .await
+        .map_err(|e| DiskError::FileSystem(format!("failed to stage translator: {e}")))?;
 
     // Staging succeeded in full — now it's safe to remove the old translator.
+    let mut cleanup_ops = Vec::new();
     if let Some(old) = current {
         let old_info = resolve(old);
-        for rel in resolve_entry_paths(&system_dir, old_info.files) {
-            helper_rm_rf(mount, &system_dir.join(rel))?;
+        for rel in resolve_entry_paths(Path::new(&system_dir), old_info.files) {
+            cleanup_ops.push(MutatorOp::RmRf {
+                path: format!("{system_dir}/{}", rel.display()),
+            });
         }
-        helper_rm_rf(
-            mount,
-            &system_dir
-                .join("etc/init")
-                .join(format!("{}.rc", dir_name(old))),
-        )?;
+        cleanup_ops.push(MutatorOp::RmRf {
+            path: format!("{system_dir}/etc/init/{}.rc", dir_name(old)),
+        });
+        mutator
+            .apply(&cleanup_ops)
+            .await
+            .map_err(|e| DiskError::FileSystem(format!("failed to remove old translator: {e}")))?;
     }
 
-    // Move the already-verified staged files into place. A rename on the same
-    // filesystem (which this always is — both paths are under the same NBD-mounted
-    // partition) is far more reliable than the copy loop it replaces here.
+    // Move the already-verified staged files into place (same filesystem
+    // rename — more reliable than a second copy loop).
+    let mut move_ops = Vec::new();
     for rel in &rel_paths {
-        let staged = staging_dir.join(rel);
-        let dst = system_dir.join(rel);
-        if staged.exists() {
-            if let Some(parent) = dst.parent() {
-                helper_mkdir_p(mount, parent)?;
-            }
-            if dst.exists() {
-                helper_rm_rf(mount, &dst)?;
-            }
-            helper_mv(mount, &staged, &dst)?;
+        let staged = Path::new(&staging).join(rel);
+        let dst = Path::new(&system_dir).join(rel);
+        let staged_guest = staged.to_string_lossy().into_owned();
+        let dst_guest = dst.to_string_lossy().into_owned();
+        if !mutator
+            .exists(&staged_guest)
+            .await
+            .map_err(|e| DiskError::FileSystem(format!("failed to stat staged file: {e}")))?
+        {
+            continue;
         }
+        if let Some(parent) = dst.parent() {
+            move_ops.push(MutatorOp::MkdirP {
+                path: parent.to_string_lossy().into_owned(),
+            });
+        }
+        if mutator
+            .exists(&dst_guest)
+            .await
+            .map_err(|e| DiskError::FileSystem(format!("failed to stat destination: {e}")))?
+        {
+            move_ops.push(MutatorOp::RmRf {
+                path: dst_guest.clone(),
+            });
+        }
+        move_ops.push(MutatorOp::Mv {
+            src: staged_guest,
+            dst: dst_guest,
+        });
     }
-    helper_rm_rf(mount, &staging_dir)?;
+    move_ops.push(MutatorOp::RmRf {
+        path: staging.clone(),
+    });
+    mutator
+        .apply(&move_ops)
+        .await
+        .map_err(|e| DiskError::FileSystem(format!("failed to install translator: {e}")))?;
 
-    let build_prop_path = system_dir.join("build.prop");
+    let build_prop_path = format!("{system_dir}/build.prop");
     // The upper build.prop shadows the base image's /system/build.prop
     // wholesale, so a partial upper must start from the base's props.
-    let mut props = base_build_prop(mount)?;
+    let mut props = base_build_prop_with(mutator).await?;
     for key in MANAGED_PROP_KEYS {
         props.remove(*key);
     }
     for (key, value) in info.props {
         props.insert(key.to_string(), value.to_string());
     }
-    helper_guest_write(
-        mount,
-        &build_prop_path,
-        build_prop_content(&props).as_bytes(),
-    )?;
-
+    let mut writes = vec![MutatorOp::WriteFile {
+        path: build_prop_path.clone(),
+        content: build_prop_content(&props).into_bytes(),
+    }];
     if let Some(rc_content) = info.init_rc {
-        let rc_path = system_dir
-            .join("etc/init")
-            .join(format!("{}.rc", dir_name(translator)));
-        if let Some(parent) = rc_path.parent() {
-            helper_mkdir_p(mount, parent)?;
-        }
-        helper_guest_write(mount, &rc_path, rc_content.as_bytes())?;
+        let rc_path = format!("{system_dir}/etc/init/{}.rc", dir_name(translator));
+        writes.push(MutatorOp::WriteFile {
+            path: rc_path,
+            content: rc_content.as_bytes().to_vec(),
+        });
     }
+    mutator
+        .apply(&writes)
+        .await
+        .map_err(|e| DiskError::FileSystem(format!("failed to write translator config: {e}")))?;
 
     Ok(())
 }
 
-fn detect_current_translator(system_dir: &Path) -> Result<Option<ArmTranslator>, DiskError> {
+async fn detect_current_translator_with(
+    mutator: &dyn GuestMutator,
+    system_dir: &str,
+) -> Result<Option<ArmTranslator>, DiskError> {
     for (translator, detect_path) in &[
         (ArmTranslator::Libndk, crate::translator::ndk::DETECT_FILE),
         (
@@ -213,24 +255,35 @@ fn detect_current_translator(system_dir: &Path) -> Result<Option<ArmTranslator>,
             crate::translator::houdini::DETECT_FILE,
         ),
     ] {
-        if system_dir.join(detect_path).exists() {
+        let path = format!("{system_dir}/{detect_path}");
+        if mutator
+            .exists(&path)
+            .await
+            .map_err(|e| DiskError::FileSystem(format!("failed to inspect {path}: {e}")))?
+        {
             return Ok(Some(*translator));
         }
     }
     Ok(None)
 }
 
-fn detect_waydroid_system_dir(mount_point: &Path) -> Result<Option<PathBuf>, DiskError> {
-    let waydroid_overlay = mount_point.join("var/lib/waydroid/overlay");
-    if waydroid_overlay.exists() {
-        return Ok(Some(waydroid_overlay));
+async fn detect_waydroid_system_dir_with(
+    mutator: &dyn GuestMutator,
+) -> Result<Option<String>, DiskError> {
+    if mutator
+        .exists("/var/lib/waydroid/overlay")
+        .await
+        .map_err(|e| DiskError::FileSystem(format!("failed to inspect guest: {e}")))?
+    {
+        return Ok(Some("/var/lib/waydroid/overlay".to_string()));
     }
-
-    let alt_overlay = mount_point.join("overlay");
-    if alt_overlay.join("system").exists() {
-        return Ok(Some(alt_overlay));
+    if mutator
+        .exists("/overlay/system")
+        .await
+        .map_err(|e| DiskError::FileSystem(format!("failed to inspect guest: {e}")))?
+    {
+        return Ok(Some("/overlay".to_string()));
     }
-
     Ok(None)
 }
 
@@ -248,51 +301,64 @@ fn parse_build_prop(content: &str) -> HashMap<String, String> {
     props
 }
 
-fn read_build_prop(path: &Path) -> Result<HashMap<String, String>, DiskError> {
-    let content = std::fs::read_to_string(path)
-        .map_err(|e| DiskError::FileSystem(format!("failed to read build.prop: {e}")))?;
-    Ok(parse_build_prop(&content))
-}
-
 /// The guest's pristine build.prop *below* the waydroid overlay. The upper
 /// overlay build.prop shadows it wholesale, so the upper must always start
 /// from the base file — the existing upper is deliberately not a source: it
 /// is derived data, and reinstalling regenerates it (an upper written by a
 /// buggy build contains only translator props and would hide the base's
 /// `ro.*` props, breaking Android boot). Two guest layouts exist: a plain
-/// `<root>/system/build.prop`, and the waydroid mainline layout where the
-/// Android system is a loop-mounted `etc/waydroid-extra/images/system.img`
-/// (ext4) — the file is extracted with `debugfs` (e2fsprogs, essential on
-/// Debian/Arch, needs no root to read the image).
-fn base_build_prop(mount_point: &Path) -> Result<HashMap<String, String>, DiskError> {
-    let plain = mount_point.join("system/build.prop");
-    if plain.is_file() {
-        return read_build_prop(&plain);
+/// `/system/build.prop`, and the waydroid mainline layout where the Android
+/// system is a loop-mounted `etc/waydroid-extra/images/system.img` (ext4).
+/// The image is read out of the guest and extracted with `debugfs`
+/// (e2fsprogs, needs no root); images are small (a few MB).
+async fn base_build_prop_with(
+    mutator: &dyn GuestMutator,
+) -> Result<HashMap<String, String>, DiskError> {
+    match mutator.read_file("/system/build.prop").await {
+        Ok(content) => return Ok(parse_build_prop(&String::from_utf8_lossy(&content))),
+        Err(err) => tracing::debug!("no plain /system/build.prop: {err}"),
     }
-    let image = mount_point.join("etc/waydroid-extra/images/system.img");
-    if image.is_file() {
-        let output = std::process::Command::new("debugfs")
-            .args(["-R", "cat /system/build.prop"])
-            .arg(&image)
-            .output()
-            .map_err(|e| DiskError::FileSystem(format!("failed to run debugfs: {e}")))?;
-        if output.status.success() {
-            return Ok(parse_build_prop(&String::from_utf8_lossy(&output.stdout)));
+
+    match mutator
+        .read_file("/etc/waydroid-extra/images/system.img")
+        .await
+    {
+        Ok(image) => {
+            let tmp = std::env::temp_dir().join(format!(
+                "andler-system-img-{}-{}.img",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos())
+                    .unwrap_or(0)
+            ));
+            std::fs::write(&tmp, &image)
+                .map_err(|e| DiskError::FileSystem(format!("failed to stage system image: {e}")))?;
+            let output = std::process::Command::new("debugfs")
+                .args(["-R", "cat /system/build.prop"])
+                .arg(&tmp)
+                .output()
+                .map_err(|e| DiskError::FileSystem(format!("failed to run debugfs: {e}")))?;
+            let _ = std::fs::remove_file(&tmp);
+            if output.status.success() {
+                return Ok(parse_build_prop(&String::from_utf8_lossy(&output.stdout)));
+            }
+            return Err(DiskError::FileSystem(format!(
+                "cannot extract /system/build.prop from the waydroid system image: \
+                 debugfs exited with {} ({})",
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
+            )));
         }
-        return Err(DiskError::FileSystem(format!(
-            "cannot extract /system/build.prop from {}: debugfs exited with {} ({})",
-            image.display(),
-            output.status,
-            String::from_utf8_lossy(&output.stderr).trim()
-        )));
+        Err(err) => tracing::debug!("no waydroid system image either: {err}"),
     }
-    Err(DiskError::FileSystem(format!(
-        "no base build.prop found: neither {} nor the waydroid system image {} \
-         exists; refusing to write an upper build.prop that would shadow the \
-         base's props wholesale",
-        plain.display(),
-        image.display()
-    )))
+
+    Err(DiskError::FileSystem(
+        "no base build.prop found: neither /system/build.prop nor the waydroid \
+         system image /etc/waydroid-extra/images/system.img exists; refusing to \
+         write an upper build.prop that would shadow the base's props wholesale"
+            .to_string(),
+    ))
 }
 
 fn build_prop_content(props: &HashMap<String, String>) -> String {
@@ -301,160 +367,149 @@ fn build_prop_content(props: &HashMap<String, String>) -> String {
     lines.join("\n") + "\n"
 }
 
-fn helper_file_output(
-    mount: &Path,
-    op: &str,
-    paths: &[&str],
-) -> Result<std::process::Output, DiskError> {
-    nbd::helper_command("file")
-        .arg(mount)
-        .arg(op)
-        .args(paths)
-        .output()
-        .map_err(|e| DiskError::FileSystem(format!("failed to run andler-helper file {op}: {e}")))
-}
-
-fn helper_ok(mount: &Path, op: &str, paths: &[&str], what: &str) -> Result<(), DiskError> {
-    let output = helper_file_output(mount, op, paths)?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(DiskError::FileSystem(format!(
-            "{what} failed ({}): {}",
-            output.status,
-            nbd::describe_helper_failure(stderr.trim())
-        )));
-    }
-    Ok(())
-}
-
-fn helper_mkdir_p(mount: &Path, path: &Path) -> Result<(), DiskError> {
-    helper_ok(
-        mount,
-        "mkdir-p",
-        &[&path.to_string_lossy()],
-        &format!("mkdir {}", path.display()),
-    )
-}
-
-fn helper_cp_a(mount: &Path, src: &Path, dst: &Path) -> Result<(), DiskError> {
-    helper_ok(
-        mount,
-        "cp-a",
-        &[&src.to_string_lossy(), &dst.to_string_lossy()],
-        &format!("cp {} -> {}", src.display(), dst.display()),
-    )
-}
-
-fn helper_mv(mount: &Path, src: &Path, dst: &Path) -> Result<(), DiskError> {
-    helper_ok(
-        mount,
-        "mv",
-        &[&src.to_string_lossy(), &dst.to_string_lossy()],
-        &format!("mv {} -> {}", src.display(), dst.display()),
-    )
-}
-
-fn helper_rm_rf(mount: &Path, path: &Path) -> Result<(), DiskError> {
-    helper_ok(
-        mount,
-        "rm-rf",
-        &[&path.to_string_lossy()],
-        &format!("rm {}", path.display()),
-    )
-}
-
-fn helper_chmod(mount: &Path, mode: u32, path: &Path) -> Result<(), DiskError> {
-    let mode_str = format!("{mode:o}");
-    helper_ok(
-        mount,
-        "chmod",
-        &[&mode_str, &path.to_string_lossy()],
-        &format!("chmod {} {}", mode, path.display()),
-    )
-}
-
-fn helper_guest_write(mount: &Path, path: &Path, content: &[u8]) -> Result<(), DiskError> {
-    // Content travels over the helper's stdin; the helper chroots and replaces
-    // the target file itself (removing a possibly-dangling symlink first), so
-    // the guest write no longer needs a host-side temp file roundtrip.
-    use std::io::Write;
-    let mut child = nbd::helper_command("guest-write")
-        .arg(mount)
-        .arg(path)
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .map_err(|e| {
-            DiskError::FileSystem(format!("failed to run andler-helper guest-write: {e}"))
-        })?;
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin
-            .write_all(content)
-            .map_err(|e| DiskError::FileSystem(format!("failed to feed andler-helper: {e}")))?;
-    }
-    let output = child.wait_with_output().map_err(|e| {
-        DiskError::FileSystem(format!("failed to run andler-helper guest-write: {e}"))
-    })?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(DiskError::FileSystem(format!(
-            "write {} failed ({}): {}",
-            path.display(),
-            output.status,
-            nbd::describe_helper_failure(stderr.trim())
-        )));
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn detect_current_translator_returns_none_on_empty_dir() {
-        let dir = std::env::temp_dir().join("andler_test_empty_dir");
-        std::fs::create_dir_all(&dir).unwrap();
-        let result = detect_current_translator(&dir).unwrap();
+    /// GuestMutator over a local directory — lets the guest-path logic be
+    /// unit-tested without an appliance or a guest agent.
+    struct TestMutator {
+        root: std::path::PathBuf,
+    }
+
+    impl TestMutator {
+        fn new() -> Self {
+            static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let root = std::env::temp_dir().join(format!(
+                "andler-test-mutator-{}-{}-{n}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            TestMutator { root }
+        }
+
+        fn guest(&self, path: &str) -> std::path::PathBuf {
+            self.root.join(path.trim_start_matches('/'))
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl GuestMutator for TestMutator {
+        fn name(&self) -> &'static str {
+            "test"
+        }
+
+        async fn apply(&self, ops: &[MutatorOp]) -> Result<(), andler_core::MutatorError> {
+            for op in ops {
+                match op {
+                    MutatorOp::WriteFile { path, content } => {
+                        if let Some(parent) = self.guest(path).parent() {
+                            std::fs::create_dir_all(parent)
+                                .map_err(|e| andler_core::MutatorError::Io(e.to_string()))?;
+                        }
+                        std::fs::write(self.guest(path), content)
+                            .map_err(|e| andler_core::MutatorError::Io(e.to_string()))?;
+                    }
+                    MutatorOp::UploadFile { path, host_path } => {
+                        if let Some(parent) = self.guest(path).parent() {
+                            std::fs::create_dir_all(parent)
+                                .map_err(|e| andler_core::MutatorError::Io(e.to_string()))?;
+                        }
+                        std::fs::copy(host_path, self.guest(path))
+                            .map_err(|e| andler_core::MutatorError::Io(e.to_string()))?;
+                    }
+                    MutatorOp::MkdirP { path } => {
+                        std::fs::create_dir_all(self.guest(path))
+                            .map_err(|e| andler_core::MutatorError::Io(e.to_string()))?;
+                    }
+                    MutatorOp::CpA { src, dst } => {
+                        std::fs::copy(self.guest(src), self.guest(dst))
+                            .map_err(|e| andler_core::MutatorError::Io(e.to_string()))?;
+                    }
+                    MutatorOp::Mv { src, dst } => {
+                        if let Some(parent) = self.guest(dst).parent() {
+                            std::fs::create_dir_all(parent)
+                                .map_err(|e| andler_core::MutatorError::Io(e.to_string()))?;
+                        }
+                        std::fs::rename(self.guest(src), self.guest(dst))
+                            .map_err(|e| andler_core::MutatorError::Io(e.to_string()))?;
+                    }
+                    MutatorOp::RmRf { path } => {
+                        let p = self.guest(path);
+                        if p.exists() {
+                            std::fs::remove_dir_all(&p)
+                                .or_else(|_| std::fs::remove_file(&p))
+                                .map_err(|e| andler_core::MutatorError::Io(e.to_string()))?;
+                        }
+                    }
+                    MutatorOp::Chmod { path, mode } => {
+                        use std::os::unix::fs::PermissionsExt;
+                        std::fs::set_permissions(
+                            self.guest(path),
+                            std::fs::Permissions::from_mode(*mode),
+                        )
+                        .map_err(|e| andler_core::MutatorError::Io(e.to_string()))?;
+                    }
+                    MutatorOp::Symlink { target, link } => {
+                        if let Some(parent) = self.guest(link).parent() {
+                            std::fs::create_dir_all(parent)
+                                .map_err(|e| andler_core::MutatorError::Io(e.to_string()))?;
+                        }
+                        let _ = std::fs::remove_file(self.guest(link));
+                        std::os::unix::fs::symlink(target, self.guest(link))
+                            .map_err(|e| andler_core::MutatorError::Io(e.to_string()))?;
+                    }
+                }
+            }
+            Ok(())
+        }
+
+        async fn read_file(&self, path: &str) -> Result<Vec<u8>, andler_core::MutatorError> {
+            std::fs::read(self.guest(path))
+                .map_err(|e| andler_core::MutatorError::Io(e.to_string()))
+        }
+
+        async fn exists(&self, path: &str) -> Result<bool, andler_core::MutatorError> {
+            Ok(self.guest(path).exists())
+        }
+    }
+
+    #[tokio::test]
+    async fn detect_current_translator_returns_none_on_empty_dir() {
+        let m = TestMutator::new();
+        let result = detect_current_translator_with(&m, "/system").await.unwrap();
         assert!(result.is_none());
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
-    #[test]
-    fn detect_waydroid_system_dir_returns_none_on_never_booted_image() {
-        let dir = std::env::temp_dir().join(format!(
-            "andler_test_waydroid_{}_{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        assert_eq!(detect_waydroid_system_dir(&dir).unwrap(), None);
-        let _ = std::fs::remove_dir_all(&dir);
+    #[tokio::test]
+    async fn detect_waydroid_system_dir_returns_none_on_never_booted_image() {
+        let m = TestMutator::new();
+        assert_eq!(detect_waydroid_system_dir_with(&m).await.unwrap(), None);
     }
 
-    #[test]
-    fn detect_waydroid_system_dir_prefers_standard_overlay_path() {
-        let dir = std::env::temp_dir().join(format!(
-            "andler_test_waydroid2_{}_{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(dir.join("var/lib/waydroid/overlay/system")).unwrap();
-        std::fs::create_dir_all(dir.join("overlay/system")).unwrap();
-        let result = detect_waydroid_system_dir(&dir).unwrap();
+    #[tokio::test]
+    async fn detect_waydroid_system_dir_prefers_standard_overlay_path() {
+        let m = TestMutator::new();
+        m.apply(&[MutatorOp::MkdirP {
+            path: "/var/lib/waydroid/overlay/system".to_string(),
+        }])
+        .await
+        .unwrap();
+        m.apply(&[MutatorOp::MkdirP {
+            path: "/overlay/system".to_string(),
+        }])
+        .await
+        .unwrap();
+        let result = detect_waydroid_system_dir_with(&m).await.unwrap();
         assert_eq!(
             result,
-            Some(dir.join("var/lib/waydroid/overlay")),
+            Some("/var/lib/waydroid/overlay".to_string()),
             "the standard waydroid overlay path must win over the legacy fallback"
         );
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -559,19 +614,17 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
-    #[test]
-    fn base_build_prop_reads_plain_layout_and_errors_without_source() {
-        let dir = std::env::temp_dir().join(format!(
-            "andler_test_props_{}_{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(dir.join("system")).unwrap();
+    #[tokio::test]
+    async fn base_build_prop_reads_plain_layout_and_errors_without_source() {
+        let m = TestMutator::new();
+        m.apply(&[MutatorOp::MkdirP {
+            path: "/system".to_string(),
+        }])
+        .await
+        .unwrap();
 
-        let err = base_build_prop(&dir)
+        let err = base_build_prop_with(&m)
+            .await
             .err()
             .expect("no base source must be a hard error, not a silent empty set");
         let text = err.to_string();
@@ -580,12 +633,13 @@ mod tests {
             "error must name the missing sources: {text}"
         );
 
-        std::fs::write(
-            dir.join("system/build.prop"),
-            "# comment\nro.product.model=Base\nro.build.version.sdk=33\n",
-        )
+        m.apply(&[MutatorOp::WriteFile {
+            path: "/system/build.prop".to_string(),
+            content: b"# comment\nro.product.model=Base\nro.build.version.sdk=33\n".to_vec(),
+        }])
+        .await
         .unwrap();
-        let props = base_build_prop(&dir).unwrap();
+        let props = base_build_prop_with(&m).await.unwrap();
         assert_eq!(
             props.get("ro.product.model").map(|s| s.as_str()),
             Some("Base")
@@ -595,36 +649,37 @@ mod tests {
             Some("33"),
             "comment lines must be skipped, real keys parsed"
         );
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
-    #[test]
-    fn base_build_prop_prefers_plain_layout_over_system_image() {
-        let dir = std::env::temp_dir().join(format!(
-            "andler_test_img_{}_{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(dir.join("system")).unwrap();
-        std::fs::create_dir_all(dir.join("etc/waydroid-extra/images")).unwrap();
-        std::fs::write(dir.join("system/build.prop"), "ro.product.model=Plain\n").unwrap();
-        // The image file is not a real ext4 here — it must not even be
-        // touched, the plain layout wins.
-        std::fs::write(
-            dir.join("etc/waydroid-extra/images/system.img"),
-            b"not an image",
-        )
+    #[tokio::test]
+    async fn base_build_prop_prefers_plain_layout_over_system_image() {
+        let m = TestMutator::new();
+        m.apply(&[
+            MutatorOp::MkdirP {
+                path: "/system".to_string(),
+            },
+            MutatorOp::MkdirP {
+                path: "/etc/waydroid-extra/images".to_string(),
+            },
+            MutatorOp::WriteFile {
+                path: "/system/build.prop".to_string(),
+                content: b"ro.product.model=Plain\n".to_vec(),
+            },
+            // The image file is not a real ext4 here — it must not even be
+            // touched, the plain layout wins.
+            MutatorOp::WriteFile {
+                path: "/etc/waydroid-extra/images/system.img".to_string(),
+                content: b"not an image".to_vec(),
+            },
+        ])
+        .await
         .unwrap();
 
-        let props = base_build_prop(&dir).unwrap();
+        let props = base_build_prop_with(&m).await.unwrap();
         assert_eq!(
             props.get("ro.product.model").map(|s| s.as_str()),
             Some("Plain")
         );
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

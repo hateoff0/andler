@@ -981,8 +981,8 @@ impl Daemon {
             _ => "13".to_string(),
         };
 
-        andler_disk::arm_translator::switch_translator(
-            &overlay_path,
+        andler_disk::arm_translator::switch_translator_with(
+            &andler_guestfs::GuestfsMutator::new(overlay_path.clone()),
             translator,
             translator_dir,
             &android_version,

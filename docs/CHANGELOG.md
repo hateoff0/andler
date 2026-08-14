@@ -13,6 +13,8 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 
 - **boot-mode switching через GuestMutator**: `switch_boot_mode_with` мигрировал с nbd/mount/chroot на `GuestMutator` (offline — `GuestfsMutator` appliance; замена `default.target` = rm + symlink, `ln -s` не перезаписывает существующую ссылку). `current_boot_mode`/`read_boot_mode` удалены — get уже config-backed (P31). Первый шаг фазы 4: nbd-путь остаётся только для chroot-кухни пакетных операций.
 
+- **ARM translator staging через GuestMutator**: `switch_translator_with` мигрировал staging (upload/chmod), замену старого транслятора (rm), перенос (mv) и запись build.prop/init.rc (write) на `GuestMutator`; один appliance-батч на фазу. `MutatorOp` получил `UploadFile` (host→guest), trait — `exists`. Чтение base build.prop: plain-путь через мутатор, waydroid `system.img` — read_file + debugfs на хостовой копии (без root). Helper-пути `file`/`guest-write` из arm_translator удалены.
+
 #### E2E
 
 - e2e-образ: `guestfs-tools` + `libguestfs-tools` + `linux-image-amd64` (ядро appliance); `/lib/modules` хост-маунт убран — appliance грузит Debian-ядро с Debian-модулями, а nbd-устройства приходят из общего с хостом ядра (`/dev/nbd*` уже существует; `modprobe` в контейнере не нужен).

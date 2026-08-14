@@ -112,6 +112,13 @@ fn build_script(ops: &[MutatorOp], content_dir: &Path) -> String {
                     quote(path)
                 ));
             }
+            MutatorOp::UploadFile { path, host_path } => {
+                lines.push(format!(
+                    "upload {} {}",
+                    quote(&host_path.to_string_lossy()),
+                    quote(path)
+                ));
+            }
             MutatorOp::MkdirP { path } => {
                 lines.push(format!("mkdir-p {}", quote(path)));
             }
@@ -173,6 +180,12 @@ impl GuestMutator for GuestfsMutator {
     async fn read_file(&self, path: &str) -> Result<Vec<u8>, MutatorError> {
         let script = format!("download {} -\n", quote(path));
         self.run_guestfish(&["--no-progress"], &script, true).await
+    }
+
+    async fn exists(&self, path: &str) -> Result<bool, MutatorError> {
+        let script = format!("exists {}\n", quote(path));
+        let out = self.run_guestfish(&[], &script, true).await?;
+        Ok(String::from_utf8_lossy(&out).trim() == "true")
     }
 }
 
