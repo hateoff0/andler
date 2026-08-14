@@ -192,8 +192,8 @@ impl Daemon {
         // or the disk has no real partition table), log it and continue rather than blocking
         // instance creation entirely — the instance is still usable, just left on whatever
         // boot mode the base image defaults to, and can be fixed with `andler guest boot-mode`.
-        if let Err(e) = andler_disk::boot_mode::switch_boot_mode(
-            &disk.path,
+        if let Err(e) = andler_disk::boot_mode::switch_boot_mode_with(
+            &andler_guestfs::GuestfsMutator::new(disk.path.clone()),
             andler_core::AndroidBootMode::Android,
         )
         .await
@@ -914,7 +914,11 @@ impl Daemon {
             return Err(DaemonError::InstanceMustBeStopped(id, state));
         }
 
-        andler_disk::boot_mode::switch_boot_mode(&overlay_path, mode).await?;
+        andler_disk::boot_mode::switch_boot_mode_with(
+            &andler_guestfs::GuestfsMutator::new(overlay_path.clone()),
+            mode,
+        )
+        .await?;
 
         // The instance.toml is the source of truth for the effective
         // profile (P31): record the new boot mode so `get` and `connect`

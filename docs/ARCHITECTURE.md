@@ -72,7 +72,7 @@ Wrapper around `qemu-img` for disk creation/cloning/resizing, plus guest tools o
 - `nbd.rs`: nbd device management with flock-based locking, `nbd_status()`, and the chroot environment setup (`bind_host_mounts`): the guest's `/etc/resolv.conf` is *written* with the host's nameservers (via the `guest-write` helper subcommand — a dangling symlink would make a bind-mount fail with ENOENT), `/dev`, `/proc`, `/sys` are bind-mounted, and a fresh tmpfs is mounted on the guest's `/run` (gpg-agent, used by pacman, needs a writable `/run`)
 - `guest_tools.rs`: offline guest provisioning via `qemu-nbd` + mount + chroot: detects the package manager (apt-get/dnf/pacman), refreshes package indexes (`update`/`makecache`/`-Sy`) and installs/removes packages inside the chroot
 - `arm_translator.rs`: ARM translator package staging in guest images (atomic staging + rename)
-- `boot_mode.rs`: Android/Linux boot-mode switching by re-pointing the guest's `default.target` symlink through chroot
+- `boot_mode.rs`: Android/Linux boot-mode switching by re-pointing the guest's `default.target` symlink through a `GuestMutator` (`switch_boot_mode_with`) — offline via the `GuestfsMutator` appliance, online via QGA; reading the mode is config-backed (P31), no disk access
 - `diskspace.rs`: free-space pre-check before snapshots
 
 **~45 unit tests** (+ ignored integration tests requiring qemu-img).

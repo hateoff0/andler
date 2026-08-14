@@ -9,7 +9,14 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Added
 
-#### CLI
+#### Daemon
+
+- **boot-mode switching через GuestMutator**: `switch_boot_mode_with` мигрировал с nbd/mount/chroot на `GuestMutator` (offline — `GuestfsMutator` appliance; замена `default.target` = rm + symlink, `ln -s` не перезаписывает существующую ссылку). `current_boot_mode`/`read_boot_mode` удалены — get уже config-backed (P31). Первый шаг фазы 4: nbd-путь остаётся только для chroot-кухни пакетных операций.
+
+#### E2E
+
+- e2e-образ: `guestfs-tools` + `libguestfs-tools` + `linux-image-amd64` (ядро appliance); `/lib/modules` хост-маунт убран — appliance грузит Debian-ядро с Debian-модулями, а nbd-устройства приходят из общего с хостом ядра (`/dev/nbd*` уже существует; `modprobe` в контейнере не нужен).
+
 
 - **`andler events [<id>] [--follow] [--json]`**: streams daemon events from the live bus — lifecycle transitions, operation state changes, raw QMP events, diagnostic log lines. Exits after the first event unless `--follow`; instance filter resolves full/prefix ids. Instance creation now emits a log event, so `(create &); andler events` shows the creation line.
 

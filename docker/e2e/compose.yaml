@@ -16,10 +16,11 @@ services:
       - /dev/kvm
 
   # Full E2E suite (docker/e2e/e2e.sh). Requires /dev/kvm.
-  # privileged + /lib/modules are only needed for the deep guest tests
-  # (offline package install/list, boot-mode: qemu-nbd + mount inside the
-  # container). The suite skips them when the nbd module is unavailable, so
-  # set E2E_PRIVILEGED=false to run without them.
+  # privileged is needed for the deep guest tests (guestfish appliance,
+  # offline package install/list). /lib/modules is deliberately NOT bind-
+  # mounted: the guestfish appliance boots the Debian kernel shipped in the
+  # image and needs the matching Debian modules — the host's modules would
+  # be loaded instead and the appliance would hang waiting for its root.
   e2e:
     build:
       context: ../..
@@ -28,8 +29,6 @@ services:
     devices:
       - /dev/kvm
     privileged: ${E2E_PRIVILEGED:-true}
-    volumes:
-      - /lib/modules:/lib/modules:ro
     environment:
       E2E_DEEP_GUEST: "1"
 

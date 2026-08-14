@@ -619,6 +619,7 @@ dependencies = [
  "andler-core",
  "andler-disk",
  "andler-firmware",
+ "andler-guestfs",
  "andler-qemu",
  "andler-rpc",
  "andler-store",

@@ -31,7 +31,7 @@ pub enum MutatorError {
 /// the same observable result for the same op batch — the conformance
 /// suite in `guest_mutator::conformance` runs against each.
 #[async_trait]
-pub trait GuestMutator {
+pub trait GuestMutator: Send + Sync {
     fn name(&self) -> &'static str;
 
     /// Applies a batch of mutations in one session. The batch contract is

@@ -117,6 +117,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         kmod \
         ovmf \
         procps \
+        guestfs-tools \
+        libguestfs-tools \
+        linux-image-amd64 \
         qemu-system-x86 \
         qemu-utils \
         sudo \
