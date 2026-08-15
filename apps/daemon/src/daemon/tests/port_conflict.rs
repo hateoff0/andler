@@ -53,7 +53,7 @@ async fn start_allows_same_port_when_other_instance_is_stopped() {
         guest_port: 22,
         host_address: None,
     }];
-    let id_a = cfg_a.id;
+    let _id_a = cfg_a.id;
     register_with_state(&daemon, cfg_a, InstanceState::Stopped, None).await;
 
     let mut cfg_b = sample_config();

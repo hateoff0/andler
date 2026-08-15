@@ -413,13 +413,6 @@ mod tests {
         assert!(err.contains("not found"), "err: {err}");
     }
 
-    fn make_tree(base: &Path) {
-        fs::create_dir_all(base.join("dir")).unwrap();
-        fs::write(base.join("dir/file.txt"), b"content").unwrap();
-        fs::write(base.join("top.txt"), b"top").unwrap();
-        symlink("dir", base.join("linkdir")).unwrap();
-    }
-
     #[test]
     fn mountpoint_owner_check_skipped_without_sudo_uid() {
         let base = std::env::temp_dir().join(format!("andler-helper-own-{}", std::process::id()));
@@ -447,7 +440,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn chroot_allowlist_covers_package_manager_queries() {
         // offline `guest remove` runs the package manager's own query
         // binary (`dpkg -l` / `rpm -q`) through chroot-run; a query binary
@@ -461,6 +453,7 @@ mod tests {
         }
     }
 
+    #[test]
     fn guest_rel_rejects_escapes_and_relative_paths() {
         let mount = std::env::temp_dir().join(format!("andler-helper-esc-{}", std::process::id()));
         fs::create_dir_all(&mount).unwrap();

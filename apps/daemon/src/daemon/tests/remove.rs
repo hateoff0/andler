@@ -92,7 +92,7 @@ async fn remove_instance_succeeds_from_stopped() {
 #[tokio::test]
 async fn remove_instance_without_purge_forgets_registry_but_keeps_disk() {
     let dir = TestTempDir::new();
-    let daemon = Daemon::new();
+    let _daemon = Daemon::new();
     let mut cfg = sample_config();
     let disk_path = dir.path().join("disk.qcow2");
     let vars_path = dir.path().join("VARS.fd");
@@ -119,7 +119,7 @@ async fn remove_instance_without_purge_forgets_registry_but_keeps_disk() {
 #[tokio::test]
 async fn remove_instance_with_purge_deletes_instance_toml() {
     let dir = TestTempDir::new();
-    let daemon = Daemon::new();
+    let _daemon = Daemon::new();
     let mut cfg = sample_config();
     cfg.disk.path = dir.path().join("disk.qcow2");
     cfg.firmware.ovmf_vars_path = dir.path().join("VARS.fd");
