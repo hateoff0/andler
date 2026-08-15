@@ -156,10 +156,11 @@ where
 
     fn call(&mut self, request: tonic::codegen::http::Request<ReqBody>) -> Self::Future {
         let method = request.uri().path().to_string();
+        // gRPC metadata travels as HTTP headers on the wire; the layer sits
+        // below tonic's Request conversion, so read the header directly.
         let request_id = request
-            .extensions()
-            .get::<tonic::metadata::MetadataMap>()
-            .and_then(|m| m.get("request_id"))
+            .headers()
+            .get("request_id")
             .and_then(|v| v.to_str().ok())
             .unwrap_or("unknown")
             .to_string();
