@@ -84,7 +84,17 @@ pub struct RingWriter {
 
 impl std::io::Write for RingWriter {
     fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+        // tracing's fmt layer never calls flush between events — it writes
+        // through io::Write::write_fmt only. Split completed lines on '\n'
+        // here instead, so the ring advances even without a flush.
         self.buf.push_str(&String::from_utf8_lossy(data));
+        while let Some(idx) = self.buf.find('\n') {
+            let line: String = self.buf.drain(..=idx).collect();
+            if !line.trim().is_empty() {
+                let ts_ms = chrono::Utc::now().timestamp_millis() as u64;
+                self.ring.push(ts_ms, line);
+            }
+        }
         self.stdout.write(data)
     }
 
@@ -142,5 +152,25 @@ mod tests {
         let snap = ring.snapshot(0);
         assert_eq!(snap.len(), 1);
         assert_eq!(snap[0].1, "INFO test: hello\n");
+    }
+
+    #[test]
+    fn writer_splits_complete_lines_without_flush() {
+        use std::io::Write;
+        let ring = LogRing::new();
+        let mut writer = RingWriter {
+            ring: ring.clone(),
+            buf: String::new(),
+            stdout: std::io::stdout(),
+        };
+        // fmt writes events as one write_fmt without flushing; the ring
+        // must still capture the completed line.
+        writer
+            .write_all(b"INFO a: first\nINFO a: second\n")
+            .unwrap();
+        let snap = ring.snapshot(0);
+        assert_eq!(snap.len(), 2, "both completed lines captured without flush");
+        assert_eq!(snap[0].1, "INFO a: first\n");
+        assert_eq!(snap[1].1, "INFO a: second\n");
     }
 }
