@@ -40,6 +40,34 @@ ID="$(andler list --json | jq -r '.[0].id')"
 expect_ok "config view shows the resolved base image" -- andler config view "$ID"
 expect_out_grep "resolved image lives in the subdir" "android13-vanilla/linux-waydroid-android13-vanilla-e2e.qcow2"
 
+echo "  [base-image pin is recorded and enforced]"
+INST_TOML="$(ls "$WORK/instances/"*/instance.toml | head -1)"
+[[ -n "$INST_TOML" ]] || fail "instance.toml not found under $WORK/instances/"
+grep -q 'base_image_pin' "$INST_TOML" && pass "pin recorded in instance.toml" \
+    || fail "base_image_pin missing from instance.toml"
+grep -q 'sha256 = ".\{64\}"' "$INST_TOML" && pass "pin carries a sha256" \
+    || fail "pin sha256 missing or malformed"
+
+cat > "$WORK/pin-checksum.toml" <<EOF
+name = "pin-checksum"
+android_version = 13
+base_image_path = "$SUBDIR/linux-waydroid-android13-vanilla-e2e.qcow2"
+ovmf_vars_path = "$OVMF_TEMPLATE"
+base_image_pin = { id = "android13-vanilla-2099-06-01T00:00:00Z", sha256 = "0000000000000000000000000000000000000000000000000000000000000000" }
+EOF
+expect_fail "create with a corrupted pin is refused" -- andler create --file "$WORK/pin-checksum.toml"
+expect_err_grep "pin error mentions the checksum" "changed since it was pinned"
+
+cat > "$WORK/pin-swap.toml" <<EOF
+name = "pin-swap"
+android_version = 13
+base_image_path = "$SUBDIR/linux-waydroid-android13-vanilla-e2e.qcow2"
+ovmf_vars_path = "$OVMF_TEMPLATE"
+base_image_pin = { id = "android11-vanilla-2099-01-01T00:00:00Z", sha256 = "1111111111111111111111111111111111111111111111111111111111111111" }
+EOF
+expect_fail "create pinning a different image is refused" -- andler create --file "$WORK/pin-swap.toml"
+expect_err_grep "pin error mentions the swap" "swapped"
+
 echo "  [legacy flat layout still resolves]"
 qemu-img create -f qcow2 "$CACHE/linux-waydroid-android11-vanilla-legacy.qcow2" 1G >/dev/null 2>&1
 cat > "$CACHE/linux-waydroid-android11-vanilla-legacy.manifest.json" <<EOF

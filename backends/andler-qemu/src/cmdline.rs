@@ -831,6 +831,7 @@ mod tests {
                 microg: false,
                 arm_translator: ArmTranslator::Libndk,
                 boot_mode: AndroidBootMode::Android,
+                base_image_pin: None,
             },
         };
         let args = disk_args(&cfg);

@@ -96,6 +96,7 @@ async fn create_android_instance_resolves_profile_and_creates_overlay() {
         microg: false,
         arm_translator: ArmTranslator::Libndk,
         boot_mode: AndroidBootMode::Android,
+        base_image_pin: None,
     };
 
     let id = daemon
@@ -160,6 +161,7 @@ async fn create_android_instance_fails_when_base_image_missing() {
         microg: true,
         arm_translator: ArmTranslator::None,
         boot_mode: AndroidBootMode::Android,
+        base_image_pin: None,
     };
 
     let err = daemon
@@ -205,6 +207,7 @@ async fn create_android_instance_cleans_up_instance_dir_on_missing_ovmf_template
         microg: true,
         arm_translator: ArmTranslator::None,
         boot_mode: AndroidBootMode::Android,
+        base_image_pin: None,
     };
 
     let err = daemon

@@ -110,12 +110,23 @@ impl TryFrom<proto::AndroidProfile> for AndroidProfile {
     type Error = ConvertError;
 
     fn try_from(value: proto::AndroidProfile) -> Result<Self, Self::Error> {
+        let base_image_pin = value
+            .base_image_pin
+            .as_ref()
+            .map(|pin| {
+                Ok(andler_core::BaseImagePin {
+                    id: pin.id.clone(),
+                    sha256: pin.sha256.clone(),
+                })
+            })
+            .transpose()?;
         Ok(AndroidProfile {
             android_version: value.android_version().try_into()?,
             gapps: value.gapps,
             microg: value.microg,
             arm_translator: value.arm_translator().into(),
             boot_mode: value.boot_mode().try_into()?,
+            base_image_pin,
         })
     }
 }
@@ -125,6 +136,10 @@ impl From<AndroidProfile> for proto::AndroidProfile {
         let mut msg = proto::AndroidProfile {
             gapps: value.gapps,
             microg: value.microg,
+            base_image_pin: value.base_image_pin.map(|pin| proto::BaseImagePin {
+                id: pin.id,
+                sha256: pin.sha256,
+            }),
             ..Default::default()
         };
         msg.set_boot_mode(value.boot_mode.into());
@@ -1172,6 +1187,7 @@ mod tests {
             microg: false,
             arm_translator: ArmTranslator::Libndk,
             boot_mode: AndroidBootMode::Android,
+            base_image_pin: None,
         };
 
         let msg: proto::AndroidProfile = profile.clone().into();
@@ -1483,6 +1499,7 @@ mod tests {
                 microg: false,
                 arm_translator: ArmTranslator::None,
                 boot_mode: AndroidBootMode::Android,
+                base_image_pin: None,
             },
         };
         let response: proto::GetInstanceConfigResponse = cfg.into();
@@ -1728,6 +1745,7 @@ mod tests {
                 microg: false,
                 arm_translator: ArmTranslator::Libndk,
                 boot_mode: AndroidBootMode::Android,
+                base_image_pin: None,
             },
         };
         let response: proto::GetInstanceConfigResponse = cfg.clone().into();

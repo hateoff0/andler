@@ -23,6 +23,73 @@ pub struct BaseImageInfo {
     pub built_at: String,
 }
 
+impl BaseImageInfo {
+    /// Stable id of this image build: the manifest fields that uniquely
+    /// identify what the image contains. The qcow2 content can change
+    /// without the id changing (a rebuild with the same label), which is
+    /// exactly why the pin pairs the id with a content sha256.
+    pub fn id(&self) -> String {
+        format!(
+            "android{}-{}-{}",
+            self.android_major,
+            self.android_variant.to_lowercase(),
+            self.built_at
+        )
+    }
+}
+
+/// Reads the manifest describing the image at `qcow2_path` (a
+/// `<stem>.manifest.json` next to it), if present.
+pub fn info_for(qcow2_path: &std::path::Path) -> Option<BaseImageInfo> {
+    let manifest_path = qcow2_path.with_extension("manifest.json");
+    let file_name = manifest_path.file_name()?.to_str()?;
+    let stem = file_name.strip_suffix(".manifest.json")?;
+    let raw = fs::read_to_string(&manifest_path).ok()?;
+    let manifest: Manifest = serde_json::from_str(&raw).ok()?;
+    let qcow2 = manifest_path.with_file_name(format!("{stem}.qcow2"));
+    if qcow2 != qcow2_path {
+        return None;
+    }
+    Some(BaseImageInfo {
+        qcow2_path: qcow2,
+        manifest_path,
+        android_major: manifest.android_major,
+        android_variant: manifest.android_variant,
+        built_at: manifest.built_at,
+    })
+}
+
+/// sha256 of a file, hex-encoded. Streamed with a fixed buffer so large
+/// base images never load into memory.
+pub fn sha256_of(path: &std::path::Path) -> Result<String, BaseImageError> {
+    use sha2::Digest;
+    let mut file = fs::File::open(path).map_err(|source| BaseImageError::ReadFile {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    let mut hasher = sha2::Sha256::new();
+    let mut buf = [0u8; 1024 * 1024];
+    loop {
+        let read = std::io::Read::read(&mut file, &mut buf).map_err(|source| {
+            BaseImageError::ReadFile {
+                path: path.to_path_buf(),
+                source,
+            }
+        })?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buf[..read]);
+    }
+    let digest = hasher.finalize();
+    let mut out = String::with_capacity(64);
+    for byte in digest {
+        use std::fmt::Write;
+        let _ = write!(out, "{byte:02x}");
+    }
+    Ok(out)
+}
+
 #[derive(Debug, Error)]
 pub enum BaseImageError {
     #[error(
@@ -37,6 +104,13 @@ pub enum BaseImageError {
 
     #[error("cannot read base image directory {path:?}: {source}")]
     ReadDir {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+
+    #[error("cannot read base image file {path:?}: {source}")]
+    ReadFile {
         path: PathBuf,
         #[source]
         source: std::io::Error,
@@ -178,6 +252,7 @@ mod tests {
             microg: false,
             arm_translator: ArmTranslator::None,
             boot_mode: AndroidBootMode::Android,
+            base_image_pin: None,
         }
     }
 

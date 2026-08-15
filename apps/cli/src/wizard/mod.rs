@@ -159,6 +159,7 @@ fn reresolve_android_base_image(
         microg: adv.microg,
         arm_translator: resolve_arm_translator(Some(adv), detected).into(),
         boot_mode: AndroidBootMode::Android,
+        base_image_pin: None,
     };
     match andler_core::base_image::resolve(&profile) {
         Ok(path) => a.base_image = path.to_string_lossy().into_owned(),
@@ -295,6 +296,7 @@ fn build_quick(
                         microg: false,
                         arm_translator: ArmTranslator::None,
                         boot_mode: AndroidBootMode::Android,
+                        base_image_pin: None,
                     };
                     andler_core::base_image::resolve(&quick_profile)
                         .map_err(|e| WizardError::Inquire(e.to_string()))?

@@ -49,6 +49,15 @@ impl std::fmt::Display for AndroidBootMode {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BaseImagePin {
+    /// Stable id of the base image the instance was created from
+    /// (`android{version}-{variant}-{built_at}` from its manifest).
+    pub id: String,
+    /// sha256 of the base image qcow2 at creation time, as hex.
+    pub sha256: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AndroidProfile {
     pub android_version: AndroidVersion,
     pub gapps: bool,
@@ -58,6 +67,13 @@ pub struct AndroidProfile {
 
     #[serde(default)]
     pub boot_mode: AndroidBootMode,
+
+    /// Base-image pin written at instance creation. When the instance file
+    /// already carries one, creation refuses a base image whose id or
+    /// checksum no longer matches (§7) — a silently swapped backing image
+    /// is a data-corruption trap, not an upgrade path.
+    #[serde(default)]
+    pub base_image_pin: Option<BaseImagePin>,
 }
 
 impl AndroidProfile {
@@ -133,6 +149,7 @@ mod tests {
             microg: false,
             arm_translator: ArmTranslator::Libndk,
             boot_mode: AndroidBootMode::Android,
+            base_image_pin: None,
         }
     }
 

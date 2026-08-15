@@ -398,6 +398,7 @@ async fn clone_instance_with_linked_mode_creates_overlay_pointing_at_source_disk
         microg: false,
         arm_translator: ArmTranslator::None,
         boot_mode: AndroidBootMode::Android,
+        base_image_pin: None,
     };
     let source_id = daemon
         .create_android_instance(
@@ -474,6 +475,7 @@ async fn clone_instance_with_full_standalone_mode_has_no_base_image() {
         microg: false,
         arm_translator: ArmTranslator::None,
         boot_mode: AndroidBootMode::Android,
+        base_image_pin: None,
     };
     let source_id = daemon
         .create_android_instance(
@@ -531,6 +533,7 @@ async fn clone_instance_with_shared_base_mode_survives_source_purge() {
         microg: false,
         arm_translator: ArmTranslator::None,
         boot_mode: AndroidBootMode::Android,
+        base_image_pin: None,
     };
     let source_id = daemon
         .create_android_instance(
@@ -589,6 +592,7 @@ async fn clone_instance_of_a_clone_is_allowed() {
         microg: false,
         arm_translator: ArmTranslator::None,
         boot_mode: AndroidBootMode::Android,
+        base_image_pin: None,
     };
     let source_id = daemon
         .create_android_instance(
@@ -665,6 +669,7 @@ async fn export_instance_disk_creates_standalone_file_without_registering_instan
         microg: false,
         arm_translator: ArmTranslator::None,
         boot_mode: AndroidBootMode::Android,
+        base_image_pin: None,
     };
     let source_id = daemon
         .create_android_instance(

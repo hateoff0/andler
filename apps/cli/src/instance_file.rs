@@ -89,6 +89,13 @@ pub struct InstanceFile {
     #[serde(default)]
     pub base_image_path: Option<String>,
 
+    /// Explicit base-image pin for Android instances. When set, creation
+    /// refuses a backing image whose manifest id or sha256 does not match
+    /// (see docs/API.md "Base-image pin"); omit to let the daemon record
+    /// the pin of whatever image is resolved.
+    #[serde(default)]
+    pub base_image_pin: Option<andler_core::BaseImagePin>,
+
     #[serde(default)]
     pub overlay_size_gib: Option<u64>,
 
@@ -372,6 +379,13 @@ impl InstanceFile {
         };
         profile.set_arm_translator(arm_translator);
 
+        profile.base_image_pin = self
+            .base_image_pin
+            .map(|pin| andler_rpc::proto::BaseImagePin {
+                id: pin.id,
+                sha256: pin.sha256,
+            });
+
         Ok(CreateAndroidInstanceRequest {
             name: self.name,
             profile: Some(profile),
@@ -591,6 +605,25 @@ mod tests {
                     profile.arm_translator(),
                     andler_rpc::proto::ArmTranslator::Libndk
                 );
+            }
+            other => panic!("expected Android, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn android_base_image_pin_parses_and_reaches_the_request() {
+        let toml = format!(
+            "{MINIMAL_ANDROID_TOML}\n\
+             base_image_pin = {{ id = \"android13-vanilla-2099-01-01T00:00:00Z\", \
+             sha256 = \"{}\" }}\n",
+            "ab".repeat(32)
+        );
+        let file: InstanceFile = toml::from_str(&toml).expect("TOML must parse");
+        match file.into_result().unwrap() {
+            InstanceFileResult::Android(req) => {
+                let pin = req.profile.unwrap().base_image_pin.unwrap();
+                assert_eq!(pin.id, "android13-vanilla-2099-01-01T00:00:00Z");
+                assert_eq!(pin.sha256, "ab".repeat(32));
             }
             other => panic!("expected Android, got {other:?}"),
         }

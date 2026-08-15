@@ -70,6 +70,7 @@ pub(crate) fn sample_android_config(disk_path: PathBuf, base_image: PathBuf) -> 
             microg: false,
             arm_translator: ArmTranslator::None,
             boot_mode: andler_core::AndroidBootMode::Android,
+            base_image_pin: None,
         },
     };
     cfg.disk = DiskConfig::overlay(disk_path, base_image, 20 * DiskConfig::GIB);

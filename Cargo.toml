@@ -33,6 +33,7 @@ prost = "0.13"
 clap = { version = "4", features = ["derive"] }
 dirs = "5"
 rand = "0.10"
+sha2 = "0.10"
 
 [workspace.lints.clippy]
 # Every `unsafe` block must carry a `// SAFETY:` justification above it

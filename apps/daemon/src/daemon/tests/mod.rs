@@ -1,6 +1,7 @@
 use super::*;
 
 mod android_boot_mode;
+mod base_image_pin;
 mod clone;
 mod common;
 mod create;

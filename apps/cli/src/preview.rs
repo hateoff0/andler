@@ -68,6 +68,7 @@ pub(crate) fn resolve_android(
 ) -> Result<Resolved, Box<dyn std::error::Error>> {
     let profile_msg = req
         .profile
+        .clone()
         .ok_or("CreateAndroidInstanceRequest is missing `profile`")?;
     let profile = AndroidProfile::try_from(profile_msg)?;
 

@@ -124,7 +124,7 @@ pub fn verify_android(
     let base_image_check = Check {
         name: "Base image",
         result: if req.base_image_path.is_empty() {
-            match req.profile {
+            match req.profile.clone() {
                 None => Err("missing profile".to_string()),
                 Some(profile_msg) => match andler_core::AndroidProfile::try_from(profile_msg) {
                     Err(e) => Err(e.to_string()),
