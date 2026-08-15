@@ -216,7 +216,12 @@ impl QemuProcess {
         loop {
             match lines.next_line().await {
                 Ok(Some(line)) => {
-                    tracing::warn!(pid, stream = stream_name, "{line}");
+                    // Guest-adjacent output is its own stream (§9.1.6):
+                    // qemu.log + `andler logs <id>` carry it, the daemon log
+                    // (and its ring) only gets it at debug — the guest can
+                    // print anything into the console, so it must never
+                    // surface at the default INFO level.
+                    tracing::debug!(pid, stream = stream_name, "{line}");
                     if let Some(file) = log_file.as_mut() {
                         let entry = format!("[{stream_name}] {line}\n");
                         if file.write_all(entry.as_bytes()).await.is_err() {

@@ -98,7 +98,7 @@ fn install_agent_offline_blocking(disk_path: &Path, package: &str) -> Result<(),
     if !update_output.status.success() {
         let stderr = String::from_utf8_lossy(&update_output.stderr);
         if let Ok(resolv) = std::fs::read_to_string(mount_guard.path().join("etc/resolv.conf")) {
-            tracing::info!("package update failed; guest resolv.conf = {:?}", resolv);
+            tracing::debug!("package update failed; guest resolv.conf = {:?}", resolv);
         } else if let Ok(meta) =
             std::fs::symlink_metadata(mount_guard.path().join("etc/resolv.conf"))
         {

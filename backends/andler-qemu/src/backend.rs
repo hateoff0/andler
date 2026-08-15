@@ -241,11 +241,13 @@ exit 30";
             .await
             .map_err(qmp_error_to_backend_error)?;
 
-        if let Some(output) = result {
+        if let Some(_output) = result {
+            // Guest-exec stdout/stderr is never logged (§9.1.5): it can
+            // carry passwords or tokens the guest printed; failures surface
+            // through the returned error instead.
             tracing::info!(
                 package = %package,
                 install = %install,
-                output = %output,
                 "guest-exec completed"
             );
         }

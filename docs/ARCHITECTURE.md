@@ -398,6 +398,24 @@ of disk with logs). Policy (decision from the architecture rework):
 - Rotation is a daemon mechanism, not a CLI concern: `andler logs` reads
   through the same file, so a rotated file never breaks the stream contract.
 
+### Log redaction (§9.1.5)
+
+The daemon log (and therefore the `andler logs daemon` ring, which carries
+the same bytes) never contains guest-controlled or guest-sourced content at
+the default INFO level:
+
+- **guest-exec stdout/stderr is never logged** (package install/remove,
+  `andler exec`, mutator commands) — it can carry passwords or tokens the
+  guest printed; failures surface through returned errors instead.
+- **QEMU/guest output lines are debug-only** — the guest can print anything
+  into the console, so qemu.log + `andler logs <id>` are the guest-log
+  stream, never the daemon log (§9.1.6).
+- **Provision manifests log op counts only**, never file contents or host
+  paths of uploads; guest file reads for diagnostics (resolv.conf) are
+  debug-only.
+- Env values are never logged; instance ids, paths, and error text (the
+  actionable, sanitized message, not raw stderr) are the allowed fields.
+
 ## Security / Threat Model
 
 Honest model, written down because the helper doc referenced it (see ROADMAP)

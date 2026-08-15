@@ -9,6 +9,10 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Added
 
+#### Security
+
+- **Log redaction (§9.1.5)**: guest-exec stdout/stderr is never logged (package install/remove output previously hit INFO — removed); QEMU/guest output lines dropped from WARN to debug (guest can print anything into the console; qemu.log/`andler logs <id>` remain the guest-log stream); guest resolv.conf diagnostics are debug-only. Documented as the redaction policy in `docs/ARCHITECTURE.md`.
+
 #### CLI
 
 - **`andler doctor --metrics`**: prints the daemon's internal metrics snapshot (§9.1.8 / P27) — RPC latency p50/p99 per method, error counts by gRPC status code, instance/running/active-op counts, QMP reconnect count.
