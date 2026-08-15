@@ -35,9 +35,11 @@ expect_ok "logs daemon --json emits JSON lines" -- timeout 10 andler logs daemon
 expect_out_grep "json has ts_ms and line" '"ts_ms":'
 
 echo "  [request_id correlation (§9.1.1)]"
-expect_ok "a normal command runs" -- andler list
-expect_ok "daemon log carries the rpc span with request_id" -- timeout 10 andler logs daemon
-expect_out_grep "rpc span present" 'rpc\{request_id=[0-9a-f]{32}'
+CID="$(create_linux "$WORK" e2e-correlation)"
+[[ -n "$CID" ]] || fail "empty instance id from create"
+expect_ok "daemon log shows the create under an rpc span with request_id" -- timeout 10 andler logs daemon
+expect_out_grep "rpc span with request_id on the create line" 'rpc\{request_id=[0-9a-f]{32}.*instance created'
+expect_ok "remove correlation instance" -- andler remove "$CID" --purge
 
 echo "  [cleanup]"
 expect_ok "list empty" -- andler list
