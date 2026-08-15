@@ -461,7 +461,9 @@ andler guest boot-mode <instance-id> [android|linux]
 
 `guest install/remove` without `--offline` never needs root on the host:
 a stopped instance is booted headless, the package is installed via the
-guest agent, and the VM is stopped again. If the guest agent does not
+guest agent, and the VM is stopped again; on an already-running VM the
+operation runs in place. Both forms are supervisor operations — progress
+is visible on `andler events` and cancellable. If the guest agent does not
 appear within `ANDLERD_GUEST_AGENT_WAIT_SECS` (default 120 s) the
 operation fails with a hint to retry with `--offline` — that path uses
 `qemu-nbd` + chroot and requires the `andler-helper` sudoers rule.

@@ -697,6 +697,109 @@ impl Daemon {
             .map_err(|_| agent_unavailable())
     }
 
+    /// Runs one guest-side package command (install or remove) through the
+    /// guest agent. Shared by the maintenance auto-start and the
+    /// already-running online path so both execute identical steps.
+    async fn run_package_exec(
+        backend: &Arc<dyn HypervisorBackend>,
+        backend_handle: &BackendHandle,
+        package: &str,
+        install: bool,
+    ) -> Result<(), DaemonError> {
+        let install_result: Result<(), BackendError> = if install {
+            backend.guest_exec_install(backend_handle, package).await
+        } else {
+            backend.guest_exec_remove(backend_handle, package).await
+        };
+        install_result.map_err(DaemonError::Backend)
+    }
+
+    /// Runs a guest-side package operation on an already-running VM as a
+    /// supervisor operation — cancellable between the agent check and the
+    /// command, progress visible on the event bus, same idempotency key as
+    /// the maintenance auto-start (`guest-{action}-{package}`), so a
+    /// repeated request joins the running one instead of double-installing.
+    async fn online_package_op(
+        &self,
+        id: InstanceId,
+        package: &str,
+        install: bool,
+        backend: &Arc<dyn HypervisorBackend>,
+        backend_handle: BackendHandle,
+    ) -> Result<(), DaemonError> {
+        let handle = self.handle_for(id).await?;
+        let action = if install { "installing" } else { "removing" };
+        let op_id = format!(
+            "guest-{}-{package}",
+            if install { "install" } else { "remove" }
+        );
+        let op_id_inner = op_id.clone();
+        let kind = if install {
+            OperationKind::GuestInstall
+        } else {
+            OperationKind::GuestRemove
+        };
+        let phases: Vec<(String, f32)> = vec![(action.to_string(), 1.0)];
+
+        let run: OpRunner = {
+            let backend = backend.clone();
+            let package = package.to_string();
+            Box::new(move |mut progress| {
+                Box::pin(async move {
+                    progress.enter_phase(action);
+                    if progress.is_cancelled() {
+                        let err = DaemonError::OperationCancelled(op_id_inner.clone());
+                        progress.finish(Err(err.to_string()));
+                        return Err(err);
+                    }
+                    if let Err(err) =
+                        Self::run_package_exec(&backend, &backend_handle, &package, install).await
+                    {
+                        progress.finish(Err(err.to_string()));
+                        return Err(err);
+                    }
+                    if progress.is_cancelled() {
+                        let err = DaemonError::OperationCancelled(op_id_inner.clone());
+                        progress.finish(Err(err.to_string()));
+                        return Err(err);
+                    }
+                    progress.set_progress(1.0);
+                    progress.finish(Ok(()));
+                    Ok(())
+                })
+            })
+        };
+
+        match handle
+            .run_operation(
+                Operation {
+                    op_id: op_id.clone(),
+                    instance_id: id,
+                    kind,
+                    phases: phases.clone(),
+                    progress: 0.0,
+                    state: OperationState::Queued,
+                    error: None,
+                },
+                Some(op_id),
+                run,
+            )
+            .await?
+        {
+            OpAccept::Started { done } => done
+                .await
+                .map_err(|_| DaemonError::InstanceSupervisorGone(id))?,
+            OpAccept::Joined { op_id: joined } => {
+                tracing::warn!(
+                    instance_id = %id,
+                    joined = %joined,
+                    "package operation joined an already-running one for the same package"
+                );
+                Ok(())
+            }
+        }
+    }
+
     /// Boots a stopped instance headless for one package operation, then
     /// stops it again. Runs as a supervisor operation: the boot wait and the
     /// potentially long guest-side install are cancellable and visible on
@@ -827,14 +930,10 @@ impl Daemon {
                     }
 
                     progress.enter_phase(action);
-                    let install_result: Result<(), BackendError> = if install {
-                        backend.guest_exec_install(&backend_handle, &package).await
-                    } else {
-                        backend.guest_exec_remove(&backend_handle, &package).await
-                    };
-                    if let Err(backend_err) = install_result {
+                    if let Err(err) =
+                        Self::run_package_exec(&backend, &backend_handle, &package, install).await
+                    {
                         stop_maintenance_vm(&mut progress, &backend, &handle, id).await;
-                        let err = DaemonError::Backend(backend_err);
                         progress.finish(Err(err.to_string()));
                         return Err(err);
                     }
@@ -939,8 +1038,7 @@ impl Daemon {
                     });
                 }
 
-                backend
-                    .guest_exec_install(&backend_handle, &package)
+                self.online_package_op(id, &package, true, backend, backend_handle)
                     .await?;
                 tracing::info!(
                     instance_id = %id,
@@ -1037,7 +1135,8 @@ impl Daemon {
                     });
                 }
 
-                backend.guest_exec_remove(&backend_handle, &package).await?;
+                self.online_package_op(id, &package, false, backend, backend_handle)
+                    .await?;
                 tracing::info!(
                     instance_id = %id,
                     package = %package,

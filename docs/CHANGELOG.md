@@ -9,6 +9,10 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Added
 
+#### Daemon
+
+- **Online package install/remove on a running VM is now a supervisor operation**: same `guest-{action}-{package}` idempotency key and event-bus progress as the maintenance auto-start (a repeated request joins the running one), cancellable between the agent check and the command. The blocking inline RPC path is gone.
+
 #### Security
 
 - **Log redaction (§9.1.5)**: guest-exec stdout/stderr is never logged (package install/remove output previously hit INFO — removed); QEMU/guest output lines dropped from WARN to debug (guest can print anything into the console; qemu.log/`andler logs <id>` remain the guest-log stream); guest resolv.conf diagnostics are debug-only. Documented as the redaction policy in `docs/ARCHITECTURE.md`.

@@ -398,3 +398,46 @@ async fn provision_with_no_ops_is_refused() {
     let err = daemon.guest_provision(id, vec![]).await.unwrap_err();
     assert!(matches!(err, DaemonError::InvalidConfig(_)), "err: {err}");
 }
+
+#[tokio::test]
+async fn running_install_runs_as_supervisor_operation() {
+    let dir = TestTempDir::new();
+    let mut daemon = Daemon::new();
+    let mut cfg = sample_config();
+    cfg.disk.path = dir.path().join("disk.qcow2");
+    std::fs::write(&cfg.disk.path, b"x").unwrap();
+    let id = cfg.id;
+    let mock = Arc::new(MaintenanceBackend::new(true));
+    register_with_state(
+        &daemon,
+        cfg,
+        InstanceState::Running,
+        Some(BackendHandle("maintenance-mock:vm".to_string())),
+    )
+    .await;
+    daemon
+        .backends
+        .insert(andler_core::BackendKind::Qemu, mock.clone());
+
+    daemon
+        .install_guest_agent(id, "htop".to_string(), false)
+        .await
+        .unwrap();
+
+    assert_eq!(mock.installs.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(
+        mock.stops.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "no VM lifecycle for a running install"
+    );
+    let handle = daemon.handle_for(id).await.unwrap();
+    assert_eq!(
+        handle.state(),
+        InstanceState::Running,
+        "running install leaves the VM running"
+    );
+    assert!(
+        handle.active_operation().await.unwrap().is_none(),
+        "operation must be finished after the install returns"
+    );
+}
