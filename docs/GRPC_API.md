@@ -38,6 +38,7 @@ The core service exposing all instance management operations.
 | `ListGuestPackages` | `InstanceIdRequest` | `ListGuestPackagesResponse` | Unary | Lists known guest packages and their installation status. |
 | `GuestProvision` | `GuestProvisionRequest` | `Empty` | Unary | Applies a provision manifest: online via QGA when running, offline via the guestfs appliance when stopped. |
 | `StreamDaemonLogs` | `DaemonLogsRequest` | `stream DaemonLogLine` | Server-streaming | Streams the daemon's own log from its in-memory ring (snapshot, or follow when requested). |
+| `GetDaemonMetrics` | `Empty` | `DaemonMetricsResponse` | Unary | Daemon-internal metrics snapshot: RPC latency p50/p99 by method, error counts by status code, instance/active-op counts, QMP reconnects. |
 | `SwitchArmTranslator` | `SwitchArmTranslatorRequest` | `Empty` | Unary | Switches the ARM translator in offline mode. |
 | `SetInstanceConfig` | `SetInstanceConfigRequest` | `Empty` | Unary | Partially updates an instance configuration by key. |
 | `SwitchAndroidBootMode` | `SwitchAndroidBootModeRequest` | `Empty` | Unary | Switches the Android boot mode in offline mode. |
@@ -843,6 +844,36 @@ CLI resolves relative paths against the manifest directory),
 |-------|------|-------------|
 | `ts_ms` | `uint64` | Wall-clock milliseconds since the UNIX epoch. |
 | `line` | `string` | One formatted daemon log line (same bytes the daemon prints; JSON shape when `ANDLERD_LOG_FORMAT=json`). |
+
+### `DaemonMetricsResponse`
+
+Snapshot of daemon-internal metrics (§9.1.8 / P27), served by
+`andler doctor --metrics`.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `latency` | repeated `MethodLatency` | RPC latency by method, most-called first. |
+| `by_code` | repeated `CodeCount` | Error counts by gRPC status code (the public face of the `ErrorKind` categories); `OK` counts successes. |
+| `instance_count` | `uint64` | Registered instances (supervisors). |
+| `running_count` | `uint64` | Instances in `Running` state. |
+| `active_ops` | `uint64` | Instances with a long-running operation in flight. |
+| `qmp_reconnects` | `uint64` | Total QMP control-socket resets across backends. |
+
+### `MethodLatency`
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `method` | `string` | gRPC path, e.g. `/AndlerService/GetVersion`. |
+| `count` | `uint64` | Samples recorded (ring-bounded at 4096 per method). |
+| `p50_ms` | `uint64` | Median latency, ms. |
+| `p99_ms` | `uint64` | 99th-percentile latency, ms. |
+
+### `CodeCount`
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `code` | `string` | gRPC status code name (`OK`, `NotFound`, …). |
+| `count` | `uint64` | Number of responses with this code. |
 
 ### `ListGuestPackagesResponse`
 

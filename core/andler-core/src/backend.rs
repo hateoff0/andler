@@ -298,6 +298,12 @@ pub trait HypervisorBackend: Send + Sync {
             operation: "guest_mutator",
         })
     }
+
+    /// Number of times the QMP control connection had to be reset after a
+    /// failure (daemon metrics; default 0).
+    fn qmp_reconnect_count(&self) -> u64 {
+        0
+    }
 }
 
 /// Result of a guest-exec command.

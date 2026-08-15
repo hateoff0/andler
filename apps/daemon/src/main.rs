@@ -1,6 +1,7 @@
 mod daemon;
 mod firmware;
 mod log_ring;
+mod metrics;
 mod service;
 
 #[cfg(test)]
@@ -270,13 +271,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     let daemon = Arc::new(daemon);
-    let service = DaemonService::new(Arc::clone(&daemon), ovmf, ring);
+    let daemon_metrics = std::sync::Arc::new(metrics::DaemonMetrics::default());
+    let service = DaemonService::new(Arc::clone(&daemon), ovmf, ring, daemon_metrics.clone());
 
     spawn_health_check_task(Arc::clone(&daemon));
 
     println!("andlerd: listening on {addr}");
 
     Server::builder()
+        .layer(metrics::MetricsLayer::new(daemon_metrics))
         .add_service(AndlerServiceServer::new(service))
         .serve_with_shutdown(addr, shutdown_signal(daemon))
         .await?;

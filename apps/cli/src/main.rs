@@ -433,6 +433,12 @@ enum Command {
         /// (asks for confirmation and validates with `visudo -c` before writing).
         #[arg(long)]
         fix: bool,
+
+        /// Print the daemon's internal metrics snapshot (§9.1.8): RPC
+        /// latency p50/p99 by method, error counts by status code,
+        /// instance/active-op counts, QMP reconnect count.
+        #[arg(long)]
+        metrics: bool,
     },
 
     /// Generate shell completion scripts
@@ -785,7 +791,10 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         .or_else(|| std::env::var("ANDLERD_ADDR").ok())
         .unwrap_or_else(|| DEFAULT_DAEMON_ADDR.to_string());
 
-    if let Some(Command::Doctor { fix }) = &cli.command {
+    if let Some(Command::Doctor { fix, metrics }) = &cli.command {
+        if *metrics {
+            return doctor::print_metrics(&addr).await;
+        }
         let all_ok = doctor::run(&addr, *fix).await;
         return if all_ok {
             Ok(())

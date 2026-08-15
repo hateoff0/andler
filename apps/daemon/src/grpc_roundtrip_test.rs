@@ -37,7 +37,12 @@ async fn spawn_server_and_connect() -> (
         code: std::path::PathBuf::from("/usr/share/edk2/x64/OVMF_CODE.4m.fd"),
         vars_template: std::path::PathBuf::from("/usr/share/edk2/x64/OVMF_VARS.4m.fd"),
     };
-    let service = DaemonService::new(daemon, test_ovmf, crate::log_ring::LogRing::new());
+    let service = DaemonService::new(
+        daemon,
+        test_ovmf,
+        crate::log_ring::LogRing::new(),
+        std::sync::Arc::new(crate::metrics::DaemonMetrics::default()),
+    );
 
     let server = tokio::spawn(async move {
         Server::builder()
@@ -1031,6 +1036,26 @@ async fn stream_daemon_logs_snapshot_round_trips_over_real_grpc() {
         lines += 1;
     }
     assert_eq!(lines, 0, "fresh ring has no lines");
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn get_daemon_metrics_round_trips_over_real_grpc() {
+    let (mut client, server) = spawn_server_and_connect().await;
+
+    let snap = client
+        .get_daemon_metrics(Empty {})
+        .await
+        .unwrap()
+        .into_inner();
+    // The test server's metrics layer is not installed (the snapshot is
+    // taken in main.rs), so latency may be empty — but the counters must
+    // be present and sane.
+    assert_eq!(snap.instance_count, 0);
+    assert_eq!(snap.running_count, 0);
+    assert_eq!(snap.active_ops, 0);
+    assert_eq!(snap.qmp_reconnects, 0);
 
     server.abort();
 }

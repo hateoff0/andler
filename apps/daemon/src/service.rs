@@ -7,18 +7,19 @@ use andler_rpc::convert;
 use andler_rpc::proto::andler_service_server::AndlerService;
 use andler_rpc::proto::{
     AttachDiskRequest, AttachDiskResponse, AttachNetworkRequest, AttachNetworkResponse,
-    CloneInstanceRequest, ConfigKeyDiff, CreateAndroidInstanceRequest, CreateInstanceRequest,
-    CreateInstanceResponse, CreateSnapshotRequest, CreateSnapshotResponse, DaemonEventMessage,
-    DaemonLogLine, DaemonLogsRequest, DeleteSnapshotRequest, DetachDiskRequest,
-    DetachNetworkRequest, Empty, EventStreamRequest, ExecCommandRequest, ExecCommandResponse,
-    ExportInstanceDiskRequest, ExportInstanceDiskResponse, GetAndroidBootModeResponse,
-    GetConfigStatusResponse, GetInstanceConfigResponse, GuestPackageEntry, GuestProvisionRequest,
-    InstallGuestAgentRequest, InstanceIdRequest, InstanceListEntry, InstanceStatusResponse,
-    ListGuestPackagesResponse, ListInstancesResponse, ListSnapshotsResponse, LogLineResponse,
-    OpCancelRequest, OpListResponse, OperationInfo, OperationPhase, RemoveGuestAgentRequest,
-    RemoveInstanceRequest, ResourceMetricsResponse, RestoreSnapshotRequest,
-    SetInstanceConfigRequest, SnapshotEntry, StopInstanceRequest, SwitchAndroidBootModeRequest,
-    SwitchArmTranslatorRequest, UpdateInstanceConfigRequest, VersionResponse,
+    CloneInstanceRequest, CodeCount, ConfigKeyDiff, CreateAndroidInstanceRequest,
+    CreateInstanceRequest, CreateInstanceResponse, CreateSnapshotRequest, CreateSnapshotResponse,
+    DaemonEventMessage, DaemonLogLine, DaemonLogsRequest, DaemonMetricsResponse,
+    DeleteSnapshotRequest, DetachDiskRequest, DetachNetworkRequest, Empty, EventStreamRequest,
+    ExecCommandRequest, ExecCommandResponse, ExportInstanceDiskRequest, ExportInstanceDiskResponse,
+    GetAndroidBootModeResponse, GetConfigStatusResponse, GetInstanceConfigResponse,
+    GuestPackageEntry, GuestProvisionRequest, InstallGuestAgentRequest, InstanceIdRequest,
+    InstanceListEntry, InstanceStatusResponse, ListGuestPackagesResponse, ListInstancesResponse,
+    ListSnapshotsResponse, LogLineResponse, MethodLatency, OpCancelRequest, OpListResponse,
+    OperationInfo, OperationPhase, RemoveGuestAgentRequest, RemoveInstanceRequest,
+    ResourceMetricsResponse, RestoreSnapshotRequest, SetInstanceConfigRequest, SnapshotEntry,
+    StopInstanceRequest, SwitchAndroidBootModeRequest, SwitchArmTranslatorRequest,
+    UpdateInstanceConfigRequest, VersionResponse,
 };
 use futures_core::Stream;
 use futures_util::StreamExt;
@@ -32,6 +33,7 @@ pub struct DaemonService {
     daemon: Arc<Daemon>,
     ovmf: OvmfPaths,
     log_ring: std::sync::Arc<crate::log_ring::LogRing>,
+    metrics: std::sync::Arc<crate::metrics::DaemonMetrics>,
 }
 
 impl DaemonService {
@@ -39,11 +41,13 @@ impl DaemonService {
         daemon: Arc<Daemon>,
         ovmf: OvmfPaths,
         log_ring: std::sync::Arc<crate::log_ring::LogRing>,
+        metrics: std::sync::Arc<crate::metrics::DaemonMetrics>,
     ) -> Self {
         DaemonService {
             daemon,
             ovmf,
             log_ring,
+            metrics,
         }
     }
 }
@@ -711,6 +715,57 @@ impl AndlerService for DaemonService {
         };
 
         Ok(Response::new(Box::pin(stream)))
+    }
+
+    async fn get_daemon_metrics(
+        &self,
+        _request: Request<Empty>,
+    ) -> Result<Response<DaemonMetricsResponse>, Status> {
+        let (instance_count, running_count, active_ops) = {
+            let supervisors = self.daemon.supervisors.read().await;
+            let mut active = 0usize;
+            for handle in supervisors.values() {
+                if handle.active_operation().await?.is_some() {
+                    active += 1;
+                }
+            }
+            let running = supervisors
+                .values()
+                .filter(|h| h.state() == andler_core::InstanceState::Running)
+                .count();
+            (supervisors.len(), running, active)
+        };
+        let qmp_reconnects: u64 = self
+            .daemon
+            .backends
+            .values()
+            .map(|b| b.qmp_reconnect_count())
+            .sum();
+        let snap = self
+            .metrics
+            .snapshot(instance_count, running_count, active_ops);
+
+        Ok(Response::new(DaemonMetricsResponse {
+            latency: snap
+                .latency
+                .into_iter()
+                .map(|m| MethodLatency {
+                    method: m.method,
+                    count: m.count,
+                    p50_ms: m.p50_ms,
+                    p99_ms: m.p99_ms,
+                })
+                .collect(),
+            by_code: snap
+                .by_code
+                .into_iter()
+                .map(|(code, count)| CodeCount { code, count })
+                .collect(),
+            instance_count: snap.instance_count as u64,
+            running_count: snap.running_count as u64,
+            active_ops: snap.active_ops as u64,
+            qmp_reconnects,
+        }))
     }
 
     async fn stream_events(

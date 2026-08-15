@@ -11,9 +11,13 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 
 #### CLI
 
+- **`andler doctor --metrics`**: prints the daemon's internal metrics snapshot (§9.1.8 / P27) — RPC latency p50/p99 per method, error counts by gRPC status code, instance/running/active-op counts, QMP reconnect count.
+
 - **`andler logs daemon [--follow] [--json] [--since <epoch-ms>]`**: streams the daemon's own log (the same lines it prints, same format) from an in-memory 4096-line ring — debugging never requires knowing where andlerd writes. `--follow` keeps streaming, `--json` emits `{"ts_ms":...,"line":...}` lines, `--since` filters the snapshot; all three are rejected with an instance id (instance logs keep `--source/--grep/--tail`).
 
 #### Daemon
+
+- **`GetDaemonMetrics` RPC**: collected by a tonic layer in the server stack (per-method latency ring, per-status-code error counts); instance/op counts computed on demand, QMP reconnects from the backend counter.
 
 - **`StreamDaemonLogs` RPC**: snapshot + follow over the daemon log ring. The tracing writer tees every formatted line into the ring (JSON shape when `ANDLERD_LOG_FORMAT=json`), bounded at 4096 lines.
 

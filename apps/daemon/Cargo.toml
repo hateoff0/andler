@@ -22,6 +22,7 @@ thiserror = { workspace = true }
 async-trait = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+tower = "0.5"
 # instance.toml is the single source of truth for instance configuration;
 # the daemon scans it on startup and writes it on config changes.
 toml = "0.8"

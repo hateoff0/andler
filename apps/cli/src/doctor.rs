@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use andler_rpc::proto::andler_service_client::AndlerServiceClient;
+use andler_rpc::proto::Empty;
 
 use crate::helpers::which;
 
@@ -830,4 +831,40 @@ mod tests {
             assert_ne!(caps & (1u64 << 12), 0);
         }
     }
+}
+
+/// `andler doctor --metrics` — prints the daemon's internal metrics
+/// snapshot (§9.1.8 / P27): RPC latency p50/p99 per method, error counts
+/// by gRPC status code, instance/active-op counts and QMP reconnects.
+pub async fn print_metrics(daemon_addr: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let mut client = AndlerServiceClient::connect(daemon_addr.to_string()).await?;
+    let snap = client
+        .get_daemon_metrics(Empty {})
+        .await
+        .map_err(|e| format!("cannot fetch daemon metrics: {e}"))?
+        .into_inner();
+
+    println!("daemon metrics ({} method(s))", snap.latency.len());
+    println!(
+        "instances: {} total, {} running, {} active op(s); QMP reconnects: {}",
+        snap.instance_count, snap.running_count, snap.active_ops, snap.qmp_reconnects
+    );
+    if snap.latency.is_empty() {
+        println!("  (no RPC traffic recorded yet)");
+    }
+    for m in &snap.latency {
+        println!(
+            "  {:<48} count={:<6} p50={}ms p99={}ms",
+            m.method, m.count, m.p50_ms, m.p99_ms
+        );
+    }
+    if !snap.by_code.is_empty() {
+        println!("errors by status code:");
+        for entry in &snap.by_code {
+            if entry.code != "OK" {
+                println!("  {}: {}", entry.code, entry.count);
+            }
+        }
+    }
+    Ok(())
 }

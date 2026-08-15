@@ -32,6 +32,7 @@ service AndlerService {
     rpc GetAndroidBootMode(InstanceIdRequest) returns (GetAndroidBootModeResponse);
     rpc GuestProvision(GuestProvisionRequest) returns (Empty);
     rpc StreamDaemonLogs(DaemonLogsRequest) returns (stream DaemonLogLine);
+    rpc GetDaemonMetrics(Empty) returns (DaemonMetricsResponse);
     rpc AttachDisk(AttachDiskRequest) returns (AttachDiskResponse);
     rpc DetachDisk(DetachDiskRequest) returns (Empty);
     rpc AttachNetwork(AttachNetworkRequest) returns (AttachNetworkResponse);
@@ -621,6 +622,27 @@ message DaemonLogsRequest {
 message DaemonLogLine {
     uint64 ts_ms = 1;
     string line = 2;
+}
+
+message DaemonMetricsResponse {
+    repeated MethodLatency latency = 1;
+    repeated CodeCount by_code = 2;
+    uint64 instance_count = 3;
+    uint64 running_count = 4;
+    uint64 active_ops = 5;
+    uint64 qmp_reconnects = 6;
+}
+
+message MethodLatency {
+    string method = 1;
+    uint64 count = 2;
+    uint64 p50_ms = 3;
+    uint64 p99_ms = 4;
+}
+
+message CodeCount {
+    string code = 1;
+    uint64 count = 2;
 }
 
 message SetInstanceConfigRequest {

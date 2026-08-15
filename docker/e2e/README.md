@@ -91,6 +91,7 @@ Coverage by suite:
 | `19_version.sh` | version handshake: a matching CLI/daemon pair passes through |
 | `20_events.sh` | `andler events`: lifecycle log event on create, instance-filtered stream during start/stop (JSON), cleanup |
 | `21_daemon_logs.sh` | `andler logs daemon`: startup line in the snapshot ring, future `--since` yields nothing, `--follow` stays alive until timeout, `--json` shape |
+| `22_daemon_metrics.sh` | `andler doctor --metrics`: snapshot header/counts, recorded RPC traffic after real commands (GetVersion/ListInstances visible) |
 
 ### Deep guest tests
 
