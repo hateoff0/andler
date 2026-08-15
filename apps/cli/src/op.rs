@@ -1,11 +1,10 @@
-use andler_rpc::proto::andler_service_client::AndlerServiceClient;
+use crate::TracedClient;
 use andler_rpc::proto::{Empty, OpCancelRequest};
-use tonic::transport::Channel;
 
 use crate::OpAction;
 
 pub async fn handle(
-    client: &mut AndlerServiceClient<Channel>,
+    client: &mut TracedClient,
     action: OpAction,
     json: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {

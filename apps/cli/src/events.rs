@@ -1,13 +1,12 @@
-use andler_rpc::proto::andler_service_client::AndlerServiceClient;
+use crate::TracedClient;
 use andler_rpc::proto::EventStreamRequest;
-use tonic::transport::Channel;
 
 /// `andler events [<id>] [--follow] [--json]` — streams daemon events
 /// (lifecycle transitions, operations, QMP events) from the live bus.
 /// Without `--follow` it exits after the first event, which makes the
 /// command scriptable in tests.
 pub async fn handle(
-    client: &mut AndlerServiceClient<Channel>,
+    client: &mut TracedClient,
     instance_id: Option<String>,
     follow: bool,
     json: bool,

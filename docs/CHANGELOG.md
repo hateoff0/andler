@@ -9,6 +9,11 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Added
 
+#### Observability
+
+- **request_id correlation (§9.1.1)**: every CLI request is stamped with a `request_id` metadata header; the daemon's RPC span carries it, so `andler logs daemon` lines reconstruct the path CLI → RPC → operation. The `rpc{request_id=…, method=…}` span wraps each handler's events.
+- **Rate-limited retry logging (§9.1.4)**: the QMP events-monitor reconnect loop logs coalesced — first failure, every 50th, and a recovery summary with the attempt count — a dead socket neither spams the log nor vanishes silently.
+
 #### Daemon
 
 - **Online package install/remove on a running VM is now a supervisor operation**: same `guest-{action}-{package}` idempotency key and event-bus progress as the maintenance auto-start (a repeated request joins the running one), cancellable between the agent check and the command. The blocking inline RPC path is gone.

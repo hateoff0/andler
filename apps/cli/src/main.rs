@@ -735,7 +735,39 @@ fn looks_like_daemon_not_running(err: &(dyn std::error::Error + 'static)) -> boo
 /// Queries the daemon's version and fails with an actionable message when
 /// it differs from this CLI's build (§13.19). Stale daemons from an earlier
 /// refactor phase produce opaque protobuf errors; name the mismatch instead.
-async fn check_daemon_version(client: &mut AndlerServiceClient<Channel>) -> Result<(), String> {
+/// Stamps every request with a `request_id` metadata header (§9.1.1): the
+/// daemon's RPC span carries it, so a single log line reconstructs the
+/// path CLI → RPC → operation.
+#[derive(Clone)]
+pub(crate) struct RequestIdInterceptor;
+
+impl tonic::service::Interceptor for RequestIdInterceptor {
+    fn call(
+        &mut self,
+        mut request: tonic::Request<()>,
+    ) -> Result<tonic::Request<()>, tonic::Status> {
+        let id = format!("{:032x}", rand::random::<u128>());
+        if let Ok(value) = id.parse() {
+            request.metadata_mut().insert("request_id", value);
+        }
+        Ok(request)
+    }
+}
+
+pub(crate) type TracedClient =
+    AndlerServiceClient<tonic::codegen::InterceptedService<Channel, RequestIdInterceptor>>;
+
+/// Connects a client that stamps every request with a `request_id`
+/// metadata header (§9.1.1): the daemon's RPC span carries it, so a single
+/// log line reconstructs the path CLI → RPC → operation.
+pub(crate) async fn traced_client(addr: &str) -> Result<TracedClient, Box<dyn std::error::Error>> {
+    Ok(AndlerServiceClient::with_interceptor(
+        Channel::from_shared(addr.to_string())?.connect().await?,
+        RequestIdInterceptor,
+    ))
+}
+
+async fn check_daemon_version(client: &mut TracedClient) -> Result<(), String> {
     let cli_version = env!("CARGO_PKG_VERSION");
     let daemon_version = client
         .get_version(Empty {})
@@ -803,7 +835,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         };
     }
 
-    let mut client = AndlerServiceClient::connect(addr).await?;
+    let mut client = traced_client(&addr).await?;
 
     // Version handshake (§13.19): a CLI and daemon built from different
     // refactor phases would otherwise surface as an opaque protobuf error

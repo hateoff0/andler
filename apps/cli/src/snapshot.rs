@@ -1,11 +1,10 @@
-use andler_rpc::proto::andler_service_client::AndlerServiceClient;
+use crate::TracedClient;
 use andler_rpc::proto::{
     CreateSnapshotRequest, DeleteSnapshotRequest, InstanceIdRequest, RestoreSnapshotRequest,
 };
 use indicatif::{ProgressBar, ProgressStyle};
 use std::io::IsTerminal;
 use std::time::Duration;
-use tonic::transport::Channel;
 
 use crate::SnapshotAction;
 
@@ -23,7 +22,7 @@ fn spinner(message: &str) -> ProgressBar {
 }
 
 pub async fn handle(
-    client: &mut AndlerServiceClient<Channel>,
+    client: &mut TracedClient,
     instance_id: String,
     action: SnapshotAction,
     json: bool,

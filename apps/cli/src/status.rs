@@ -1,11 +1,10 @@
-use andler_rpc::proto::andler_service_client::AndlerServiceClient;
+use crate::TracedClient;
 use andler_rpc::proto::{
     instance_kind, network_mode, render_backend, AudioBackend, CpuPriority, DiskFormat,
     DisplayEngine, Empty, GetInstanceConfigResponse, InstanceIdRequest, InstanceStateKind,
     LogStreamSource,
 };
 use std::io::IsTerminal;
-use tonic::transport::Channel;
 
 use crate::helpers::{
     colorize_status, format_bytes, format_bytes_per_sec, format_size, state_kind_name,
@@ -13,7 +12,7 @@ use crate::helpers::{
 use crate::{CliLogSource, ListSortKey};
 
 pub async fn handle_status(
-    client: &mut AndlerServiceClient<Channel>,
+    client: &mut TracedClient,
     instance_id: String,
     json: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -73,7 +72,7 @@ fn parse_state_filter(s: &str) -> Option<InstanceStateKind> {
 }
 
 pub async fn handle_list(
-    client: &mut AndlerServiceClient<Channel>,
+    client: &mut TracedClient,
     full_id: bool,
     state: Option<String>,
     name: Option<String>,
@@ -180,7 +179,7 @@ pub async fn handle_list(
 }
 
 pub async fn handle_config(
-    client: &mut AndlerServiceClient<Channel>,
+    client: &mut TracedClient,
     instance_id: String,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let response = client
@@ -192,7 +191,7 @@ pub async fn handle_config(
 }
 
 pub async fn handle_config_status(
-    client: &mut AndlerServiceClient<Channel>,
+    client: &mut TracedClient,
     instance_id: String,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let response = client
@@ -243,7 +242,7 @@ fn log_line_matches_filters(
 }
 
 pub async fn handle_logs(
-    client: &mut AndlerServiceClient<Channel>,
+    client: &mut TracedClient,
     instance_id: String,
     source: Option<CliLogSource>,
     grep: Option<String>,
@@ -334,7 +333,7 @@ struct MetricsJson {
 }
 
 pub async fn handle_metrics(
-    client: &mut AndlerServiceClient<Channel>,
+    client: &mut TracedClient,
     instance_id: String,
     once: bool,
     json: bool,
@@ -747,7 +746,7 @@ mod tests {
 }
 
 pub async fn handle_daemon_logs(
-    client: &mut AndlerServiceClient<Channel>,
+    client: &mut TracedClient,
     follow: bool,
     json: bool,
     since: Option<u64>,

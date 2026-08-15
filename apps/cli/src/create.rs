@@ -1,9 +1,8 @@
-use andler_rpc::proto::andler_service_client::AndlerServiceClient;
+use crate::TracedClient;
 use andler_rpc::proto::{
     AndroidProfile as ProtoAndroidProfile, CreateAndroidInstanceRequest, CreateInstanceRequest,
 };
 use std::path::PathBuf;
-use tonic::transport::Channel;
 
 use crate::instance_file::{InstanceFile, InstanceFileResult};
 use crate::wizard::{PartialArgs, WizardError, WizardKind};
@@ -11,7 +10,7 @@ use crate::{CliAndroidVersion, CliArmTranslator, CliCdromBus, CliKind};
 
 #[allow(clippy::too_many_arguments)] // mirrors all create CLI flags; splitting adds indirection for no benefit
 pub async fn handle(
-    client: &mut AndlerServiceClient<Channel>,
+    client: &mut TracedClient,
     file: Option<PathBuf>,
     kind: Option<CliKind>,
     name: Option<String>,

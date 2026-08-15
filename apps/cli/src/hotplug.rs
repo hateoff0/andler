@@ -1,9 +1,8 @@
-use andler_rpc::proto::andler_service_client::AndlerServiceClient;
+use crate::TracedClient;
 use andler_rpc::proto::{
     AttachDiskRequest, AttachNetworkRequest, DetachDiskRequest, DetachNetworkRequest,
     NetworkConfig as ProtoNetworkConfig, NetworkMode as ProtoNetworkMode,
 };
-use tonic::transport::Channel;
 
 use crate::{AttachAction, CliAttachNetMode, CliNatBackend, DetachAction};
 
@@ -39,7 +38,7 @@ fn proto_network_config(
 }
 
 pub async fn handle_attach(
-    client: &mut AndlerServiceClient<Channel>,
+    client: &mut TracedClient,
     action: AttachAction,
 ) -> Result<(), Box<dyn std::error::Error>> {
     match action {
@@ -90,7 +89,7 @@ pub async fn handle_attach(
 }
 
 pub async fn handle_detach(
-    client: &mut AndlerServiceClient<Channel>,
+    client: &mut TracedClient,
     action: DetachAction,
 ) -> Result<(), Box<dyn std::error::Error>> {
     match action {

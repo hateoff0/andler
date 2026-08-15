@@ -551,9 +551,7 @@ fn default_instances_root() -> String {
 }
 
 pub async fn handle_wizard(
-    client: &mut andler_rpc::proto::andler_service_client::AndlerServiceClient<
-        tonic::transport::Channel,
-    >,
+    client: &mut crate::TracedClient,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let partial = PartialArgs::default();
     let result = run(partial).await;
@@ -576,9 +574,7 @@ pub async fn handle_wizard(
 }
 
 pub async fn send_result(
-    client: &mut andler_rpc::proto::andler_service_client::AndlerServiceClient<
-        tonic::transport::Channel,
-    >,
+    client: &mut crate::TracedClient,
     result: WizardResult,
 ) -> Result<(), Box<dyn std::error::Error>> {
     match result {

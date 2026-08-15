@@ -416,6 +416,17 @@ the default INFO level:
 - Env values are never logged; instance ids, paths, and error text (the
   actionable, sanitized message, not raw stderr) are the allowed fields.
 
+### Request correlation (§9.1.1)
+
+Every CLI request carries a `request_id` metadata header (32-hex, generated
+per request); the daemon's RPC layer wraps each handler in an
+`rpc{request_id=…, method=…}` span, so any event emitted while handling a
+request shows up in the daemon log with its id. Long operations keep their
+own `op_id` on the event bus; together they reconstruct
+CLI → RPC → operation from one log line. Retry loops (QMP events monitor,
+health checks) log coalesced — first failure, every 50th attempt, and a
+recovery summary (§9.1.4).
+
 ## Security / Threat Model
 
 Honest model, written down because the helper doc referenced it (see ROADMAP)

@@ -2,10 +2,9 @@ use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use std::str::FromStr;
 
+use crate::TracedClient;
 use andler_core::InstanceId;
-use andler_rpc::proto::andler_service_client::AndlerServiceClient;
 use andler_rpc::proto::{Empty, InstanceIdRequest, InstanceStateKind};
-use tonic::transport::Channel;
 
 use crate::ConnectLevel;
 
@@ -14,7 +13,7 @@ use crate::ConnectLevel;
 /// one. Phase 2 ships `console` (works on any VM, any state that runs QEMU)
 /// and `exec` (needs the guest agent); ssh/adb land with provisioning.
 pub async fn handle_connect(
-    client: &mut AndlerServiceClient<Channel>,
+    client: &mut TracedClient,
     instance_id: String,
     level: ConnectLevel,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -70,7 +69,7 @@ pub async fn handle_connect(
 /// actual plumbing. The client inherits this process's stdio so it stays
 /// interactive.
 async fn connect_via_port_forward(
-    client: &mut AndlerServiceClient<Channel>,
+    client: &mut TracedClient,
     full_id: &str,
     guest_port: u16,
     what: &str,
@@ -131,7 +130,7 @@ async fn connect_via_port_forward(
 /// (the daemon resolves ids server-side per RPC, but the console socket
 /// path needs the full id client-side).
 async fn resolve_full_id(
-    client: &mut AndlerServiceClient<Channel>,
+    client: &mut TracedClient,
     raw: &str,
 ) -> Result<String, Box<dyn std::error::Error>> {
     let needle = raw.to_ascii_lowercase();

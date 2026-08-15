@@ -14,6 +14,7 @@ andler-disk = { path = "../../services/andler-disk" }
 andler-firmware = { path = "../../services/andler-firmware" }
 andler-qemu = { path = "../../backends/andler-qemu" }
 andler-rpc = { path = "../../services/andler-rpc" }
+rand = { workspace = true }
 tonic = { workspace = true }
 tokio = { workspace = true }
 clap = { workspace = true }

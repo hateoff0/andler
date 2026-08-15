@@ -1,10 +1,9 @@
-use andler_rpc::proto::andler_service_client::AndlerServiceClient;
+use crate::TracedClient;
 use andler_rpc::proto::{InstanceIdRequest, RemoveInstanceRequest, StopInstanceRequest};
 use std::io::IsTerminal;
-use tonic::transport::Channel;
 
 pub async fn resolve_echo(
-    client: &mut AndlerServiceClient<Channel>,
+    client: &mut TracedClient,
     instance_id: &str,
 ) -> (String, Option<String>) {
     match client
@@ -30,7 +29,7 @@ fn print_echo(verb: &str, id: &str, name: Option<&str>) {
 }
 
 pub async fn handle_start(
-    client: &mut AndlerServiceClient<Channel>,
+    client: &mut TracedClient,
     instance_id: String,
 ) -> Result<(), Box<dyn std::error::Error>> {
     client
@@ -44,7 +43,7 @@ pub async fn handle_start(
 }
 
 pub async fn handle_stop(
-    client: &mut AndlerServiceClient<Channel>,
+    client: &mut TracedClient,
     instance_id: String,
     graceful: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -60,7 +59,7 @@ pub async fn handle_stop(
 }
 
 pub async fn handle_pause(
-    client: &mut AndlerServiceClient<Channel>,
+    client: &mut TracedClient,
     instance_id: String,
 ) -> Result<(), Box<dyn std::error::Error>> {
     client
@@ -74,7 +73,7 @@ pub async fn handle_pause(
 }
 
 pub async fn handle_resume(
-    client: &mut AndlerServiceClient<Channel>,
+    client: &mut TracedClient,
     instance_id: String,
 ) -> Result<(), Box<dyn std::error::Error>> {
     client
@@ -88,7 +87,7 @@ pub async fn handle_resume(
 }
 
 pub async fn handle_remove(
-    client: &mut AndlerServiceClient<Channel>,
+    client: &mut TracedClient,
     instance_id: String,
     purge: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {

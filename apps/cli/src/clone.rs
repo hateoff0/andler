@@ -1,11 +1,10 @@
-use andler_rpc::proto::andler_service_client::AndlerServiceClient;
+use crate::TracedClient;
 use andler_rpc::proto::{CloneInstanceRequest, ExportInstanceDiskRequest};
-use tonic::transport::Channel;
 
 use crate::CliCloneMode;
 
 pub async fn handle_clone(
-    client: &mut AndlerServiceClient<Channel>,
+    client: &mut TracedClient,
     source_instance_id: String,
     name: String,
     instances_root: String,
@@ -28,7 +27,7 @@ pub async fn handle_clone(
 }
 
 pub async fn handle_export(
-    client: &mut AndlerServiceClient<Channel>,
+    client: &mut TracedClient,
     source_instance_id: String,
     dest_path: String,
 ) -> Result<(), Box<dyn std::error::Error>> {

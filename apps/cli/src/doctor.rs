@@ -1,6 +1,5 @@
 use std::path::{Path, PathBuf};
 
-use andler_rpc::proto::andler_service_client::AndlerServiceClient;
 use andler_rpc::proto::Empty;
 
 use crate::helpers::which;
@@ -303,7 +302,7 @@ fn nbd_checks() -> Vec<Check> {
 }
 
 async fn daemon_check(addr: &str) -> Check {
-    let connect = AndlerServiceClient::connect(addr.to_string());
+    let connect = crate::traced_client(addr);
     match tokio::time::timeout(std::time::Duration::from_secs(3), connect).await {
         Ok(Ok(_client)) => ok("andlerd", format!("reachable at {addr}")),
         Ok(Err(e)) => fail(
@@ -837,7 +836,7 @@ mod tests {
 /// snapshot (§9.1.8 / P27): RPC latency p50/p99 per method, error counts
 /// by gRPC status code, instance/active-op counts and QMP reconnects.
 pub async fn print_metrics(daemon_addr: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let mut client = AndlerServiceClient::connect(daemon_addr.to_string()).await?;
+    let mut client = crate::traced_client(daemon_addr).await?;
     let snap = client
         .get_daemon_metrics(Empty {})
         .await

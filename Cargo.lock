@@ -507,6 +507,7 @@ dependencies = [
  "indicatif",
  "inquire",
  "libc",
+ "rand 0.10.2",
  "regex",
  "serde",
  "serde_json",

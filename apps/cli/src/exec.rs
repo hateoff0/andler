@@ -1,12 +1,11 @@
-use andler_rpc::proto::andler_service_client::AndlerServiceClient;
+use crate::TracedClient;
 use andler_rpc::proto::ExecCommandRequest;
-use tonic::transport::Channel;
 
 /// `andler exec <id> -- cmd args...` — runs a command in the guest through
 /// the guest agent and relays its exit code. Programmatic access level of
 /// `andler connect`; works without any guest network setup.
 pub async fn handle_exec(
-    client: &mut AndlerServiceClient<Channel>,
+    client: &mut TracedClient,
     instance_id: String,
     argv: Vec<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {

@@ -1,10 +1,9 @@
-use andler_rpc::proto::andler_service_client::AndlerServiceClient;
+use crate::TracedClient;
 use andler_rpc::proto::{
     AndroidBootMode as ProtoAndroidBootMode, GuestProvisionRequest, InstallGuestAgentRequest,
     InstanceIdRequest, RemoveGuestAgentRequest, SwitchAndroidBootModeRequest,
     SwitchArmTranslatorRequest,
 };
-use tonic::transport::Channel;
 
 use std::io::IsTerminal;
 
@@ -76,7 +75,7 @@ pub enum GuestAction {
 }
 
 pub async fn handle(
-    client: &mut AndlerServiceClient<Channel>,
+    client: &mut TracedClient,
     action: GuestAction,
 ) -> Result<(), Box<dyn std::error::Error>> {
     match action {

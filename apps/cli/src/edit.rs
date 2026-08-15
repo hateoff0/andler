@@ -1,13 +1,12 @@
+use crate::TracedClient;
 use andler_core::InstanceConfig;
 use andler_rpc::convert;
-use andler_rpc::proto::andler_service_client::AndlerServiceClient;
 use andler_rpc::proto::InstanceIdRequest;
-use tonic::transport::Channel;
 
 use crate::helpers::which;
 
 pub async fn handle(
-    client: &mut AndlerServiceClient<Channel>,
+    client: &mut TracedClient,
     instance_id: String,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let response = client

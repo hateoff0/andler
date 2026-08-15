@@ -111,17 +111,42 @@ impl QemuBackend {
         ));
         let tx = self.qmp_events.clone();
         let task = tokio::spawn(async move {
+            // §9.1.4: retry loops log coalesced — first failure, every
+            // 50th, and the recovery summary — a dead socket must not
+            // spam the daemon log nor vanish silently.
+            let mut failed: u64 = 0;
             loop {
-                if let Ok(reader) = crate::qmp::QmpEventReader::connect(&events_socket).await {
-                    let mut rx = reader.subscribe();
-                    while let Ok(ev) = rx.recv().await {
-                        let record = andler_core::QmpEventRecord {
-                            handle: handle.clone(),
-                            event: QemuBackend::map_qmp_event(&ev.event),
-                            data: ev.data.map(|d| d.to_string()).unwrap_or_default(),
-                        };
-                        if tx.send(record).is_err() {
-                            return;
+                match crate::qmp::QmpEventReader::connect(&events_socket).await {
+                    Ok(reader) => {
+                        if failed > 0 {
+                            tracing::warn!(
+                                handle = %handle.0,
+                                attempts = failed,
+                                "events monitor reconnected after {failed} failed attempts"
+                            );
+                            failed = 0;
+                        }
+                        let mut rx = reader.subscribe();
+                        while let Ok(ev) = rx.recv().await {
+                            let record = andler_core::QmpEventRecord {
+                                handle: handle.clone(),
+                                event: QemuBackend::map_qmp_event(&ev.event),
+                                data: ev.data.map(|d| d.to_string()).unwrap_or_default(),
+                            };
+                            if tx.send(record).is_err() {
+                                return;
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        failed += 1;
+                        if failed == 1 || failed.is_multiple_of(50) {
+                            tracing::warn!(
+                                handle = %handle.0,
+                                attempts = failed,
+                                error = %err,
+                                "events monitor connect failed, retrying"
+                            );
                         }
                     }
                 }

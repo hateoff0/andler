@@ -1,6 +1,7 @@
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use tracing::Instrument;
 
 const LATENCY_SAMPLES_PER_METHOD: usize = 4096;
 
@@ -155,24 +156,38 @@ where
 
     fn call(&mut self, request: tonic::codegen::http::Request<ReqBody>) -> Self::Future {
         let method = request.uri().path().to_string();
+        let request_id = request
+            .extensions()
+            .get::<tonic::metadata::MetadataMap>()
+            .and_then(|m| m.get("request_id"))
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("unknown")
+            .to_string();
+        // §9.1.1: every event emitted while handling this request carries
+        // the request_id (and method) via the span — the CLI stamps the
+        // header, so one log line reconstructs CLI → RPC → operation.
+        let span = tracing::info_span!("rpc", request_id = %request_id, method = %method);
         let start = Instant::now();
         let metrics = self.metrics.clone();
         let mut inner = self.inner.clone();
-        Box::pin(async move {
-            let response = inner.call(request).await;
-            // tonic server services have Error = Infallible; gRPC status is
-            // carried in the response's grpc-status header. Missing header
-            // (or http-level success) = OK.
-            let code = response.as_ref().ok().and_then(|r| {
-                r.headers()
-                    .get("grpc-status")
-                    .and_then(|v| v.to_str().ok())
-                    .and_then(|s| s.parse::<i32>().ok())
-                    .map(tonic::Code::from_i32)
-            });
-            metrics.record_rpc(&method, start.elapsed(), code);
-            response
-        })
+        Box::pin(
+            async move {
+                let response = inner.call(request).await;
+                // tonic server services have Error = Infallible; gRPC status is
+                // carried in the response's grpc-status header. Missing header
+                // (or http-level success) = OK.
+                let code = response.as_ref().ok().and_then(|r| {
+                    r.headers()
+                        .get("grpc-status")
+                        .and_then(|v| v.to_str().ok())
+                        .and_then(|s| s.parse::<i32>().ok())
+                        .map(tonic::Code::from_i32)
+                });
+                metrics.record_rpc(&method, start.elapsed(), code);
+                response
+            }
+            .instrument(span),
+        )
     }
 }
 
