@@ -1,5 +1,6 @@
 mod daemon;
 mod firmware;
+mod log_ring;
 mod service;
 
 #[cfg(test)]
@@ -150,7 +151,7 @@ mod verbosity_tests {
     }
 }
 
-fn init_tracing() {
+fn init_tracing() -> std::sync::Arc<log_ring::LogRing> {
     let json = std::env::var("ANDLERD_LOG_FORMAT")
         .map(|v| v.eq_ignore_ascii_case("json"))
         .unwrap_or(false);
@@ -173,14 +174,21 @@ fn init_tracing() {
         }
     };
 
+    let ring = log_ring::LogRing::new();
+    let writer = log_ring::RingMakeWriter::new(ring.clone());
     if json {
         tracing_subscriber::fmt()
             .json()
             .with_env_filter(filter)
+            .with_writer(writer)
             .init();
     } else {
-        tracing_subscriber::fmt().with_env_filter(filter).init();
+        tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_writer(writer)
+            .init();
     }
+    ring
 }
 
 fn default_store_path() -> String {
@@ -189,7 +197,7 @@ fn default_store_path() -> String {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    init_tracing();
+    let ring = init_tracing();
 
     // One daemon per ANDLER_HOME: the lock file lives next to the database
     // and is held (via the File's fd) for the whole process lifetime.
@@ -262,7 +270,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     let daemon = Arc::new(daemon);
-    let service = DaemonService::new(Arc::clone(&daemon), ovmf);
+    let service = DaemonService::new(Arc::clone(&daemon), ovmf, ring);
 
     spawn_health_check_task(Arc::clone(&daemon));
 

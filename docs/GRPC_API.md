@@ -37,6 +37,7 @@ The core service exposing all instance management operations.
 | `RemoveGuestAgent` | `RemoveGuestAgentRequest` | `Empty` | Unary | Removes a package from the guest OS. |
 | `ListGuestPackages` | `InstanceIdRequest` | `ListGuestPackagesResponse` | Unary | Lists known guest packages and their installation status. |
 | `GuestProvision` | `GuestProvisionRequest` | `Empty` | Unary | Applies a provision manifest: online via QGA when running, offline via the guestfs appliance when stopped. |
+| `StreamDaemonLogs` | `DaemonLogsRequest` | `stream DaemonLogLine` | Server-streaming | Streams the daemon's own log from its in-memory ring (snapshot, or follow when requested). |
 | `SwitchArmTranslator` | `SwitchArmTranslatorRequest` | `Empty` | Unary | Switches the ARM translator in offline mode. |
 | `SetInstanceConfig` | `SetInstanceConfigRequest` | `Empty` | Unary | Partially updates an instance configuration by key. |
 | `SwitchAndroidBootMode` | `SwitchAndroidBootModeRequest` | `Empty` | Unary | Switches the Android boot mode in offline mode. |
@@ -828,6 +829,20 @@ CLI resolves relative paths against the manifest directory),
 `ProvisionChmod { path, mode }` (octal mode as uint32),
 `ProvisionSymlink { target, link }`. An empty oneof is rejected as
 `MissingField`.
+
+### `DaemonLogsRequest`
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `follow` | `bool` | Stream new lines as they are logged (default false: return the ring snapshot and close). |
+| `since_ms` | `optional uint64` | Only lines with `ts_ms >= since_ms` (default 0 = the whole ring tail, up to the last 4096 lines). |
+
+### `DaemonLogLine`
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `ts_ms` | `uint64` | Wall-clock milliseconds since the UNIX epoch. |
+| `line` | `string` | One formatted daemon log line (same bytes the daemon prints; JSON shape when `ANDLERD_LOG_FORMAT=json`). |
 
 ### `ListGuestPackagesResponse`
 

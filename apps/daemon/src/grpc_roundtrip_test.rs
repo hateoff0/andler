@@ -37,7 +37,7 @@ async fn spawn_server_and_connect() -> (
         code: std::path::PathBuf::from("/usr/share/edk2/x64/OVMF_CODE.4m.fd"),
         vars_template: std::path::PathBuf::from("/usr/share/edk2/x64/OVMF_VARS.4m.fd"),
     };
-    let service = DaemonService::new(daemon, test_ovmf);
+    let service = DaemonService::new(daemon, test_ovmf, crate::log_ring::LogRing::new());
 
     let server = tokio::spawn(async move {
         Server::builder()
@@ -1008,6 +1008,31 @@ fn provision_mkdir_op() -> andler_rpc::proto::ProvisionOp {
             },
         )),
     }
+}
+
+#[tokio::test]
+async fn stream_daemon_logs_snapshot_round_trips_over_real_grpc() {
+    let (mut client, server) = spawn_server_and_connect().await;
+
+    let mut stream = client
+        .stream_daemon_logs(andler_rpc::proto::DaemonLogsRequest {
+            follow: false,
+            since_ms: None,
+        })
+        .await
+        .unwrap()
+        .into_inner();
+
+    // The test server's ring is empty, but the RPC itself must work and
+    // terminate (snapshot mode closes the stream).
+    let mut lines = 0;
+    while let Some(line) = stream.message().await.unwrap() {
+        assert!(!line.line.is_empty());
+        lines += 1;
+    }
+    assert_eq!(lines, 0, "fresh ring has no lines");
+
+    server.abort();
 }
 
 #[tokio::test]

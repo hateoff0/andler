@@ -9,7 +9,13 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Added
 
+#### CLI
+
+- **`andler logs daemon [--follow] [--json] [--since <epoch-ms>]`**: streams the daemon's own log (the same lines it prints, same format) from an in-memory 4096-line ring — debugging never requires knowing where andlerd writes. `--follow` keeps streaming, `--json` emits `{"ts_ms":...,"line":...}` lines, `--since` filters the snapshot; all three are rejected with an instance id (instance logs keep `--source/--grep/--tail`).
+
 #### Daemon
+
+- **`StreamDaemonLogs` RPC**: snapshot + follow over the daemon log ring. The tracing writer tees every formatted line into the ring (JSON shape when `ANDLERD_LOG_FORMAT=json`), bounded at 4096 lines.
 
 - **Base-image pin**: every Android instance records `base_image_pin = { id, sha256 }` (manifest id + content sha256 of the qcow2) in its `instance.toml` at creation. Creating from an instance file that already pins an image refuses a backing file whose id or checksum no longer matches — a silently swapped base image (which would corrupt linked clones on top of it) now fails with an actionable error instead of being accepted. The check runs at creation only; updates are explicit (edit the pin in the instance file).
 

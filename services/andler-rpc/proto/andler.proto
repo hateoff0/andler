@@ -31,6 +31,7 @@ service AndlerService {
     rpc SwitchAndroidBootMode(SwitchAndroidBootModeRequest) returns (Empty);
     rpc GetAndroidBootMode(InstanceIdRequest) returns (GetAndroidBootModeResponse);
     rpc GuestProvision(GuestProvisionRequest) returns (Empty);
+    rpc StreamDaemonLogs(DaemonLogsRequest) returns (stream DaemonLogLine);
     rpc AttachDisk(AttachDiskRequest) returns (AttachDiskResponse);
     rpc DetachDisk(DetachDiskRequest) returns (Empty);
     rpc AttachNetwork(AttachNetworkRequest) returns (AttachNetworkResponse);
@@ -607,6 +608,19 @@ message ProvisionChmod {
 message ProvisionSymlink {
     string target = 1;
     string link = 2;
+}
+
+message DaemonLogsRequest {
+    // Stream new lines as they are logged. Default false: return the
+    // current ring snapshot and close.
+    bool follow = 1;
+    // Only lines with ts_ms >= since_ms. Default 0 = the whole ring tail.
+    optional uint64 since_ms = 2;
+}
+
+message DaemonLogLine {
+    uint64 ts_ms = 1;
+    string line = 2;
 }
 
 message SetInstanceConfigRequest {

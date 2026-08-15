@@ -9,16 +9,16 @@ use andler_rpc::proto::{
     AttachDiskRequest, AttachDiskResponse, AttachNetworkRequest, AttachNetworkResponse,
     CloneInstanceRequest, ConfigKeyDiff, CreateAndroidInstanceRequest, CreateInstanceRequest,
     CreateInstanceResponse, CreateSnapshotRequest, CreateSnapshotResponse, DaemonEventMessage,
-    DeleteSnapshotRequest, DetachDiskRequest, DetachNetworkRequest, Empty, EventStreamRequest,
-    ExecCommandRequest, ExecCommandResponse, ExportInstanceDiskRequest, ExportInstanceDiskResponse,
-    GetAndroidBootModeResponse, GetConfigStatusResponse, GetInstanceConfigResponse,
-    GuestPackageEntry, GuestProvisionRequest, InstallGuestAgentRequest, InstanceIdRequest,
-    InstanceListEntry, InstanceStatusResponse, ListGuestPackagesResponse, ListInstancesResponse,
-    ListSnapshotsResponse, LogLineResponse, OpCancelRequest, OpListResponse, OperationInfo,
-    OperationPhase, RemoveGuestAgentRequest, RemoveInstanceRequest, ResourceMetricsResponse,
-    RestoreSnapshotRequest, SetInstanceConfigRequest, SnapshotEntry, StopInstanceRequest,
-    SwitchAndroidBootModeRequest, SwitchArmTranslatorRequest, UpdateInstanceConfigRequest,
-    VersionResponse,
+    DaemonLogLine, DaemonLogsRequest, DeleteSnapshotRequest, DetachDiskRequest,
+    DetachNetworkRequest, Empty, EventStreamRequest, ExecCommandRequest, ExecCommandResponse,
+    ExportInstanceDiskRequest, ExportInstanceDiskResponse, GetAndroidBootModeResponse,
+    GetConfigStatusResponse, GetInstanceConfigResponse, GuestPackageEntry, GuestProvisionRequest,
+    InstallGuestAgentRequest, InstanceIdRequest, InstanceListEntry, InstanceStatusResponse,
+    ListGuestPackagesResponse, ListInstancesResponse, ListSnapshotsResponse, LogLineResponse,
+    OpCancelRequest, OpListResponse, OperationInfo, OperationPhase, RemoveGuestAgentRequest,
+    RemoveInstanceRequest, ResourceMetricsResponse, RestoreSnapshotRequest,
+    SetInstanceConfigRequest, SnapshotEntry, StopInstanceRequest, SwitchAndroidBootModeRequest,
+    SwitchArmTranslatorRequest, UpdateInstanceConfigRequest, VersionResponse,
 };
 use futures_core::Stream;
 use futures_util::StreamExt;
@@ -31,11 +31,20 @@ use crate::firmware::OvmfPaths;
 pub struct DaemonService {
     daemon: Arc<Daemon>,
     ovmf: OvmfPaths,
+    log_ring: std::sync::Arc<crate::log_ring::LogRing>,
 }
 
 impl DaemonService {
-    pub fn new(daemon: Arc<Daemon>, ovmf: OvmfPaths) -> Self {
-        DaemonService { daemon, ovmf }
+    pub fn new(
+        daemon: Arc<Daemon>,
+        ovmf: OvmfPaths,
+        log_ring: std::sync::Arc<crate::log_ring::LogRing>,
+    ) -> Self {
+        DaemonService {
+            daemon,
+            ovmf,
+            log_ring,
+        }
     }
 }
 
@@ -76,6 +85,9 @@ impl AndlerService for DaemonService {
 
     type StreamResourceMetricsStream =
         Pin<Box<dyn Stream<Item = Result<ResourceMetricsResponse, Status>> + Send + 'static>>;
+
+    type StreamDaemonLogsStream =
+        Pin<Box<dyn Stream<Item = Result<DaemonLogLine, Status>> + Send + 'static>>;
 
     async fn create_instance(
         &self,
@@ -664,6 +676,42 @@ impl AndlerService for DaemonService {
 
     type StreamEventsStream =
         Pin<Box<dyn Stream<Item = Result<DaemonEventMessage, Status>> + Send>>;
+
+    async fn stream_daemon_logs(
+        &self,
+        request: Request<DaemonLogsRequest>,
+    ) -> Result<Response<Self::StreamDaemonLogsStream>, Status> {
+        let req = request.into_inner();
+        let since_ms = req.since_ms.unwrap_or(0);
+
+        let ring = self.log_ring.clone();
+        let snapshot = ring.snapshot(since_ms);
+        let rx = if req.follow {
+            Some(ring.subscribe())
+        } else {
+            None
+        };
+
+        let stream = async_stream::stream! {
+            for (ts_ms, line) in snapshot {
+                yield Ok(DaemonLogLine { ts_ms, line });
+            }
+            if let Some(mut rx) = rx {
+                loop {
+                    match rx.recv().await {
+                        Ok(line) => yield Ok(DaemonLogLine {
+                            ts_ms: chrono::Utc::now().timestamp_millis() as u64,
+                            line,
+                        }),
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    }
+                }
+            }
+        };
+
+        Ok(Response::new(Box::pin(stream)))
+    }
 
     async fn stream_events(
         &self,

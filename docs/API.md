@@ -223,6 +223,27 @@ Streams QEMU stdout/stderr with `[stdout]`/`[stderr]` prefix. Also reads histori
 
 If instance has no running backend (never started, or already stopped), prints a warning to stderr and exits with code 0.
 
+### Daemon logs
+
+```bash
+andler logs daemon [--follow] [--json] [--since <epoch-ms>]
+```
+
+Streams the daemon's own log (the same lines it prints to stdout/stderr,
+in the same format — JSON when `ANDLERD_LOG_FORMAT=json`), served from an
+in-memory ring of the last 4096 lines, so debugging never requires knowing
+where the daemon writes. The special id `daemon` is reserved for this
+command and is never a valid instance id.
+
+| Flag | Description |
+|------|-------------|
+| `--follow` | Keep streaming new lines instead of returning the ring snapshot |
+| `--json` | JSON-lines output: `{"ts_ms":...,"line":...}` |
+| `--since <epoch-ms>` | Only lines at/after this timestamp (snapshot mode) |
+
+`--follow/--json/--since` are rejected when an instance id is given; the
+instance form has its own flags (`--source`, `--grep`, `--tail`).
+
 ### `metrics`
 
 ```bash

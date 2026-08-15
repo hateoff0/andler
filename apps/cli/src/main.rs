@@ -132,6 +132,18 @@ dual_id_args!(LogsArgs,
 
     #[arg(long)]
     pub tail: Option<usize>,
+
+    /// Only for `andler logs daemon`: follow new lines.
+    #[arg(long)]
+    pub follow: bool,
+
+    /// Only for `andler logs daemon`: JSON-lines output.
+    #[arg(long)]
+    pub json: bool,
+
+    /// Only for `andler logs daemon`: only lines at/after this epoch-ms.
+    #[arg(long)]
+    pub since: Option<u64>,
 );
 
 dual_id_args!(MetricsArgs,
@@ -943,15 +955,28 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             crate::events::handle(&mut client, args.instance_id, args.follow, args.json).await?;
         }
         Some(Command::Logs(args)) => {
-            let id = args.resolve_id()?;
-            status::handle_logs(
-                &mut client,
-                id.to_string(),
-                args.source,
-                args.grep,
-                args.tail,
-            )
-            .await?;
+            let is_daemon = args.instance_id.as_deref() == Some("daemon")
+                || args.instance.as_deref() == Some("daemon");
+            if is_daemon {
+                status::handle_daemon_logs(&mut client, args.follow, args.json, args.since).await?;
+            } else {
+                if args.follow || args.json || args.since.is_some() {
+                    eprintln!(
+                        "--follow/--json/--since apply to `andler logs daemon` only; \
+                         instance logs stream everything"
+                    );
+                    std::process::exit(2);
+                }
+                let id = args.resolve_id()?;
+                status::handle_logs(
+                    &mut client,
+                    id.to_string(),
+                    args.source,
+                    args.grep,
+                    args.tail,
+                )
+                .await?;
+            }
         }
         Some(Command::Metrics(args)) => {
             let id = args.resolve_id()?;

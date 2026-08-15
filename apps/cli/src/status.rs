@@ -745,3 +745,34 @@ mod tests {
         assert!(json.contains("\"vram_used_bytes\":null"));
     }
 }
+
+pub async fn handle_daemon_logs(
+    client: &mut AndlerServiceClient<Channel>,
+    follow: bool,
+    json: bool,
+    since: Option<u64>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut stream = client
+        .stream_daemon_logs(andler_rpc::proto::DaemonLogsRequest {
+            follow,
+            since_ms: since,
+        })
+        .await?
+        .into_inner();
+
+    let mut stdout = std::io::stdout();
+    use std::io::Write;
+    while let Some(line) = stream.message().await? {
+        if json {
+            writeln!(
+                stdout,
+                "{{\"ts_ms\":{},\"line\":{}}}",
+                line.ts_ms,
+                serde_json::to_string(&line.line)?
+            )?;
+        } else {
+            writeln!(stdout, "{}", line.line)?;
+        }
+    }
+    Ok(())
+}

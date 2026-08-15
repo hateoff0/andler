@@ -90,6 +90,7 @@ Coverage by suite:
 | `18_boot_mode.sh` | P31: `config view` surfaces `boot_mode: android` from the config (no disk mount), `config set` refuses the key (immutable), `guest boot-mode` get is config-backed |
 | `19_version.sh` | version handshake: a matching CLI/daemon pair passes through |
 | `20_events.sh` | `andler events`: lifecycle log event on create, instance-filtered stream during start/stop (JSON), cleanup |
+| `21_daemon_logs.sh` | `andler logs daemon`: startup line in the snapshot ring, future `--since` yields nothing, `--follow` stays alive until timeout, `--json` shape |
 
 ### Deep guest tests
 
