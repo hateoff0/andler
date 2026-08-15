@@ -9,6 +9,10 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Added
 
+#### CLI
+
+- **`andler doctor` no longer pushes root**: the `andler-helper` presence check and the passwordless-sudo probe are warnings, not failures, and their fix text explains the rule is only needed for the offline qemu-nbd/chroot rescue case (a VM that cannot boot) — the smart online package path needs no root on the host.
+
 #### Daemon
 
 - **Smart guest package path**: `guest install/remove <pkg>` no longer requires root on the host by default. A stopped instance is auto-started headless for maintenance, the package is installed/removed via the guest agent (QGA `guest-exec`, same `PackageManager` command shapes as the offline path), and the VM is stopped again — all as a cancellable supervisor operation visible on the event bus. If the guest agent does not appear within `ANDLERD_GUEST_AGENT_WAIT_SECS` (default 120 s), the operation fails with a hint to retry with `--offline`. The new `--offline` flag forces the qemu-nbd/chroot path (requires the `andler-helper` sudoers rule) — the rescue case for VMs that cannot boot. `--offline` on a running instance is refused with an explanation.

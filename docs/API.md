@@ -515,7 +515,7 @@ Interactive guided instance creation wizard (also the default when `andler` is i
 andler doctor [--fix]
 ```
 
-Checks the local environment for ANDLER prerequisites: KVM availability, QEMU/OVMF installation, nbd kernel module (a scan failure is reported with `Run: sudo modprobe nbd max_part=8`), the `andler-helper` privileged binary and its passwordless-sudo rule, daemon reachability, and base images. Read-only — works even if andlerd isn't running.
+Checks the local environment for ANDLER prerequisites: KVM availability, QEMU/OVMF installation, nbd kernel module (a scan failure is reported with `Run: sudo modprobe nbd max_part=8`), the `andler-helper` privileged binary and its passwordless-sudo rule, daemon reachability, and base images. Read-only — works even if andlerd isn't running. The helper/sudoers checks are warnings, not failures: the smart online package path needs no root on the host, the helper rule is only required for the offline qemu-nbd/chroot rescue case (VM cannot boot).
 
 With `--fix`, offers to install the `andler-helper` binary (root:root 0755, via `sudo install`) and write its single passwordless-sudo rule to `/etc/sudoers.d/andler` (validates with `visudo -c` before writing; migrates legacy per-binary rules away).
 ### `completions`
