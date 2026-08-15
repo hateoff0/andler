@@ -276,7 +276,7 @@ fn nbd_checks() -> Vec<Check> {
     // load it automatically" note above actually true — without it,
     // try_autoload_nbd_module() fails silently (see nbd.rs) and the user only
     // finds out when something using nbd breaks later. All of it (modprobe +
-    // qemu-nbd + mount/umount + chroot + the translator file ops) is now the
+    // qemu-nbd + mount/umount + chroot + guest-write) is now the
     // single andler-helper binary, so one presence check plus one sudo probe
     // covers the whole surface.
     match helper_issue() {
