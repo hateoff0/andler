@@ -90,7 +90,9 @@ fn check_passwordless_sudo(name: &'static str, path: &Path) -> Check {
         .output();
 
     let fix = format!(
-        "add via `sudo visudo`: youruser ALL=(root) NOPASSWD: {}",
+        "add via `sudo visudo`: youruser ALL=(root) NOPASSWD: {} — only needed for offline \
+         guest package ops when a VM cannot boot (qemu-nbd/chroot); the smart online path \
+         needs no root on the host",
         path.display()
     );
 
@@ -104,7 +106,7 @@ fn check_passwordless_sudo(name: &'static str, path: &Path) -> Check {
         Ok(o) => {
             let stderr = String::from_utf8_lossy(&o.stderr);
             if stderr.contains("password is required") || stderr.contains("no tty present") {
-                fail(name, "passwordless sudo not configured", fix)
+                warn(name, "passwordless sudo not configured", fix)
             } else {
                 warn(
                     name,
@@ -282,10 +284,12 @@ fn nbd_checks() -> Vec<Check> {
     match helper_issue() {
         None => checks.push(ok("andler-helper", HELPER_PATH)),
         Some(issue) => checks.push(
-            fail(
+            warn(
                 "andler-helper",
                 format!("{HELPER_PATH}: {issue}"),
-                "run `andler doctor --fix` to install it (will require sudo)",
+                "run `andler doctor --fix` to install it (will require sudo) — only needed \
+                 for offline guest package ops when a VM cannot boot; the smart online path \
+                 needs no root on the host",
             )
             .with_sudoers_rule(Path::new(HELPER_PATH)),
         ),
