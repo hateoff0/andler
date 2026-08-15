@@ -3,5 +3,6 @@ pub mod proto {
 }
 
 pub mod convert;
+pub mod provision_convert;
 
 pub use convert::ConvertError;

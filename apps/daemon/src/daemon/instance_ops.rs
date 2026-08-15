@@ -9,9 +9,9 @@ use super::types::{write_instance_toml, InstanceDirGuard};
 use super::Daemon;
 use super::SupervisorHandle;
 use andler_core::{
-    BackendError, BackendHandle, DaemonEvent, DiskFormat, EventKind, EventLogLevel,
+    BackendError, BackendHandle, DaemonEvent, DiskFormat, EventKind, EventLogLevel, GuestMutator,
     HypervisorBackend, InstanceConfig, InstanceEvent, InstanceId, InstanceKind, InstanceState,
-    Operation, OperationKind, OperationState, Resolution, INSTANCE_ID_HEX_LEN,
+    MutatorOp, Operation, OperationKind, OperationState, Resolution, INSTANCE_ID_HEX_LEN,
 };
 
 /// Checks that the files this instance needs to boot are still present on disk.
@@ -138,7 +138,7 @@ impl Daemon {
     #[allow(clippy::too_many_arguments)] // mirrors the CreateAndroidInstanceRequest proto fields
     pub async fn create_android_instance(
         &self,
-        profile: andler_core::AndroidProfile,
+        mut profile: andler_core::AndroidProfile,
         instance_name: String,
         base_image_path: PathBuf,
         instances_root: PathBuf,
@@ -149,6 +149,15 @@ impl Daemon {
         let id = InstanceId::new();
         let instance_dir = instances_root.join(id.to_string());
         let mut dir_guard = InstanceDirGuard::new(instance_dir.clone());
+
+        // Pin check first — before any copy, overlay, or even the instance
+        // directory exists. An existing pin that no longer matches means
+        // the image on disk is not the one this instance was created from.
+        if let Some(pin) =
+            Self::verify_or_derive_pin(&base_image_path, profile.base_image_pin.as_ref())?
+        {
+            profile.base_image_pin = Some(pin);
+        }
 
         andler_core::paths::ensure_private_dir(&instance_dir)
             .await
@@ -218,6 +227,72 @@ impl Daemon {
         dir_guard.disarm();
 
         Ok(registered_id)
+    }
+
+    /// Enforces or records the base-image pin (§7). With an existing pin,
+    /// creation refuses an image whose manifest id or content sha256 no
+    /// longer matches — a silently swapped backing image corrupts every
+    /// linked clone sitting on top of it. Without a pin, the freshly chosen
+    /// image's id + sha256 are recorded so the instance file carries its
+    /// provenance. The check is creation-time only: once the instance disk
+    /// (or overlay) exists, its backing file reference — not the pin —
+    /// determines what the VM actually reads, and re-hashing a multi-GB
+    /// image on every start would cost seconds per boot for no protection.
+    pub(crate) fn verify_or_derive_pin(
+        base_image_path: &std::path::Path,
+        pin: Option<&andler_core::BaseImagePin>,
+    ) -> Result<Option<andler_core::BaseImagePin>, DaemonError> {
+        let Some(info) = andler_core::base_image::info_for(base_image_path) else {
+            if let Some(pin) = pin {
+                return Err(DaemonError::BaseImagePinMismatch(format!(
+                    "the instance file pins base image `{}`, but no manifest.json exists next \
+                     to {}; the image's identity cannot be verified — restore the original \
+                     image or remove `base_image_pin` from the instance file to accept the \
+                     current one",
+                    pin.id,
+                    base_image_path.display()
+                )));
+            }
+            tracing::warn!(
+                path = %base_image_path.display(),
+                "no manifest.json next to the base image; pin not recorded"
+            );
+            return Ok(None);
+        };
+
+        let id = info.id();
+        match pin {
+            Some(pin) => {
+                if pin.id != id {
+                    return Err(DaemonError::BaseImagePinMismatch(format!(
+                        "the instance file pins base image `{}`, but {} is `{}`; \
+                         the image was swapped since the instance was created — restore \
+                         the original image or remove `base_image_pin` from the instance \
+                         file to accept the new one",
+                        pin.id,
+                        base_image_path.display(),
+                        id
+                    )));
+                }
+                let actual = andler_core::base_image::sha256_of(base_image_path)?;
+                if actual != pin.sha256 {
+                    return Err(DaemonError::BaseImagePinMismatch(format!(
+                        "base image {} changed since it was pinned (expected sha256 {}, \
+                         got {}); the instance's linked clones may read different content \
+                         than at creation — restore the original image or remove \
+                         `base_image_pin` from the instance file to accept the new one",
+                        base_image_path.display(),
+                        pin.sha256,
+                        actual
+                    )));
+                }
+                Ok(None)
+            }
+            None => {
+                let sha256 = andler_core::base_image::sha256_of(base_image_path)?;
+                Ok(Some(andler_core::BaseImagePin { id, sha256 }))
+            }
+        }
     }
 
     pub async fn create_linux_instance(
@@ -1006,6 +1081,86 @@ impl Daemon {
                 ),
             }),
         }
+    }
+
+    /// Applies a provision manifest (already expanded to `MutatorOp`s by the
+    /// CLI) through the state-appropriate mutator: online via the guest
+    /// agent when the VM is running, offline through the guestfs appliance
+    /// when it is stopped (§7). One apply call; the mutator batches.
+    pub async fn guest_provision(
+        &self,
+        id: InstanceId,
+        ops: Vec<MutatorOp>,
+    ) -> Result<(), DaemonError> {
+        if ops.is_empty() {
+            return Err(DaemonError::InvalidConfig(
+                "provision manifest contains no ops".to_string(),
+            ));
+        }
+        let handle = self.handle_for(id).await?;
+        let (state, disk_path, backend_handle, backend_kind) = {
+            let config = handle.config();
+            (
+                handle.state(),
+                config.disk.path.clone(),
+                handle.backend_handle(),
+                config.backend,
+            )
+        };
+
+        match &state {
+            InstanceState::Running => {
+                let backend_handle =
+                    backend_handle.ok_or_else(|| DaemonError::GuestAgentUnavailable {
+                        instance_id: id,
+                        message: "instance is running but has no backend handle".to_string(),
+                    })?;
+                let backend = self.backend_for(backend_kind)?;
+                if !backend.is_guest_agent_available(&backend_handle).await? {
+                    return Err(DaemonError::GuestAgentUnavailable {
+                        instance_id: id,
+                        message: format!(
+                            "VM is running but the guest agent is not available; \
+                             stop the VM first to provision `{id}` offline"
+                        ),
+                    });
+                }
+                let mutator = backend.guest_mutator(&backend_handle).await?;
+                mutator.apply(&ops).await?;
+            }
+            InstanceState::Paused => {
+                return Err(DaemonError::GuestAgentUnavailable {
+                    instance_id: id,
+                    message: format!(
+                        "VM is paused, so the guest agent cannot respond; \
+                         resume the VM or stop it first to provision `{id}`"
+                    ),
+                });
+            }
+            InstanceState::Created | InstanceState::Stopped | InstanceState::Error { .. } => {
+                if !disk_path.exists() {
+                    return Err(DaemonError::InstanceNotFound(id));
+                }
+                let mutator = andler_guestfs::GuestfsMutator::new(disk_path);
+                mutator.apply(&ops).await?;
+            }
+            other => {
+                return Err(DaemonError::GuestAgentUnavailable {
+                    instance_id: id,
+                    message: format!(
+                        "instance is in state {other:?}; provision needs a stopped \
+                         instance (offline appliance) or a running one with a guest agent"
+                    ),
+                });
+            }
+        }
+
+        tracing::info!(
+            instance_id = %id,
+            ops = ops.len(),
+            "provision manifest applied"
+        );
+        Ok(())
     }
 
     pub async fn list_guest_packages(

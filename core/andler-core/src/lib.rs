@@ -9,6 +9,7 @@ pub mod events;
 pub mod fsm;
 pub mod package_manager;
 pub mod paths;
+pub mod provision;
 
 // Tests that mutate ANDLER_HOME must serialize on this single lock — a
 // per-module lock does not protect against a parallel module's test reading
@@ -18,7 +19,9 @@ pub mod test_lock {
     pub static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 }
 
-pub use android_profile::{AndroidBootMode, AndroidProfile, AndroidVersion, ArmTranslator};
+pub use android_profile::{
+    AndroidBootMode, AndroidProfile, AndroidVersion, ArmTranslator, BaseImagePin,
+};
 pub use backend::{
     BackendHandle, BackendStatus, GuestExecOutput, HypervisorBackend, LogLine, LogStreamSource,
     ResourceMetrics, SnapshotInfo,

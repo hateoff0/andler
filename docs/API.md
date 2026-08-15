@@ -430,6 +430,10 @@ andler guest remove spice-vdagent <instance-id>
 # List known packages and their status
 andler guest list <instance-id>
 
+# Apply a provision manifest (online via QGA when running, offline via the
+# guestfs appliance when stopped)
+andler guest provision ./manifest.toml <instance-id>
+
 # Switch Android boot mode (Android instances)
 andler guest boot-mode <instance-id> [android|linux]
 ```
@@ -441,6 +445,61 @@ appear within `ANDLERD_GUEST_AGENT_WAIT_SECS` (default 120 s) the
 operation fails with a hint to retry with `--offline` — that path uses
 `qemu-nbd` + chroot and requires the `andler-helper` sudoers rule.
 
+### Provision manifests
+
+`guest provision <manifest> <instance-id>` applies a declarative TOML
+manifest (canonical copies live in `docker/images/guest-components/`).
+Running instance → applied online through the guest agent (zero root);
+stopped instance → applied offline through the guestfs appliance (zero
+root, one appliance session per call). Paused is rejected. All ops map
+1:1 onto the shared `MutatorOp` batch — write, upload, mkdir, cp, mv,
+rm-rf, chmod, symlink:
+
+```toml
+schema_version = 1
+name = "spice-guest"
+
+[[ops]]
+op = "mkdir-p"
+path = "/usr/local/bin"
+
+[[ops]]
+op = "upload-file"          # host_path is resolved relative to the manifest dir
+guest_path = "/usr/local/bin/spice-agent"
+host_path = "./bin/spice-agent"
+mode = "0755"               # optional; becomes a trailing chmod op
+
+[[ops]]
+op = "write-file"
+path = "/etc/spice.conf"
+content = "enabled = true\n"
+mode = "0644"
+
+[[ops]]
+op = "symlink"
+target = "/usr/local/bin/spice-agent"
+link = "/usr/bin/spice-agent"
+```
+
+`mode` is an octal string (1–4 digits); any invalid mode or an unknown
+`schema_version` / `op` kind / field fails the whole call before anything
+is applied. An empty op list is refused.
+
+### Base-image pin
+
+Every Android instance records the image it was created from in its
+`instance.toml` (`kind.android_profile.base_image_pin = { id, sha256 }`):
+the manifest id (`android{version}-{variant}-{built_at}`) plus the
+content sha256 of the qcow2. The pin is written at creation time — when
+the instance file already carries one, creation refuses an image whose
+id or checksum no longer matches, instead of silently building on a
+swapped backing file (which would corrupt every linked clone on top of
+it). Explicit updates are manual by design: remove or edit
+`base_image_pin` in the instance file to accept a different image. The
+check runs at creation only — an existing instance disk references its
+backing file directly, and re-hashing a multi-GB image on every start
+would cost seconds per boot for no protection.
+
 Known packages: `spice-vdagent` (shared folders), `qemu-guest-agent` (host-guest communication), `spice-webdavd` (webdav shared folders).
 
 **ARM translators**: `install libndk <id>` / `install libhoudini <id>` are special-cased — they go through `SwitchArmTranslator` (offline disk staging) instead of the package-manager path. There is **no online path**: the translator is written into the stopped VM's disk overlay, so `Running`/`Paused` instances are rejected with "must be stopped … stop it first". Works before the guest's first boot — the `var/lib/waydroid/overlay` upper dir is created on the disk if `waydroid init` hasn't run yet. Optional `--translator-dir <path>` points at a local cache directory with the extracted translator instead of downloading it. Without it, the daemon downloads the translator zip (~18 MiB) from GitHub on first use, caches it in `~/.andler/cache/arm-translators/`, and verifies its MD5; the download has a 15 s connect timeout and a 5 min total timeout — a broken/slow connection fails with a clear error pointing at `--translator-dir` instead of hanging forever. Daemon logs (`andler logs` / `RUST_LOG=info`) report each stage (download → md5 → extract).
@@ -450,6 +509,7 @@ Known packages: `spice-vdagent` (shared folders), `qemu-guest-agent` (host-guest
 | `install <package> <instance-id>` | Install a package in the guest OS |
 | `remove <package> <instance-id>` | Remove a package from the guest OS |
 | `list <instance-id>` | List known packages and their status (installed/not installed) |
+| `provision <manifest> <instance-id>` | Apply a provision manifest (see above) |
 | `boot-mode <instance-id> [mode]` | Get or set the Android boot mode (`android`/`linux`) |
 
 ### `attach`

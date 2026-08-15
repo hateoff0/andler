@@ -36,6 +36,7 @@ The core service exposing all instance management operations.
 | `InstallGuestAgent` | `InstallGuestAgentRequest` | `Empty` | Unary | Installs a package in the guest OS. |
 | `RemoveGuestAgent` | `RemoveGuestAgentRequest` | `Empty` | Unary | Removes a package from the guest OS. |
 | `ListGuestPackages` | `InstanceIdRequest` | `ListGuestPackagesResponse` | Unary | Lists known guest packages and their installation status. |
+| `GuestProvision` | `GuestProvisionRequest` | `Empty` | Unary | Applies a provision manifest: online via QGA when running, offline via the guestfs appliance when stopped. |
 | `SwitchArmTranslator` | `SwitchArmTranslatorRequest` | `Empty` | Unary | Switches the ARM translator in offline mode. |
 | `SetInstanceConfig` | `SetInstanceConfigRequest` | `Empty` | Unary | Partially updates an instance configuration by key. |
 | `SwitchAndroidBootMode` | `SwitchAndroidBootModeRequest` | `Empty` | Unary | Switches the Android boot mode in offline mode. |
@@ -341,6 +342,14 @@ Android VM profile.
 | `microg` | `bool` | Include microG. |
 | `arm_translator` | `ArmTranslator` | ARM translation layer. |
 | `boot_mode` | `AndroidBootMode` | What the guest boots into (default Android; `UNSPECIFIED` maps to Android). |
+| `base_image_pin` | `BaseImagePin` | Optional; enforced at creation (id + sha256 of the backing image). |
+
+### `BaseImagePin`
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `id` | `string` | Base-image manifest id (`android{version}-{variant}-{built_at}`). |
+| `sha256` | `string` | Content sha256 of the base image qcow2, hex. |
 
 ### `CreateAndroidInstanceRequest`
 
@@ -799,6 +808,26 @@ Request to remove a package from the guest OS.
 | `instance_id` | `string` | Instance ID. |
 | `package` | `string` | Package name. |
 | `offline` | `bool` | Force the offline qemu-nbd/chroot path (requires the helper sudoers rule) instead of the smart path: online via guest agent, auto-starting a stopped VM for maintenance when needed. |
+
+### `GuestProvisionRequest`
+
+Request to apply a provision manifest (see `docs/API.md` for the TOML format).
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `instance_id` | `string` | Instance ID. |
+| `ops` | repeated `ProvisionOp` | Flat, already-expanded ops (a manifest `mode` arrives as its own chmod op); mirrors the core `MutatorOp` list 1:1. |
+
+### `ProvisionOp` and payload messages
+
+`ProvisionOp` is a oneof choosing one of: `ProvisionWriteFile { path, content }`,
+`ProvisionUploadFile { guest_path, host_path }` (host path is absolute — the
+CLI resolves relative paths against the manifest directory),
+`ProvisionMkdirP { path }`, `ProvisionCpA { src, dst }`,
+`ProvisionMv { src, dst }`, `ProvisionRmRf { path }`,
+`ProvisionChmod { path, mode }` (octal mode as uint32),
+`ProvisionSymlink { target, link }`. An empty oneof is rejected as
+`MissingField`.
 
 ### `ListGuestPackagesResponse`
 

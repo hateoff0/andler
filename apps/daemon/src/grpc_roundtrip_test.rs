@@ -8,9 +8,10 @@ use andler_rpc::proto::{
     AttachDiskRequest, AttachNetworkRequest, AudioConfig, CloneInstanceRequest, CloneMode,
     CpuConfig, CreateInstanceRequest, DetachDiskRequest, DetachNetworkRequest, DiskConfig,
     DisplayConfig, Empty, EventStreamRequest, ExecCommandRequest, ExportInstanceDiskRequest,
-    FirmwareConfig, GetInstanceConfigResponse, GpuConfig, InputConfig, InstanceIdRequest,
-    InstanceStateKind, MemoryConfig, NetworkConfig, OpCancelRequest, RemoveInstanceRequest,
-    Resolution, RestoreSnapshotRequest, SetInstanceConfigRequest,
+    FirmwareConfig, GetInstanceConfigResponse, GpuConfig, GuestProvisionRequest, InputConfig,
+    InstanceIdRequest, InstanceStateKind, MemoryConfig, NetworkConfig, OpCancelRequest,
+    ProvisionMkdirP, RemoveInstanceRequest, Resolution, RestoreSnapshotRequest,
+    SetInstanceConfigRequest,
 };
 use tokio::net::TcpListener;
 use tokio_stream::wrappers::TcpListenerStream;
@@ -965,6 +966,48 @@ async fn list_guest_packages_instance_not_found() {
     assert_eq!(status.code(), tonic::Code::NotFound);
 
     server.abort();
+}
+
+#[tokio::test]
+async fn provision_on_unknown_instance_round_trips_as_not_found() {
+    let (mut client, server) = spawn_server_and_connect().await;
+
+    let status = client
+        .guest_provision(GuestProvisionRequest {
+            instance_id: "c".repeat(64),
+            ops: vec![provision_mkdir_op()],
+        })
+        .await
+        .expect_err("nonexistent instance must fail");
+    assert_eq!(status.code(), tonic::Code::NotFound);
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn provision_with_empty_ops_round_trips_as_invalid_argument() {
+    let (mut client, server) = spawn_server_and_connect().await;
+
+    let status = client
+        .guest_provision(GuestProvisionRequest {
+            instance_id: "d".repeat(64),
+            ops: vec![],
+        })
+        .await
+        .expect_err("empty ops must fail");
+    assert_eq!(status.code(), tonic::Code::InvalidArgument);
+
+    server.abort();
+}
+
+fn provision_mkdir_op() -> andler_rpc::proto::ProvisionOp {
+    andler_rpc::proto::ProvisionOp {
+        op: Some(andler_rpc::proto::provision_op::Op::MkdirP(
+            ProvisionMkdirP {
+                path: "/opt/x".to_string(),
+            },
+        )),
+    }
 }
 
 #[tokio::test]

@@ -1,7 +1,8 @@
 use andler_rpc::proto::andler_service_client::AndlerServiceClient;
 use andler_rpc::proto::{
-    AndroidBootMode as ProtoAndroidBootMode, InstallGuestAgentRequest, InstanceIdRequest,
-    RemoveGuestAgentRequest, SwitchAndroidBootModeRequest, SwitchArmTranslatorRequest,
+    AndroidBootMode as ProtoAndroidBootMode, GuestProvisionRequest, InstallGuestAgentRequest,
+    InstanceIdRequest, RemoveGuestAgentRequest, SwitchAndroidBootModeRequest,
+    SwitchArmTranslatorRequest,
 };
 use tonic::transport::Channel;
 
@@ -55,6 +56,15 @@ pub enum GuestAction {
         /// stopped VM for maintenance when needed.
         #[arg(long)]
         offline: bool,
+    },
+
+    /// Apply a provision manifest (docker/images/guest-components/*/manifest.toml).
+    /// Runs online via the guest agent when the VM is running, offline via
+    /// the guestfs appliance when it is stopped.
+    Provision {
+        manifest: std::path::PathBuf,
+
+        instance_id: String,
     },
 
     BootMode {
@@ -183,6 +193,37 @@ pub async fn handle(
                 client.remove_guest_agent(request).await?;
                 println!("Package `{package}` removed successfully");
             }
+        }
+        GuestAction::Provision {
+            manifest,
+            instance_id,
+        } => {
+            let manifest_text = std::fs::read_to_string(&manifest)
+                .map_err(|e| format!("cannot read manifest {}: {e}", manifest.display()))?;
+            let parsed = andler_core::provision::ProvisionManifest::parse(&manifest_text)?;
+            let mut ops = parsed.to_mutator_ops()?;
+            let manifest_dir = manifest
+                .parent()
+                .map(|p| p.to_path_buf())
+                .unwrap_or_else(|| std::path::PathBuf::from("."));
+            for op in ops.iter_mut() {
+                if let andler_core::MutatorOp::UploadFile { host_path, .. } = op {
+                    if host_path.is_relative() {
+                        *host_path = manifest_dir.join(&*host_path);
+                    }
+                }
+            }
+            let (resolved_id, _name) = lifecycle::resolve_echo(client, &instance_id).await;
+            let request = GuestProvisionRequest {
+                instance_id: resolved_id,
+                ops: andler_rpc::provision_convert::provision_ops_to_proto(&ops),
+            };
+            client.guest_provision(request).await?;
+            println!(
+                "Provisioned `{}` ({} ops) successfully",
+                parsed.name,
+                ops.len()
+            );
         }
         GuestAction::BootMode {
             instance_id,

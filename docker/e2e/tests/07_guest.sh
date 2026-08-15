@@ -129,6 +129,65 @@ expect_err_grep "auto-started for maintenance" "Retry with .--offline."
 expect_ok "smart-path failure left the instance stopped" -- andler status "$LID"
 expect_out_grep "instance is stopped" "Stopped"
 
+echo "  [deep: provision manifest applies offline via the guestfs appliance]"
+mkdir -p "$WORK/provision"
+printf 'payload-bytes\n' > "$WORK/provision/payload.bin"
+cat > "$WORK/provision/manifest.toml" <<'MANIFEST'
+schema_version = 1
+name = "e2e-provision"
+
+[[ops]]
+op = "mkdir-p"
+path = "/opt/andler-e2e"
+
+[[ops]]
+op = "write-file"
+path = "/opt/andler-e2e/provisioned.txt"
+content = "provisioned by e2e\n"
+mode = "0640"
+
+[[ops]]
+op = "upload-file"
+guest_path = "/opt/andler-e2e/payload.bin"
+host_path = "./payload.bin"
+mode = "0755"
+
+[[ops]]
+op = "symlink"
+target = "/opt/andler-e2e/provisioned.txt"
+link = "/opt/andler-e2e/link.txt"
+MANIFEST
+
+expect_ok "guest provision applies the manifest offline" -- timeout 300 andler guest provision "$WORK/provision/manifest.toml" "$LID"
+expect_out_grep "provision reports success" 'Provisioned .e2e-provision. \(6 ops\) successfully'
+
+if ! qemu-nbd --connect=/dev/nbd0 "$WORK/linux/linux-disk.qcow2"; then
+    fail "cannot re-connect the linux disk for provision verification"
+fi
+blockdev --rereadpt /dev/nbd0
+sleep 1
+NBD_CONNECTED=1
+mkdir -p "$WORK/mnt"
+mount -o ro /dev/nbd0p1 "$WORK/mnt"
+P_DIR="$WORK/mnt/opt/andler-e2e"
+[[ -f "$P_DIR/provisioned.txt" ]] && pass "write-file landed" || fail "write-file missing"
+grep -q "^provisioned by e2e$" "$P_DIR/provisioned.txt" \
+    && pass "write-file content" || fail "write-file content mismatch"
+MODE=$(stat -c %a "$P_DIR/provisioned.txt")
+[[ "$MODE" == "640" ]] && pass "write-file mode 0640" || fail "write-file mode is $MODE (want 640)"
+[[ -f "$P_DIR/payload.bin" ]] && pass "upload-file landed" || fail "upload-file missing"
+grep -q "^payload-bytes$" "$P_DIR/payload.bin" \
+    && pass "upload-file content" || fail "upload-file content mismatch"
+MODE=$(stat -c %a "$P_DIR/payload.bin")
+[[ "$MODE" == "755" ]] && pass "upload-file mode 0755" || fail "upload-file mode is $MODE (want 755)"
+[[ -L "$P_DIR/link.txt" ]] && pass "symlink created" || fail "symlink missing"
+[[ "$(readlink "$P_DIR/link.txt")" == "/opt/andler-e2e/provisioned.txt" ]] \
+    && pass "symlink target" || fail "symlink target mismatch"
+umount "$WORK/mnt"
+qemu-nbd --disconnect /dev/nbd0 >/dev/null 2>&1 || true
+NBD_CONNECTED=0
+pass "provision verified through the mounted disk"
+
 echo "  [deep: Android boot-mode switching]"
 AID="$(create_android "$WORK/ai" guest-android "$GUEST_QCOW")"
 [[ -n "$AID" ]] || fail "empty id from android create"

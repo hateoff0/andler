@@ -4,6 +4,7 @@ use futures_core::stream::BoxStream;
 use crate::config::{DiskConfig, InstanceConfig, NetworkConfig, Resolution};
 use crate::error::BackendError;
 use crate::fsm::InstanceState;
+use crate::guest_mutator::GuestMutator;
 use crate::InstanceKind;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -280,6 +281,21 @@ pub trait HypervisorBackend: Send + Sync {
         Err(BackendError::NotImplemented {
             backend: self.name(),
             operation: "guest_exec_command",
+        })
+    }
+
+    /// Returns an online `GuestMutator` bound to the running guest's agent.
+    /// The returned mutator owns its QGA connection (chardevs serve exactly
+    /// one client), so callers must not interleave other guest-exec traffic
+    /// while it lives.
+    async fn guest_mutator(
+        &self,
+        handle: &BackendHandle,
+    ) -> Result<Box<dyn GuestMutator>, BackendError> {
+        let _ = handle;
+        Err(BackendError::NotImplemented {
+            backend: self.name(),
+            operation: "guest_mutator",
         })
     }
 }

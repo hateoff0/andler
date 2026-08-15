@@ -1,0 +1,15 @@
+# Shape reference for a provisioning unit. Real components (SPICE agent,
+# input bridge) will land here as they are packaged — this one only
+# demonstrates every file op.
+schema_version = 1
+name = "spice-agent-example"
+
+[[ops]]
+op = "mkdir-p"
+path = "/usr/local/bin"
+
+[[ops]]
+op = "write-file"
+path = "/etc/spice-agent.conf"
+content = "enabled = true\n"
+mode = "0644"

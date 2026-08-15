@@ -30,6 +30,7 @@ service AndlerService {
     rpc SetInstanceConfig(SetInstanceConfigRequest) returns (Empty);
     rpc SwitchAndroidBootMode(SwitchAndroidBootModeRequest) returns (Empty);
     rpc GetAndroidBootMode(InstanceIdRequest) returns (GetAndroidBootModeResponse);
+    rpc GuestProvision(GuestProvisionRequest) returns (Empty);
     rpc AttachDisk(AttachDiskRequest) returns (AttachDiskResponse);
     rpc DetachDisk(DetachDiskRequest) returns (Empty);
     rpc AttachNetwork(AttachNetworkRequest) returns (AttachNetworkResponse);
@@ -248,6 +249,12 @@ message AndroidProfile {
     reserved "libndk";
     ArmTranslator arm_translator = 6;
     AndroidBootMode boot_mode = 7;
+    BaseImagePin base_image_pin = 8;
+}
+
+message BaseImagePin {
+    string id = 1;
+    string sha256 = 2;
 }
 
 message CreateAndroidInstanceRequest {
@@ -540,6 +547,66 @@ message SwitchAndroidBootModeRequest {
 
 message GetAndroidBootModeResponse {
     AndroidBootMode mode = 1;
+}
+
+message GuestProvisionRequest {
+    string instance_id = 1;
+    // Flat, already-expanded ops (mode is its own chmod op); mirrors the
+    // core MutatorOp list 1:1.
+    repeated ProvisionOp ops = 2;
+}
+
+message ProvisionOp {
+    oneof op {
+        ProvisionWriteFile write_file = 1;
+        ProvisionUploadFile upload_file = 2;
+        ProvisionMkdirP mkdir_p = 3;
+        ProvisionCpA cp_a = 4;
+        ProvisionMv mv = 5;
+        ProvisionRmRf rm_rf = 6;
+        ProvisionChmod chmod = 7;
+        ProvisionSymlink symlink = 8;
+    }
+}
+
+message ProvisionWriteFile {
+    string path = 1;
+    bytes content = 2;
+}
+
+message ProvisionUploadFile {
+    string guest_path = 1;
+    // Absolute path on the host; the CLI resolves relative paths against
+    // the manifest's own directory before sending.
+    string host_path = 2;
+}
+
+message ProvisionMkdirP {
+    string path = 1;
+}
+
+message ProvisionCpA {
+    string src = 1;
+    string dst = 2;
+}
+
+message ProvisionMv {
+    string src = 1;
+    string dst = 2;
+}
+
+message ProvisionRmRf {
+    string path = 1;
+}
+
+message ProvisionChmod {
+    string path = 1;
+    uint32 mode = 2;
+}
+
+message ProvisionSymlink {
+    string target = 1;
+    string link = 2;
 }
 
 message SetInstanceConfigRequest {

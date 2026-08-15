@@ -1428,6 +1428,18 @@ impl HypervisorBackend for QemuBackend {
         }
     }
 
+    async fn guest_mutator(
+        &self,
+        handle: &BackendHandle,
+    ) -> Result<Box<dyn andler_core::GuestMutator>, BackendError> {
+        let mut instances = self.instances.lock().await;
+        let instance = instances
+            .get_mut(handle)
+            .ok_or_else(|| BackendError::HandleNotFound(handle.0.clone()))?;
+        let qga = Self::guest_agent_client(instance).await?;
+        Ok(Box::new(crate::mutator::QgaMutator::new(qga)))
+    }
+
     async fn set_guest_display_resolution(
         &self,
         handle: &BackendHandle,

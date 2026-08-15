@@ -9,7 +9,13 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Added
 
+#### Daemon
+
+- **Base-image pin**: every Android instance records `base_image_pin = { id, sha256 }` (manifest id + content sha256 of the qcow2) in its `instance.toml` at creation. Creating from an instance file that already pins an image refuses a backing file whose id or checksum no longer matches — a silently swapped base image (which would corrupt linked clones on top of it) now fails with an actionable error instead of being accepted. The check runs at creation only; updates are explicit (edit the pin in the instance file).
+
 #### CLI
+
+- **`andler guest provision <manifest> <id>`**: applies a declarative TOML provision manifest (write/upload/mkdir/cp/mv/rm-rf/chmod/symlink, optional octal `mode` on write/upload) through the shared `MutatorOp` batch — online via the guest agent when the VM is running, offline via the guestfs appliance when stopped (zero root either way). Relative `host_path` values resolve against the manifest's own directory. Invalid schema/op/mode fails the whole call before anything is applied; canonical manifests live in `docker/images/guest-components/`.
 
 - **`andler doctor` no longer pushes root**: the `andler-helper` presence check and the passwordless-sudo probe are warnings, not failures, and their fix text explains the rule is only needed for the offline qemu-nbd/chroot rescue case (a VM that cannot boot) — the smart online package path needs no root on the host.
 

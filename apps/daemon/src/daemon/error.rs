@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
-use andler_core::{BackendError, BackendKind, InstanceId, InstanceState};
+use andler_core::base_image::BaseImageError;
+use andler_core::{BackendError, BackendKind, InstanceId, InstanceState, MutatorError};
 use andler_store::StoreError;
 use thiserror::Error;
 
@@ -23,6 +24,15 @@ pub enum DaemonError {
 
     #[error("disk error: {0}")]
     Disk(#[from] andler_disk::DiskError),
+
+    #[error("guest mutation error: {0}")]
+    Mutator(#[from] MutatorError),
+
+    #[error("base image error: {0}")]
+    BaseImage(#[from] BaseImageError),
+
+    #[error("{0}")]
+    BaseImagePinMismatch(String),
 
     #[error("firmware error: {0}")]
     Firmware(String),
@@ -316,10 +326,13 @@ impl DaemonError {
             }
             DaemonError::Backend(_)
             | DaemonError::Disk(_)
+            | DaemonError::Mutator(_)
+            | DaemonError::BaseImage(_)
             | DaemonError::Io { .. }
             | DaemonError::Firmware(_)
             | DaemonError::Store(_)
             | DaemonError::InstanceSupervisorGone(_) => ErrorKind::Internal,
+            DaemonError::BaseImagePinMismatch(_) => ErrorKind::FailedPrecondition,
             DaemonError::InstanceNotRemovable(_, _) => ErrorKind::FailedPrecondition,
             DaemonError::ConfigMigrationConflict { .. } => ErrorKind::FailedPrecondition,
             DaemonError::ConfigFileInvalid { .. } => ErrorKind::InvalidArgument,

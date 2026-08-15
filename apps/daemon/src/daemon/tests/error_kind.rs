@@ -85,6 +85,10 @@ fn every_error_variant_maps_to_its_documented_kind() {
             ErrorKind::Internal,
         ),
         (
+            DaemonError::Mutator(andler_core::MutatorError::Io("boom".into())),
+            ErrorKind::Internal,
+        ),
+        (
             DaemonError::InstanceNotRemovable(id(), state()),
             ErrorKind::FailedPrecondition,
         ),

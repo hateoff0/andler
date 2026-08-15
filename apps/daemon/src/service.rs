@@ -12,8 +12,8 @@ use andler_rpc::proto::{
     DeleteSnapshotRequest, DetachDiskRequest, DetachNetworkRequest, Empty, EventStreamRequest,
     ExecCommandRequest, ExecCommandResponse, ExportInstanceDiskRequest, ExportInstanceDiskResponse,
     GetAndroidBootModeResponse, GetConfigStatusResponse, GetInstanceConfigResponse,
-    GuestPackageEntry, InstallGuestAgentRequest, InstanceIdRequest, InstanceListEntry,
-    InstanceStatusResponse, ListGuestPackagesResponse, ListInstancesResponse,
+    GuestPackageEntry, GuestProvisionRequest, InstallGuestAgentRequest, InstanceIdRequest,
+    InstanceListEntry, InstanceStatusResponse, ListGuestPackagesResponse, ListInstancesResponse,
     ListSnapshotsResponse, LogLineResponse, OpCancelRequest, OpListResponse, OperationInfo,
     OperationPhase, RemoveGuestAgentRequest, RemoveInstanceRequest, ResourceMetricsResponse,
     RestoreSnapshotRequest, SetInstanceConfigRequest, SnapshotEntry, StopInstanceRequest,
@@ -473,6 +473,19 @@ impl AndlerService for DaemonService {
         self.daemon
             .remove_guest_agent(id, req.package, req.offline)
             .await?;
+
+        Ok(Response::new(Empty {}))
+    }
+
+    async fn guest_provision(
+        &self,
+        request: Request<GuestProvisionRequest>,
+    ) -> Result<Response<Empty>, Status> {
+        let req = request.into_inner();
+        let id = self.daemon.resolve_instance_id(&req.instance_id).await?;
+        let ops = andler_rpc::provision_convert::provision_ops_from_proto(&req.ops)?;
+
+        self.daemon.guest_provision(id, ops).await?;
 
         Ok(Response::new(Empty {}))
     }
