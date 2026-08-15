@@ -180,11 +180,13 @@ fn init_tracing() -> std::sync::Arc<log_ring::LogRing> {
     if json {
         tracing_subscriber::fmt()
             .json()
+            .with_ansi(false)
             .with_env_filter(filter)
             .with_writer(writer)
             .init();
     } else {
         tracing_subscriber::fmt()
+            .with_ansi(false)
             .with_env_filter(filter)
             .with_writer(writer)
             .init();
