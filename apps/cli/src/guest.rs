@@ -37,12 +37,24 @@ pub enum GuestAction {
 
         #[arg(long)]
         translator_dir: Option<std::path::PathBuf>,
+
+        /// Force the offline qemu-nbd/chroot path (requires sudo) instead of
+        /// the smart path: install via the guest agent, auto-starting a
+        /// stopped VM for maintenance when needed.
+        #[arg(long)]
+        offline: bool,
     },
 
     Remove {
         package: String,
 
         instance_id: String,
+
+        /// Force the offline qemu-nbd/chroot path (requires sudo) instead of
+        /// the smart path: remove via the guest agent, auto-starting a
+        /// stopped VM for maintenance when needed.
+        #[arg(long)]
+        offline: bool,
     },
 
     BootMode {
@@ -102,6 +114,7 @@ pub async fn handle(
             package,
             instance_id,
             translator_dir,
+            offline,
         } => {
             let (resolved_id, _name) = lifecycle::resolve_echo(client, &instance_id).await;
 
@@ -140,6 +153,7 @@ pub async fn handle(
                 let request = InstallGuestAgentRequest {
                     instance_id: resolved_id,
                     package: package.clone(),
+                    offline,
                 };
                 client.install_guest_agent(request).await?;
                 println!("Package `{package}` installed successfully");
@@ -148,6 +162,7 @@ pub async fn handle(
         GuestAction::Remove {
             package,
             instance_id,
+            offline,
         } => {
             let (resolved_id, _name) = lifecycle::resolve_echo(client, &instance_id).await;
             let is_arm_translator = matches!(package.as_str(), "libndk" | "libhoudini");
@@ -163,6 +178,7 @@ pub async fn handle(
                 let request = RemoveGuestAgentRequest {
                     instance_id: resolved_id,
                     package: package.clone(),
+                    offline,
                 };
                 client.remove_guest_agent(request).await?;
                 println!("Package `{package}` removed successfully");

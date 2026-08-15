@@ -456,7 +456,9 @@ impl AndlerService for DaemonService {
         let req = request.into_inner();
         let id = self.daemon.resolve_instance_id(&req.instance_id).await?;
 
-        self.daemon.install_guest_agent(id, req.package).await?;
+        self.daemon
+            .install_guest_agent(id, req.package, req.offline)
+            .await?;
 
         Ok(Response::new(Empty {}))
     }
@@ -468,7 +470,9 @@ impl AndlerService for DaemonService {
         let req = request.into_inner();
         let id = self.daemon.resolve_instance_id(&req.instance_id).await?;
 
-        self.daemon.remove_guest_agent(id, req.package).await?;
+        self.daemon
+            .remove_guest_agent(id, req.package, req.offline)
+            .await?;
 
         Ok(Response::new(Empty {}))
     }

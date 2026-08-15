@@ -505,11 +505,16 @@ message ResourceMetricsResponse {
 message InstallGuestAgentRequest {
     string instance_id = 1;
     string package = 2;
+    // Force the offline qemu-nbd/chroot path even when the instance is
+    // stopped. Default (false) is the smart path: install online via QGA,
+    // auto-starting a stopped instance for maintenance when needed.
+    bool offline = 3;
 }
 
 message RemoveGuestAgentRequest {
     string instance_id = 1;
     string package = 2;
+    bool offline = 3;
 }
 
 message ListGuestPackagesResponse {

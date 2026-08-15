@@ -2,14 +2,16 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use super::error::DaemonError;
+use super::ops::OpProgress;
 use super::spawn_supervisor;
+use super::supervisor::{OpAccept, OpRunner};
 use super::types::{write_instance_toml, InstanceDirGuard};
 use super::Daemon;
 use super::SupervisorHandle;
 use andler_core::{
     BackendError, BackendHandle, DaemonEvent, DiskFormat, EventKind, EventLogLevel,
     HypervisorBackend, InstanceConfig, InstanceEvent, InstanceId, InstanceKind, InstanceState,
-    Resolution, INSTANCE_ID_HEX_LEN,
+    Operation, OperationKind, OperationState, Resolution, INSTANCE_ID_HEX_LEN,
 };
 
 /// Checks that the files this instance needs to boot are still present on disk.
@@ -620,10 +622,203 @@ impl Daemon {
             .map_err(|_| agent_unavailable())
     }
 
+    /// Boots a stopped instance headless for one package operation, then
+    /// stops it again. Runs as a supervisor operation: the boot wait and the
+    /// potentially long guest-side install are cancellable and visible on
+    /// the event bus — never a blocking inline RPC.
+    async fn auto_start_maintenance(
+        &self,
+        id: InstanceId,
+        package: &str,
+        install: bool,
+    ) -> Result<(), DaemonError> {
+        let handle = self.handle_for(id).await?;
+        let cfg = handle.config();
+        self.check_port_forward_conflicts(id, &cfg).await?;
+        let backend = self.backend_for(cfg.backend)?.clone();
+
+        let wait_secs = guest_agent_wait_secs();
+        let action = if install { "install" } else { "remove" };
+        let op_id = format!("guest-{action}-{package}");
+        let op_id_inner = op_id.clone();
+        let kind = if install {
+            OperationKind::GuestInstall
+        } else {
+            OperationKind::GuestRemove
+        };
+        let phases: Vec<(String, f32)> = vec![
+            ("starting VM".to_string(), 0.15),
+            ("waiting for guest agent".to_string(), 0.45),
+            (action.to_string(), 0.35),
+            ("stopping VM".to_string(), 0.05),
+        ];
+
+        let run: OpRunner = {
+            let handle = handle.clone();
+            let backend = backend.clone();
+            let cfg = cfg.clone();
+            let package = package.to_string();
+            Box::new(move |mut progress| {
+                Box::pin(async move {
+                    // Best-effort teardown shared by every failure path: the
+                    // auto-started VM must never be left running behind a
+                    // failed operation.
+                    async fn stop_maintenance_vm(
+                        progress: &mut OpProgress,
+                        backend: &Arc<dyn HypervisorBackend>,
+                        handle: &SupervisorHandle,
+                        id: InstanceId,
+                    ) {
+                        progress.enter_phase("stopping VM");
+                        let _ = handle.transition(InstanceEvent::Stop).await;
+                        if let Some(bh) = handle.backend_handle() {
+                            if let Err(err) = backend.stop(&bh, true).await {
+                                tracing::warn!(instance_id = %id, error = %err, "failed to stop maintenance VM");
+                                let _ = handle
+                                    .transition(InstanceEvent::Fail(err.to_string()))
+                                    .await;
+                                return;
+                            }
+                        }
+                        let _ = handle.set_handle(None).await;
+                        let _ = handle.transition(InstanceEvent::StopCompleted).await;
+                    }
+
+                    progress.enter_phase("starting VM");
+                    if let Err(err) = handle.transition(InstanceEvent::Start).await {
+                        progress.finish(Err(err.to_string()));
+                        return Err(err);
+                    }
+                    let spawn_result = match validate_instance_files(&cfg) {
+                        Ok(()) => backend.spawn(&cfg).await,
+                        Err(e) => Err(e),
+                    };
+                    let backend_handle = match spawn_result {
+                        Ok(bh) => bh,
+                        Err(backend_err) => {
+                            let _ = handle
+                                .transition(InstanceEvent::Fail(backend_err.to_string()))
+                                .await;
+                            let err = DaemonError::Backend(backend_err);
+                            progress.finish(Err(err.to_string()));
+                            return Err(err);
+                        }
+                    };
+                    Self::attach_process_exit_watcher(
+                        id,
+                        &handle,
+                        backend.clone(),
+                        backend_handle.clone(),
+                    );
+                    handle.set_handle(Some(backend_handle.clone())).await?;
+                    if let Err(err) = handle.transition(InstanceEvent::StartCompleted).await {
+                        stop_maintenance_vm(&mut progress, &backend, &handle, id).await;
+                        progress.finish(Err(err.to_string()));
+                        return Err(err);
+                    }
+
+                    progress.enter_phase("waiting for guest agent");
+                    let deadline =
+                        std::time::Instant::now() + std::time::Duration::from_secs(wait_secs);
+                    loop {
+                        if progress.is_cancelled() {
+                            stop_maintenance_vm(&mut progress, &backend, &handle, id).await;
+                            let err = DaemonError::OperationCancelled(op_id_inner.clone());
+                            progress.finish(Err(err.to_string()));
+                            return Err(err);
+                        }
+                        match backend.is_guest_agent_available(&backend_handle).await {
+                            Ok(true) => break,
+                            Ok(false) => {}
+                            Err(err) => {
+                                tracing::warn!(instance_id = %id, error = %err, "guest agent probe failed during maintenance boot");
+                            }
+                        }
+                        if std::time::Instant::now() >= deadline {
+                            stop_maintenance_vm(&mut progress, &backend, &handle, id).await;
+                            let err = DaemonError::GuestAgentUnavailable {
+                                instance_id: id,
+                                message: format!(
+                                    "VM was auto-started for maintenance but the guest agent \
+                                     did not respond within {wait_secs}s — the VM may not boot. \
+                                     Retry with `--offline` to {action} `{package}` without \
+                                     starting the VM (requires sudo for qemu-nbd/chroot)"
+                                ),
+                            };
+                            progress.finish(Err(err.to_string()));
+                            return Err(err);
+                        }
+                        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                    }
+
+                    progress.enter_phase(action);
+                    let install_result: Result<(), BackendError> = if install {
+                        backend.guest_exec_install(&backend_handle, &package).await
+                    } else {
+                        backend.guest_exec_remove(&backend_handle, &package).await
+                    };
+                    if let Err(backend_err) = install_result {
+                        stop_maintenance_vm(&mut progress, &backend, &handle, id).await;
+                        let err = DaemonError::Backend(backend_err);
+                        progress.finish(Err(err.to_string()));
+                        return Err(err);
+                    }
+                    if progress.is_cancelled() {
+                        stop_maintenance_vm(&mut progress, &backend, &handle, id).await;
+                        let err = DaemonError::OperationCancelled(op_id_inner.clone());
+                        progress.finish(Err(err.to_string()));
+                        return Err(err);
+                    }
+
+                    stop_maintenance_vm(&mut progress, &backend, &handle, id).await;
+                    tracing::info!(
+                        instance_id = %id,
+                        package = %package,
+                        install,
+                        "package operation via auto-started maintenance VM"
+                    );
+                    progress.set_progress(1.0);
+                    progress.finish(Ok(()));
+                    Ok(())
+                })
+            })
+        };
+
+        match handle
+            .run_operation(
+                Operation {
+                    op_id: op_id.clone(),
+                    instance_id: id,
+                    kind,
+                    phases: phases.clone(),
+                    progress: 0.0,
+                    state: OperationState::Queued,
+                    error: None,
+                },
+                Some(op_id),
+                run,
+            )
+            .await?
+        {
+            OpAccept::Started { done } => done
+                .await
+                .map_err(|_| DaemonError::InstanceSupervisorGone(id))?,
+            OpAccept::Joined { op_id: joined } => {
+                tracing::warn!(
+                    instance_id = %id,
+                    joined = %joined,
+                    "package operation joined an already-running one for the same package"
+                );
+                Ok(())
+            }
+        }
+    }
+
     pub async fn install_guest_agent(
         &self,
         id: InstanceId,
         package: String,
+        offline: bool,
     ) -> Result<(), DaemonError> {
         let handle = self.handle_for(id).await?;
         let (state, disk_path, backend_handle, backend_kind) = {
@@ -638,6 +833,12 @@ impl Daemon {
 
         match &state {
             InstanceState::Running | InstanceState::Paused => {
+                if offline {
+                    return Err(DaemonError::InvalidConfig(format!(
+                        "`--offline` only applies to a stopped instance (currently {state:?}); \
+                         `{package}` can be installed in the running VM without root on the host"
+                    )));
+                }
                 let backend_handle =
                     backend_handle.ok_or_else(|| DaemonError::GuestAgentUnavailable {
                         instance_id: id,
@@ -686,9 +887,12 @@ impl Daemon {
                                 .to_string(),
                         ));
                     }
-                    _ => {
+                    _ if offline => {
                         andler_disk::guest_tools::install_agent_offline(&disk_path, &package)
                             .await?;
+                    }
+                    _ => {
+                        self.auto_start_maintenance(id, &package, true).await?;
                     }
                 }
                 tracing::info!(
@@ -712,6 +916,7 @@ impl Daemon {
         &self,
         id: InstanceId,
         package: String,
+        offline: bool,
     ) -> Result<(), DaemonError> {
         let handle = self.handle_for(id).await?;
         let (state, disk_path, backend_handle, backend_kind) = {
@@ -726,6 +931,12 @@ impl Daemon {
 
         match &state {
             InstanceState::Running | InstanceState::Paused => {
+                if offline {
+                    return Err(DaemonError::InvalidConfig(format!(
+                        "`--offline` only applies to a stopped instance (currently {state:?}); \
+                         `{package}` can be removed in the running VM without root on the host"
+                    )));
+                }
                 let backend_handle =
                     backend_handle.ok_or_else(|| DaemonError::GuestAgentUnavailable {
                         instance_id: id,
@@ -772,9 +983,12 @@ impl Daemon {
                                 .to_string(),
                         ));
                     }
-                    _ => {
+                    _ if offline => {
                         andler_disk::guest_tools::remove_agent_offline(&disk_path, &package)
                             .await?;
+                    }
+                    _ => {
+                        self.auto_start_maintenance(id, &package, false).await?;
                     }
                 }
                 tracing::info!(
@@ -1118,4 +1332,14 @@ fn spawn_compact_on_shutdown(id: InstanceId, disk: andler_core::DiskConfig) {
             }
         }
     });
+}
+
+/// How long a maintenance auto-start waits for the guest agent before
+/// giving up (default 120s; overridable for tests with
+/// ANDLERD_GUEST_AGENT_WAIT_SECS, floor 5s).
+fn guest_agent_wait_secs() -> u64 {
+    match std::env::var("ANDLERD_GUEST_AGENT_WAIT_SECS") {
+        Ok(v) => v.parse::<u64>().unwrap_or(120).max(5),
+        Err(_) => 120,
+    }
 }

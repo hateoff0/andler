@@ -788,6 +788,7 @@ Request to install a package in the guest OS.
 |-------|------|-------------|
 | `instance_id` | `string` | Instance ID. |
 | `package` | `string` | Package name (e.g., `spice-vdagent`). |
+| `offline` | `bool` | Force the offline qemu-nbd/chroot path (requires the helper sudoers rule) instead of the smart path: online via guest agent, auto-starting a stopped VM for maintenance when needed. |
 
 ### `RemoveGuestAgentRequest`
 
@@ -797,6 +798,7 @@ Request to remove a package from the guest OS.
 |-------|------|-------------|
 | `instance_id` | `string` | Instance ID. |
 | `package` | `string` | Package name. |
+| `offline` | `bool` | Force the offline qemu-nbd/chroot path (requires the helper sudoers rule) instead of the smart path: online via guest agent, auto-starting a stopped VM for maintenance when needed. |
 
 ### `ListGuestPackagesResponse`
 

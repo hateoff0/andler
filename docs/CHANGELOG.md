@@ -11,6 +11,8 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 
 #### Daemon
 
+- **Smart guest package path**: `guest install/remove <pkg>` no longer requires root on the host by default. A stopped instance is auto-started headless for maintenance, the package is installed/removed via the guest agent (QGA `guest-exec`, same `PackageManager` command shapes as the offline path), and the VM is stopped again — all as a cancellable supervisor operation visible on the event bus. If the guest agent does not appear within `ANDLERD_GUEST_AGENT_WAIT_SECS` (default 120 s), the operation fails with a hint to retry with `--offline`. The new `--offline` flag forces the qemu-nbd/chroot path (requires the `andler-helper` sudoers rule) — the rescue case for VMs that cannot boot. `--offline` on a running instance is refused with an explanation.
+
 - **boot-mode switching через GuestMutator**: `switch_boot_mode_with` мигрировал с nbd/mount/chroot на `GuestMutator` (offline — `GuestfsMutator` appliance; замена `default.target` = rm + symlink, `ln -s` не перезаписывает существующую ссылку). `current_boot_mode`/`read_boot_mode` удалены — get уже config-backed (P31). Первый шаг фазы 4: nbd-путь остаётся только для chroot-кухни пакетных операций.
 
 - **ARM translator staging через GuestMutator**: `switch_translator_with` мигрировал staging (upload/chmod), замену старого транслятора (rm), перенос (mv) и запись build.prop/init.rc (write) на `GuestMutator`; один appliance-батч на фазу. `MutatorOp` получил `UploadFile` (host→guest), trait — `exists`. Чтение base build.prop: plain-путь через мутатор, waydroid `system.img` — read_file + debugfs на хостовой копии (без root). Helper-пути `file`/`guest-write` из arm_translator удалены.

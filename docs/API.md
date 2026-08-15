@@ -418,8 +418,11 @@ Mode selection by instance state:
 | `Starting` / `Stopping` | Rejected. |
 
 ```bash
-# Install a package
+# Install a package (smart path: online via guest agent when running;
+# auto-starts a stopped VM for maintenance and stops it again; --offline
+# forces the qemu-nbd/chroot path for VMs that cannot boot)
 andler guest install spice-vdagent <instance-id>
+andler guest install spice-vdagent <instance-id> --offline
 
 # Remove a package
 andler guest remove spice-vdagent <instance-id>
@@ -430,6 +433,13 @@ andler guest list <instance-id>
 # Switch Android boot mode (Android instances)
 andler guest boot-mode <instance-id> [android|linux]
 ```
+
+`guest install/remove` without `--offline` never needs root on the host:
+a stopped instance is booted headless, the package is installed via the
+guest agent, and the VM is stopped again. If the guest agent does not
+appear within `ANDLERD_GUEST_AGENT_WAIT_SECS` (default 120 s) the
+operation fails with a hint to retry with `--offline` — that path uses
+`qemu-nbd` + chroot and requires the `andler-helper` sudoers rule.
 
 Known packages: `spice-vdagent` (shared folders), `qemu-guest-agent` (host-guest communication), `spice-webdavd` (webdav shared folders).
 

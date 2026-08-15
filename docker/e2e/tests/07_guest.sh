@@ -111,17 +111,23 @@ expect_ok "guest list (offline)" -- andler guest list "$LID"
 expect_out_grep "lists qemu-guest-agent" "qemu-guest-agent"
 expect_out_grep "nothing installed yet" "not installed"
 
-expect_ok "guest install qemu-guest-agent (offline apt)" -- timeout 300 andler guest install qemu-guest-agent "$LID"
+expect_ok "guest install qemu-guest-agent (offline apt)" -- timeout 300 andler guest install qemu-guest-agent "$LID" --offline
 expect_out_grep "install reports success" "installed successfully"
 
 expect_ok "guest list after install" -- andler guest list "$LID"
 expect_out_grep "qemu-ga now installed" "qemu-guest-agent.*installed"
 
-expect_ok "guest remove qemu-guest-agent" -- timeout 300 andler guest remove qemu-guest-agent "$LID"
+expect_ok "guest remove qemu-guest-agent" -- timeout 300 andler guest remove qemu-guest-agent "$LID" --offline
 expect_out_grep "remove reports success" "removed successfully"
 
 expect_ok "guest list after remove" -- andler guest list "$LID"
 expect_out_grep "qemu-ga removed again" "qemu-guest-agent.*not installed"
+
+echo "  [smart path: stopped VM without QGA falls back with an actionable hint]"
+expect_fail "guest install without --offline on a non-booting VM" -- timeout 200 andler guest install qemu-guest-agent "$LID"
+expect_err_grep "auto-started for maintenance" "Retry with .--offline."
+expect_ok "smart-path failure left the instance stopped" -- andler status "$LID"
+expect_out_grep "instance is stopped" "Stopped"
 
 echo "  [deep: Android boot-mode switching]"
 AID="$(create_android "$WORK/ai" guest-android "$GUEST_QCOW")"

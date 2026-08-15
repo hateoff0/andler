@@ -28,6 +28,9 @@ export E2E_STORE_PATH="$E2E_WORKDIR/andlerd.db"
 export E2E_LISTEN_ADDR="${E2E_LISTEN_ADDR:-127.0.0.1:50051}"
 export E2E_DAEMON_PID_FILE="$E2E_WORKDIR/daemon.pid"
 export E2E_DEEP_GUEST="${E2E_DEEP_GUEST:-1}"
+# Short maintenance auto-start wait: suite 07 exercises the "VM does not
+# respond" path and must not spend 120s per attempt.
+export ANDLERD_GUEST_AGENT_WAIT_SECS="${ANDLERD_GUEST_AGENT_WAIT_SECS:-30}"
 export E2E_LAST_OUT="$E2E_WORKDIR/last.out"
 export E2E_LAST_ERR="$E2E_WORKDIR/last.err"
 export ANDLER_BIN="${ANDLER_BIN:-/usr/local/bin/andler}"
