@@ -121,7 +121,43 @@ fn install_agent_offline_blocking(disk_path: &Path, package: &str) -> Result<(),
         )));
     }
 
+    enable_systemd_unit(mount_guard.path(), pkg_manager, package)?;
+
     tracing::info!(package = %package, "package installed successfully in guest filesystem");
+    Ok(())
+}
+
+/// deb-systemd-helper cannot create the enable symlink without a running
+/// systemd (always true in the offline chroot), so the unit would never
+/// start on the next boot. andler links the known unit into
+/// multi-user.target.wants itself.
+fn enable_systemd_unit(
+    mount: &Path,
+    pkg_manager: PackageManager,
+    package: &str,
+) -> Result<(), DiskError> {
+    let Some(unit) = KNOWN_PACKAGES
+        .iter()
+        .chain(ANDROID_PACKAGES.iter())
+        .find(|p| p.name == package)
+        .and_then(|p| p.systemd_unit)
+    else {
+        return Ok(());
+    };
+    let _ = pkg_manager;
+    let wants_dir = "/etc/systemd/system/multi-user.target.wants";
+    let link = format!("{wants_dir}/{unit}");
+    let target = format!("/lib/systemd/system/{unit}");
+    let output = chroot_exec(mount, &["ln", "-sf", &target, &link])?;
+    if !output.status.success() {
+        tracing::warn!(
+            package,
+            unit,
+            stderr = %String::from_utf8_lossy(&output.stderr).trim(),
+            "could not enable the package systemd unit in the offline chroot; \
+             the service may not start on boot"
+        );
+    }
     Ok(())
 }
 
@@ -187,6 +223,13 @@ pub struct GuestPackage {
     /// where they install the same tool (e.g. `/usr/bin/qemu-ga` on Arch,
     /// `/usr/sbin/qemu-ga` on Debian/Ubuntu).
     pub binary_checks: &'static [&'static str],
+
+    /// systemd unit the package ships. deb-systemd-helper skips the enable
+    /// symlink when no systemd is running (always the case in the offline
+    /// chroot), so andler creates the multi-user.target.wants link itself
+    /// after install; without it the freshly installed service would never
+    /// start on the next boot.
+    pub systemd_unit: Option<&'static str>,
 }
 
 pub const KNOWN_PACKAGES: &[GuestPackage] = &[
@@ -194,16 +237,19 @@ pub const KNOWN_PACKAGES: &[GuestPackage] = &[
         name: "spice-vdagent",
         description: "Shared clipboard & copy/paste between host and guest",
         binary_checks: &["/usr/bin/spice-vdagentd", "/usr/sbin/spice-vdagentd"],
+        systemd_unit: Some("spice-vdagentd.service"),
     },
     GuestPackage {
         name: "qemu-guest-agent",
         description: "Host-guest communication (guest-exec, freeze/thaw)",
         binary_checks: &["/usr/bin/qemu-ga", "/usr/sbin/qemu-ga"],
+        systemd_unit: Some("qemu-guest-agent.service"),
     },
     GuestPackage {
         name: "spice-webdavd",
         description: "Shared folders via SPICE webdav",
         binary_checks: &["/usr/bin/spice-webdavd"],
+        systemd_unit: Some("spice-webdavd.service"),
     },
 ];
 
@@ -212,11 +258,13 @@ pub const ANDROID_PACKAGES: &[GuestPackage] = &[
         name: "libndk",
         description: "ARM translation (Google NDK, for AMD CPUs)",
         binary_checks: &["var/lib/waydroid/overlay/system/lib/libndk_translation.so"],
+        systemd_unit: None,
     },
     GuestPackage {
         name: "libhoudini",
         description: "ARM translation (Intel Houdini)",
         binary_checks: &["var/lib/waydroid/overlay/system/lib/libhoudini.so"],
+        systemd_unit: None,
     },
 ];
 

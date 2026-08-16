@@ -21,10 +21,31 @@ pub struct GuestMount {
 impl GuestMount {
     /// Mounts the guest disk read-write via guestfish inspection (finds
     /// the root filesystem automatically, like the appliance paths do).
+    /// One retry after a short pause: a freshly-exited appliance (a
+    /// previous mount/drop) can still hold its FUSE socket, and a second
+    /// guestmount started immediately then fails with "appliance closed
+    /// the connection unexpectedly" — seen reliably in the containerized
+    /// e2e (list → install back-to-back).
     pub fn mount(disk_path: &Path) -> Result<GuestMount, DiskError> {
         if !disk_path.exists() {
             return Err(DiskError::BackingFileNotFound(disk_path.to_path_buf()));
         }
+        match Self::mount_once(disk_path) {
+            Ok(m) => Ok(m),
+            Err(first_err) => {
+                std::thread::sleep(std::time::Duration::from_secs(2));
+                Self::mount_once(disk_path).map_err(|second_err| {
+                    tracing::warn!(
+                        error = %second_err,
+                        "guestmount retry also failed after an appliance race; first error: {first_err}"
+                    );
+                    second_err
+                })
+            }
+        }
+    }
+
+    fn mount_once(disk_path: &Path) -> Result<GuestMount, DiskError> {
         let mount = std::env::temp_dir().join(format!(
             "andler-guest-mnt-{}-{}",
             std::process::id(),
@@ -85,23 +106,47 @@ impl Drop for GuestMount {
                 "failed to guestunmount; the FUSE mount may be left behind"
             );
         }
+        // guestunmount returns once the FUSE mount is gone, but the
+        // appliance (libguestfs' own QEMU) exits asynchronously after that
+        // and holds the disk image open for a moment — a QEMU spawn right
+        // after (maintenance auto-start) then fails with "Failed to get
+        // write lock". Wait out the teardown so the file is really free.
+        std::thread::sleep(std::time::Duration::from_millis(1500));
         let _ = std::fs::remove_dir_all(&self.mount);
     }
 }
 
 /// Runs a command chrooted into the guest mount, inside a fresh user+mount
-/// namespace where the caller is root. Returns the child's output.
+/// namespace where the caller is root. Device nodes cannot work through
+/// the FUSE mount (open on a device file → EPERM) and devtmpfs cannot be
+/// bind-mounted in a user namespace, so the needed nodes are bind-mounted
+/// individually from the host (/dev/null, zero, random, urandom, tty,
+/// console) plus /proc, /sys and a tmpfs /run — the same recipe the old
+/// chroot kitchen used, now without any privileges. Returns the child's
+/// output.
 pub fn chroot_exec(mount: &Path, argv: &[&str]) -> Result<std::process::Output, DiskError> {
     let mount_str = mount.to_string_lossy().into_owned();
+    let script = "mount --bind /dev/null \"$1/dev/null\" 2>/dev/null; \
+                  mount --bind /dev/zero \"$1/dev/zero\" 2>/dev/null; \
+                  mount --bind /dev/random \"$1/dev/random\" 2>/dev/null; \
+                  mount --bind /dev/urandom \"$1/dev/urandom\" 2>/dev/null; \
+                  mount --bind /dev/tty \"$1/dev/tty\" 2>/dev/null; \
+                  mount --bind /dev/console \"$1/dev/console\" 2>/dev/null; \
+                  mount --bind /proc \"$1/proc\" 2>/dev/null; \
+                  mount --bind /sys \"$1/sys\" 2>/dev/null; \
+                  mount -t tmpfs tmpfs \"$1/run\" 2>/dev/null; \
+                  exec chroot \"$1\" \"${@:2}\"";
     let mut cmd = Command::new("unshare");
     cmd.args([
         "--user",
         "--map-root-user",
         "--mount",
         "--",
-        "chroot",
-        &mount_str,
+        "bash",
+        "-c",
+        script,
     ]);
+    cmd.arg("bash").arg(&mount_str);
     cmd.args(argv);
     cmd.stdin(std::process::Stdio::null());
     cmd.stdout(std::process::Stdio::piped());
@@ -118,12 +163,21 @@ pub fn chroot_exec(mount: &Path, argv: &[&str]) -> Result<std::process::Output, 
 /// access. The FUSE mount is writable by us, so no helper is involved.
 pub fn prepare_resolv(mount: &Path) -> Result<(), DiskError> {
     let target = mount.join("etc/resolv.conf");
-    if target.exists()
-        && std::fs::read_to_string(&target)
-            .map(|c| !c.trim().is_empty())
-            .unwrap_or(false)
-    {
-        return Ok(());
+    // Cloud images ship resolv.conf as a symlink into /run (a stub that
+    // does not exist here) — replace such a link with a plain file.
+    match std::fs::symlink_metadata(&target) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            let _ = std::fs::remove_file(&target);
+        }
+        Ok(_) => {
+            let has_content = std::fs::read_to_string(&target)
+                .map(|c| !c.trim().is_empty())
+                .unwrap_or(false);
+            if has_content {
+                return Ok(());
+            }
+        }
+        Err(_) => {}
     }
     let host_resolv = std::fs::read_to_string("/etc/resolv.conf")
         .map_err(|e| DiskError::FileSystem(format!("cannot read /etc/resolv.conf: {e}")))?;
