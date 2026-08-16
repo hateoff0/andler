@@ -194,7 +194,26 @@ impl QemuBackend {
         Err(last_connect_error.expect("retry loop always records its last error"))
     }
 
-    async fn guest_agent_client(instance: &RunningInstance) -> Result<QmpClient, BackendError> {
+    /// Full guest argv for a package operation: the manager binary first, then
+    /// the subcommand shape from `core::package_manager`. The args are
+    /// subcommand-only by contract, so the binary name must be prepended here
+    /// — regression: the online path once exec'd GNU coreutils' `install`.
+    fn package_argv(
+        pm: andler_core::package_manager::PackageManager,
+        install: bool,
+        package: &str,
+    ) -> Vec<String> {
+        let mut argv = vec![pm.binary_name().to_string()];
+        let args = if install {
+            pm.install_args(package)
+        } else {
+            pm.remove_args(package)
+        };
+        argv.extend(args.iter().map(|s| s.to_string()));
+        argv
+    }
+
+    async fn guest_agent_client(instance: &mut RunningInstance) -> Result<QmpClient, BackendError> {
         let path = instance.process.qga_socket_path();
         QmpClient::connect_agent(&path)
             .await
@@ -251,14 +270,14 @@ exit 30";
             "pacman" => andler_core::package_manager::PackageManager::Pacman,
             _ => andler_core::package_manager::PackageManager::Apt,
         };
-        let cmd_args: Vec<&str> = if install {
-            pm.install_args(package)
-        } else {
-            pm.remove_args(package)
-        };
+        // install_args/remove_args carry the subcommand only ("install -y
+        // <pkg>"); the manager binary itself must head the argv — without
+        // it the guest runs GNU coreutils' `install` instead of apt-get.
+        let argv = Self::package_argv(pm, install, package);
+        let argv_refs: Vec<&str> = argv.iter().map(String::as_str).collect();
 
         let pid = qga
-            .guest_exec(cmd_args[0], &cmd_args[1..])
+            .guest_exec(argv_refs[0], &argv_refs[1..])
             .await
             .map_err(qmp_error_to_backend_error)?;
 
@@ -1982,5 +2001,23 @@ mod tests {
         assert_eq!(name, format!("snap-{}", &long_id[..24]));
         assert!(name.len() <= 31, "QEMU node names are capped at 31 chars");
         assert!(!name.contains(".tmp-"));
+    }
+}
+
+#[cfg(test)]
+mod package_argv_tests {
+    use super::QemuBackend;
+    use andler_core::package_manager::PackageManager;
+
+    #[test]
+    fn argv_heads_the_manager_binary() {
+        let argv = QemuBackend::package_argv(PackageManager::Apt, true, "hello");
+        assert_eq!(argv, vec!["apt-get", "install", "-y", "hello"]);
+        let argv = QemuBackend::package_argv(PackageManager::Apt, false, "hello");
+        assert_eq!(argv, vec!["apt-get", "remove", "-y", "hello"]);
+        let argv = QemuBackend::package_argv(PackageManager::Pacman, true, "hello");
+        assert_eq!(argv, vec!["pacman", "-S", "--noconfirm", "hello"]);
+        let argv = QemuBackend::package_argv(PackageManager::Dnf, true, "hello");
+        assert_eq!(argv, vec!["dnf", "install", "-y", "hello"]);
     }
 }
