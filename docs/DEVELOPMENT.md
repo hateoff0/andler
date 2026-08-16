@@ -68,9 +68,7 @@ ANDLERD_STORE_PATH=/path/to/andlerd.db ./target/release/andlerd
 
 The daemon runs unprivileged; offline guest operations (offline `guest install`/`remove`, ARM translator switching, boot-mode switching) need root only for a fixed set of operations (nbd connect/disconnect, `mount`/`umount`, chrooted package-manager runs, guest-filesystem writes, `modprobe` for the nbd module). All of them go through **one** privileged binary:
 
-- `/usr/local/sbin/andler-helper` — root:root 0755, validates every argument itself (paths must lie inside the NBD-mounted guest partition, devices must be free `/dev/nbd*` devices, chroot commands come from a strict allowlist, mount points must be owned by the invoking user), installed by `andler doctor --fix`
-
-The single sudoers rule is `youruser ALL=(root) NOPASSWD: /usr/local/sbin/andler-helper` (written to `/etc/sudoers.d/andler`, validated with `visudo -c`). `--fix` also migrates legacy per-binary rules from the old sudoers format away. Without this rule, offline operations fail with an actionable message pointing at `andler doctor --fix`.
+Offline guest operations are zero-root: `guestmount` (libguestfs FUSE) mounts the guest disk, `unshare --user --map-root-user --mount` + chroot run the package manager inside an unprivileged user namespace. Prerequisites (`andler doctor`): libguestfs-tools, `/dev/fuse`, and unprivileged user namespaces (Debian/Ubuntu may need `sysctl kernel.unprivileged_userns_clone=1`). No helper binary, no sudoers rules.
 
 ### Default Paths
 
@@ -128,7 +126,7 @@ Coverage (all CLI commands):
 3. Disk: create/info/resize (grow + shrink refusal)/compact (qcow2 + raw), zero-size and unparsable-size negatives
 4. Snapshots: live create (incl. duplicate tag)/list/`--json`, offline restore, restore-while-running, create/delete-while-stopped
 5. Clone/export: Android create (incl. missing base image), linked/full-standalone/shared-base clones, live-clone removal protection, export, nonexistent-source negatives
-6. Guest: error paths always; deep tests (offline install/remove/list against a real Debian rootfs via qemu-nbd, Android boot-mode switching) when the `nbd` module is available — otherwise SKIP, rest of the suite still runs
+6. Guest: error paths always; deep tests (offline install/remove/list against a real Debian rootfs via guestmount + userns, Android boot-mode switching) — SKIP when guestmount/FUSE is unavailable, rest of the suite still runs
 7. Client-side: `create --dry-run`, `--verify` pass/fail, wizard non-TTY refusal, shell completions, `andler doctor`
 8. Persistence: daemon restart against the same store (state survives), final cleanup
 
@@ -207,7 +205,8 @@ andler/
 │   │       ├── overlay.rs        # Android overlay disks
 │   │       ├── clone.rs          # 3 clone modes
 │   │       ├── nbd.rs            # nbd device management (flock), nbd_status()
-│   │       ├── guest_tools.rs    # offline guest provisioning (qemu-nbd + mount)
+│   │       ├── guest_offline.rs # zero-root guestmount + userns chroot
+│   │       ├── guest_tools.rs    # offline guest provisioning (guestmount + userns)
 │   │       ├── arm_translator.rs # ARM translator package staging
 │   │       ├── diskspace.rs      # free-space pre-check for snapshots
 │   │       └── error.rs          # DiskError

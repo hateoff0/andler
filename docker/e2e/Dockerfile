@@ -44,7 +44,6 @@ COPY services/andler-rpc/Cargo.toml services/andler-rpc/Cargo.toml
 COPY services/andler-guestfs/Cargo.toml services/andler-guestfs/Cargo.toml
 COPY apps/daemon/Cargo.toml apps/daemon/Cargo.toml
 COPY apps/cli/Cargo.toml apps/cli/Cargo.toml
-COPY apps/helper/Cargo.toml apps/helper/Cargo.toml
 
 # Stub sources so `cargo fetch` can resolve the workspace graph
 RUN for crate in andler-core andler-qemu andler-disk andler-net andler-firmware andler-store andler-rpc andler-guestfs; do \
@@ -53,7 +52,6 @@ RUN for crate in andler-core andler-qemu andler-disk andler-net andler-firmware 
     done && \
     mkdir -p apps/daemon/src && echo "fn main() {}" > apps/daemon/src/main.rs && \
     mkdir -p apps/cli/src && echo "fn main() {}" > apps/cli/src/main.rs && \
-    mkdir -p apps/helper/src && echo "fn main() {}" > apps/helper/src/main.rs
 
 # Dependency downloads only happen on the first build; afterwards the registry
 # cache mount survives layer invalidation.
@@ -72,7 +70,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/andler/target \
     cargo build --workspace --bins --tests \
     && mkdir -p /andler/dist \
-    && cp target/debug/andler target/debug/andlerd target/debug/andler-helper /andler/dist/
+    && cp target/debug/andler target/debug/andlerd /andler/dist/
 
 # --- testbuild: bake the cargo cache into the image -------------------------
 FROM builder AS testbuild
@@ -145,10 +143,6 @@ RUN debootstrap --variant=minbase --include=systemd bookworm /opt/e2e/guest-root
 
 COPY --from=builder /andler/dist/andler /usr/local/bin/andler
 COPY --from=builder /andler/dist/andlerd /usr/local/bin/andlerd
-COPY --from=builder /andler/dist/andler-helper /usr/local/sbin/andler-helper
-# Also next to the andler binary: `doctor --fix` reinstalls a broken helper
-# from current_exe().parent(), mirroring how the release tarball ships it.
-COPY --from=builder /andler/dist/andler-helper /usr/local/bin/andler-helper
 COPY docker/e2e/e2e.sh /usr/local/bin/andler-e2e
 COPY docker/e2e/tests /usr/local/share/andler-e2e/tests
 

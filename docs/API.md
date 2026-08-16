@@ -427,7 +427,7 @@ stdout/stderr are relayed and the CLI exits with the guest's exit code.
 
 ### `guest`
 
-Guest package management — install, remove, or list packages in the guest OS. Auto-fallback: if VM is running and guest agent is available → online via the guest agent socket (`guest-exec`); if VM is stopped → offline via `qemu-nbd` + mount.
+Guest package management — install, remove, or list packages in the guest OS. Auto-fallback: if VM is running and guest agent is available → online via the guest agent socket (`guest-exec`); if VM is stopped → offline via `guestmount` (FUSE) + an unprivileged user namespace — zero root either way.
 
 Mode selection by instance state:
 
@@ -435,13 +435,13 @@ Mode selection by instance state:
 |-------|----------|
 | `Running` | Online via the guest agent. If `qemu-guest-agent` is not installed/responding, the command fails with a hint to stop the VM first (offline path) — no silent fallback. |
 | `Paused` | Treated like online, but the frozen guest agent cannot respond, so the command fails with a hint to resume or stop the VM. |
-| `Created` / `Stopped` / `Error` | Offline via `qemu-nbd` + mount + chroot (requires the `nbd` kernel module, `qemu-utils`, and the single passwordless `sudo -n` rule for `/usr/local/sbin/andler-helper` — see `andler doctor --fix`). |
+| `Created` / `Stopped` / `Error` | Offline via `guestmount` (FUSE) + `unshare` user namespace + chroot — zero root; requires `libguestfs-tools`, `/dev/fuse`, and unprivileged user namespaces (see `andler doctor`). |
 | `Starting` / `Stopping` | Rejected. |
 
 ```bash
 # Install a package (smart path: online via guest agent when running;
 # auto-starts a stopped VM for maintenance and stops it again; --offline
-# forces the qemu-nbd/chroot path for VMs that cannot boot)
+# forces the offline guestmount/userns path for VMs that cannot boot)
 andler guest install spice-vdagent <instance-id>
 andler guest install spice-vdagent <instance-id> --offline
 
@@ -466,7 +466,7 @@ operation runs in place. Both forms are supervisor operations — progress
 is visible on `andler events` and cancellable. If the guest agent does not
 appear within `ANDLERD_GUEST_AGENT_WAIT_SECS` (default 120 s) the
 operation fails with a hint to retry with `--offline` — that path uses
-`qemu-nbd` + chroot and requires the `andler-helper` sudoers rule.
+the offline guestmount + userns path — zero root, no sudoers rules.
 
 ### Provision manifests
 
@@ -595,12 +595,10 @@ Interactive guided instance creation wizard (also the default when `andler` is i
 ### `doctor`
 
 ```bash
-andler doctor [--fix] [--metrics]
+andler doctor [--metrics]
 ```
 
-Checks the local environment for ANDLER prerequisites: KVM availability, QEMU/OVMF installation, nbd kernel module (a scan failure is reported with `Run: sudo modprobe nbd max_part=8`), the `andler-helper` privileged binary and its passwordless-sudo rule, daemon reachability, and base images. Read-only — works even if andlerd isn't running. The helper/sudoers checks are warnings, not failures: the smart online package path needs no root on the host, the helper rule is only required for the offline qemu-nbd/chroot rescue case (VM cannot boot).
-
-With `--fix`, offers to install the `andler-helper` binary (root:root 0755, via `sudo install`) and write its single passwordless-sudo rule to `/etc/sudoers.d/andler` (validates with `visudo -c` before writing; migrates legacy per-binary rules away).
+Checks the local environment for ANDLER prerequisites: KVM availability, QEMU/OVMF installation, daemon reachability, base images, and the offline-guest-operation prerequisites (`guestmount`/libguestfs on PATH, `/dev/fuse`, unprivileged user namespaces allowed — the `sysctl kernel.unprivileged_userns_clone=1` hint appears on Debian/Ubuntu when disabled). Read-only — works even if andlerd isn't running. Offline guest package ops (`--offline`) are zero-root: no sudoers rules, nothing to install.
 
 With `--metrics`, prints the daemon's internal metrics snapshot instead of the environment checks: RPC latency p50/p99 by method, error counts by gRPC status code, instance counts, active operations, and QMP reconnects (requires a reachable daemon).
 ### `completions`

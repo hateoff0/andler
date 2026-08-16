@@ -9,6 +9,11 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Added
 
+#### Offline guest ops are zero-root
+
+- **`--offline` no longer needs root or sudoers**: the qemu-nbd + mount + `andler-helper chroot-run` kitchen is replaced by `guestmount` (libguestfs FUSE — no block mount) + `unshare --user --map-root-user --mount` + chroot. Prerequisites, checked by `andler doctor`: `guestmount` on PATH, `/dev/fuse`, unprivileged user namespaces (Debian/Ubuntu: `sysctl kernel.unprivileged_userns_clone=1` — the doctor hint names it). Apt inside the userns runs with `APT::Sandbox::User=root` + `Acquire::ForceIPv4=true` (the sandbox setuid is not available in userns).
+- **`andler-helper` and its sudoers rule are gone**: the crate, the `/usr/local/sbin/andler-helper` install, `doctor --fix`, and all nbd/modprobe/chroot sudoers logic are removed; `andler doctor` checks the new zero-root prerequisites instead. Offline `guest list`/`install`/`remove` still exist (`--offline`), just without privileges.
+
 #### Observability
 
 - **request_id correlation (§9.1.1)**: every CLI request is stamped with a `request_id` metadata header; the daemon's RPC span carries it, so `andler logs daemon` lines reconstruct the path CLI → RPC → operation. The `rpc{request_id=…, method=…}` span wraps each handler's events.

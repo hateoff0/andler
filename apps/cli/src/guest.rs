@@ -38,9 +38,9 @@ pub enum GuestAction {
         #[arg(long)]
         translator_dir: Option<std::path::PathBuf>,
 
-        /// Force the offline qemu-nbd/chroot path (requires sudo) instead of
-        /// the smart path: install via the guest agent, auto-starting a
-        /// stopped VM for maintenance when needed.
+        /// Force the offline path (guestmount FUSE + userns chroot — zero
+        /// root) instead of the smart path: install via the guest agent,
+        /// auto-starting a stopped VM for maintenance when needed.
         #[arg(long)]
         offline: bool,
     },
@@ -50,9 +50,9 @@ pub enum GuestAction {
 
         instance_id: String,
 
-        /// Force the offline qemu-nbd/chroot path (requires sudo) instead of
-        /// the smart path: remove via the guest agent, auto-starting a
-        /// stopped VM for maintenance when needed.
+        /// Force the offline path (guestmount FUSE + userns chroot — zero
+        /// root) instead of the smart path: remove via the guest agent,
+        /// auto-starting a stopped VM for maintenance when needed.
         #[arg(long)]
         offline: bool,
     },

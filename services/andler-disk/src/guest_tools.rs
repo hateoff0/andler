@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use crate::error::DiskError;
-use crate::nbd;
+use crate::guest_offline::{chroot_exec, prepare_resolv, GuestMount};
 use andler_core::config::InstanceKind;
 pub use andler_core::package_manager::PackageManager;
 
@@ -27,21 +27,10 @@ pub fn is_agent_installed(
     package: &str,
 ) -> Result<bool, DiskError> {
     let (query_binary, cmd_args) = pkg_manager.check_installed_command(package);
-
-    let output = nbd::helper_command("chroot-run")
-        .arg(mount_point)
-        .arg(query_binary)
-        .args(cmd_args)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .output();
-
-    match output {
-        Ok(o) => Ok(o.status.success()),
-        Err(e) => Err(DiskError::FileSystem(format!(
-            "failed to check for installed agent: {e}"
-        ))),
-    }
+    let mut argv: Vec<&str> = vec![query_binary];
+    argv.extend(cmd_args.iter().copied());
+    let output = chroot_exec(mount_point, &argv)?;
+    Ok(output.status.success())
 }
 
 pub async fn install_agent_offline(disk_path: &Path, package: &str) -> Result<(), DiskError> {
@@ -57,14 +46,8 @@ pub async fn install_agent_offline(disk_path: &Path, package: &str) -> Result<()
 }
 
 fn install_agent_offline_blocking(disk_path: &Path, package: &str) -> Result<(), DiskError> {
-    if !disk_path.exists() {
-        return Err(DiskError::BackingFileNotFound(disk_path.to_path_buf()));
-    }
-
-    let nbd_guard = nbd::connect_nbd(disk_path)?;
-    let partitions = nbd::wait_for_partitions(nbd_guard.path())?;
-    let root_partition = nbd::find_root_partition(&partitions)?;
-    let mount_guard = nbd::mount_partition(&root_partition)?;
+    let mount_guard = GuestMount::mount(disk_path)?;
+    prepare_resolv(mount_guard.path())?;
 
     let pkg_manager = detect_package_manager(mount_guard.path()).ok_or_else(|| {
         DiskError::PackageManagerNotFound {
@@ -79,21 +62,20 @@ fn install_agent_offline_blocking(disk_path: &Path, package: &str) -> Result<(),
     }
 
     let update_args = match pkg_manager {
-        PackageManager::Apt => vec!["update"],
+        PackageManager::Apt => vec![
+            "-o",
+            "APT::Sandbox::User=root",
+            "-o",
+            "Acquire::ForceIPv4=true",
+            "update",
+        ],
         PackageManager::Dnf => vec!["makecache"],
         PackageManager::Pacman => vec!["-Sy"],
     };
 
-    let update_output = nbd::helper_command("chroot-run")
-        .arg(mount_guard.path())
-        .arg(pkg_manager.binary_name())
-        .args(&update_args)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .output()
-        .map_err(|e| {
-            DiskError::NbdSetupFailed(format!("failed to run chroot package update: {e}"))
-        })?;
+    let mut update_argv: Vec<&str> = vec![pkg_manager.binary_name()];
+    update_argv.extend(update_args.iter().copied());
+    let update_output = chroot_exec(mount_guard.path(), &update_argv)?;
 
     if !update_output.status.success() {
         let stderr = String::from_utf8_lossy(&update_output.stderr);
@@ -112,27 +94,30 @@ fn install_agent_offline_blocking(disk_path: &Path, package: &str) -> Result<(),
         return Err(DiskError::NbdSetupFailed(format!(
             "failed to update package indexes in guest (exit {}): {}",
             update_output.status,
-            nbd::describe_helper_failure(stderr.trim())
+            stderr.trim()
         )));
     }
 
     let cmd_args = pkg_manager.install_args(package);
+    let mut install_argv: Vec<&str> = vec![pkg_manager.binary_name()];
+    if pkg_manager == PackageManager::Apt {
+        install_argv.extend([
+            "-o",
+            "APT::Sandbox::User=root",
+            "-o",
+            "Acquire::ForceIPv4=true",
+        ]);
+    }
+    install_argv.extend(cmd_args.iter().copied());
 
-    let output = nbd::helper_command("chroot-run")
-        .arg(mount_guard.path())
-        .arg(pkg_manager.binary_name())
-        .args(cmd_args)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .output()
-        .map_err(|e| DiskError::NbdSetupFailed(format!("failed to run chroot: {e}")))?;
+    let output = chroot_exec(mount_guard.path(), &install_argv)?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(DiskError::NbdSetupFailed(format!(
             "package installation failed (exit {}): {}",
             output.status,
-            nbd::describe_helper_failure(stderr.trim())
+            stderr.trim()
         )));
     }
 
@@ -153,14 +138,7 @@ pub async fn remove_agent_offline(disk_path: &Path, package: &str) -> Result<(),
 }
 
 fn remove_agent_offline_blocking(disk_path: &Path, package: &str) -> Result<(), DiskError> {
-    if !disk_path.exists() {
-        return Err(DiskError::BackingFileNotFound(disk_path.to_path_buf()));
-    }
-
-    let nbd_guard = nbd::connect_nbd(disk_path)?;
-    let partitions = nbd::wait_for_partitions(nbd_guard.path())?;
-    let root_partition = nbd::find_root_partition(&partitions)?;
-    let mount_guard = nbd::mount_partition(&root_partition)?;
+    let mount_guard = GuestMount::mount(disk_path)?;
 
     let pkg_manager = detect_package_manager(mount_guard.path()).ok_or_else(|| {
         DiskError::PackageManagerNotFound {
@@ -175,22 +153,25 @@ fn remove_agent_offline_blocking(disk_path: &Path, package: &str) -> Result<(), 
     }
 
     let cmd_args = pkg_manager.remove_args(package);
+    let mut remove_argv: Vec<&str> = vec![pkg_manager.binary_name()];
+    if pkg_manager == PackageManager::Apt {
+        remove_argv.extend([
+            "-o",
+            "APT::Sandbox::User=root",
+            "-o",
+            "Acquire::ForceIPv4=true",
+        ]);
+    }
+    remove_argv.extend(cmd_args.iter().copied());
 
-    let output = nbd::helper_command("chroot-run")
-        .arg(mount_guard.path())
-        .arg(pkg_manager.binary_name())
-        .args(cmd_args)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .output()
-        .map_err(|e| DiskError::NbdSetupFailed(format!("failed to run chroot: {e}")))?;
+    let output = chroot_exec(mount_guard.path(), &remove_argv)?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(DiskError::NbdSetupFailed(format!(
             "package removal failed (exit {}): {}",
             output.status,
-            nbd::describe_helper_failure(stderr.trim())
+            stderr.trim()
         )));
     }
 
@@ -279,11 +260,7 @@ pub fn check_all_packages_offline(
 pub fn check_all_packages_offline_with_disk(
     disk_path: &Path,
 ) -> Result<Vec<(&'static GuestPackage, PackageStatus)>, DiskError> {
-    let nbd_guard = nbd::connect_nbd(disk_path)?;
-    let partitions = nbd::wait_for_partitions(nbd_guard.path())?;
-    let root = nbd::find_root_partition(&partitions)?;
-    let mount_guard = nbd::mount_partition(&root)?;
-
+    let mount_guard = GuestMount::mount(disk_path)?;
     let results = check_all_packages_offline(mount_guard.path());
     Ok(results)
 }
@@ -291,11 +268,7 @@ pub fn check_all_packages_offline_with_disk(
 pub fn check_android_packages_offline_with_disk(
     disk_path: &Path,
 ) -> Result<Vec<(&'static GuestPackage, PackageStatus)>, DiskError> {
-    let nbd_guard = nbd::connect_nbd(disk_path)?;
-    let partitions = nbd::wait_for_partitions(nbd_guard.path())?;
-    let root = nbd::find_root_partition(&partitions)?;
-    let mount_guard = nbd::mount_partition(&root)?;
-
+    let mount_guard = GuestMount::mount(disk_path)?;
     let results = ANDROID_PACKAGES
         .iter()
         .map(|pkg| {

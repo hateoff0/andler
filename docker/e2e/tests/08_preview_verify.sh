@@ -64,7 +64,7 @@ fi
 
 echo "  [doctor]"
 # doctor exits non-zero on any warning, and a container has no base images
-# by default — seed a fixture so --fix can be asserted to exit 0.
+# by default — seed a fixture so the offline checks can be asserted too.
 BIMG_DIR="$HOME/.andler/cache/base-images/android13-vanilla"
 mkdir -p "$BIMG_DIR"
 printf '{"android_major":"13","android_variant":"vanilla","built_at":"e2e-fixture"}' > "$BIMG_DIR/e2e-fake.manifest.json"
@@ -74,7 +74,7 @@ andler doctor >"$E2E_LAST_OUT" 2>"$E2E_LAST_ERR"
 DOCTOR_RC=$?
 set -e
 if [[ "$DOCTOR_RC" -eq 0 || "$DOCTOR_RC" -eq 1 ]]; then
-    pass "doctor runs (exit $DOCTOR_RC; 1 is expected when nbd/base-image checks warn)"
+    pass "doctor runs (exit $DOCTOR_RC; 1 is expected when offline/base-image checks warn)"
 else
     fail "doctor exited with $DOCTOR_RC"
 fi
@@ -84,38 +84,11 @@ expect_out_grep "doctor checks /dev/kvm" "/dev/kvm"
 expect_out_grep "doctor checks qemu" "qemu-system-x86_64"
 expect_out_grep "doctor checks CAP_NET_ADMIN" "CAP_NET_ADMIN"
 
-echo "  [doctor --fix installs andler-helper + single rule]"
-# The container runs as root, so the checks pass trivially; break the
-# helper so --fix actually has to install it and write the sudoers rule
-# (the path `doctor --fix` is for).
-rm -f /usr/local/sbin/andler-helper
-if sudo -n true 2>/dev/null; then
-    echo y | andler doctor --fix >"$E2E_LAST_OUT" 2>"$E2E_LAST_ERR" || {
-        cat "$E2E_LAST_ERR" >&2
-        fail "doctor --fix must exit 0"
-    }
-    if [[ -x /usr/local/sbin/andler-helper ]]; then
-        pass "andler-helper installed at /usr/local/sbin/andler-helper"
-    else
-        fail "andler-helper installed at /usr/local/sbin/andler-helper"
-    fi
-    if [[ -f /etc/sudoers.d/andler ]]; then
-        HELPER_RULES=$(grep -c "NOPASSWD: /usr/local/sbin/andler-helper" /etc/sudoers.d/andler || true)
-        LEGACY_RULES=$(grep -cE "NOPASSWD: /(usr/bin|usr/sbin|bin|sbin)/(modprobe|qemu-nbd|mount|umount|chroot|mkdir|cp|mv|rm|chmod)( |,|$)" /etc/sudoers.d/andler || true)
-        if [[ "$HELPER_RULES" -eq 1 ]]; then
-            pass "sudoers file has exactly one andler-helper rule"
-        else
-            fail "sudoers file must contain exactly one andler-helper rule, found $HELPER_RULES"
-        fi
-        if [[ "$LEGACY_RULES" -eq 0 ]]; then
-            pass "no legacy per-binary rules remain"
-        else
-            fail "legacy per-binary rules must be migrated away, found $LEGACY_RULES"
-        fi
-    else
-        fail "/etc/sudoers.d/andler must exist after --fix"
-    fi
-else
-    echo "    ok: sudo not usable in this container; skipping --fix assertions" >>"$E2E_LAST_OUT"
-    pass "sudo not usable in this container; skipping --fix assertions"
-fi
+echo "  [doctor offline prereqs (zero-root)]"
+expect_out_grep "offline section present" "Offline guest operations"
+expect_out_grep "guestmount checked" "guestmount"
+expect_out_grep "/dev/fuse checked" "/dev/fuse"
+expect_out_grep "userns checked" "user namespaces"
+expect_out_nogrep "no sudoers/helper checks remain" "sudoers"
+expect_out_nogrep "no nbd kernel module check remains" "nbd kernel module"
+expect_out_nogrep "no andler-helper check remains" "andler-helper"

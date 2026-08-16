@@ -920,7 +920,7 @@ impl Daemon {
                                     "VM was auto-started for maintenance but the guest agent \
                                      did not respond within {wait_secs}s — the VM may not boot. \
                                      Retry with `--offline` to {action} `{package}` without \
-                                     starting the VM (requires sudo for qemu-nbd/chroot)"
+                                     starting the VM (use `--offline` with the zero-root guestmount path)"
                                 ),
                             };
                             progress.finish(Err(err.to_string()));
@@ -1071,7 +1071,7 @@ impl Daemon {
                 tracing::info!(
                     instance_id = %id,
                     package = %package,
-                    "package installed via offline qemu-nbd"
+                    "package installed via offline guestmount"
                 );
                 Ok(())
             }
@@ -1168,7 +1168,7 @@ impl Daemon {
                 tracing::info!(
                     instance_id = %id,
                     package = %package,
-                    "package removed via offline qemu-nbd"
+                    "package removed via offline guestmount"
                 );
                 Ok(())
             }
