@@ -51,7 +51,7 @@ RUN for crate in andler-core andler-qemu andler-disk andler-net andler-firmware 
         mkdir -p "$dir/src" && echo "// placeholder" > "$dir/src/lib.rs"; \
     done && \
     mkdir -p apps/daemon/src && echo "fn main() {}" > apps/daemon/src/main.rs && \
-    mkdir -p apps/cli/src && echo "fn main() {}" > apps/cli/src/main.rs && \
+    mkdir -p apps/cli/src && echo "fn main() {}" > apps/cli/src/main.rs
 
 # Dependency downloads only happen on the first build; afterwards the registry
 # cache mount survives layer invalidation.
@@ -107,9 +107,11 @@ FROM debian:bookworm-slim AS e2e
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates \
+        curl \
         debootstrap \
         e2fsprogs \
         fdisk \
+        genisoimage \
         iproute2 \
         jq \
         kmod \
@@ -123,6 +125,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         sudo \
         util-linux \
     && rm -rf /var/lib/apt/lists/*
+
+# Bootable guest fixture for the online-package e2e: the official Debian
+# genericcloud image boots out of the box (GRUB/systemd/devtmpfs/virtio are
+# the distro's own work) and installs packages via cloud-init from a NoCloud
+# seed — no guestmount/userns/chroot anywhere near the fixture.
+RUN mkdir -p /opt/e2e \
+    && curl -fsSL -o /opt/e2e/online-disk.qcow2 \
+        https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-genericcloud-amd64.qcow2 \
+    && qemu-img info /opt/e2e/online-disk.qcow2 >/dev/null
 
 # Map Arch-style OVMF path (what andler-firmware probes) to the Debian package
 RUN mkdir -p /usr/share/edk2-ovmf/x64 && \
@@ -146,7 +157,7 @@ COPY --from=builder /andler/dist/andlerd /usr/local/bin/andlerd
 COPY docker/e2e/e2e.sh /usr/local/bin/andler-e2e
 COPY docker/e2e/tests /usr/local/share/andler-e2e/tests
 
-RUN chmod +x /usr/local/bin/andler-e2e /usr/local/bin/andler /usr/local/bin/andlerd /usr/local/sbin/andler-helper
+RUN chmod +x /usr/local/bin/andler-e2e /usr/local/bin/andler /usr/local/bin/andlerd
 
 CMD ["/usr/local/bin/andler-e2e"]
 

@@ -57,7 +57,7 @@ SUITE=0
 # Per-suite wall-clock budget. A suite that hangs (daemon wedged, CLI stuck
 # on a dead connection) is killed here instead of stalling the whole run —
 # with a diagnostics dump so the wedged state is inspectable in the log.
-SUITE_TIMEOUT="${E2E_SUITE_TIMEOUT:-300}"
+SUITE_TIMEOUT="${E2E_SUITE_TIMEOUT:-600}"
 for script in "$E2E_ROOT"/tests/[0-9][0-9]_*.sh; do
     name="$(basename "$script")"
     echo

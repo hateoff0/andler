@@ -92,6 +92,7 @@ Coverage by suite:
 | `20_events.sh` | `andler events`: lifecycle log event on create, instance-filtered stream during start/stop (JSON), cleanup |
 | `21_daemon_logs.sh` | `andler logs daemon`: startup line in the snapshot ring, future `--since` yields nothing, `--follow` stays alive until timeout, `--json` shape |
 | `22_daemon_metrics.sh` | `andler doctor --metrics`: snapshot header/counts, recorded RPC traffic after real commands (GetVersion/ListInstances visible) |
+| `23_online_install.sh` | The default online package path against a genuinely booted guest: the official Debian genericcloud image (baked at build time) + NoCloud seed — cloud-init brings up DHCP, installs and enables qemu-guest-agent (DNS workaround: pinned slirp resolver, hardcoded mirror IPv4s, ForceIPv4); then `guest install/remove` runs online via QGA, verified with guest-exec |
 
 ### Deep guest tests
 

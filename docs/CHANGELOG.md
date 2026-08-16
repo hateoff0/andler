@@ -7,6 +7,10 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 ## [Unreleased]
 
 
+### Fixed
+
+- **Online guest install ran GNU coreutils' `install` instead of the package manager**: the guest argv was built from the subcommand shapes only (`install -y <pkg>`) without the manager binary, so a running VM's `guest install hello` failed with `install: invalid option -- 'y'`. Caught by the new online e2e against a booted cloud guest; a unit test pins the full argv for apt/dnf/pacman.
+
 ### Added
 
 #### Offline guest ops are zero-root
