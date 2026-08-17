@@ -94,6 +94,27 @@ Coverage by suite:
 | `22_daemon_metrics.sh` | `andler doctor --metrics`: snapshot header/counts, recorded RPC traffic after real commands (GetVersion/ListInstances visible) |
 | `23_online_install.sh` | The default online package path against a genuinely booted guest: the official Debian genericcloud image (baked at build time) + NoCloud seed — cloud-init brings up DHCP, installs and enables qemu-guest-agent (DNS workaround: pinned slirp resolver, hardcoded mirror IPv4s, ForceIPv4); then `guest install/remove` runs online via QGA, verified with guest-exec |
 
+### Guest package ops: offline (07) + online (23)
+
+The two package-install paths for guests deliberately live in two
+different suites because one is the offline rescue path and the other the
+default online path. Suite numbers are chronological, not thematic:
+
+- `07_guest.sh` — guest operations, deep path: offline `install`/
+  `remove`/`list` via the guestfs appliance (`--offline`), plus Android
+  boot-mode / ARM translator via the same appliance.
+- `23_online_install.sh` — the default online package path (QGA against
+  a booted guest): `install`/`remove`/`exec` without `--offline`.
+
+For the package ops feature, read the two together: `07` covers offline
+(rescue, VM won't boot), `23` covers the normal running-VM path.
+
+Every suite is self-contained and order-independent — the orchestrator
+starts a fresh daemon + sqlite store per suite, and the harness keeps a
+clean `~/.andler/instances` between suites (each suite removes its own
+instances). Running suites out of order (e.g. `23` before `07`) is
+supported; verified in the containerized run.
+
 ### Deep guest tests
 
 The offline guest paths (`guest install/remove/list`, boot-mode switching)
@@ -112,7 +133,7 @@ Suite 07 builds its guest disk at runtime from a minimal Debian rootfs baked
 into the image (via `debootstrap` at image build time) — no pre-made images
 are downloaded during the run.
 
-## Why not one target for everything
+### Why not one target for everything
 
 `andler-core` is a pure domain crate and tests without any environment. Some
 `andler-qemu`/`andler-daemon` tests require a real QEMU process and
