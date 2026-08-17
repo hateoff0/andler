@@ -398,26 +398,31 @@ of disk with logs). Policy (decision from the architecture rework):
 - Rotation is a daemon mechanism, not a CLI concern: `andler logs` reads
   through the same file, so a rotated file never breaks the stream contract.
 
-### Offline zero-root: FUSE access() kernel dependency
+### Offline zero-root: FUSE mount flags
 
 The offline package path (`--offline`) mounts the guest disk via
 `guestmount` (FUSE) and runs the package manager chrooted in a user
-namespace. The mount maps every guest uid/gid to the mounting user
-(`-o uid=<euid> -o gid=<egid>`, two separate flags — the comma form
-`-o uid=X,gid=Y` silently drops gid in libguestfs 1.48), so inside the
-namespace the guest files belong to root and dpkg/apt can own them.
-dpkg verifies its database directory with `access(R_OK|W_OK)`; whether
-`access()` works on a FUSE mount for a non-root process depends on the
-kernel — on some kernels (observed: cachyos 7.1.8 with libfuse2) it
-returns EACCES even for the mounting user with the ownership mapping in
-place, and dpkg aborts with "required read/write access to the dpkg
-database directory". Running as root works (and is what the e2e suite
-exercises). The daemon detects the condition up front (a `test -w
-/var/lib/dpkg` probe inside the chroot) and reports the workaround
-instead of failing after a minutes-long apt run. `subuid`/`newuidmap`
-range mapping does not fix this: a user namespace cannot map
-outside-root (uid 0) into itself, and the kernel's FUSE owner check
-compares the process uid across namespaces. The smart online path is
+namespace. Three mount options make this work for a non-root user:
+
+- `-o uid=<euid> -o gid=<egid>` map every guest uid/gid to the mounting
+  user, so inside the namespace the guest files belong to root. Two
+  separate flags: the comma form `-o uid=X,gid=Y` silently drops gid in
+  libguestfs 1.48.
+- `-o default_permissions` enables real POSIX permission checks. Without
+  it the kernel answers `access(2)` from its stricter FUSE path that
+  compares the caller against the mount owner and rejects non-root even
+  when the files belong to the caller; dpkg aborts with "required
+  read/write access to the dpkg database directory". With the flag,
+  access is decided by mode bits against the mapped owners, which is
+  exactly what dpkg's `access(R_OK|W_OK)` needs. Verified with a full
+  `dpkg -i` inside the chroot on the cloud image.
+
+The daemon still probes `test -w /var/lib/dpkg` in the chroot right
+after mounting and fails with the workaround named instead of failing
+after a minutes-long apt run, in case a host combination breaks one of
+these assumptions in the future. `subuid`/`newuidmap` range mapping is
+not needed: the single identity required inside the chroot (guest root)
+is covered by the uid/gid mapping alone. The smart online path is
 unaffected.
 
 ### Log redaction (§9.1.5)

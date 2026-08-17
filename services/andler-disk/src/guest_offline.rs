@@ -57,8 +57,11 @@ impl GuestMount {
         std::fs::create_dir_all(&mount).map_err(|e| DiskError::FileSystem(e.to_string()))?;
 
         // Map guest uid/gid to the mounting user so dpkg/apt can own
-        // the files inside the user namespace; two -o flags (the comma
-        // form silently drops gid). Kernel-dependent, see ARCHITECTURE.
+        // the files inside the user namespace, and enable POSIX
+        // permission checks: without default_permissions the kernel
+        // checks access(2) against the mount owner instead of the
+        // mapped owners and rejects non-root even as the owner. Two -o
+        // flags for uid/gid (the comma form silently drops gid).
         // SAFETY: geteuid/getegid are plain syscall wrappers with no
         // pointer arguments and no failure mode.
         let euid = unsafe { libc::geteuid() };
@@ -72,6 +75,8 @@ impl GuestMount {
             .arg(format!("uid={euid}"))
             .arg("-o")
             .arg(format!("gid={egid}"))
+            .arg("-o")
+            .arg("default_permissions")
             .arg(&mount)
             .stdin(std::process::Stdio::null())
             .output()
