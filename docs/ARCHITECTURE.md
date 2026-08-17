@@ -402,18 +402,23 @@ of disk with logs). Policy (decision from the architecture rework):
 
 The offline package path (`--offline`) mounts the guest disk via
 `guestmount` (FUSE) and runs the package manager chrooted in a user
-namespace. dpkg verifies its database directory with `access(R_OK|W_OK)`;
-whether `access()` works on a FUSE mount for a non-root process depends on
-the kernel — on some kernels (observed: cachyos 7.1.8 with libfuse2) it
-returns EACCES even for the mounting user, and dpkg aborts with
-"required read/write access to the dpkg database directory". Running as
-root works (and is what the e2e suite exercises). The daemon detects the
-condition up front (a `test -w /var/lib/dpkg` probe inside the chroot)
-and reports the workaround instead of failing after a minutes-long apt
-run. `subuid`/`newuidmap` range mapping does not fix this: a user
-namespace cannot map outside-root (uid 0) into itself, and the kernel's
-FUSE owner check compares the process uid across namespaces. The smart
-online path is unaffected.
+namespace. The mount maps every guest uid/gid to the mounting user
+(`-o uid=<euid> -o gid=<egid>`, two separate flags — the comma form
+`-o uid=X,gid=Y` silently drops gid in libguestfs 1.48), so inside the
+namespace the guest files belong to root and dpkg/apt can own them.
+dpkg verifies its database directory with `access(R_OK|W_OK)`; whether
+`access()` works on a FUSE mount for a non-root process depends on the
+kernel — on some kernels (observed: cachyos 7.1.8 with libfuse2) it
+returns EACCES even for the mounting user with the ownership mapping in
+place, and dpkg aborts with "required read/write access to the dpkg
+database directory". Running as root works (and is what the e2e suite
+exercises). The daemon detects the condition up front (a `test -w
+/var/lib/dpkg` probe inside the chroot) and reports the workaround
+instead of failing after a minutes-long apt run. `subuid`/`newuidmap`
+range mapping does not fix this: a user namespace cannot map
+outside-root (uid 0) into itself, and the kernel's FUSE owner check
+compares the process uid across namespaces. The smart online path is
+unaffected.
 
 ### Log redaction (§9.1.5)
 
