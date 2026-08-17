@@ -48,6 +48,7 @@ pub async fn install_agent_offline(disk_path: &Path, package: &str) -> Result<()
 fn install_agent_offline_blocking(disk_path: &Path, package: &str) -> Result<(), DiskError> {
     let mount_guard = GuestMount::mount(disk_path)?;
     prepare_resolv(mount_guard.path())?;
+    check_guest_db_access(mount_guard.path())?;
 
     let pkg_manager = detect_package_manager(mount_guard.path()).ok_or_else(|| {
         DiskError::PackageManagerNotFound {
@@ -127,6 +128,27 @@ fn install_agent_offline_blocking(disk_path: &Path, package: &str) -> Result<(),
     Ok(())
 }
 
+/// dpkg verifies its database directory with access(R_OK|W_OK). FUSE
+/// access() handling for non-root processes depends on the kernel: on
+/// some kernels (observed on cachyos 7.1.8 with libfuse2) access() on a
+/// FUSE mount returns EACCES even for the mounting user, and dpkg then
+/// aborts with "required read/write access to the dpkg database
+/// directory". Detect that up front instead of after a minutes-long apt
+/// run, and name the workaround.
+fn check_guest_db_access(mount: &Path) -> Result<(), DiskError> {
+    let output = chroot_exec(mount, &["/usr/bin/test", "-w", "/var/lib/dpkg"])?;
+    if output.status.success() {
+        return Ok(());
+    }
+    Err(DiskError::NbdSetupFailed(
+        "the guest's dpkg database is not writable through the FUSE mount: the kernel's FUSE \
+         access() handling denies non-root processes in this environment. The zero-root offline \
+         path needs a kernel where FUSE access() works for the mounting user, or andlerd running \
+         as root (validated in the e2e suite); the smart online path is unaffected"
+            .to_string(),
+    ))
+}
+
 /// deb-systemd-helper cannot create the enable symlink without a running
 /// systemd (always true in the offline chroot), so the unit would never
 /// start on the next boot. andler links the known unit into
@@ -175,6 +197,7 @@ pub async fn remove_agent_offline(disk_path: &Path, package: &str) -> Result<(),
 
 fn remove_agent_offline_blocking(disk_path: &Path, package: &str) -> Result<(), DiskError> {
     let mount_guard = GuestMount::mount(disk_path)?;
+    check_guest_db_access(mount_guard.path())?;
 
     let pkg_manager = detect_package_manager(mount_guard.path()).ok_or_else(|| {
         DiskError::PackageManagerNotFound {
