@@ -228,6 +228,7 @@ message CreateInstanceRequest {
     AudioConfig audio = 10;
     InputConfig input = 11;
     CdromBus cdrom_bus = 12;
+    bool autostart = 13;
 }
 
 enum AndroidVersion {
@@ -354,6 +355,7 @@ message GetInstanceConfigResponse {
     repeated DiskConfig extra_disks = 14;
     repeated NetworkConfig extra_networks = 15;
     AndroidBootMode boot_mode = 16;
+    bool autostart = 17;
 }
 
 message UpdateInstanceConfigRequest {
@@ -372,6 +374,7 @@ message UpdateInstanceConfigRequest {
     InputConfig input = 13;
     repeated DiskConfig extra_disks = 14;
     repeated NetworkConfig extra_networks = 15;
+    bool autostart = 16;
 }
 
 enum LogStreamSource {

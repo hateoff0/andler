@@ -778,6 +778,7 @@ impl TryFrom<proto::CreateInstanceRequest> for InstanceConfig {
                 .input
                 .ok_or(ConvertError::MissingField("input"))?
                 .into(),
+            autostart: value.autostart,
         })
     }
 }
@@ -839,6 +840,7 @@ impl From<InstanceConfig> for proto::GetInstanceConfigResponse {
             audio: Some(value.audio.into()),
             input: Some(value.input.into()),
             boot_mode: boot_mode as i32,
+            autostart: value.autostart,
         }
     }
 }
@@ -905,6 +907,7 @@ impl TryFrom<proto::GetInstanceConfigResponse> for InstanceConfig {
                 .input
                 .ok_or(ConvertError::MissingField("input"))?
                 .into(),
+            autostart: value.autostart,
         })
     }
 }
@@ -970,6 +973,7 @@ pub fn instance_config_to_update_request(
         firmware: response.firmware,
         audio: response.audio,
         input: response.input,
+        autostart: response.autostart,
     }
 }
 
@@ -1032,6 +1036,7 @@ pub fn update_request_to_instance_config(
             .ok_or(ConvertError::MissingField("audio"))?
             .try_into()?,
         input: req.input.ok_or(ConvertError::MissingField("input"))?.into(),
+        autostart: req.autostart,
     })
 }
 
@@ -1271,6 +1276,7 @@ mod tests {
             firmware: FirmwareConfig::reference_default(PathBuf::from("/tmp/VARS.fd")),
             audio: AudioConfig::reference_default(),
             input: InputConfig::reference_default(),
+            autostart: false,
         }
     }
 
@@ -1295,6 +1301,7 @@ mod tests {
             firmware: Some(cfg.firmware.clone().into()),
             audio: Some(cfg.audio.into()),
             input: Some(cfg.input.into()),
+            autostart: cfg.autostart,
             ..Default::default()
         };
         request.set_cdrom_bus(cdrom_bus.into());
@@ -1320,6 +1327,25 @@ mod tests {
         assert_eq!(converted.firmware, original.firmware);
         assert_eq!(converted.audio, original.audio);
         assert_eq!(converted.input, original.input);
+        assert_eq!(converted.autostart, original.autostart);
+    }
+
+    #[test]
+    fn create_instance_request_round_trips_autostart_true() {
+        let mut original = sample_instance_config();
+        original.autostart = true;
+        let request = instance_config_to_create_request(&original);
+        let converted = InstanceConfig::try_from(request).unwrap();
+        assert!(converted.autostart);
+    }
+
+    #[test]
+    fn instance_config_to_update_request_round_trips_autostart() {
+        let mut cfg = sample_instance_config();
+        cfg.autostart = true;
+        let req = instance_config_to_update_request(cfg.clone(), "vm-0".into());
+        let back = update_request_to_instance_config(cfg.id.clone(), req).unwrap();
+        assert!(back.autostart);
     }
 
     #[test]

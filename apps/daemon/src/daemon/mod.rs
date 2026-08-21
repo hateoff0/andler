@@ -41,6 +41,10 @@ pub struct Daemon {
     pub(crate) broken: RwLock<HashMap<InstanceId, String>>,
     pub(crate) store: Option<Store>,
     events: broadcast::Sender<DaemonEvent>,
+    /// Deferred-start tasks for instances marked `autostart`. Each task is
+    /// supervised by a paired watcher that logs panic; we hold the
+    /// JoinHandle so a panic is observed (PLAN §O, AGENTS tokio::spawn rule).
+    autostart_tasks: std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>,
 }
 
 const EVENT_CHANNEL_CAPACITY: usize = 256;
@@ -323,12 +327,14 @@ impl Daemon {
             broken: RwLock::new(broken),
             store: Some(store),
             events,
+            autostart_tasks: std::sync::Mutex::new(Vec::new()),
         };
         spawn_qmp_relays(
             daemon.events.clone(),
             &daemon.backends,
             daemon.supervisors.clone(),
         );
+        daemon.spawn_autostart_tasks().await;
         Ok(daemon)
     }
 
@@ -343,6 +349,7 @@ impl Daemon {
             broken: RwLock::new(HashMap::new()),
             store,
             events,
+            autostart_tasks: std::sync::Mutex::new(Vec::new()),
         };
         spawn_qmp_relays(
             daemon.events.clone(),
@@ -350,6 +357,68 @@ impl Daemon {
             daemon.supervisors.clone(),
         );
         daemon
+    }
+
+    /// Deferred-start pass for instances marked `autostart` (PLAN §O).
+    /// Issues exactly one `start_instance` per matching instance via the
+    /// shared `do_start_instance` path — never retried in a loop on
+    /// failure, so a failing autostart leaves the instance in
+    /// Error/Stopped and the daemon keeps running. Each task is paired
+    /// with a watcher that observes its JoinHandle (AGENTS tokio::spawn
+    /// rule: hold the handle, log panic/completion).
+    async fn spawn_autostart_tasks(&self) {
+        let supervisors = self.supervisors.clone();
+        let backends = self.backends.clone();
+        let ids: Vec<InstanceId> = {
+            let map = supervisors.read().await;
+            map.iter()
+                .filter(|(_, handle)| {
+                    handle.config().autostart && handle.state() == InstanceState::Stopped
+                })
+                .map(|(id, _)| *id)
+                .collect()
+        };
+        if ids.is_empty() {
+            return;
+        }
+        tracing::info!(
+            count = ids.len(),
+            "scheduling autostart for instances marked autostart=true"
+        );
+        let join = tokio::spawn(async move {
+            for id in ids {
+                match instance_ops::do_start_instance(&supervisors, &backends, id).await {
+                    Ok(()) => {}
+                    Err(err) => {
+                        tracing::error!(
+                            instance_id = %id,
+                            error = %err,
+                            "autostart failed; instance left in Error/Stopped, daemon continues"
+                        );
+                    }
+                }
+            }
+        });
+        let watcher = tokio::spawn(async move {
+            match join.await {
+                Ok(()) => {}
+                Err(join_err) if join_err.is_panic() => {
+                    tracing::error!(error = ?join_err, "autostart task panicked");
+                }
+                Err(join_err) => {
+                    tracing::warn!(error = ?join_err, "autostart task cancelled");
+                }
+            }
+        });
+        // Keep both handles; the watcher's handle is the canonical one
+        // we retain to satisfy the AGENTS rule (observe completion).
+        // The inner JoinHandle is owned by the watcher and is observed
+        // through its result above.
+        if let Ok(mut guard) = self.autostart_tasks.lock() {
+            guard.push(watcher);
+        } else {
+            tracing::warn!("autostart_tasks mutex poisoned; dropping watcher handle");
+        }
     }
 
     pub(crate) fn backend_for(

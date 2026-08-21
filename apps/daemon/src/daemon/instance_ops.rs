@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -6,12 +7,12 @@ use super::ops::OpProgress;
 use super::spawn_supervisor;
 use super::supervisor::{OpAccept, OpRunner};
 use super::types::{write_instance_toml, InstanceDirGuard};
-use super::Daemon;
-use super::SupervisorHandle;
+use super::{Daemon, SupervisorHandle};
 use andler_core::{
-    BackendError, BackendHandle, DaemonEvent, DiskFormat, EventKind, EventLogLevel, GuestMutator,
-    HypervisorBackend, InstanceConfig, InstanceEvent, InstanceId, InstanceKind, InstanceState,
-    MutatorOp, Operation, OperationKind, OperationState, Resolution, INSTANCE_ID_HEX_LEN,
+    BackendError, BackendHandle, BackendKind, DaemonEvent, DiskFormat, EventKind, EventLogLevel,
+    GuestMutator, HypervisorBackend, InstanceConfig, InstanceEvent, InstanceId, InstanceKind,
+    InstanceState, MutatorOp, Operation, OperationKind, OperationState, Resolution,
+    INSTANCE_ID_HEX_LEN,
 };
 
 /// Checks that the files this instance needs to boot are still present on disk.
@@ -345,44 +346,7 @@ impl Daemon {
     }
 
     pub async fn start_instance(&self, id: InstanceId) -> Result<(), DaemonError> {
-        let handle = self.handle_for(id).await?;
-        let cfg = handle.config();
-        // Checked before the Start transition so a refused start leaves the
-        // instance in Created, not stuck in Starting.
-        self.check_port_forward_conflicts(id, &cfg).await?;
-        handle.transition(InstanceEvent::Start).await?;
-
-        let backend = self.backend_for(cfg.backend)?.clone();
-
-        let spawn_result = match validate_instance_files(&cfg) {
-            Ok(()) => backend.spawn(&cfg).await,
-            Err(e) => Err(e),
-        };
-
-        match spawn_result {
-            Ok(backend_handle) => {
-                // Subscribe as early as possible so a crash between spawn
-                // and StartCompleted is still caught; the watcher outlives
-                // set_handle below either way.
-                Self::attach_process_exit_watcher(
-                    id,
-                    &handle,
-                    backend.clone(),
-                    backend_handle.clone(),
-                );
-                handle.set_handle(Some(backend_handle)).await?;
-                handle.transition(InstanceEvent::StartCompleted).await?;
-                tracing::info!(instance_id = %id, "instance started");
-                Ok(())
-            }
-            Err(backend_err) => {
-                handle
-                    .transition(InstanceEvent::Fail(backend_err.to_string()))
-                    .await?;
-                tracing::error!(instance_id = %id, error = %backend_err, "instance failed to start");
-                Err(DaemonError::Backend(backend_err))
-            }
-        }
+        do_start_instance(&self.supervisors, &self.backends, id).await
     }
 
     /// Refuses to start an instance whose `network.port_forwards` host
@@ -396,42 +360,7 @@ impl Daemon {
         id: InstanceId,
         cfg: &InstanceConfig,
     ) -> Result<(), DaemonError> {
-        let wanted: Vec<u16> = std::iter::once(&cfg.network)
-            .chain(cfg.extra_networks.iter())
-            .flat_map(|net| net.port_forwards.iter().map(|f| f.host_port))
-            .collect();
-        if wanted.is_empty() {
-            return Ok(());
-        }
-
-        let supervisors = self.supervisors.read().await;
-        for (other_id, other) in supervisors.iter() {
-            if *other_id == id {
-                continue;
-            }
-            let state = other.state();
-            if !matches!(
-                state,
-                InstanceState::Running | InstanceState::Paused | InstanceState::Starting
-            ) {
-                continue;
-            }
-            let other_cfg = other.config();
-            let held: Vec<u16> = std::iter::once(&other_cfg.network)
-                .chain(other_cfg.extra_networks.iter())
-                .flat_map(|net| net.port_forwards.iter().map(|f| f.host_port))
-                .collect();
-            for port in &wanted {
-                if held.contains(port) {
-                    return Err(DaemonError::PortForwardConflict {
-                        port: *port,
-                        instance: id,
-                        held_by: *other_id,
-                    });
-                }
-            }
-        }
-        Ok(())
+        check_port_forward_conflicts_impl(&self.supervisors, id, cfg).await
     }
 
     /// Watches the backend's process-exit stream and turns an unexpected
@@ -1586,6 +1515,110 @@ fn spawn_compact_on_shutdown(id: InstanceId, disk: andler_core::DiskConfig) {
             }
         }
     });
+}
+
+/// Start-sequence body shared between the `StartInstance` RPC and the
+/// daemon's deferred `autostart` task (PLAN §O). The RPC and the task
+/// must use the same path so supervisor/QMP/exit-watcher guarantees
+/// stay uniform; the only difference is how `&self` is obtained.
+pub(super) async fn do_start_instance(
+    supervisors: &std::sync::Arc<tokio::sync::RwLock<HashMap<InstanceId, SupervisorHandle>>>,
+    backends: &HashMap<BackendKind, Arc<dyn HypervisorBackend>>,
+    id: InstanceId,
+) -> Result<(), DaemonError> {
+    let handle = {
+        let map = supervisors.read().await;
+        map.get(&id)
+            .cloned()
+            .ok_or(DaemonError::InstanceNotFound(id))?
+    };
+    let cfg = handle.config();
+    // Checked before the Start transition so a refused start leaves the
+    // instance in Created, not stuck in Starting. Same port-conflict
+    // check as the RPC path (see check_port_forward_conflicts).
+    check_port_forward_conflicts_impl(supervisors, id, &cfg).await?;
+    handle.transition(InstanceEvent::Start).await?;
+
+    let backend = backends
+        .get(&cfg.backend)
+        .ok_or(DaemonError::NoBackendRegistered(cfg.backend))?
+        .clone();
+
+    let spawn_result = match validate_instance_files(&cfg) {
+        Ok(()) => backend.spawn(&cfg).await,
+        Err(e) => Err(e),
+    };
+
+    match spawn_result {
+        Ok(backend_handle) => {
+            // Subscribe as early as possible so a crash between spawn
+            // and StartCompleted is still caught; the watcher outlives
+            // set_handle below either way.
+            Daemon::attach_process_exit_watcher(
+                id,
+                &handle,
+                backend.clone(),
+                backend_handle.clone(),
+            );
+            handle.set_handle(Some(backend_handle)).await?;
+            handle.transition(InstanceEvent::StartCompleted).await?;
+            tracing::info!(instance_id = %id, "instance started");
+            Ok(())
+        }
+        Err(backend_err) => {
+            handle
+                .transition(InstanceEvent::Fail(backend_err.to_string()))
+                .await?;
+            tracing::error!(instance_id = %id, error = %backend_err, "instance failed to start");
+            Err(DaemonError::Backend(backend_err))
+        }
+    }
+}
+
+/// Shared host-port conflict check used by both the `StartInstance` RPC
+/// (`check_port_forward_conflicts`) and the deferred `autostart` task, so
+/// the two paths can never drift (PLAN §12.B, §O).
+async fn check_port_forward_conflicts_impl(
+    supervisors: &std::sync::Arc<tokio::sync::RwLock<HashMap<InstanceId, SupervisorHandle>>>,
+    id: InstanceId,
+    cfg: &InstanceConfig,
+) -> Result<(), DaemonError> {
+    let wanted: Vec<u16> = std::iter::once(&cfg.network)
+        .chain(cfg.extra_networks.iter())
+        .flat_map(|net| net.port_forwards.iter().map(|f| f.host_port))
+        .collect();
+    if wanted.is_empty() {
+        return Ok(());
+    }
+
+    let map = supervisors.read().await;
+    for (other_id, other) in map.iter() {
+        if *other_id == id {
+            continue;
+        }
+        let state = other.state();
+        if !matches!(
+            state,
+            InstanceState::Running | InstanceState::Paused | InstanceState::Starting
+        ) {
+            continue;
+        }
+        let other_cfg = other.config();
+        let held: Vec<u16> = std::iter::once(&other_cfg.network)
+            .chain(other_cfg.extra_networks.iter())
+            .flat_map(|net| net.port_forwards.iter().map(|f| f.host_port))
+            .collect();
+        for port in &wanted {
+            if held.contains(port) {
+                return Err(DaemonError::PortForwardConflict {
+                    port: *port,
+                    instance: id,
+                    held_by: *other_id,
+                });
+            }
+        }
+    }
+    Ok(())
 }
 
 /// How long a maintenance auto-start waits for the guest agent before

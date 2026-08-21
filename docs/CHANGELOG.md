@@ -13,6 +13,10 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Added
 
+#### Autostart (PLAN §O)
+
+- **Instances can start automatically when the daemon starts**: set `autostart = true` in the instance's `instance.toml` (or `create --file` TOML), or `andler config set <id> autostart true`. On daemon startup each `Stopped` autostart-marked instance is started through the same path as `andler start` (same port-conflict check, same supervisor guarantees). A failing autostart leaves the instance in `Error` and is never retried in a loop; already-running adopted VMs and non-marked instances are untouched. Covered by the new `24_autostart.sh` e2e suite.
+
 #### Offline guest ops are zero-root
 
 - **`--offline` no longer needs root or sudoers**: the qemu-nbd + mount + `andler-helper chroot-run` kitchen is replaced by `guestmount` (libguestfs FUSE — no block mount) + `unshare --user --map-root-user --mount` + chroot. Prerequisites, checked by `andler doctor`: `guestmount` on PATH, `/dev/fuse`, unprivileged user namespaces (Debian/Ubuntu: `sysctl kernel.unprivileged_userns_clone=1` — the doctor hint names it). Apt inside the userns runs with `APT::Sandbox::User=root` + `Acquire::ForceIPv4=true` (the sandbox setuid is not available in userns).

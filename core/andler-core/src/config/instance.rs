@@ -132,6 +132,12 @@ pub struct InstanceConfig {
     pub firmware: FirmwareConfig,
     pub audio: AudioConfig,
     pub input: InputConfig,
+
+    /// Start this instance automatically when the daemon starts (§O). If the
+    /// start fails the instance stays in Error/Stopped — never retried in a
+    /// loop by the daemon.
+    #[serde(default)]
+    pub autostart: bool,
 }
 
 fn schema_version_default() -> u32 {
@@ -236,6 +242,7 @@ mod tests {
             firmware: FirmwareConfig::reference_default(PathBuf::from("test-vm_VARS.fd")),
             audio: AudioConfig::reference_default(),
             input: InputConfig::reference_default(),
+            autostart: false,
         };
 
         let json = serde_json::to_string(&cfg).expect("serialize");
@@ -264,6 +271,7 @@ mod tests {
             firmware: FirmwareConfig::reference_default(PathBuf::from("test-vm_VARS.fd")),
             audio: AudioConfig::reference_default(),
             input: InputConfig::reference_default(),
+            autostart: false,
         }
     }
 

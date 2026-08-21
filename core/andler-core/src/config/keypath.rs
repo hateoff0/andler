@@ -357,6 +357,16 @@ pub fn config_keys() -> &'static [ConfigKey] {
             live: false,
         },
         ConfigKey {
+            key: "autostart",
+            get: |cfg| cfg.autostart.to_string(),
+            set: Some(|cfg, value| {
+                cfg.autostart = parse_bool(value)?;
+                Ok(())
+            }),
+            immutable_reason: None,
+            live: false,
+        },
+        ConfigKey {
             key: "cpu.cores",
             get: |cfg| cfg.cpu.cores.to_string(),
             set: Some(set_cpu_cores),
@@ -841,6 +851,7 @@ mod tests {
             firmware: FirmwareConfig::reference_default(PathBuf::from("/tmp/firmware-VARS.fd")),
             audio: crate::config::AudioConfig::reference_default(),
             input: InputConfig::reference_default(),
+            autostart: false,
         }
     }
 
@@ -999,6 +1010,7 @@ mod tests {
             "kind",
             "backend",
             "schema_version",
+            "autostart",
             "extra_disks",
             "extra_networks",
         ];

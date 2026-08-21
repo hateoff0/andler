@@ -109,6 +109,7 @@ impl AndroidProfile {
             firmware: FirmwareConfig::reference_default(ovmf_vars_path),
             audio: AudioConfig::reference_default(),
             input: InputConfig::reference_default(),
+            autostart: false,
         }
     }
 }

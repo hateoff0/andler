@@ -83,6 +83,10 @@ pub struct InstanceFile {
     #[serde(default = "default_true")]
     pub enable_uefi: bool,
 
+    /// Start this instance automatically when the daemon starts.
+    #[serde(default)]
+    pub autostart: bool,
+
     #[serde(default)]
     pub android_version: Option<u32>,
 
@@ -332,6 +336,7 @@ impl InstanceFile {
                     .unwrap_or_else(InputConfig::reference_default)
                     .into(),
             ),
+            autostart: self.autostart,
             ..Default::default()
         };
         req.set_cdrom_bus(resolved_cdrom_bus.into());

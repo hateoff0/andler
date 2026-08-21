@@ -423,6 +423,7 @@ fn print_instance_config(config: GetInstanceConfigResponse) {
         "backend: {}",
         crate::helpers::backend_kind_name(config.backend())
     );
+    println!("autostart: {}", config.autostart);
 
     let boot_mode = config.boot_mode();
     match config.kind.and_then(|k| k.kind) {

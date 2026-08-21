@@ -311,6 +311,7 @@ Request to create a Linux VM. Fields correspond 1:1 to `InstanceConfig` except `
 | `audio` | `AudioConfig` | Audio configuration. |
 | `input` | `InputConfig` | Input configuration. |
 | `cdrom_bus` | `CdromBus` | CD-ROM bus (defaults to `IDE`). |
+| `autostart` | `bool` | Start this instance automatically when the daemon starts (default `false`). |
 
 ### `AndroidVersion`
 
@@ -485,6 +486,7 @@ Full configuration of an instance (read-only).
 | `audio` | `AudioConfig` | Audio config. |
 | `input` | `InputConfig` | Input config. |
 | `boot_mode` | `AndroidBootMode` | Effective boot mode of an Android VM (config-backed since P31; `UNSPECIFIED` for Linux VMs). |
+| `autostart` | `bool` | Start this instance automatically when the daemon starts (§O). |
 
 ### `UpdateInstanceConfigRequest`
 
@@ -507,6 +509,7 @@ Request to replace the entire configuration of an instance. Must match current `
 | `firmware` | `FirmwareConfig` | Firmware config. |
 | `audio` | `AudioConfig` | Audio config. |
 | `input` | `InputConfig` | Input config. |
+| `autostart` | `bool` | Start this instance automatically when the daemon starts (§O). |
 
 ### `ConfigKeyDiff`
 

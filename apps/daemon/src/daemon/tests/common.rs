@@ -57,6 +57,7 @@ pub(crate) fn sample_config() -> InstanceConfig {
         firmware: FirmwareConfig::reference_default(vars_path),
         audio: AudioConfig::reference_default(),
         input: InputConfig::reference_default(),
+        autostart: false,
     }
 }
 

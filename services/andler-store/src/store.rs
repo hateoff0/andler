@@ -403,6 +403,7 @@ mod tests {
             firmware: FirmwareConfig::reference_default(PathBuf::from("/tmp/test-vars.fd")),
             audio: AudioConfig::reference_default(),
             input: InputConfig::reference_default(),
+            autostart: false,
         }
     }
 

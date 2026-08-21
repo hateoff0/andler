@@ -151,6 +151,7 @@ andler config --instance <instance-id> [--edit]
 |-----|-------|--------------|
 | `display.resolution` | `WxH`, e.g. `1920x1080` | Works in any state; on a `Running`/`Paused` instance the new resolution is pushed into the guest over the QEMU guest agent immediately (applied by the guest compositor/session), and persisted for the next boot (delivered via fw_cfg) |
 | `name` | any valid instance name | Instance must be stopped (`disk_idle`) |
+| `autostart` | `true`\|`false` | Works in any state; takes effect at the next daemon restart (§O) |
 | `arm_translator` (`kind.android_profile.arm_translator`) | `none` \| `libndk` \| `libhoudini` | Android instances only, instance must be stopped; performs the same offline switch as `SwitchArmTranslator` |
 | `cpu.cores` / `cpu.sockets` / `cpu.threads` / `cpu.priority` | integers / priority name | Instance must be stopped |
 | `memory.size_bytes` / `memory.ballooning` / `memory.zram` / `memory.ksm` | size string / `true`\|`false` | Instance must be stopped |
@@ -668,6 +669,7 @@ ovmf_vars_path = "/home/user/.andler/my-linux-vm/VARS.fd"
 
 disk_size_gib = 100
 snapshot_timeout_secs = 60   # accepted for compatibility; snapshot ops are synchronous
+autostart = true             # start this instance automatically when the daemon starts (§O)
 
 [cpu]
 cores = 8

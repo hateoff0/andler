@@ -93,6 +93,7 @@ Coverage by suite:
 | `21_daemon_logs.sh` | `andler logs daemon`: startup line in the snapshot ring, future `--since` yields nothing, `--follow` stays alive until timeout, `--json` shape |
 | `22_daemon_metrics.sh` | `andler doctor --metrics`: snapshot header/counts, recorded RPC traffic after real commands (GetVersion/ListInstances visible) |
 | `23_online_install.sh` | The default online package path against a genuinely booted guest: the official Debian genericcloud image (baked at build time) + NoCloud seed — cloud-init brings up DHCP, installs and enables qemu-guest-agent (DNS workaround: pinned slirp resolver, hardcoded mirror IPv4s, ForceIPv4); then `guest install/remove` runs online via QGA, verified with guest-exec |
+| `24_autostart.sh` | Autostart (§O): `create --file` with `autostart = true` reaches Running after a daemon restart with exactly one QEMU process (no double start), a non-marked instance stays Stopped, `config set autostart false/true` toggles the flag and survives a second restart |
 
 ### Guest package ops: offline (07) + online (23)
 

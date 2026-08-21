@@ -210,6 +210,7 @@ fn sample_create_instance_request() -> CreateInstanceRequest {
         audio: Some(audio),
         input: Some(input),
         cdrom_bus: andler_rpc::proto::CdromBus::Ide as i32,
+        autostart: false,
     }
 }
 

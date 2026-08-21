@@ -189,6 +189,7 @@ mod tests {
             firmware: FirmwareConfig::reference_default(PathBuf::new()),
             audio: AudioConfig::reference_default(),
             input: InputConfig::reference_default(),
+            autostart: false,
         };
         Resolved {
             cfg,
