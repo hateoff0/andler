@@ -50,7 +50,7 @@ The core service exposing all instance management operations.
 | `ListOperations` | `Empty` | `OpListResponse` | Unary | Lists the long-running operation currently executing per instance. |
 | `CancelOperation` | `OpCancelRequest` | `Empty` | Unary | Requests cancellation of a running operation; the operation stops at its next cancel point and reports `OperationCancelled`. |
 | `ExecCommand` | `ExecCommandRequest` | `ExecCommandResponse` | Unary | Runs an arbitrary command in the guest via the guest agent and returns its exit code plus captured stdout/stderr. |
-| `GetVersion` | `Empty` | `VersionResponse` | Unary | Returns the daemon's build version (the CLI handshakes on this before every command, §13.19). |
+| `GetVersion` | `Empty` | `VersionResponse` | Unary | Returns the daemon's build version (the CLI handshakes on this before every command). |
 | `StreamEvents` | `EventStreamRequest` | `stream DaemonEventMessage` | Server-streaming | Streams daemon events (lifecycle transitions, operations, QMP events, log lines) from the live bus, optionally filtered to one instance. |
 
 ---
@@ -485,8 +485,8 @@ Full configuration of an instance (read-only).
 | `firmware` | `FirmwareConfig` | Firmware config. |
 | `audio` | `AudioConfig` | Audio config. |
 | `input` | `InputConfig` | Input config. |
-| `boot_mode` | `AndroidBootMode` | Effective boot mode of an Android VM (config-backed since P31; `UNSPECIFIED` for Linux VMs). |
-| `autostart` | `bool` | Start this instance automatically when the daemon starts (§O). |
+| `boot_mode` | `AndroidBootMode` | Effective boot mode of an Android VM (config-backed; `UNSPECIFIED` for Linux VMs). |
+| `autostart` | `bool` | Start this instance automatically when the daemon starts. |
 
 ### `UpdateInstanceConfigRequest`
 
@@ -509,7 +509,7 @@ Request to replace the entire configuration of an instance. Must match current `
 | `firmware` | `FirmwareConfig` | Firmware config. |
 | `audio` | `AudioConfig` | Audio config. |
 | `input` | `InputConfig` | Input config. |
-| `autostart` | `bool` | Start this instance automatically when the daemon starts (§O). |
+| `autostart` | `bool` | Start this instance automatically when the daemon starts. |
 
 ### `ConfigKeyDiff`
 
@@ -850,7 +850,7 @@ CLI resolves relative paths against the manifest directory),
 
 ### `DaemonMetricsResponse`
 
-Snapshot of daemon-internal metrics (§9.1.8 / P27), served by
+Snapshot of daemon-internal metrics, served by
 `andler doctor --metrics`.
 
 | Field | Type | Description |
@@ -924,7 +924,7 @@ Single package entry.
 |-------------|--------------|------|
 | `NOT_FOUND` | `InstanceNotFound`, `SnapshotNotFound`, `SnapshotLayerMissing`, `InstanceRefNotFound`, `DiskNotAttached`, `NetworkNotAttached`, `OperationNotFound` | Unknown instance/snapshot/layer/ref, detaching a device that is not attached, or cancelling an unknown operation. |
 | `UNIMPLEMENTED` | `NoBackendRegistered`, `Backend(NotImplemented)` | Backend kind not available. |
-| `FAILED_PRECONDITION` | `InvalidTransition`, `InstanceNotRemovable`, `InstanceNotClonable`, `InstanceAlreadyStopped`, `SharedBaseNotSupportedForLinuxVm`, `InstanceHasLiveClones`, `SnapshotOperationRequiresRunningInstance`, `SnapshotLimitExceeded`, `SnapshotRequiresQcow2`, `SnapshotInternalNotRestorable`, `RestoreTargetOnArchivedBranch`, `RestoreWouldBreakClones`, `DeleteWouldBreakClones`, `CannotDeleteBaseLayer`, `GuestAgentUnavailable`, `NotAndroid`, `InstanceMustBeStopped`, `HotplugRequiresRunningInstance`, `OperationAlreadyRunning`, `OperationCancelled`, `PortForwardConflict`, `Backend(HandleNotFound)`, `Backend(ProcessNotRunning)` | Wrong lifecycle state, resource limit, snapshot chain constraint, guest agent unavailable, wrong instance kind, operation conflicts (one long op per instance; cancelled op), host port already forwarded by another running instance. |
+| `FAILED_PRECONDITION` | `InvalidTransition`, `InstanceNotRemovable`, `InstanceNotClonable`, `InstanceAlreadyStopped`, `SharedBaseNotSupportedForLinuxVm`, `InstanceHasLiveClones`, `SnapshotOperationRequiresRunningInstance`, `SnapshotLimitExceeded`, `SnapshotRequiresQcow2`, `SnapshotInternalNotRestorable`, `RestoreTargetOnArchivedBranch`, `RestoreWouldBreakClones`, `DeleteWouldBreakClones`, `CannotDeleteBaseLayer`, `GuestAgentUnavailable`, `NotAndroid`, `InstanceMustBeStopped`, `HotplugRequiresRunningInstance`, `OperationAlreadyRunning`, `OperationCancelled`, `PortForwardConflict`, `DiskInUse`, `Backend(HandleNotFound)`, `Backend(ProcessNotRunning)` | Wrong lifecycle state, resource limit, snapshot chain constraint, guest agent unavailable, wrong instance kind, operation conflicts (one long op per instance; cancelled op), host port already forwarded by another running instance, disk file already in use by another running instance. |
 | `ALREADY_EXISTS` | `SnapshotAlreadyExists`, `DiskAlreadyAttached` | Duplicate snapshot tag, or attaching a disk image that is already attached (including the primary disk). |
 | `INVALID_ARGUMENT` | `ConvertError`, `EmptyInstanceRef`, `MalformedInstanceRef`, `AmbiguousInstanceId`, `ConfigIdMismatch`, `ConfigKindChanged`, `ConfigDiskPathChanged`, `InvalidConfig`, `InvalidConfigKey`, `MissingOvmfVarsTemplate` | Malformed request or invalid arguments |
 | `RESOURCE_EXHAUSTED` | `InsufficientDiskSpace` | Not enough free space for a snapshot operation |

@@ -6,6 +6,7 @@ mod base_image_pin;
 mod clone;
 mod common;
 mod create;
+mod disk_conflict;
 mod error_kind;
 mod events;
 mod guest_maintenance;

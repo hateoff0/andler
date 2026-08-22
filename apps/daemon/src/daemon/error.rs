@@ -202,6 +202,15 @@ pub enum DaemonError {
         held_by: InstanceId,
     },
 
+    #[error(
+        "disk {path} is already in use by running instance {held_by};          stop it first or point this instance at its own disk"
+    )]
+    DiskInUse {
+        path: std::path::PathBuf,
+        instance: InstanceId,
+        held_by: InstanceId,
+    },
+
     #[error("instance reference must not be empty")]
     EmptyInstanceRef,
 
@@ -357,6 +366,7 @@ impl DaemonError {
             DaemonError::OperationCancelled(_) => ErrorKind::FailedPrecondition,
             DaemonError::OperationNotFound(_) => ErrorKind::NotFound,
             DaemonError::PortForwardConflict { .. } => ErrorKind::FailedPrecondition,
+            DaemonError::DiskInUse { .. } => ErrorKind::FailedPrecondition,
             DaemonError::EmptyInstanceRef => ErrorKind::InvalidArgument,
             DaemonError::ConfigIdMismatch { .. } => ErrorKind::InvalidArgument,
             DaemonError::ConfigKindChanged(_) => ErrorKind::InvalidArgument,

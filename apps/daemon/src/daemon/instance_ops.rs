@@ -230,7 +230,7 @@ impl Daemon {
         Ok(registered_id)
     }
 
-    /// Enforces or records the base-image pin (§7). With an existing pin,
+    /// Enforces or records the base-image pin. With an existing pin,
     /// creation refuses an image whose manifest id or content sha256 no
     /// longer matches — a silently swapped backing image corrupts every
     /// linked clone sitting on top of it. Without a pin, the freshly chosen
@@ -354,7 +354,7 @@ impl Daemon {
     /// (or starting) right now. Two QEMU slirp netdevs bound to the same
     /// host port would otherwise fail with an opaque QEMU error at best
     /// and silently misroute traffic at worst — the host port is a shared
-    /// resource across instances (PLAN §12.B).
+    /// resource across instances.
     async fn check_port_forward_conflicts(
         &self,
         id: InstanceId,
@@ -1114,7 +1114,7 @@ impl Daemon {
     /// Applies a provision manifest (already expanded to `MutatorOp`s by the
     /// CLI) through the state-appropriate mutator: online via the guest
     /// agent when the VM is running, offline through the guestfs appliance
-    /// when it is stopped (§7). One apply call; the mutator batches.
+    /// when it is stopped. One apply call; the mutator batches.
     pub async fn guest_provision(
         &self,
         id: InstanceId,
@@ -1318,7 +1318,7 @@ impl Daemon {
         .await?;
 
         // The instance.toml is the source of truth for the effective
-        // profile (P31): record the new boot mode so `get` and `connect`
+        // profile record the new boot mode so `get` and `connect`
         // never need an offline disk mount. Both the file and the in-memory
         // config are updated — a get right after switch must see the new
         // value without a daemon restart.
@@ -1518,7 +1518,7 @@ fn spawn_compact_on_shutdown(id: InstanceId, disk: andler_core::DiskConfig) {
 }
 
 /// Start-sequence body shared between the `StartInstance` RPC and the
-/// daemon's deferred `autostart` task (PLAN §O). The RPC and the task
+/// daemon.s deferred `autostart` task. The RPC and the task
 /// must use the same path so supervisor/QMP/exit-watcher guarantees
 /// stay uniform; the only difference is how `&self` is obtained.
 pub(super) async fn do_start_instance(
@@ -1537,6 +1537,10 @@ pub(super) async fn do_start_instance(
     // instance in Created, not stuck in Starting. Same port-conflict
     // check as the RPC path (see check_port_forward_conflicts).
     check_port_forward_conflicts_impl(supervisors, id, &cfg).await?;
+    // Same for the disk: QEMU takes an exclusive write lock on the disk
+    // file, so a second instance pointing at the same disk would fail
+    // with an opaque lock error at spawn — refuse it up front.
+    check_disk_conflicts_impl(supervisors, id, &cfg).await?;
     handle.transition(InstanceEvent::Start).await?;
 
     let backend = backends
@@ -1577,7 +1581,7 @@ pub(super) async fn do_start_instance(
 
 /// Shared host-port conflict check used by both the `StartInstance` RPC
 /// (`check_port_forward_conflicts`) and the deferred `autostart` task, so
-/// the two paths can never drift (PLAN §12.B, §O).
+/// the two paths can never drift.
 async fn check_port_forward_conflicts_impl(
     supervisors: &std::sync::Arc<tokio::sync::RwLock<HashMap<InstanceId, SupervisorHandle>>>,
     id: InstanceId,
@@ -1612,6 +1616,56 @@ async fn check_port_forward_conflicts_impl(
             if held.contains(port) {
                 return Err(DaemonError::PortForwardConflict {
                     port: *port,
+                    instance: id,
+                    held_by: *other_id,
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Shared disk-path conflict check used by both the `StartInstance` RPC
+/// and the deferred `autostart` task, so the two paths can never drift
+/// QEMU takes an exclusive write lock on the disk file; two
+/// instances pointing at the same disk (primary or extra) would
+/// otherwise fail with an opaque lock error at best and corrupt the disk
+/// at worst. Shared base images are fine (read-only backing files), so
+/// only the top-level disk paths are compared.
+async fn check_disk_conflicts_impl(
+    supervisors: &std::sync::Arc<tokio::sync::RwLock<HashMap<InstanceId, SupervisorHandle>>>,
+    id: InstanceId,
+    cfg: &InstanceConfig,
+) -> Result<(), DaemonError> {
+    let wanted: Vec<std::path::PathBuf> = std::iter::once(&cfg.disk.path)
+        .chain(cfg.extra_disks.iter().map(|d| &d.path))
+        .cloned()
+        .collect();
+    if wanted.is_empty() {
+        return Ok(());
+    }
+
+    let map = supervisors.read().await;
+    for (other_id, other) in map.iter() {
+        if *other_id == id {
+            continue;
+        }
+        let state = other.state();
+        if !matches!(
+            state,
+            InstanceState::Running | InstanceState::Paused | InstanceState::Starting
+        ) {
+            continue;
+        }
+        let other_cfg = other.config();
+        let held: Vec<std::path::PathBuf> = std::iter::once(&other_cfg.disk.path)
+            .chain(other_cfg.extra_disks.iter().map(|d| &d.path))
+            .cloned()
+            .collect();
+        for path in &wanted {
+            if held.contains(path) {
+                return Err(DaemonError::DiskInUse {
+                    path: path.clone(),
                     instance: id,
                     held_by: *other_id,
                 });

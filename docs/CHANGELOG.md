@@ -13,9 +13,10 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Added
 
-#### Autostart (PLAN §O)
+#### Autostart
 
 - **Instances can start automatically when the daemon starts**: set `autostart = true` in the instance's `instance.toml` (or `create --file` TOML), or `andler config set <id> autostart true`. On daemon startup each `Stopped` autostart-marked instance is started through the same path as `andler start` (same port-conflict check, same supervisor guarantees). A failing autostart leaves the instance in `Error` and is never retried in a loop; already-running adopted VMs and non-marked instances are untouched. Covered by the new `24_autostart.sh` e2e suite.
+- **Starting an instance whose disk is already in use by a running instance is refused up front**: two instances pointing at the same disk file (primary or extra, via `instance.toml`) would otherwise fail at QEMU spawn with an opaque write-lock error and land the second instance in `Error` — now `andler start` fails with an actionable `disk ... is already in use by running instance <id>` message and leaves the instance untouched. Shared base images (read-only backing) stay legal. Covered by the new `25_disk_conflict.sh` e2e suite.
 
 #### Offline guest ops are zero-root
 
@@ -24,8 +25,8 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 
 #### Observability
 
-- **request_id correlation (§9.1.1)**: every CLI request is stamped with a `request_id` metadata header; the daemon's RPC span carries it, so `andler logs daemon` lines reconstruct the path CLI → RPC → operation. The `rpc{request_id=…, method=…}` span wraps each handler's events.
-- **Rate-limited retry logging (§9.1.4)**: the QMP events-monitor reconnect loop logs coalesced — first failure, every 50th, and a recovery summary with the attempt count — a dead socket neither spams the log nor vanishes silently.
+- **request_id correlation**: every CLI request is stamped with a `request_id` metadata header; the daemon's RPC span carries it, so `andler logs daemon` lines reconstruct the path CLI → RPC → operation. The `rpc{request_id=…, method=…}` span wraps each handler's events.
+- **Rate-limited retry logging**: the QMP events-monitor reconnect loop logs coalesced — first failure, every 50th, and a recovery summary with the attempt count — a dead socket neither spams the log nor vanishes silently.
 
 #### Daemon
 
@@ -33,11 +34,11 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 
 #### Security
 
-- **Log redaction (§9.1.5)**: guest-exec stdout/stderr is never logged (package install/remove output previously hit INFO — removed); QEMU/guest output lines dropped from WARN to debug (guest can print anything into the console; qemu.log/`andler logs <id>` remain the guest-log stream); guest resolv.conf diagnostics are debug-only. Documented as the redaction policy in `docs/ARCHITECTURE.md`.
+- **Log redaction**: guest-exec stdout/stderr is never logged (package install/remove output previously hit INFO — removed); QEMU/guest output lines dropped from WARN to debug (guest can print anything into the console; qemu.log/`andler logs <id>` remain the guest-log stream); guest resolv.conf diagnostics are debug-only. Documented as the redaction policy in `docs/ARCHITECTURE.md`.
 
 #### CLI
 
-- **`andler doctor --metrics`**: prints the daemon's internal metrics snapshot (§9.1.8 / P27) — RPC latency p50/p99 per method, error counts by gRPC status code, instance/running/active-op counts, QMP reconnect count.
+- **`andler doctor --metrics`**: prints the daemon's internal metrics snapshot — RPC latency p50/p99 per method, error counts by gRPC status code, instance/running/active-op counts, QMP reconnect count.
 
 - **`andler logs daemon [--follow] [--json] [--since <epoch-ms>]`**: streams the daemon's own log (the same lines it prints, same format) from an in-memory 4096-line ring — debugging never requires knowing where andlerd writes. `--follow` keeps streaming, `--json` emits `{"ts_ms":...,"line":...}` lines, `--since` filters the snapshot; all three are rejected with an instance id (instance logs keep `--source/--grep/--tail`).
 
@@ -59,7 +60,7 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 
 - **Smart guest package path**: `guest install/remove <pkg>` no longer requires root on the host by default. A stopped instance is auto-started headless for maintenance, the package is installed/removed via the guest agent (QGA `guest-exec`, same `PackageManager` command shapes as the offline path), and the VM is stopped again — all as a cancellable supervisor operation visible on the event bus. If the guest agent does not appear within `ANDLERD_GUEST_AGENT_WAIT_SECS` (default 120 s), the operation fails with a hint to retry with `--offline`. The new `--offline` flag forces the qemu-nbd/chroot path (requires the `andler-helper` sudoers rule) — the rescue case for VMs that cannot boot. `--offline` on a running instance is refused with an explanation.
 
-- **boot-mode switching через GuestMutator**: `switch_boot_mode_with` мигрировал с nbd/mount/chroot на `GuestMutator` (offline — `GuestfsMutator` appliance; замена `default.target` = rm + symlink, `ln -s` не перезаписывает существующую ссылку). `current_boot_mode`/`read_boot_mode` удалены — get уже config-backed (P31). Первый шаг фазы 4: nbd-путь остаётся только для chroot-кухни пакетных операций.
+- **boot-mode switching через GuestMutator**: `switch_boot_mode_with` мигрировал с nbd/mount/chroot на `GuestMutator` (offline — `GuestfsMutator` appliance; замена `default.target` = rm + symlink, `ln -s` не перезаписывает существующую ссылку). `current_boot_mode`/`read_boot_mode` удалены — get уже config-backed. Первый шаг фазы 4: nbd-путь остаётся только для chroot-кухни пакетных операций.
 
 - **ARM translator staging через GuestMutator**: `switch_translator_with` мигрировал staging (upload/chmod), замену старого транслятора (rm), перенос (mv) и запись build.prop/init.rc (write) на `GuestMutator`; один appliance-батч на фазу. `MutatorOp` получил `UploadFile` (host→guest), trait — `exists`. Чтение base build.prop: plain-путь через мутатор, waydroid `system.img` — read_file + debugfs на хостовой копии (без root). Helper-пути `file`/`guest-write` из arm_translator удалены.
 
@@ -92,11 +93,11 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 - **Host-port conflict guard**: starting an instance whose `network.port_forwards` host port is already forwarded by another running instance is refused with `port <p> is already forwarded by running instance <id>; stop it first or pick another host_port` instead of an opaque QEMU bind error.
 - **`andler doctor`**: new `CAP_NET_ADMIN` check — bridge networking runs `ip link` directly in andlerd and fails without the capability; the check warns with a fix (`setcap` or `Nat` mode).
 - **Version handshake**: every command queries the daemon's build version first; a daemon from a different build is rejected with `daemon is version X, this CLI was built for Y; restart the daemon …` instead of an opaque protobuf error.
-- **`config view`** prints `boot_mode` for Android VMs; `guest boot-mode <id>` reads the mode from `instance.toml` (config-backed since P31, no offline disk mount) and works in any state.
+- **`config view`** prints `boot_mode` for Android VMs; `guest boot-mode <id>` reads the mode from `instance.toml` (config-backed, no offline disk mount) and works in any state.
 
 #### Daemon
 
-- **boot_mode is config-backed (P31)**: `switch_android_boot_mode` records the new mode in both `instance.toml` and the in-memory config after applying it to the disk; `get_android_boot_mode` reads the config and no longer requires a stopped instance (the `connect` level decision needs it on a Running VM).
+- **boot_mode is config-backed**: `switch_android_boot_mode` records the new mode in both `instance.toml` and the in-memory config after applying it to the disk; `get_android_boot_mode` reads the config and no longer requires a stopped instance (the `connect` level decision needs it on a Running VM).
 - **`guest_exec_command` on `HypervisorBackend`**: generic guest-agent command execution with a per-command timeout and exit-code/stderr returns (the existing `wait_for_guest_exec` keeps its install-path semantics).
 
 #### Backend (`andler-qemu`)

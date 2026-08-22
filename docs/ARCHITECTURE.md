@@ -72,7 +72,7 @@ Wrapper around `qemu-img` for disk creation/cloning/resizing, plus guest tools o
 - `nbd.rs`: nbd device management with flock-based locking, `nbd_status()`, and the chroot environment setup (`bind_host_mounts`): the guest's `/etc/resolv.conf` is *written* with the host's nameservers (via the `guest-write` helper subcommand — a dangling symlink would make a bind-mount fail with ENOENT), `/dev`, `/proc`, `/sys` are bind-mounted, and a fresh tmpfs is mounted on the guest's `/run` (gpg-agent, used by pacman, needs a writable `/run`)
 - `guest_offline.rs` + `guest_tools.rs`: zero-root offline guest provisioning — the disk is mounted via `guestmount` (libguestfs FUSE) and package-manager commands run chrooted inside an unprivileged user namespace (`unshare --user --map-root-user --mount`); detects the package manager (apt-get/dnf/pacman), refreshes package indexes and installs/removes packages. No `/dev/nbd*`, no root, no sudoers rules
 - `arm_translator.rs`: ARM translator package staging in guest images (atomic staging + rename)
-- `boot_mode.rs`: Android/Linux boot-mode switching by re-pointing the guest's `default.target` symlink through a `GuestMutator` (`switch_boot_mode_with`) — offline via the `GuestfsMutator` appliance, online via QGA; reading the mode is config-backed (P31), no disk access
+- `boot_mode.rs`: Android/Linux boot-mode switching by re-pointing the guest's `default.target` symlink through a `GuestMutator` (`switch_boot_mode_with`) — offline via the `GuestfsMutator` appliance, online via QGA; reading the mode is config-backed, no disk access
 - `diskspace.rs`: free-space pre-check before snapshots
 
 **~45 unit tests** (+ ignored integration tests requiring qemu-img).
@@ -86,7 +86,7 @@ against a guest image: the appliance boots its own unprivileged QEMU,
 mounts the filesystem under an exclusive qemu image lock and applies a
 batch of `MutatorOp` mutations in one session. Zero root; the package
 install/remove path stays on the chroot kitchen (spike-verified
-suspended variant, §6). The trait + batch contract + shared conformance
+suspended variant). The trait + batch contract + shared conformance
 suite live in `andler-core`.
 
 ### `services/andler-net` — Network Configuration
@@ -133,7 +133,8 @@ Orchestrates all operations. Holds backend registry, per-instance supervisors, o
 - **Instance registry on disk**: each instance is a directory `~/.andler/instances/<id>/` whose `instance.toml` is the single source of truth for the config; the daemon re-reads it on every state transition (so hand-edits survive daemon restarts). `Daemon::restore()` scans the instances directory, tracks entries with missing/invalid toml as *broken* (listed with the reason, removable, never fatal to startup), migrates legacy store configs, and reconnects to any QEMU process that survived a crash (`adopt`, below). The SQLite store holds only snapshot metadata — instance configs and states never touch it.
 - **Instance supervisor (task per instance)**: each registered instance runs one tokio task that owns the FSM state, the backend handle and the config — the only writer of all three. Everything else reads them through `tokio::sync::watch` snapshots (`SupervisorHandle::state()/backend_handle()/config()`) and mutates them through an mpsc command channel (`transition`, `set_handle`, `set_config`), which acknowledges only after the change is applied and persisted. This replaces the old shared `RwLock<HashMap<…>>` as the daemon's structural state. Long-running operations (snapshot restore is the first) run as supervisor sub-tasks that ack their start immediately through a oneshot and stream progress back (`RunOperation`/`CancelOperation`/`GetActiveOp` in `daemon/ops.rs`) — one operation per instance, cancellation via a watch token checked at per-file phase boundaries; `Operation` events land on the event bus and in the instance audit log. QMP/metrics ownership moves under the supervisor in a later phase.
 - **Daemon restart semantics**: a graceful SIGTERM/Ctrl+C is a deliberate shutdown — `shutdown_signal` stops every Running/Paused instance before the daemon exits and `kill_on_drop` guards the rest. Reconnect is therefore a crash-recovery path, not a graceful-restart path: on startup `Daemon::restore()` tries to adopt any instance whose QEMU process is still alive by connecting to its QMP socket, resolving the surviving QEMU's pid (`query-processes`, falling back to the `/proc` `process=<name>` cmdline marker), verifying identity, and re-creating the backend handle around the pidfd. Only if the process cannot be found/recovered does the instance land in `Stopped`. Instances that were mid-operation (Starting/Stopping) at crash time are never guessed at: they become `Stopped`, and `start` is the documented recovery path.
-- **Autostart (PLAN §O)**: an instance whose `instance.toml` has `autostart = true` is started automatically when the daemon starts. The start is issued through the exact same `do_start_instance` path as the `StartInstance` RPC (same port-conflict check, same FSM transitions, same exit watcher), so supervisor guarantees never diverge between a manual and an automatic start. The pass runs as a supervised background task after `restore()` — one start per matching instance, never a retry loop: a failing start leaves the instance in `Error`/`Stopped` and the daemon continues. Only instances in `Stopped` are autostarted; adopted running VMs and instances in any other state are left alone. The flag is settable at create (`create --file` `autostart = true`), in the file directly, or via `andler config set <id> autostart true`.
+- **Autostart**: an instance whose `instance.toml` has `autostart = true` is started automatically when the daemon starts. The start is issued through the exact same `do_start_instance` path as the `StartInstance` RPC (same port-conflict check, same FSM transitions, same exit watcher), so supervisor guarantees never diverge between a manual and an automatic start. The pass runs as a supervised background task after `restore()` — one start per matching instance, never a retry loop: a failing start leaves the instance in `Error`/`Stopped` and the daemon continues. Only instances in `Stopped` are autostarted; adopted running VMs and instances in any other state are left alone. The flag is settable at create (`create --file` `autostart = true`), in the file directly, or via `andler config set <id> autostart true`.
+- **Multi-instance resource conflicts**: before the `Start` transition, `do_start_instance` refuses a start whose host ports or disk files (primary or extra) collide with another instance in `Running`/`Paused`/`Starting` — the same shared check for the RPC and the autostart paths. Ports: two QEMU slirp netdevs bound to the same host port would misroute traffic. Disks: QEMU takes an exclusive write lock on the disk file, so a second instance pointing at the same disk would fail at spawn with an opaque lock error and land in `Error`; the up-front `DiskInUse`/`PortForwardConflict` errors leave the instance untouched. Shared base images (read-only backing files) are not conflicts.
 - **Event bus**: the daemon owns a `broadcast::Sender<DaemonEvent>`; supervisors publish `Lifecycle` events on every applied FSM transition (with the `Fail` reason). Consumers subscribe via `Daemon::subscribe_events()` (event types live in `andler-core::events`, pure serde types).
 - Instance lifecycle via FSM transitions (applied by the supervisor)
 - `InstanceDirGuard` RAII for cleanup on partial failure
@@ -426,7 +427,7 @@ not needed: the single identity required inside the chroot (guest root)
 is covered by the uid/gid mapping alone. The smart online path is
 unaffected.
 
-### Log redaction (§9.1.5)
+### Log redaction
 
 The daemon log (and therefore the `andler logs daemon` ring, which carries
 the same bytes) never contains guest-controlled or guest-sourced content at
@@ -437,14 +438,14 @@ the default INFO level:
   guest printed; failures surface through returned errors instead.
 - **QEMU/guest output lines are debug-only** — the guest can print anything
   into the console, so qemu.log + `andler logs <id>` are the guest-log
-  stream, never the daemon log (§9.1.6).
+  stream, never the daemon log.
 - **Provision manifests log op counts only**, never file contents or host
   paths of uploads; guest file reads for diagnostics (resolv.conf) are
   debug-only.
 - Env values are never logged; instance ids, paths, and error text (the
   actionable, sanitized message, not raw stderr) are the allowed fields.
 
-### Request correlation (§9.1.1)
+### Request correlation
 
 Every CLI request carries a `request_id` metadata header (32-hex, generated
 per request); the daemon's RPC layer wraps each handler in an
@@ -453,7 +454,7 @@ request shows up in the daemon log with its id. Long operations keep their
 own `op_id` on the event bus; together they reconstruct
 CLI → RPC → operation from one log line. Retry loops (QMP events monitor,
 health checks) log coalesced — first failure, every 50th attempt, and a
-recovery summary (§9.1.4).
+recovery summary.
 
 ## Security / Threat Model
 
