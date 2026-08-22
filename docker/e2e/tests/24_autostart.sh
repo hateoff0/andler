@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 24 — autostart (§O): instances marked `autostart = true` in their
+# 24 — autostart: instances marked `autostart = true` in their
 # instance.toml are started automatically when the daemon restarts, through
 # the same start path as `andler start`; instances without the flag stay
 # Stopped. No retry loop: a failing autostart leaves the instance in Error.

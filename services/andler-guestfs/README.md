@@ -13,7 +13,7 @@ batch. Zero root on the host — no nbd, no mount, no helper.
 
 ## Session model
 
-One appliance session per `apply` batch (per §6 of the refactor plan):
+One appliance session per `apply` batch:
 a staging run that touches hundreds of files is a single `guestfish`
 invocation, not one per file. `WriteFile` content is staged into a
 host temp dir and uploaded with `upload`, keeping binary content out

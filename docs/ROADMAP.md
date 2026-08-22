@@ -66,13 +66,13 @@
 - [x] Long-operation progress and cancellation (`andler op list`/`op cancel`) — the first long op (snapshot restore) runs as a supervisor sub-task that acks immediately and streams weighted phases; one operation per instance (`OperationAlreadyRunning`), cancellation via a watch token checked at per-file phase boundaries, `Operation` events on the bus and in the audit log (`apps/daemon/src/daemon/ops.rs`).
 - [x] Guest access levels (`andler connect`) — console attaches to the serial chardev socket in raw mode (works on any running VM); ssh/adb spawn the external client against `network.port_forwards`; `exec` runs commands in the guest through QGA with exit-code relay. `auto` picks by the effective `(kind, boot_mode)` profile.
 - [x] `network.port_forwards` — TOML/proto/cmdline chain (slirp `hostfwd=`, passt port list; bridge/isolated rejected), immutable via `config set`.
-- [x] boot_mode in the config (P31) — `AndroidProfile.boot_mode` with an Android default; switch records it in `instance.toml` and memory; get works in any state (no offline disk mount).
+- [x] boot_mode in the config — `AndroidProfile.boot_mode` with an Android default; switch records it in `instance.toml` and memory; get works in any state (no offline disk mount).
 - [x] Version handshake CLI↔daemon — `GetVersion` RPC checked before every command; mismatched daemon builds are rejected with a restart hint instead of an opaque protobuf error.
 - [x] `doctor` checks `CAP_NET_ADMIN` — bridge networking runs `ip link` directly in andlerd; the check warns with a fix (`setcap` or Nat mode).
 - [x] Package managers in `andler-core` — `PackageManager` enum + command specifications moved out of `andler-disk` (online QGA path and offline path share one spec).
 - [x] Core: add VM template system for quick VM creation — `andler create --template <name>` (built-ins `headless`/`desktop`, user templates in `~/.andler/templates/`), merged defaults < template < CLI flags, `--kind linux` only in this phase.
 
-- [x] GuestMutator abstraction — `MutatorOp` batch + `GuestMutator` trait in `andler-core`, `QgaMutator` (online, QGA, zero root) and `GuestfsMutator` (new crate `services/andler-guestfs`, libguestfs appliance, zero root), with a shared conformance suite that runs the same assertions against both real implementations. Package install stays on the chroot kitchen (spike-verified suspended variant, §6).
+- [x] GuestMutator abstraction — `MutatorOp` batch + `GuestMutator` trait in `andler-core`, `QgaMutator` (online, QGA, zero root) and `GuestfsMutator` (new crate `services/andler-guestfs`, libguestfs appliance, zero root), with a shared conformance suite that runs the same assertions against both real implementations. Package install stays on the chroot kitchen (spike-verified suspended variant).
 - [x] QMP event subscription — `QmpClient` background reader task (async events → broadcast, replies → pending oneshot), `QemuBackend` per-instance relay, daemon forwards `DaemonEvent::Qmp`; `StreamEvents` RPC + `andler events [<id>] [--follow] [--json]`.
 
 ## In Progress

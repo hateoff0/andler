@@ -65,7 +65,7 @@ async fn get_android_boot_mode_rejects_non_android_instance() {
 
 #[tokio::test]
 async fn get_android_boot_mode_reads_config_while_running() {
-    // P31: boot_mode lives in instance.toml, so `get` must work in any
+    // boot_mode lives in instance.toml, so `get` must work in any
     // state — the connect level decision needs it on a Running VM and
     // must never require an offline disk mount.
     let daemon = Daemon::new();

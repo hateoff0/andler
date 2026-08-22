@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::MutatorOp;
 
-/// Guest provisioning manifest (§7): a declarative list of file mutations
+/// Guest provisioning manifest: a declarative list of file mutations
 /// applied through a `GuestMutator` — online via QGA when the instance is
 /// running, offline through the guestfs appliance when stopped. One
 /// manifest = one `guest provision <file> <id>` call; manifests live in

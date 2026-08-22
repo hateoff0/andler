@@ -216,7 +216,7 @@ impl QemuProcess {
         loop {
             match lines.next_line().await {
                 Ok(Some(line)) => {
-                    // Guest-adjacent output is its own stream (§9.1.6):
+                    // Guest-adjacent output is its own stream:
                     // qemu.log + `andler logs <id>` carry it, the daemon log
                     // (and its ring) only gets it at debug — the guest can
                     // print anything into the console, so it must never
@@ -249,7 +249,7 @@ impl QemuProcess {
 
     /// Fires once when the QEMU process exits, for any reason — including
     /// a crash or a kill that bypassed `stop()`. This is the replacement for
-    /// polling `is_alive()` (P8: death is an event, not a 30s-late fact).
+    /// polling `is_alive()` (death is an event, not a 30s-late fact).
     pub fn subscribe_exit(&self) -> broadcast::Receiver<()> {
         self.exit_sender.subscribe()
     }

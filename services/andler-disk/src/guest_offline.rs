@@ -3,7 +3,7 @@ use std::process::Command;
 
 use crate::error::DiskError;
 
-/// Zero-root offline guest access (§7 spike, 2026-08): the guest disk is
+/// Zero-root offline guest access (2026-08): the guest disk is
 /// mounted through `guestmount` (libguestfs FUSE — no block mount, no
 /// privileges) and commands run inside a user namespace
 /// (`unshare --user --map-root-user --mount` + `chroot`). This replaces

@@ -37,7 +37,7 @@ pub async fn handle_connect(
         ConnectLevel::Console => connect_console(&full_id).await,
         ConnectLevel::Ssh => connect_via_port_forward(client, &full_id, 22, "ssh").await,
         ConnectLevel::Adb => connect_via_port_forward(client, &full_id, 5555, "adb").await,
-        // Effective profile (kind × boot_mode, PLAN §12.A): an Android
+        // Effective profile (kind × boot_mode): an Android
         // instance booted into linux mode is reached over ssh, one booted
         // into android over adb; plain Linux VMs keep the serial console.
         ConnectLevel::Auto => {

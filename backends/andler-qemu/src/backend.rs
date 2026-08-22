@@ -111,7 +111,7 @@ impl QemuBackend {
         ));
         let tx = self.qmp_events.clone();
         let task = tokio::spawn(async move {
-            // §9.1.4: retry loops log coalesced — first failure, every
+            // Retry loops log coalesced — first failure, every
             // 50th, and the recovery summary — a dead socket must not
             // spam the daemon log nor vanish silently.
             let mut failed: u64 = 0;
@@ -286,7 +286,7 @@ exit 30";
             .map_err(qmp_error_to_backend_error)?;
 
         if let Some(_output) = result {
-            // Guest-exec stdout/stderr is never logged (§9.1.5): it can
+            // Guest-exec stdout/stderr is never logged: it can
             // carry passwords or tokens the guest printed; failures surface
             // through the returned error instead.
             tracing::info!(

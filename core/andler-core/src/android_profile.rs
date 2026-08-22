@@ -70,7 +70,7 @@ pub struct AndroidProfile {
 
     /// Base-image pin written at instance creation. When the instance file
     /// already carries one, creation refuses a base image whose id or
-    /// checksum no longer matches (§7) — a silently swapped backing image
+    /// checksum no longer matches — a silently swapped backing image
     /// is a data-corruption trap, not an upgrade path.
     #[serde(default)]
     pub base_image_pin: Option<BaseImagePin>,

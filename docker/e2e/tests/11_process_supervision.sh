@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # 11 — process supervision: a qemu process killed out from under the daemon
 # lands the instance in Error { QEMU process exited unexpectedly } fast —
-# via pidfd death notification (P8), not the 30s health-check poll.
+# via pidfd death notification, not the 30s health-check poll.
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 

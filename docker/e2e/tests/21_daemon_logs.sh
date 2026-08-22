@@ -34,7 +34,7 @@ echo "  [--json shape]"
 expect_ok "logs daemon --json emits JSON lines" -- timeout 10 andler logs daemon --json
 expect_out_grep "json has ts_ms and line" '"ts_ms":'
 
-echo "  [request_id correlation (§9.1.1)]"
+echo "  [request_id correlation]"
 CID="$(create_linux "$WORK" e2e-correlation)"
 [[ -n "$CID" ]] || fail "empty instance id from create"
 expect_ok "daemon log shows the create under an rpc span with request_id" -- timeout 10 andler logs daemon

@@ -43,7 +43,7 @@ pub struct Daemon {
     events: broadcast::Sender<DaemonEvent>,
     /// Deferred-start tasks for instances marked `autostart`. Each task is
     /// supervised by a paired watcher that logs panic; we hold the
-    /// JoinHandle so a panic is observed (PLAN §O, AGENTS tokio::spawn rule).
+    /// JoinHandle so a panic is observed (AGENTS tokio::spawn rule).
     autostart_tasks: std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>,
 }
 
@@ -359,7 +359,7 @@ impl Daemon {
         daemon
     }
 
-    /// Deferred-start pass for instances marked `autostart` (PLAN §O).
+    /// Deferred-start pass for instances marked `autostart`.
     /// Issues exactly one `start_instance` per matching instance via the
     /// shared `do_start_instance` path — never retried in a loop on
     /// failure, so a failing autostart leaves the instance in

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # 19 — version handshake: the CLI queries the daemon version up front and
-# runs only when both sides were built together (§13.19).
+# runs only when both sides were built together.
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 

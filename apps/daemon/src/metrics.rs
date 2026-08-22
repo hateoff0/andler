@@ -5,7 +5,7 @@ use tracing::Instrument;
 
 const LATENCY_SAMPLES_PER_METHOD: usize = 4096;
 
-/// Daemon-internal metrics (§9.1.8 / P27): RPC latency by method with
+/// Daemon-internal metrics: RPC latency by method with
 /// p50/p99, error counts by gRPC status code (the public face of the
 /// ErrorKind categories), instance/supervisor counts, active operations,
 /// and QMP reconnect count. Collected by a tonic layer in the server
@@ -164,7 +164,7 @@ where
             .and_then(|v| v.to_str().ok())
             .unwrap_or("unknown")
             .to_string();
-        // §9.1.1: every event emitted while handling this request carries
+        // Every event emitted while handling this request carries
         // the request_id (and method) via the span — the CLI stamps the
         // header, so one log line reconstructs CLI → RPC → operation.
         let span = tracing::info_span!("rpc", request_id = %request_id, method = %method);

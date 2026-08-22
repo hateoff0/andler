@@ -429,7 +429,7 @@ enum Command {
 
     /// Check the host environment for andler prerequisites
     Doctor {
-        /// Print the daemon's internal metrics snapshot (§9.1.8): RPC
+        /// Print the daemon's internal metrics snapshot: RPC
         /// latency p50/p99 by method, error counts by status code,
         /// instance/active-op counts, QMP reconnect count.
         #[arg(long)]
@@ -728,9 +728,9 @@ fn looks_like_daemon_not_running(err: &(dyn std::error::Error + 'static)) -> boo
 }
 
 /// Queries the daemon's version and fails with an actionable message when
-/// it differs from this CLI's build (§13.19). Stale daemons from an earlier
+/// it differs from this CLI.s build. Stale daemons from an earlier
 /// refactor phase produce opaque protobuf errors; name the mismatch instead.
-/// Stamps every request with a `request_id` metadata header (§9.1.1): the
+/// Stamps every request with a `request_id` metadata header: the
 /// daemon's RPC span carries it, so a single log line reconstructs the
 /// path CLI → RPC → operation.
 #[derive(Clone)]
@@ -753,7 +753,7 @@ pub(crate) type TracedClient =
     AndlerServiceClient<tonic::codegen::InterceptedService<Channel, RequestIdInterceptor>>;
 
 /// Connects a client that stamps every request with a `request_id`
-/// metadata header (§9.1.1): the daemon's RPC span carries it, so a single
+/// metadata header: the daemon's RPC span carries it, so a single
 /// log line reconstructs the path CLI → RPC → operation.
 pub(crate) async fn traced_client(addr: &str) -> Result<TracedClient, Box<dyn std::error::Error>> {
     Ok(AndlerServiceClient::with_interceptor(
@@ -832,7 +832,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut client = traced_client(&addr).await?;
 
-    // Version handshake (§13.19): a CLI and daemon built from different
+    // Version handshake: a CLI and daemon built from different
     // refactor phases would otherwise surface as an opaque protobuf error
     // mid-RPC. Report the mismatch explicitly and point at the fix.
     if let Err(msg) = check_daemon_version(&mut client).await {

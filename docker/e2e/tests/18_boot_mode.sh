@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 18 — P31: boot_mode lives in instance.toml. The config exposes it without
+# 18 — boot_mode lives in instance.toml. The config exposes it without
 # any offline disk mount, config set refuses to touch it (the dedicated
 # boot-mode command is the only writer), and switch updates the config.
 set -euo pipefail

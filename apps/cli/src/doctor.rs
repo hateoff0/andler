@@ -130,7 +130,7 @@ fn cap_net_admin_check() -> Check {
 }
 
 /// Offline guest operations are zero-root since the guestmount+userns
-/// migration (PLAN §7 spike): the disk is mounted through guestmount (FUSE)
+/// migration: the disk is mounted through guestmount (FUSE)
 /// and package commands run inside an unprivileged user namespace — no
 /// sudoers rules exist anymore. These checks pin the three prerequisites.
 fn offline_checks() -> Vec<Check> {
@@ -288,7 +288,7 @@ pub async fn run(daemon_addr: &str) -> bool {
 }
 
 /// `andler doctor --metrics` — prints the daemon's internal metrics
-/// snapshot (§9.1.8 / P27): RPC latency p50/p99 per method, error counts
+/// snapshot: RPC latency p50/p99 per method, error counts
 /// by gRPC status code, instance/active-op counts and QMP reconnects.
 pub async fn print_metrics(daemon_addr: &str) -> Result<(), Box<dyn std::error::Error>> {
     let mut client = crate::traced_client(daemon_addr).await?;

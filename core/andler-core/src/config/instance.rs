@@ -133,7 +133,7 @@ pub struct InstanceConfig {
     pub audio: AudioConfig,
     pub input: InputConfig,
 
-    /// Start this instance automatically when the daemon starts (§O). If the
+    /// Start this instance automatically when the daemon starts. If the
     /// start fails the instance stays in Error/Stopped — never retried in a
     /// loop by the daemon.
     #[serde(default)]
