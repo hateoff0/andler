@@ -211,6 +211,15 @@ pub enum DaemonError {
         held_by: InstanceId,
     },
 
+    #[error(
+        "host CPU {cpu} is pinned by running instance {held_by};          pick a disjoint cpu.affinity set or stop that instance"
+    )]
+    CpuAffinityConflict {
+        cpu: usize,
+        instance: InstanceId,
+        held_by: InstanceId,
+    },
+
     #[error("instance reference must not be empty")]
     EmptyInstanceRef,
 
@@ -367,6 +376,7 @@ impl DaemonError {
             DaemonError::OperationNotFound(_) => ErrorKind::NotFound,
             DaemonError::PortForwardConflict { .. } => ErrorKind::FailedPrecondition,
             DaemonError::DiskInUse { .. } => ErrorKind::FailedPrecondition,
+            DaemonError::CpuAffinityConflict { .. } => ErrorKind::FailedPrecondition,
             DaemonError::EmptyInstanceRef => ErrorKind::InvalidArgument,
             DaemonError::ConfigIdMismatch { .. } => ErrorKind::InvalidArgument,
             DaemonError::ConfigKindChanged(_) => ErrorKind::InvalidArgument,

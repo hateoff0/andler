@@ -94,7 +94,7 @@ Coverage by suite:
 | `22_daemon_metrics.sh` | `andler doctor --metrics`: snapshot header/counts, recorded RPC traffic after real commands (GetVersion/ListInstances visible) |
 | `23_online_install.sh` | The default online package path against a genuinely booted guest: the official Debian genericcloud image (baked at build time) + NoCloud seed — cloud-init brings up DHCP, installs and enables qemu-guest-agent (DNS workaround: pinned slirp resolver, hardcoded mirror IPv4s, ForceIPv4); then `guest install/remove` runs online via QGA, verified with guest-exec |
 | `24_autostart.sh` | Autostart: `create --file` with `autostart = true` reaches Running after a daemon restart with exactly one QEMU process (no double start), a non-marked instance stays Stopped, `config set autostart false/true` toggles the flag and survives a second restart |
-| `25_disk_conflict.sh` | Multi-instance disk lock: two instances sharing one disk file — the second start is refused up front with the disk-in-use error (no raw QEMU write-lock failure, instance left untouched), stopping the first frees the disk |
+| `26_affinity.sh` | CPU pinning: `cpu.affinity = [0, 1]` in `instance.toml` pins the QEMU process (verified via `/proc/<pid>/status` `Cpus_allowed_list`), an overlapping pin on a running instance is refused up front, a disjoint pin starts fine, an index beyond the host CPU count is rejected before spawn |
 
 ### Guest package ops: offline (07) + online (23)
 

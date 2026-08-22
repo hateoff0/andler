@@ -1,5 +1,6 @@
 use super::*;
 
+mod affinity_conflict;
 mod android_boot_mode;
 mod autostart;
 mod base_image_pin;

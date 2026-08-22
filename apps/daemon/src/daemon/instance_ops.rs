@@ -1541,6 +1541,10 @@ pub(super) async fn do_start_instance(
     // file, so a second instance pointing at the same disk would fail
     // with an opaque lock error at spawn — refuse it up front.
     check_disk_conflicts_impl(supervisors, id, &cfg).await?;
+    // And for pinned CPUs: two instances pinned to overlapping host CPUs
+    // would silently contend for the same cores, defeating the pin.
+    check_cpu_affinity_conflicts_impl(supervisors, id, &cfg).await?;
+    validate_cpu_affinity(&cfg)?;
     handle.transition(InstanceEvent::Start).await?;
 
     let backend = backends
@@ -1579,8 +1583,6 @@ pub(super) async fn do_start_instance(
     }
 }
 
-/// Shared host-port conflict check used by both the `StartInstance` RPC
-/// (`check_port_forward_conflicts`) and the deferred `autostart` task, so
 /// the two paths can never drift.
 async fn check_port_forward_conflicts_impl(
     supervisors: &std::sync::Arc<tokio::sync::RwLock<HashMap<InstanceId, SupervisorHandle>>>,
@@ -1670,6 +1672,74 @@ async fn check_disk_conflicts_impl(
                     held_by: *other_id,
                 });
             }
+        }
+    }
+    Ok(())
+}
+
+/// Shared pinned-CPU conflict check used by both the `StartInstance` RPC
+/// and the deferred `autostart` task. Only instances with an explicit
+/// `cpu.affinity` participate: two pinned instances sharing a host CPU
+/// would silently contend for that core, so the second start is refused.
+/// Unpinned instances are left to the scheduler and never conflict.
+async fn check_cpu_affinity_conflicts_impl(
+    supervisors: &std::sync::Arc<tokio::sync::RwLock<HashMap<InstanceId, SupervisorHandle>>>,
+    id: InstanceId,
+    cfg: &InstanceConfig,
+) -> Result<(), DaemonError> {
+    let Some(wanted) = &cfg.cpu.affinity else {
+        return Ok(());
+    };
+    if wanted.is_empty() {
+        return Ok(());
+    }
+
+    let map = supervisors.read().await;
+    for (other_id, other) in map.iter() {
+        if *other_id == id {
+            continue;
+        }
+        let state = other.state();
+        if !matches!(
+            state,
+            InstanceState::Running | InstanceState::Paused | InstanceState::Starting
+        ) {
+            continue;
+        }
+        let Some(held) = &other.config().cpu.affinity else {
+            continue;
+        };
+        for cpu in wanted {
+            if held.contains(cpu) {
+                return Err(DaemonError::CpuAffinityConflict {
+                    cpu: *cpu,
+                    instance: id,
+                    held_by: *other_id,
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Rejects a `cpu.affinity` set that references host CPUs the QEMU process
+/// could never be pinned to (index >= the host's available parallelism).
+/// Checked before the Start transition so a bad set fails fast instead of
+/// surfacing as a raw taskset error at spawn.
+fn validate_cpu_affinity(cfg: &InstanceConfig) -> Result<(), DaemonError> {
+    let Some(affinity) = &cfg.cpu.affinity else {
+        return Ok(());
+    };
+    let host_cpus = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1);
+    for cpu in affinity {
+        if *cpu >= host_cpus {
+            return Err(DaemonError::InvalidConfig(format!(
+                "cpu.affinity references host CPU {cpu}, but this host exposes {host_cpus} \
+                 (0-{}); edit the affinity set in instance.toml",
+                host_cpus.saturating_sub(1)
+            )));
         }
     }
     Ok(())

@@ -740,12 +740,17 @@ impl HypervisorBackend for QemuBackend {
             }
         }
 
-        // ANDLERD_DEV_RESTART=1 keeps the QEMU process alive when the daemon
-        // exits, so a dev loop can restart the daemon without losing VMs.
         let dev_restart = std::env::var("ANDLERD_DEV_RESTART")
             .map(|value| value == "1")
             .unwrap_or(false);
-        let process = QemuProcess::spawn(&args, qmp_socket_path, log_file_path, !dev_restart).await;
+        let process = QemuProcess::spawn(
+            &args,
+            qmp_socket_path,
+            log_file_path,
+            !dev_restart,
+            cfg.cpu.affinity.as_deref(),
+        )
+        .await;
         if let Err(err) = process {
             self.teardown_network_info(&network_info).await;
             for (_, info) in &extra_network_infos {

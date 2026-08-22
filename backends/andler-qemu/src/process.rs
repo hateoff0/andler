@@ -62,8 +62,27 @@ impl QemuProcess {
         qmp_socket_path: PathBuf,
         log_file_path: Option<PathBuf>,
         kill_on_drop: bool,
+        cpu_affinity: Option<&[usize]>,
     ) -> Result<Self, ProcessError> {
-        let mut child = Command::new(QEMU_BINARY)
+        let mut command = match cpu_affinity {
+            // taskset pins every QEMU thread (vCPU, iothread, main) to the
+            // configured host CPUs: threads inherit the process affinity.
+            // The thread-context QEMU object exists but its accel binding
+            // is absent on the QEMU versions this project targets, so the
+            // process-level pin is the version-independent mechanism.
+            Some(affinity) => {
+                let list = affinity
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(",");
+                let mut command = Command::new("taskset");
+                command.args(["-c", &list]).arg(QEMU_BINARY);
+                command
+            }
+            None => Command::new(QEMU_BINARY),
+        };
+        let mut child = command
             .args(args)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -333,7 +352,7 @@ mod tests {
             "-nographic".to_string(),
         ];
 
-        let mut process = QemuProcess::spawn(&args, qmp_path, None, true)
+        let mut process = QemuProcess::spawn(&args, qmp_path, None, true, None)
             .await
             .unwrap();
         assert!(process.is_alive());
@@ -352,7 +371,7 @@ mod tests {
             "-nographic".to_string(),
         ];
 
-        let mut process = QemuProcess::spawn(&args, qmp_path, None, true)
+        let mut process = QemuProcess::spawn(&args, qmp_path, None, true, None)
             .await
             .unwrap();
         process.force_kill().await.unwrap();
