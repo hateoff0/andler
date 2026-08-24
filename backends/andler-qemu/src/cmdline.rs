@@ -185,6 +185,7 @@ fn memory_args(cfg: &InstanceConfig) -> Vec<String> {
     if cfg.memory.overcommit_mem_lock {
         args.push("-overcommit".to_string());
         args.push("mem-lock=on".to_string());
+        args.push("-mem-prealloc".to_string());
     }
     args
 }
@@ -688,6 +689,7 @@ mod tests {
         let args = memory_args(&cfg);
         assert!(args.contains(&"-overcommit".to_string()));
         assert!(args.contains(&"mem-lock=on".to_string()));
+        assert!(args.contains(&"-mem-prealloc".to_string()));
     }
     #[test]
     fn firmware_args_match_start_sh() {
