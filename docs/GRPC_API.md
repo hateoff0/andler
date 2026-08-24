@@ -90,6 +90,7 @@ Memory configuration.
 | `ballooning` | `bool` | Enable memory ballooning (dynamic reclamation). |
 | `zram` | `bool` | Enable zram for compressed swap. |
 | `ksm` | `bool` | Enable Kernel Same-page Merging for deduplication. |
+| `overcommit_mem_lock` | `bool` | Enable memory overcommit via `mem-lock=on` in the QEMU cmdline (`-overcommit mem-lock=on`), preventing the guest RAM from being swapped out. |
 
 ### `DiskFormat`
 

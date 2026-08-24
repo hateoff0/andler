@@ -13,6 +13,10 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Added
 
+#### Memory overcommit
+
+- **`memory.overcommit_mem_lock` pins the guest RAM to host memory**: set `overcommit_mem_lock = true` in `instance.toml` (or `andler config set <id> memory.overcommit_mem_lock true`) and the QEMU process is launched with `-overcommit mem-lock=on`, so the guest's RAM is locked (mlocked) and cannot be swapped out. Defaults to `false`; the key is writable only while the instance is stopped. Covered by the new `27_overcommit_mem_lock.sh` e2e suite.
+
 #### Autostart
 
 - **Instances can start automatically when the daemon starts**: set `autostart = true` in the instance's `instance.toml` (or `create --file` TOML), or `andler config set <id> autostart true`. On daemon startup each `Stopped` autostart-marked instance is started through the same path as `andler start` (same port-conflict check, same supervisor guarantees). A failing autostart leaves the instance in `Error` and is never retried in a loop; already-running adopted VMs and non-marked instances are untouched. Covered by the new `24_autostart.sh` e2e suite.

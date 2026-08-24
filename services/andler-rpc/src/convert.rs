@@ -210,7 +210,6 @@ impl From<CpuConfig> for proto::CpuConfig {
         msg
     }
 }
-
 impl From<proto::MemoryConfig> for MemoryConfig {
     fn from(value: proto::MemoryConfig) -> Self {
         MemoryConfig {
@@ -218,6 +217,7 @@ impl From<proto::MemoryConfig> for MemoryConfig {
             ballooning: value.ballooning,
             zram: value.zram,
             ksm: value.ksm,
+            overcommit_mem_lock: value.overcommit_mem_lock,
         }
     }
 }
@@ -229,6 +229,7 @@ impl From<MemoryConfig> for proto::MemoryConfig {
             ballooning: value.ballooning,
             zram: value.zram,
             ksm: value.ksm,
+            overcommit_mem_lock: value.overcommit_mem_lock,
         }
     }
 }
@@ -1198,6 +1199,16 @@ mod tests {
         let msg: proto::AndroidProfile = profile.clone().into();
         let back: AndroidProfile = msg.try_into().unwrap();
         assert_eq!(profile, back);
+    }
+    #[test]
+    fn memory_config_round_trips_through_proto() {
+        let mut cfg = MemoryConfig::reference_default();
+        cfg.ballooning = true;
+        cfg.zram = false;
+        cfg.ksm = false;
+        let msg: proto::MemoryConfig = cfg.clone().into();
+        let back: MemoryConfig = msg.into();
+        assert_eq!(cfg, back);
     }
 
     #[test]

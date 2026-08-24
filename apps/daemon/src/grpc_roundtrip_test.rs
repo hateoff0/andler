@@ -201,6 +201,7 @@ fn sample_create_instance_request() -> CreateInstanceRequest {
             ballooning: false,
             zram: false,
             ksm: true,
+            overcommit_mem_lock: false,
         }),
         disk: Some(disk),
         display: Some(display),

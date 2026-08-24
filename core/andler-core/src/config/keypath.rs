@@ -174,6 +174,14 @@ bool_keys!(
     firmware.enable_uefi => firmware_enable_uefi_get / firmware_enable_uefi_set,
 );
 
+fn memory_overcommit_mem_lock_get(cfg: &InstanceConfig) -> String {
+    bool_str(cfg.memory.overcommit_mem_lock)
+}
+
+fn memory_overcommit_mem_lock_set(cfg: &mut InstanceConfig, value: &str) -> Result<(), String> {
+    cfg.memory.overcommit_mem_lock = parse_bool(value)?;
+    Ok(())
+}
 fn disk_snapshot_timeout_get(cfg: &InstanceConfig) -> String {
     match cfg.disk.snapshot_timeout_secs {
         Some(secs) => secs.to_string(),
@@ -433,6 +441,13 @@ pub fn config_keys() -> &'static [ConfigKey] {
             key: "memory.ksm",
             get: memory_ksm_get,
             set: Some(memory_ksm_set),
+            immutable_reason: None,
+            live: false,
+        },
+        ConfigKey {
+            key: "memory.overcommit_mem_lock",
+            get: memory_overcommit_mem_lock_get,
+            set: Some(memory_overcommit_mem_lock_set),
             immutable_reason: None,
             live: false,
         },

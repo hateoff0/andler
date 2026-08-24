@@ -66,6 +66,7 @@ message MemoryConfig {
     bool ballooning = 2;
     bool zram = 3;
     bool ksm = 4;
+    bool overcommit_mem_lock = 5;
 }
 
 enum DiskFormat {

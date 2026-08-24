@@ -455,7 +455,6 @@ fn print_instance_config(config: GetInstanceConfigResponse) {
     if let Some(cpu) = config.cpu {
         println!("[cpu]");
         println!("  cores: {}", cpu.cores);
-        println!("  sockets: {}", cpu.sockets);
         println!("  threads: {}", cpu.threads);
         println!("  affinity: {:?}", cpu.affinity);
         println!(
@@ -475,6 +474,7 @@ fn print_instance_config(config: GetInstanceConfigResponse) {
         println!("  ballooning: {}", memory.ballooning);
         println!("  zram: {}", memory.zram);
         println!("  ksm: {}", memory.ksm);
+        println!("  overcommit_mem_lock: {}", memory.overcommit_mem_lock);
     }
 
     if let Some(disk) = config.disk {

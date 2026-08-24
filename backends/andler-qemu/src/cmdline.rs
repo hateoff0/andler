@@ -174,14 +174,19 @@ fn machine_and_cpu_args(cfg: &InstanceConfig) -> Vec<String> {
 fn memory_args(cfg: &InstanceConfig) -> Vec<String> {
     let size = qemu_size_suffix(cfg.memory.size_bytes);
     let share = if cfg.memory.ksm { "on" } else { "off" };
-    vec![
+    let mut args = vec![
         "-m".to_string(),
         size.clone(),
         "-object".to_string(),
         format!("memory-backend-memfd,id=mem1,size={size},share={share}"),
         "-machine".to_string(),
         "memory-backend=mem1".to_string(),
-    ]
+    ];
+    if cfg.memory.overcommit_mem_lock {
+        args.push("-overcommit".to_string());
+        args.push("mem-lock=on".to_string());
+    }
+    args
 }
 
 fn firmware_args(cfg: &InstanceConfig) -> Vec<String> {
@@ -669,6 +674,21 @@ mod tests {
         assert!(args.contains(&"memory-backend-memfd,id=mem1,size=8G,share=off".to_string()));
     }
 
+    #[test]
+    fn memory_args_no_overcommit_by_default() {
+        let cfg = start_sh_equivalent_config();
+        let args = memory_args(&cfg);
+        assert!(!args.iter().any(|a| a == "-overcommit"));
+    }
+
+    #[test]
+    fn memory_args_overcommit_mem_lock_when_enabled() {
+        let mut cfg = start_sh_equivalent_config();
+        cfg.memory.overcommit_mem_lock = true;
+        let args = memory_args(&cfg);
+        assert!(args.contains(&"-overcommit".to_string()));
+        assert!(args.contains(&"mem-lock=on".to_string()));
+    }
     #[test]
     fn firmware_args_match_start_sh() {
         let cfg = start_sh_equivalent_config();
