@@ -202,6 +202,7 @@ fn sample_create_instance_request() -> CreateInstanceRequest {
             zram: false,
             ksm: true,
             overcommit_mem_lock: false,
+            hugepages: false,
         }),
         disk: Some(disk),
         display: Some(display),

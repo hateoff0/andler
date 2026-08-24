@@ -182,6 +182,15 @@ fn memory_overcommit_mem_lock_set(cfg: &mut InstanceConfig, value: &str) -> Resu
     cfg.memory.overcommit_mem_lock = parse_bool(value)?;
     Ok(())
 }
+
+fn memory_hugepages_get(cfg: &InstanceConfig) -> String {
+    bool_str(cfg.memory.hugepages)
+}
+
+fn memory_hugepages_set(cfg: &mut InstanceConfig, value: &str) -> Result<(), String> {
+    cfg.memory.hugepages = parse_bool(value)?;
+    Ok(())
+}
 fn disk_snapshot_timeout_get(cfg: &InstanceConfig) -> String {
     match cfg.disk.snapshot_timeout_secs {
         Some(secs) => secs.to_string(),
@@ -448,6 +457,13 @@ pub fn config_keys() -> &'static [ConfigKey] {
             key: "memory.overcommit_mem_lock",
             get: memory_overcommit_mem_lock_get,
             set: Some(memory_overcommit_mem_lock_set),
+            immutable_reason: None,
+            live: false,
+        },
+        ConfigKey {
+            key: "memory.hugepages",
+            get: memory_hugepages_get,
+            set: Some(memory_hugepages_set),
             immutable_reason: None,
             live: false,
         },

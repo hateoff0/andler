@@ -96,6 +96,7 @@ Coverage by suite:
 | `24_autostart.sh` | Autostart: `create --file` with `autostart = true` reaches Running after a daemon restart with exactly one QEMU process (no double start), a non-marked instance stays Stopped, `config set autostart false/true` toggles the flag and survives a second restart |
 | `26_affinity.sh` | CPU pinning: `cpu.affinity = [0, 1]` in `instance.toml` pins the QEMU process (verified via `/proc/<pid>/status` `Cpus_allowed_list`), an overlapping pin on a running instance is refused up front, a disjoint pin starts fine, an index beyond the host CPU count is rejected before spawn |
 | `27_overcommit_mem_lock.sh` | `memory.overcommit_mem_lock` config key: false by default, `config set` true/false round-trips through `config view`, malformed value rejected, survives a daemon restart. The QEMU arg it maps to (`-overcommit mem-lock=on`) is asserted by the cmdline unit test |
+| `28_hugepages.sh` | `memory.hugepages` config key: false by default, `config set` true/false round-trips through `config view`, malformed value rejected, survives a daemon restart. The QEMU arg it maps to (`memory-backend-file` with `mem-path=/dev/hugepages`) is asserted by the cmdline unit test |
 
 ### Guest package ops: offline (07) + online (23)
 

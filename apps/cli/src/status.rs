@@ -475,6 +475,7 @@ fn print_instance_config(config: GetInstanceConfigResponse) {
         println!("  zram: {}", memory.zram);
         println!("  ksm: {}", memory.ksm);
         println!("  overcommit_mem_lock: {}", memory.overcommit_mem_lock);
+        println!("  hugepages: {}", memory.hugepages);
     }
 
     if let Some(disk) = config.disk {

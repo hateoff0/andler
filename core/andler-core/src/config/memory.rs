@@ -15,6 +15,9 @@ pub struct MemoryConfig {
 
     #[serde(default)]
     pub overcommit_mem_lock: bool,
+
+    #[serde(default)]
+    pub hugepages: bool,
 }
 
 impl MemoryConfig {
@@ -27,6 +30,7 @@ impl MemoryConfig {
             zram: false,
             ksm: true,
             overcommit_mem_lock: false,
+            hugepages: false,
         }
     }
 }
@@ -43,6 +47,7 @@ mod tests {
         assert!(!cfg.zram);
         assert!(cfg.ksm);
         assert!(!cfg.overcommit_mem_lock);
+        assert!(!cfg.hugepages);
     }
 
     #[test]
@@ -53,6 +58,7 @@ mod tests {
         assert!(!cfg.zram);
         assert!(!cfg.ksm);
         assert!(!cfg.overcommit_mem_lock);
+        assert!(!cfg.hugepages);
     }
 
     #[test]
@@ -60,5 +66,19 @@ mod tests {
         let toml = "size_bytes = 8589934592\novercommit_mem_lock = true";
         let cfg: MemoryConfig = toml::from_str(toml).unwrap();
         assert!(cfg.overcommit_mem_lock);
+    }
+
+    #[test]
+    fn hugepages_defaults_to_false_when_omitted() {
+        let minimal = "size_bytes = 8589934592";
+        let cfg: MemoryConfig = toml::from_str(minimal).unwrap();
+        assert!(!cfg.hugepages);
+    }
+
+    #[test]
+    fn hugepages_parses_true() {
+        let toml = "size_bytes = 8589934592\nhugepages = true";
+        let cfg: MemoryConfig = toml::from_str(toml).unwrap();
+        assert!(cfg.hugepages);
     }
 }

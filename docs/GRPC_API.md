@@ -91,6 +91,7 @@ Memory configuration.
 | `zram` | `bool` | Enable zram for compressed swap. |
 | `ksm` | `bool` | Enable Kernel Same-page Merging for deduplication. |
 | `overcommit_mem_lock` | `bool` | Enable memory overcommit via `mem-lock=on` in the QEMU cmdline (`-overcommit mem-lock=on`), preventing the guest RAM from being swapped out. |
+| `hugepages` | `bool` | Back the guest RAM with a hugetlbfs region (`memory-backend-file` with `mem-path=/dev/hugepages,preallocate=true`) instead of anonymous memfd, giving the guest large pages. |
 
 ### `DiskFormat`
 

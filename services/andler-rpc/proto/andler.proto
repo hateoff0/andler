@@ -67,6 +67,7 @@ message MemoryConfig {
     bool zram = 3;
     bool ksm = 4;
     bool overcommit_mem_lock = 5;
+    bool hugepages = 6;
 }
 
 enum DiskFormat {

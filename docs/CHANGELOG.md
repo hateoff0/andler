@@ -16,6 +16,7 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 #### Memory overcommit
 
 - **`memory.overcommit_mem_lock` pins the guest RAM to host memory**: set `overcommit_mem_lock = true` in `instance.toml` (or `andler config set <id> memory.overcommit_mem_lock true`) and the QEMU process is launched with `-overcommit mem-lock=on`, so the guest's RAM is locked (mlocked) and cannot be swapped out. Defaults to `false`; the key is writable only while the instance is stopped. Covered by the new `27_overcommit_mem_lock.sh` e2e suite.
+- **`memory.hugepages` backs the guest RAM with hugetlbfs**: set `hugepages = true` in `instance.toml` (or `andler config set <id> memory.hugepages true`) and the QEMU process is launched with a `memory-backend-file` object (`mem-path=/dev/hugepages,preallocate=true`) instead of anonymous `memory-backend-memfd`, so the guest's RAM is backed by large pages. Requires a mounted hugetlbfs (e.g. `mount -t hugetlbfs hugetlbfs /dev/hugepages`). Defaults to `false`; the key is writable only while the instance is stopped. Covered by the new `28_hugepages.sh` e2e suite.
 
 #### Autostart
 

@@ -218,6 +218,7 @@ impl From<proto::MemoryConfig> for MemoryConfig {
             zram: value.zram,
             ksm: value.ksm,
             overcommit_mem_lock: value.overcommit_mem_lock,
+            hugepages: value.hugepages,
         }
     }
 }
@@ -230,6 +231,7 @@ impl From<MemoryConfig> for proto::MemoryConfig {
             zram: value.zram,
             ksm: value.ksm,
             overcommit_mem_lock: value.overcommit_mem_lock,
+            hugepages: value.hugepages,
         }
     }
 }
@@ -1209,6 +1211,15 @@ mod tests {
         let msg: proto::MemoryConfig = cfg.clone().into();
         let back: MemoryConfig = msg.into();
         assert_eq!(cfg, back);
+    }
+    #[test]
+    fn memory_config_hugepages_round_trips_through_proto() {
+        let mut cfg = MemoryConfig::reference_default();
+        cfg.hugepages = true;
+        let msg: proto::MemoryConfig = cfg.clone().into();
+        assert!(msg.hugepages);
+        let back: MemoryConfig = msg.into();
+        assert!(back.hugepages);
     }
 
     #[test]

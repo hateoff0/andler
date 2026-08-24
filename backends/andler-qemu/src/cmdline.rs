@@ -174,11 +174,18 @@ fn machine_and_cpu_args(cfg: &InstanceConfig) -> Vec<String> {
 fn memory_args(cfg: &InstanceConfig) -> Vec<String> {
     let size = qemu_size_suffix(cfg.memory.size_bytes);
     let share = if cfg.memory.ksm { "on" } else { "off" };
+    let backend = if cfg.memory.hugepages {
+        format!(
+            "memory-backend-file,id=mem1,size={size},share={share},mem-path=/dev/hugepages,preallocate=true"
+        )
+    } else {
+        format!("memory-backend-memfd,id=mem1,size={size},share={share}")
+    };
     let mut args = vec![
         "-m".to_string(),
         size.clone(),
         "-object".to_string(),
-        format!("memory-backend-memfd,id=mem1,size={size},share={share}"),
+        backend,
         "-machine".to_string(),
         "memory-backend=mem1".to_string(),
     ];
@@ -690,6 +697,16 @@ mod tests {
         assert!(args.contains(&"-overcommit".to_string()));
         assert!(args.contains(&"mem-lock=on".to_string()));
         assert!(args.contains(&"-mem-prealloc".to_string()));
+    }
+
+    #[test]
+    fn memory_args_hugepages_uses_file_backend_with_hugetlbfs() {
+        let mut cfg = start_sh_equivalent_config();
+        cfg.memory.hugepages = true;
+        let args = memory_args(&cfg);
+        assert!(args
+            .contains(&"memory-backend-file,id=mem1,size=8G,share=on,mem-path=/dev/hugepages,preallocate=true".to_string()));
+        assert!(args.contains(&"memory-backend=mem1".to_string()));
     }
     #[test]
     fn firmware_args_match_start_sh() {
