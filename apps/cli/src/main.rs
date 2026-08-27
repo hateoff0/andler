@@ -176,6 +176,8 @@ pub enum ConfigCommand {
     /// loaded, plus the live-applied resolution when one is pending.
     Status {
         instance_id: Option<String>,
+        #[arg(long, help = "Emit the result as JSON instead of human-readable text")]
+        json: bool,
     },
 }
 
@@ -188,7 +190,11 @@ pub struct ConfigFlags {
     pub edit: bool,
 
     #[arg(long, short)]
+    #[arg(long, short)]
     pub file: Option<PathBuf>,
+
+    #[arg(long, help = "Emit the result as JSON instead of human-readable text")]
+    pub json: bool,
 }
 
 #[derive(Args)]
@@ -288,6 +294,9 @@ enum Command {
 
         #[arg(long)]
         linked_overlay: bool,
+
+        #[arg(long, help = "Emit the result as JSON instead of human-readable text")]
+        json: bool,
     },
 
     /// Connect to a guest: serial console, ssh, adb, or exec (auto-picks
@@ -372,12 +381,17 @@ enum Command {
 
         #[arg(long, value_enum)]
         mode: CliCloneMode,
+        #[arg(long, help = "Emit the result as JSON instead of human-readable text")]
+        json: bool,
     },
 
     /// Export an instance's disk image to a standalone file
     Export {
         source_instance_id: String,
         dest_path: String,
+
+        #[arg(long, help = "Emit the result as JSON instead of human-readable text")]
+        json: bool,
     },
 
     /// Manage QEMU snapshots (create, restore, delete, list)
@@ -404,6 +418,12 @@ enum Command {
         action: Option<DiskAction>,
         #[command(flatten)]
         flags: DiskFlags,
+        #[arg(
+            long,
+            global = true,
+            help = "Emit the result as JSON instead of human-readable text"
+        )]
+        json: bool,
     },
 
     /// Hot-plug a disk or network device into a running instance
@@ -422,6 +442,13 @@ enum Command {
     Guest {
         #[command(subcommand)]
         action: guest::GuestAction,
+
+        #[arg(
+            long,
+            global = true,
+            help = "Emit the result as JSON instead of human-readable text"
+        )]
+        json: bool,
     },
 
     /// Interactive configuration wizard (hardware auto-detection)
@@ -870,6 +897,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             instances_root,
             overlay_size_gib,
             linked_overlay,
+            json,
         }) => {
             create::handle(
                 &mut client,
@@ -895,6 +923,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 instances_root,
                 overlay_size_gib,
                 linked_overlay,
+                json,
             )
             .await?;
         }
@@ -952,12 +981,12 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                     .ok_or("instance ID required")?;
                 edit::handle(&mut client, id.to_string()).await?;
             }
-            Some(ConfigCommand::Status { instance_id }) => {
+            Some(ConfigCommand::Status { instance_id, json }) => {
                 let id = instance_id
                     .as_deref()
                     .or(flags.instance.as_deref())
                     .ok_or("instance ID required")?;
-                status::handle_config_status(&mut client, id.to_string()).await?;
+                status::handle_config_status(&mut client, id.to_string(), json).await?;
             }
             Some(ConfigCommand::Set {
                 instance_id,
@@ -1023,15 +1052,24 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             name,
             instances_root,
             mode,
+            json,
         }) => {
-            clone::handle_clone(&mut client, source_instance_id, name, instances_root, mode)
-                .await?;
+            clone::handle_clone(
+                &mut client,
+                source_instance_id,
+                name,
+                instances_root,
+                mode,
+                json,
+            )
+            .await?;
         }
         Some(Command::Export {
             source_instance_id,
             dest_path,
+            json,
         }) => {
-            clone::handle_export(&mut client, source_instance_id, dest_path).await?;
+            clone::handle_export(&mut client, source_instance_id, dest_path, json).await?;
         }
         Some(Command::Snapshot { action, json }) => {
             let instance_id = match &action {
@@ -1045,7 +1083,11 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         Some(Command::Op { action, json }) => {
             crate::op::handle(&mut client, action, json).await?;
         }
-        Some(Command::Disk { action, flags }) => {
+        Some(Command::Disk {
+            action,
+            flags,
+            json,
+        }) => {
             let resolved = match action {
                 Some(a) => a,
                 None => {
@@ -1097,10 +1139,10 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
             };
-            disk::handle(resolved).await?;
+            disk::handle(resolved, json).await?;
         }
-        Some(Command::Guest { action }) => {
-            guest::handle(&mut client, action).await?;
+        Some(Command::Guest { action, json }) => {
+            guest::handle(&mut client, action, json).await?;
         }
         Some(Command::Attach { action }) => {
             hotplug::handle_attach(&mut client, action).await?;

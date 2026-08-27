@@ -2,7 +2,20 @@ use crate::helpers::{ensure_qcow2_extension, format_size, parse_size};
 use crate::DiskAction;
 use andler_disk::DiskError;
 
-pub async fn handle(action: DiskAction) -> Result<(), Box<dyn std::error::Error>> {
+fn disk_info_json(
+    path: &std::path::Path,
+    info: &andler_disk::qcow2::DiskInfo,
+) -> serde_json::Value {
+    serde_json::json!({
+        "path": path.display().to_string(),
+        "format": info.format,
+        "virtual_size": info.virtual_size,
+        "actual_size": info.actual_size,
+        "backing_file": info.backing_file,
+    })
+}
+
+pub async fn handle(action: DiskAction, json: bool) -> Result<(), Box<dyn std::error::Error>> {
     match action {
         DiskAction::Create { path, size } => {
             let bytes = parse_size(&size)?;
@@ -15,22 +28,26 @@ pub async fn handle(action: DiskAction) -> Result<(), Box<dyn std::error::Error>
         }
         DiskAction::Info { path } => {
             let info = andler_disk::qcow2::info(&path).await?;
-            println!("path:         {}", path.display());
-            println!("format:       {}", info.format);
-            println!("virtual_size: {}", format_size(info.virtual_size));
-            let pct = if info.virtual_size > 0 {
-                info.actual_size as f64 / info.virtual_size as f64 * 100.0
+            if json {
+                println!("{}", disk_info_json(&path, &info));
             } else {
-                0.0
-            };
-            println!(
-                "actual_usage: {} ({:.1}%)",
-                format_size(info.actual_size),
-                pct
-            );
-            match info.backing_file {
-                Some(bf) => println!("backing_file: {bf}"),
-                None => println!("backing_file: none"),
+                println!("path:         {}", path.display());
+                println!("format:       {}", info.format);
+                println!("virtual_size: {}", format_size(info.virtual_size));
+                let pct = if info.virtual_size > 0 {
+                    info.actual_size as f64 / info.virtual_size as f64 * 100.0
+                } else {
+                    0.0
+                };
+                println!(
+                    "actual_usage: {} ({:.1}%)",
+                    format_size(info.actual_size),
+                    pct
+                );
+                match info.backing_file {
+                    Some(bf) => println!("backing_file: {bf}"),
+                    None => println!("backing_file: none"),
+                }
             }
         }
         DiskAction::Resize { path, size, shrink } => {
@@ -73,4 +90,38 @@ pub async fn handle(action: DiskAction) -> Result<(), Box<dyn std::error::Error>
         },
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::disk_info_json;
+    use andler_disk::qcow2::DiskInfo;
+
+    #[test]
+    fn disk_info_json_serializes_all_fields() {
+        let info = DiskInfo {
+            virtual_size: 2_147_483_648,
+            actual_size: 512_000_000,
+            format: "qcow2".to_string(),
+            backing_file: Some("base.qcow2".to_string()),
+        };
+        let json = disk_info_json(std::path::Path::new("/data/vm/disk.qcow2"), &info);
+        assert_eq!(json["path"], "/data/vm/disk.qcow2");
+        assert_eq!(json["format"], "qcow2");
+        assert_eq!(json["virtual_size"], 2_147_483_648u64);
+        assert_eq!(json["actual_size"], 512_000_000);
+        assert_eq!(json["backing_file"], "base.qcow2");
+    }
+
+    #[test]
+    fn disk_info_json_backing_file_none_is_null() {
+        let info = DiskInfo {
+            virtual_size: 1_073_741_824,
+            actual_size: 0,
+            format: "qcow2".to_string(),
+            backing_file: None,
+        };
+        let json = disk_info_json(std::path::Path::new("disk.qcow2"), &info);
+        assert!(json["backing_file"].is_null());
+    }
 }

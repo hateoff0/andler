@@ -16,6 +16,9 @@ expect_file "disk file exists" "$DISK"
 expect_ok "disk info" -- andler disk info "$DISK"
 expect_out_grep "info reports qcow2" "format: *qcow2"
 expect_out_grep "info reports virtual size" "virtual_size:"
+    expect_ok "disk info --json" -- andler disk info "$DISK" --json
+    expect_ok "disk info --json reports virtual_size" -- jq -e '.virtual_size == 1073741824' <<<"$(cat "$E2E_LAST_OUT")"
+    expect_ok "disk info --json reports backing_file null" -- jq -e '.backing_file == null' <<<"$(cat "$E2E_LAST_OUT")"
 
 echo "  [disk resize]"
 expect_ok "disk resize to 2G" -- andler disk resize "$DISK" --size 2G

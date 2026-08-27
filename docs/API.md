@@ -63,8 +63,8 @@ andler create \
 | `--arm-translator <mode>` | No | ARM→x86 translation: `none` (default), `libndk`, `libhoudini` |
 | `--overlay-size-gib <size>` | No | Overlay disk size in GiB (default: 128, Android only) |
 | `--linked-overlay` | No | Use a linked (backing-file) overlay instead of a standalone copy (Android only) |
-| `--instances-root <path>` | No | Instance directory root (default: `~/.andler/instances`) |
 | `--template <name>` | No | VM template applied over the defaults and under the CLI flags (merge order: defaults < template < flags). Built-ins: `headless` (CPU renderer, no display/audio) and `desktop` (Venus GPU, SDL display, audio). User templates live in `~/.andler/templates/<name>.toml` and accept the same partial sections. Only supported with `--kind linux` in this phase. |
+| `--json` | Output as a JSON object: `{"instance_id": "<id>"}` for a real create; with `--dry-run --json`, the fully resolved `InstanceConfig` (all config sections) serialized as JSON |
 
 On success both file and CLI modes print `Created instance <name> (<id>)`. TOML mode requires `disk_path` and `iso_path`; a missing field is a clean error (`missing required field disk_path in instance file`), and an unknown `android_version` is rejected (`unsupported value for android_version: 12`).
 
@@ -145,6 +145,8 @@ andler config --instance <instance-id> [--edit]
 
 `status` reports how `instance.toml` and the daemon's loaded config relate: the instance id/name/state, the list of keys where file and memory differ (or `file and memory are in sync`), the live-applied resolution, and any error from reading the file. On an idle instance (`Created`/`Stopped`/`Error`) a hand-edited file is applied on read, so `status` normally shows sync; on a `Running`/`Paused` instance manual edits are never applied silently — they appear as a pending diff and take effect at the next stop/start or via `config set`/`edit`.
 
+`config status --json` prints `{"instance_id", "name", "state", "live_resolution", "file_error", "diffs"}` (`live_resolution` and `file_error` are `null` when absent; `diffs` is an array of `{"key", "file_value", "memory_value"}`).
+
 `set` updates a single config key by name. Supported keys (the full whitelist lives in `andler-core` `config_keys()`):
 
 | Key | Value | Requirements |
@@ -200,6 +202,8 @@ Source must be in a terminal state (`Created`, `Stopped`, or `Error`). `LinuxVm`
 
 Cloning a clone is allowed.
 
+With `--json`, clone prints `{"instance_id", "source_instance_id"}`.
+
 ### `export`
 
 ```bash
@@ -207,6 +211,8 @@ andler export <source-id> <dest-path>
 ```
 
 Exports the instance disk as a standalone file at `dest_path`. Does not create a new instance. Source must be in a terminal state (`Created`, `Stopped`, or `Error`).
+
+With `--json`, export prints `{"dest_path", "source_instance_id"}`.
 
 ### `logs`
 
@@ -340,6 +346,8 @@ andler disk compact /path/to/disk.qcow2
 
 The flag form (`andler disk --create --path <p> --size <s>`, `--info`, `--resize`, `--compact`) is also accepted; the action flags are mutually exclusive (`disk: actions are mutually exclusive, got --create and --info`), and at least one is required.
 
+`disk info --json` prints `{"path", "format", "virtual_size", "actual_size", "backing_file"}` (`backing_file` is `null` when the disk has no backing file).
+
 ### `op`
 
 Long-running operation inspection and cancellation. Snapshot restores and
@@ -468,6 +476,8 @@ is visible on `andler events` and cancellable. If the guest agent does not
 appear within `ANDLERD_GUEST_AGENT_WAIT_SECS` (default 120 s) the
 operation fails with a hint to retry with `--offline` — that path uses
 the offline guestmount + userns path — zero root, no sudoers rules.
+
+`guest list --json` prints `{"packages": [{"name", "description", "status"}]}`.
 
 ### Provision manifests
 

@@ -1,8 +1,8 @@
 use crate::TracedClient;
 use andler_rpc::proto::{
-    AndroidBootMode as ProtoAndroidBootMode, GuestProvisionRequest, InstallGuestAgentRequest,
-    InstanceIdRequest, RemoveGuestAgentRequest, SwitchAndroidBootModeRequest,
-    SwitchArmTranslatorRequest,
+    AndroidBootMode as ProtoAndroidBootMode, GuestPackageEntry, GuestProvisionRequest,
+    InstallGuestAgentRequest, InstanceIdRequest, RemoveGuestAgentRequest,
+    SwitchAndroidBootModeRequest, SwitchArmTranslatorRequest,
 };
 
 use std::io::IsTerminal;
@@ -74,9 +74,22 @@ pub enum GuestAction {
     },
 }
 
+fn package_json(pkg: &GuestPackageEntry) -> serde_json::Value {
+    serde_json::json!({
+        "name": pkg.name,
+        "description": pkg.description,
+        "status": pkg.status,
+    })
+}
+
+fn packages_json(packages: &[serde_json::Value]) -> serde_json::Value {
+    serde_json::json!({ "packages": packages })
+}
+
 pub async fn handle(
     client: &mut TracedClient,
     action: GuestAction,
+    json: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     match action {
         GuestAction::List { instance_id: None } => {
@@ -94,8 +107,10 @@ pub async fn handle(
             };
             let response = client.list_guest_packages(request).await?;
             let packages = response.into_inner().packages;
-
-            if packages.is_empty() {
+            let rows: Vec<serde_json::Value> = packages.iter().map(package_json).collect();
+            if json {
+                println!("{}", packages_json(&rows));
+            } else if packages.is_empty() {
                 println!("No known packages.");
             } else {
                 let is_tty = std::io::stdout().is_terminal();
@@ -260,4 +275,35 @@ pub async fn handle(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{package_json, packages_json};
+    use andler_rpc::proto::GuestPackageEntry;
+
+    #[test]
+    fn package_json_serializes_all_fields() {
+        let pkg = GuestPackageEntry {
+            name: "guest-tools".to_string(),
+            description: "guest tools".to_string(),
+            status: "installed".to_string(),
+        };
+        let json = package_json(&pkg);
+        assert_eq!(json["name"], "guest-tools");
+        assert_eq!(json["description"], "guest tools");
+        assert_eq!(json["status"], "installed");
+    }
+
+    #[test]
+    fn packages_json_wraps_rows() {
+        let rows: Vec<serde_json::Value> = vec![package_json(&GuestPackageEntry {
+            name: "a".to_string(),
+            description: "b".to_string(),
+            status: "installed".to_string(),
+        })];
+        let json = packages_json(&rows);
+        assert!(json["packages"].is_array());
+        assert_eq!(json["packages"][0]["name"], "a");
+    }
 }

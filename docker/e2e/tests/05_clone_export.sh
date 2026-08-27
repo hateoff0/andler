@@ -24,6 +24,9 @@ echo "  [clone modes]"
 LINKED="$(andler clone "$SRC" --name linked-clone --instances-root "$ANDROID_ROOT" --mode linked | sed -n 's/^cloned instance_id=//p')"
 [[ -n "$LINKED" ]] || fail "empty id from clone --mode linked"
 pass "clone --mode linked"
+    expect_ok "clone --json" -- andler clone "$SRC" --name linked-clone-json --instances-root "$ANDROID_ROOT" --mode linked --json
+    expect_ok "clone --json reports source_instance_id" -- jq -e '.source_instance_id == "'"$SRC"'"' <<<"$(cat "$E2E_LAST_OUT")"
+    expect_ok "clone --json reports instance_id" -- jq -e '.instance_id | test("^[0-9a-f]{64}$")' <<<"$(cat "$E2E_LAST_OUT")"
 
 expect_fail "remove --purge on source with a live linked clone" -- andler remove "$SRC" --purge
 expect_err_grep "live-clone protection message" "live"
@@ -75,6 +78,9 @@ expect_fail "clone of a nonexistent source" -- andler clone "$UNKNOWN_ID" --name
 echo "  [export]"
 expect_ok "export to a standalone file" -- andler export "$SRC" "$WORK/exported-android-disk.qcow2"
 expect_file "exported disk exists" "$WORK/exported-android-disk.qcow2"
+    expect_ok "export --json" -- andler export "$SRC" "$WORK/exported-android-disk.qcow2" --json
+    expect_ok "export --json reports dest_path" -- jq -e '.dest_path == "'"$WORK/exported-android-disk.qcow2"'"' <<<"$(cat "$E2E_LAST_OUT")"
+    expect_ok "export --json reports source_instance_id" -- jq -e '.source_instance_id == "'"$SRC"'"' <<<"$(cat "$E2E_LAST_OUT")"
 
 expect_fail "export of a nonexistent source" -- andler export "$UNKNOWN_ID" "$WORK/x.qcow2"
 

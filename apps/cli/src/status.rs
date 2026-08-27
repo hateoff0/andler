@@ -1,8 +1,8 @@
 use crate::TracedClient;
 use andler_rpc::proto::{
     instance_kind, network_mode, render_backend, AudioBackend, CpuPriority, DiskFormat,
-    DisplayEngine, Empty, GetInstanceConfigResponse, InstanceIdRequest, InstanceStateKind,
-    LogStreamSource,
+    DisplayEngine, Empty, GetConfigStatusResponse, GetInstanceConfigResponse, InstanceIdRequest,
+    InstanceStateKind, InstanceStatusResponse, LogStreamSource,
 };
 use std::io::IsTerminal;
 
@@ -10,6 +10,15 @@ use crate::helpers::{
     colorize_status, format_bytes, format_bytes_per_sec, format_size, state_kind_name,
 };
 use crate::{CliLogSource, ListSortKey};
+
+fn status_json(instance_id: &str, response: &InstanceStatusResponse) -> serde_json::Value {
+    serde_json::json!({
+        "instance_id": instance_id,
+        "state": state_kind_name(response.state()),
+        "detail": response.detail,
+        "error_message": response.error_message,
+    })
+}
 
 pub async fn handle_status(
     client: &mut TracedClient,
@@ -24,24 +33,7 @@ pub async fn handle_status(
         .into_inner();
     let state = response.state();
     if json {
-        #[derive(serde::Serialize)]
-        struct InstanceStatusJson<'a> {
-            instance_id: &'a str,
-            state: &'a str,
-            #[serde(skip_serializing_if = "str::is_empty")]
-            detail: &'a str,
-            #[serde(skip_serializing_if = "str::is_empty")]
-            error_message: &'a str,
-        }
-        println!(
-            "{}",
-            serde_json::to_string(&InstanceStatusJson {
-                instance_id: &instance_id,
-                state: state_kind_name(state),
-                detail: &response.detail,
-                error_message: &response.error_message,
-            })?
-        );
+        println!("{}", status_json(&instance_id, &response));
         return Ok(());
     }
     println!(
@@ -190,39 +182,65 @@ pub async fn handle_config(
     Ok(())
 }
 
+fn config_status_json(response: &GetConfigStatusResponse) -> serde_json::Value {
+    let diffs: Vec<serde_json::Value> = response
+        .diffs
+        .iter()
+        .map(|d| {
+            serde_json::json!({
+                "key": d.key,
+                "file_value": d.file_value,
+                "memory_value": d.memory_value,
+            })
+        })
+        .collect();
+    serde_json::json!({
+        "instance_id": crate::helpers::short_id(&response.instance_id),
+        "name": response.name,
+        "state": state_kind_name(response.state()),
+        "live_resolution": response.live_resolution,
+        "file_error": response.file_error,
+        "diffs": diffs,
+    })
+}
+
 pub async fn handle_config_status(
     client: &mut TracedClient,
     instance_id: String,
+    json: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let response = client
         .get_config_status(InstanceIdRequest { instance_id })
         .await?
         .into_inner();
-
-    println!(
-        "instance_id: {}",
-        crate::helpers::short_id(&response.instance_id)
-    );
-    println!("name: {}", response.name);
-    println!("state: {}", state_kind_name(response.state()));
-    if let Some(resolution) = &response.live_resolution {
-        println!("live_resolution: {resolution}");
-    }
-    if let Some(error) = &response.file_error {
-        println!("file_error: {error}");
-    }
-    if response.diffs.is_empty() {
-        println!("config: file and memory are in sync");
+    if json {
+        println!("{}", config_status_json(&response));
     } else {
         println!(
-            "config: {} key(s) differ between file and memory:",
-            response.diffs.len()
+            "instance_id: {}",
+            crate::helpers::short_id(&response.instance_id)
         );
-        for diff in &response.diffs {
+        println!("name: {}", response.name);
+        println!("state: {}", state_kind_name(response.state()));
+        if let Some(resolution) = &response.live_resolution {
+            println!("live_resolution: {resolution}");
+        }
+        if let Some(error) = &response.file_error {
+            println!("file_error: {error}");
+        }
+        if response.diffs.is_empty() {
+            println!("config: file and memory are in sync");
+        } else {
             println!(
-                "  {:<24} file={}  memory={}",
-                diff.key, diff.file_value, diff.memory_value
+                "config: {} key(s) differ between file and memory:",
+                response.diffs.len()
             );
+            for diff in &response.diffs {
+                println!(
+                    "  {:<24} file={}  memory={}",
+                    diff.key, diff.file_value, diff.memory_value
+                );
+            }
         }
     }
     Ok(())
@@ -633,9 +651,14 @@ fn print_instance_config(config: GetInstanceConfigResponse) {
 
 #[cfg(test)]
 mod tests {
-    use super::{log_line_matches_filters, parse_state_filter, MetricsJson};
+    use super::{
+        config_status_json, log_line_matches_filters, parse_state_filter, status_json, MetricsJson,
+    };
     use crate::CliLogSource;
-    use andler_rpc::proto::{InstanceStateKind, LogLineResponse, LogStreamSource};
+    use andler_rpc::proto::{
+        ConfigKeyDiff, GetConfigStatusResponse, InstanceStateKind, InstanceStatusResponse,
+        LogLineResponse, LogStreamSource,
+    };
 
     fn line(source: LogStreamSource, text: &str) -> LogLineResponse {
         let mut msg = LogLineResponse {
@@ -744,6 +767,69 @@ mod tests {
         assert!(json.contains("\"cpu_percent\":12.3"));
         assert!(json.contains("\"rss_bytes\":2254857830"));
         assert!(json.contains("\"vram_used_bytes\":null"));
+    }
+    #[test]
+    fn status_json_serializes_expected_fields() {
+        let response = InstanceStatusResponse {
+            state: InstanceStateKind::Running as i32,
+            detail: "running fine".to_string(),
+            error_message: String::new(),
+        };
+        let json = status_json("0123456789abcdef0123456789abcdef", &response);
+        assert_eq!(json["instance_id"], "0123456789abcdef0123456789abcdef");
+        assert_eq!(json["state"], "Running");
+        assert_eq!(json["detail"], "running fine");
+        assert_eq!(json["error_message"], "");
+    }
+
+    #[test]
+    fn status_json_state_maps_through_state_kind_name() {
+        let response = InstanceStatusResponse {
+            state: InstanceStateKind::Error as i32,
+            detail: String::new(),
+            error_message: "boom".to_string(),
+        };
+        let json = status_json("deadbeef", &response);
+        assert_eq!(json["state"], "Error");
+        assert_eq!(json["error_message"], "boom");
+    }
+
+    #[test]
+    fn config_status_json_serializes_diffs_and_metadata() {
+        let response = GetConfigStatusResponse {
+            instance_id: "0123456789abcdef0123456789abcdef".to_string(),
+            name: "vm-1".to_string(),
+            state: InstanceStateKind::Running as i32,
+            live_resolution: Some("1920x1080".to_string()),
+            file_error: None,
+            diffs: vec![ConfigKeyDiff {
+                key: "memory.size_bytes".to_string(),
+                file_value: "1073741824".to_string(),
+                memory_value: "2147483648".to_string(),
+            }],
+        };
+        let json = config_status_json(&response);
+        assert_eq!(json["name"], "vm-1");
+        assert_eq!(json["state"], "Running");
+        assert_eq!(json["live_resolution"], "1920x1080");
+        assert_eq!(json["diffs"][0]["key"], "memory.size_bytes");
+        assert_eq!(json["diffs"][0]["file_value"], "1073741824");
+        assert_eq!(json["diffs"][0]["memory_value"], "2147483648");
+    }
+
+    #[test]
+    fn config_status_json_reports_file_error() {
+        let response = GetConfigStatusResponse {
+            instance_id: "0123456789abcdef0123456789abcdef".to_string(),
+            name: "vm-1".to_string(),
+            state: InstanceStateKind::Stopped as i32,
+            live_resolution: None,
+            file_error: Some("missing field 'cpu'".to_string()),
+            diffs: vec![],
+        };
+        let json = config_status_json(&response);
+        assert_eq!(json["file_error"], "missing field 'cpu'");
+        assert!(json["diffs"].is_array());
     }
 }
 

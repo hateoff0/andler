@@ -116,6 +116,9 @@ expect_out_grep "install reports success" "installed successfully"
 
 expect_ok "guest list after install" -- andler guest list "$LID"
 expect_out_grep "qemu-ga now installed" "qemu-guest-agent.*installed"
+    expect_ok "guest list --json" -- timeout 120 andler guest list "$LID" --json
+    expect_ok "guest list --json reports an array of packages" -- jq -e '.packages | type == "array"' <<<"$(cat "$E2E_LAST_OUT")"
+    expect_ok "guest list --json reports qemu-guest-agent installed" -- jq -e '.packages[] | select(.name == "qemu-guest-agent") | .status == "installed"' <<<"$(cat "$E2E_LAST_OUT")"
 
 expect_ok "guest remove qemu-guest-agent" -- timeout 300 andler guest remove qemu-guest-agent "$LID" --offline
 expect_out_grep "remove reports success" "removed successfully"

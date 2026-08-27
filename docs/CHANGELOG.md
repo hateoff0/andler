@@ -13,6 +13,9 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Added
 
+#### --json CLI output
+- **`--json` output for more commands**: `create` (real and `--dry-run`), `clone`, `export`, `disk info`, `guest list`, `config status`, and `status` now accept `--json` for machine-readable output. `create --dry-run --json` serializes the resolved `InstanceConfig`; `clone`/`export` report the new id/dest plus the `source_instance_id`; `disk info` reports `{path, format, virtual_size, actual_size, backing_file}`; `guest list` reports `{packages: [{name, description, status}]}`; `config status` and `status` report the instance id, state, and any error. Covered by the `02_config`, `03_disk`, `05_clone_export`, `07_guest`, and `08_preview_verify` e2e suites.
+
 #### Memory overcommit
 
 - **`memory.overcommit_mem_lock` pins the guest RAM to host memory**: set `overcommit_mem_lock = true` in `instance.toml` (or `andler config set <id> memory.overcommit_mem_lock true`) and the QEMU process is launched with `-overcommit mem-lock=on`, so the guest's RAM is locked (mlocked) and cannot be swapped out. Defaults to `false`; the key is writable only while the instance is stopped. Covered by the new `27_overcommit_mem_lock.sh` e2e suite.

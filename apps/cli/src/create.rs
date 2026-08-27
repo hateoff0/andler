@@ -8,6 +8,10 @@ use crate::instance_file::{InstanceFile, InstanceFileResult};
 use crate::wizard::{PartialArgs, WizardError, WizardKind};
 use crate::{CliAndroidVersion, CliArmTranslator, CliCdromBus, CliKind};
 
+fn created_json(id: &str) -> serde_json::Value {
+    serde_json::json!({ "instance_id": id })
+}
+
 #[allow(clippy::too_many_arguments)] // mirrors all create CLI flags; splitting adds indirection for no benefit
 pub async fn handle(
     client: &mut TracedClient,
@@ -33,6 +37,7 @@ pub async fn handle(
     instances_root: String,
     overlay_size_gib: u64,
     linked_overlay: bool,
+    json: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let has_file = file.is_some();
     let has_kind = kind.is_some();
@@ -198,17 +203,26 @@ pub async fn handle(
                 template.as_ref(),
             );
             if dry_run {
-                return crate::preview::print_linux_preview(&req);
+                if json {
+                    let resolved = crate::preview::resolve_linux(&req)?;
+                    println!("{}", serde_json::to_string(&resolved.cfg)?);
+                } else {
+                    return crate::preview::print_linux_preview(&req);
+                }
             }
             if verify {
                 return exit_on_verify_result(crate::verify::verify_linux(&req)?);
             }
             let response = client.create_instance(req).await?;
             let id = response.into_inner().instance_id;
-            println!(
-                "Created instance {name} ({})",
-                crate::helpers::short_id(&id)
-            );
+            if json {
+                println!("{}", created_json(&id));
+            } else {
+                println!(
+                    "Created instance {name} ({})",
+                    crate::helpers::short_id(&id)
+                );
+            }
         }
         CliKind::Android => {
             let av = android_version.ok_or("--android-version is required for --kind android")?;
@@ -234,17 +248,26 @@ pub async fn handle(
                 linked_overlay,
             );
             if dry_run {
-                return crate::preview::print_android_preview(&req);
+                if json {
+                    let resolved = crate::preview::resolve_android(&req)?;
+                    println!("{}", serde_json::to_string(&resolved.cfg)?);
+                } else {
+                    return crate::preview::print_android_preview(&req);
+                }
             }
             if verify {
                 return exit_on_verify_result(crate::verify::verify_android(&req)?);
             }
             let response = client.create_android_instance(req).await?;
             let id = response.into_inner().instance_id;
-            println!(
-                "Created instance {name} ({})",
-                crate::helpers::short_id(&id)
-            );
+            if json {
+                println!("{}", created_json(&id));
+            } else {
+                println!(
+                    "Created instance {name} ({})",
+                    crate::helpers::short_id(&id)
+                );
+            }
         }
     }
 
@@ -464,6 +487,12 @@ mod tests {
     #[test]
     fn validate_base_image_path_existing_is_allowed() {
         assert!(validate_base_image_path("/tmp").is_ok());
+    }
+
+    #[test]
+    fn created_json_serializes_instance_id() {
+        let json = created_json("0123456789abcdef0123456789abcdef");
+        assert_eq!(json["instance_id"], "0123456789abcdef0123456789abcdef");
     }
 
     #[test]

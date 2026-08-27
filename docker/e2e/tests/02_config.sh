@@ -47,6 +47,9 @@ unset VISUAL
 echo "  [config status]"
 expect_ok "config status in sync after set/edit" -- andler config status "$ID"
 expect_out_grep "status shows in sync" "in sync"
+    expect_ok "config status --json" -- andler config status "$ID" --json
+    expect_ok "config status --json reports a valid instance id" -- jq -e '.instance_id | test("^[0-9a-f]{12}")' <<<"$(cat "$E2E_LAST_OUT")"
+    expect_ok "config status --json reports in-sync state" -- jq -e '.state == "Created" and (.diffs | length == 0)' <<<"$(cat "$E2E_LAST_OUT")"
 
 # A manual edit visible to the daemon after a status call: on a stopped
 # instance the file is applied on read, so the status stays in sync and the

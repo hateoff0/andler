@@ -15,6 +15,9 @@ expect_ok "dry-run resolves a Linux VM" -- andler create --kind linux --name dry
 expect_out_grep "dry-run header" "Dry run: this would create"
 expect_out_grep "dry-run kind" "Type: *Linux VM"
 expect_out_grep "dry-run disk line" "^Disk:"
+    expect_ok "create --json dry-run" -- andler create --kind linux --name dry-json --iso-path "$WORK/empty.iso" --disk-path "$WORK/dry-json.qcow2" --ovmf-vars-template "$WORK/VARS.fd" --dry-run --json
+    expect_ok "create --json dry-run reports name" -- jq -e '.name == "dry-json"' <<<"$(cat "$E2E_LAST_OUT")"
+    expect_ok "create --json dry-run reports LinuxVm kind" -- jq -e '.kind | has("LinuxVm")' <<<"$(cat "$E2E_LAST_OUT")"
 
 expect_ok "nothing was created by --dry-run" -- andler list
 expect_out_grep "no instances" "no instances"
