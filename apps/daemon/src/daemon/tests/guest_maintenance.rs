@@ -4,7 +4,7 @@ use andler_core::{
     BackendError, BackendHandle, GuestMutator, InstanceConfig, InstanceId, InstanceState,
     MutatorError, MutatorOp,
 };
-use std::sync::atomic::{AtomicBool, AtomicUsize};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 /// Backend whose guest agent appears immediately after spawn; records
@@ -164,7 +164,7 @@ async fn stopped_install_auto_starts_installs_and_stops_again() {
     let (daemon, mock, id) = stopped_instance_with_maintenance_backend(dir.path(), true).await;
 
     daemon
-        .install_guest_agent(id, "htop".to_string(), false)
+        .install_guest_agent(id, "htop".to_string(), false, None)
         .await
         .unwrap();
 
@@ -182,7 +182,7 @@ async fn stopped_remove_auto_starts_removes_and_stops_again() {
     let (daemon, mock, id) = stopped_instance_with_maintenance_backend(dir.path(), true).await;
 
     daemon
-        .remove_guest_agent(id, "htop".to_string(), false)
+        .remove_guest_agent(id, "htop".to_string(), false, None)
         .await
         .unwrap();
 
@@ -199,7 +199,7 @@ async fn stopped_install_without_agent_fails_and_leaves_instance_stopped() {
     let (daemon, mock, id) = stopped_instance_with_maintenance_backend(dir.path(), false).await;
 
     let err = daemon
-        .install_guest_agent(id, "htop".to_string(), false)
+        .install_guest_agent(id, "htop".to_string(), false, None)
         .await
         .unwrap_err();
 
@@ -235,7 +235,7 @@ async fn offline_flag_on_running_instance_is_refused() {
         .insert(andler_core::BackendKind::Qemu, mock.clone());
 
     let err = daemon
-        .install_guest_agent(id, "htop".to_string(), true)
+        .install_guest_agent(id, "htop".to_string(), true, None)
         .await
         .unwrap_err();
     assert!(matches!(err, DaemonError::InvalidConfig(_)), "err: {err}");
@@ -420,7 +420,7 @@ async fn running_install_runs_as_supervisor_operation() {
         .insert(andler_core::BackendKind::Qemu, mock.clone());
 
     daemon
-        .install_guest_agent(id, "htop".to_string(), false)
+        .install_guest_agent(id, "htop".to_string(), false, None)
         .await
         .unwrap();
 
@@ -439,5 +439,250 @@ async fn running_install_runs_as_supervisor_operation() {
     assert!(
         handle.active_operation().await.unwrap().is_none(),
         "operation must be finished after the install returns"
+    );
+}
+
+/// Backend whose guest-agent install blocks on a gate until the test
+/// releases it, so an operation can be held in-flight to exercise the
+/// supervisor's idempotency-key join.
+struct GateBackend {
+    installs: AtomicUsize,
+    removes: AtomicUsize,
+    spawns: AtomicUsize,
+    release: tokio::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<()>>,
+}
+
+impl GateBackend {
+    fn new(release: tokio::sync::mpsc::UnboundedReceiver<()>) -> Self {
+        GateBackend {
+            installs: AtomicUsize::new(0),
+            removes: AtomicUsize::new(0),
+            spawns: AtomicUsize::new(0),
+            release: tokio::sync::Mutex::new(release),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl andler_core::HypervisorBackend for GateBackend {
+    fn name(&self) -> &'static str {
+        "gate-mock"
+    }
+
+    fn supported_render_backends(&self) -> &[andler_core::RenderBackend] {
+        &[]
+    }
+
+    async fn spawn(&self, _cfg: &InstanceConfig) -> Result<BackendHandle, BackendError> {
+        self.spawns.fetch_add(1, Ordering::SeqCst);
+        Ok(BackendHandle("gate-mock:vm".to_string()))
+    }
+
+    async fn pause(&self, _handle: &BackendHandle) -> Result<(), BackendError> {
+        Ok(())
+    }
+
+    async fn resume(&self, _handle: &BackendHandle) -> Result<(), BackendError> {
+        Ok(())
+    }
+
+    async fn stop(&self, _handle: &BackendHandle, _graceful: bool) -> Result<(), BackendError> {
+        Ok(())
+    }
+
+    async fn status(
+        &self,
+        _handle: &BackendHandle,
+    ) -> Result<andler_core::BackendStatus, BackendError> {
+        Ok(andler_core::BackendStatus {
+            state: InstanceState::Running,
+            detail: None,
+            clean_shutdown: false,
+        })
+    }
+
+    async fn is_guest_agent_available(
+        &self,
+        _handle: &BackendHandle,
+    ) -> Result<bool, BackendError> {
+        Ok(true)
+    }
+
+    async fn guest_exec_install(
+        &self,
+        _handle: &BackendHandle,
+        _package: &str,
+    ) -> Result<(), BackendError> {
+        self.installs.fetch_add(1, Ordering::SeqCst);
+        // Hold the operation in-flight until the test releases the gate.
+        let _ = self.release.lock().await.recv().await;
+        Ok(())
+    }
+
+    async fn guest_exec_remove(
+        &self,
+        _handle: &BackendHandle,
+        _package: &str,
+    ) -> Result<(), BackendError> {
+        self.removes.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+
+    async fn guest_exec_command(
+        &self,
+        _handle: &BackendHandle,
+        _argv: &[String],
+        _timeout: Option<std::time::Duration>,
+    ) -> Result<andler_core::GuestExecOutput, BackendError> {
+        Err(BackendError::NotImplemented {
+            backend: "gate-mock",
+            operation: "guest_exec_command",
+        })
+    }
+
+    async fn guest_mutator(
+        &self,
+        _handle: &BackendHandle,
+    ) -> Result<Box<dyn GuestMutator>, BackendError> {
+        Err(BackendError::NotImplemented {
+            backend: "gate-mock",
+            operation: "guest_mutator",
+        })
+    }
+
+    fn metrics_stream(
+        &self,
+        _handle: &BackendHandle,
+    ) -> futures_core::stream::BoxStream<'_, andler_core::ResourceMetrics> {
+        Box::pin(futures_util::stream::empty())
+    }
+
+    fn log_stream(
+        &self,
+        _handle: &BackendHandle,
+    ) -> futures_core::stream::BoxStream<'_, andler_core::LogLine> {
+        Box::pin(futures_util::stream::empty())
+    }
+}
+
+/// A stopped instance whose backend blocks `guest_exec_install` on a gate,
+/// plus the sender used to release it.
+async fn stopped_instance_with_gate_backend(
+    dir: &std::path::Path,
+) -> (
+    Arc<Daemon>,
+    Arc<GateBackend>,
+    tokio::sync::mpsc::UnboundedSender<()>,
+    InstanceId,
+) {
+    let mut daemon = Daemon::new();
+    let mut cfg = sample_config();
+    cfg.disk.path = dir.join("disk.qcow2");
+    std::fs::write(&cfg.disk.path, b"x").unwrap();
+    let id = cfg.id;
+    let (release_tx, release_rx) = tokio::sync::mpsc::unbounded_channel();
+    let mock = Arc::new(GateBackend::new(release_rx));
+    register_with_state(&daemon, cfg, InstanceState::Stopped, None).await;
+    daemon
+        .backends
+        .insert(andler_core::BackendKind::Qemu, mock.clone());
+    (Arc::new(daemon), mock, release_tx, id)
+}
+
+/// Waits until the instance has an active operation (bounded so a hang
+/// reports as a test failure, never a deadlock).
+async fn wait_for_active_operation(daemon: &Arc<Daemon>, id: InstanceId) {
+    let handle = daemon.handle_for(id).await.unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while handle.active_operation().await.unwrap().is_none() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the operation never registered as active"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+}
+
+/// A network retry that carries the SAME idempotency token joins the
+/// in-flight operation instead of starting a second one.
+#[tokio::test]
+async fn install_with_same_idempotency_token_joins_in_flight_operation() {
+    let dir = TestTempDir::new();
+    let (daemon, mock, release, id) = stopped_instance_with_gate_backend(dir.path()).await;
+
+    let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+    let daemon_first = daemon.clone();
+    let first = tokio::spawn(async move {
+        let r = daemon_first
+            .install_guest_agent(id, "htop".to_string(), false, Some("tok-A".to_string()))
+            .await;
+        let _ = result_tx.send(r);
+    });
+    wait_for_active_operation(&daemon, id).await;
+
+    // A retry with the same token must join, not start a second install.
+    let retry = daemon
+        .install_guest_agent(id, "htop".to_string(), false, Some("tok-A".to_string()))
+        .await;
+    assert!(
+        retry.is_ok(),
+        "same-token retry must join the in-flight install, got: {retry:?}"
+    );
+
+    let _ = release.send(());
+    first
+        .await
+        .expect("the first install must complete once the gate is released");
+    let first_result = result_rx.await.expect("result channel stays open");
+    assert!(
+        first_result.is_ok(),
+        "the first install must succeed, got: {first_result:?}"
+    );
+
+    assert_eq!(
+        mock.installs.load(Ordering::SeqCst),
+        1,
+        "only one install must run; the retry joined the first"
+    );
+    let handle = daemon.handle_for(id).await.unwrap();
+    assert_eq!(
+        handle.state(),
+        InstanceState::Stopped,
+        "the auto-started maintenance VM is stopped again"
+    );
+}
+
+/// A network retry that carries a DIFFERENT idempotency token is refused
+/// with OperationAlreadyRunning, because the join key differs.
+#[tokio::test]
+async fn install_with_different_idempotency_token_is_refused() {
+    let dir = TestTempDir::new();
+    let (daemon, mock, release, id) = stopped_instance_with_gate_backend(dir.path()).await;
+
+    let daemon_first = daemon.clone();
+    let first = tokio::spawn(async move {
+        daemon_first
+            .install_guest_agent(id, "htop".to_string(), false, Some("tok-A".to_string()))
+            .await
+    });
+    wait_for_active_operation(&daemon, id).await;
+
+    let retry = daemon
+        .install_guest_agent(id, "htop".to_string(), false, Some("tok-B".to_string()))
+        .await;
+    assert!(
+        matches!(retry, Err(DaemonError::OperationAlreadyRunning { .. })),
+        "a different-token retry must be refused, got: {retry:?}"
+    );
+
+    let _ = release.send(());
+    first
+        .await
+        .expect("the first install must complete once the gate is released");
+
+    assert_eq!(
+        mock.installs.load(Ordering::SeqCst),
+        1,
+        "only one install must run; the different-token retry was refused"
     );
 }

@@ -433,6 +433,10 @@ message RestoreSnapshotRequest {
     // True: keep the current chain as an archived branch and continue from
     // the target. False (default): discard layers newer than the target.
     bool branch = 4;
+    // Client-supplied idempotency key: a retry with the same token joins the
+    // in-flight restore instead of starting a second one. Omit for the
+    // default key `snapshot-restore:<tag>`.
+    optional string idempotency_token = 5;
 }
 
 message DeleteSnapshotRequest {
@@ -523,12 +527,20 @@ message InstallGuestAgentRequest {
     // stopped. Default (false) is the smart path: install online via QGA,
     // auto-starting a stopped instance for maintenance when needed.
     bool offline = 3;
+    // Client-supplied idempotency key: a retry with the same token joins the
+    // in-flight install instead of starting a second one. Omit for the
+    // default key `guest-install:<package>`.
+    optional string idempotency_token = 4;
 }
 
 message RemoveGuestAgentRequest {
     string instance_id = 1;
     string package = 2;
     bool offline = 3;
+    // Client-supplied idempotency key: a retry with the same token joins the
+    // in-flight remove instead of starting a second one. Omit for the
+    // default key `guest-remove:<package>`.
+    optional string idempotency_token = 4;
 }
 
 message ListGuestPackagesResponse {

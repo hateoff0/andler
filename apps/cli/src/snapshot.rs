@@ -55,6 +55,7 @@ pub async fn handle(
             tag,
             timeout,
             branch,
+            idempotency_token,
         } => {
             let pb = spinner(&format!("Restoring snapshot \"{tag}\"..."));
             let result = client
@@ -63,6 +64,7 @@ pub async fn handle(
                     tag: tag.clone(),
                     timeout_secs: timeout,
                     branch,
+                    idempotency_token,
                 })
                 .await;
             pb.finish_and_clear();

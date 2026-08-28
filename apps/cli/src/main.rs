@@ -539,6 +539,11 @@ enum SnapshotAction {
         /// discarding layers newer than the target.
         #[arg(long)]
         branch: bool,
+
+        /// Client-supplied idempotency key: a network retry with the same
+        /// token joins the in-flight restore instead of starting a second one.
+        #[arg(long)]
+        idempotency_token: Option<String>,
     },
 
     Delete {

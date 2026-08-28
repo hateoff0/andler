@@ -13,6 +13,10 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Added
 
+#### Idempotency tokens
+
+- **`--idempotency-token` makes a network retry idempotent**: `guest install/remove <pkg> <id> --idempotency-token <key>` and `snapshot restore <id> --tag <tag> --idempotency-token <key>` accept a client-chosen key. A second call with the same token while the first is still in-flight joins the running operation (it runs once; the second call returns its result) instead of starting a duplicate; a call with a *different* token while one is in-flight is refused with `OperationAlreadyRunning` (a `FAILED_PRECONDITION`). Omit the flag and the operation's own id is used as the key, so a repeat of an identical call still joins. The token is used as the in-flight-operation join key on the online guest path (a running VM, or a stopped VM auto-started for maintenance) and on online snapshot restore; on the offline `--offline` guest path it is accepted but unused. Covered by the `guest_maintenance` daemon unit tests and the `23_online_install.sh` e2e suite.
+
 #### --json CLI output
 - **`--json` output for more commands**: `create` (real and `--dry-run`), `clone`, `export`, `disk info`, `guest list`, `config status`, and `status` now accept `--json` for machine-readable output. `create --dry-run --json` serializes the resolved `InstanceConfig`; `clone`/`export` report the new id/dest plus the `source_instance_id`; `disk info` reports `{path, format, virtual_size, actual_size, backing_file}`; `guest list` reports `{packages: [{name, description, status}]}`; `config status` and `status` report the instance id, state, and any error. Covered by the `02_config`, `03_disk`, `05_clone_export`, `07_guest`, and `08_preview_verify` e2e suites.
 

@@ -335,6 +335,12 @@ Restore/delete are refused while linked clones derive from the instance's disk c
 chain contains it. Deleting the base layer (the first snapshot) is refused — there is no
 parent to merge its data into.
 
+`snapshot restore` accepts `--idempotency-token <key>` (online restore only).
+A repeat with the same token while a restore is in-flight joins the running
+restore; a repeat with a *different* token is refused with
+`OperationAlreadyRunning`. Omit the flag and the operation's own id is used as
+the key.
+
 `delete` asks for confirmation on an interactive terminal (answering `n` prints `Cancelled.` and keeps the snapshot).
 
 List output shows `tag`, `id`, `created_at` (human-readable local time), `description`,
@@ -503,6 +509,16 @@ is visible on `andler events` and cancellable. If the guest agent does not
 appear within `ANDLERD_GUEST_AGENT_WAIT_SECS` (default 120 s) the
 operation fails with a hint to retry with `--offline` — that path uses
 the offline guestmount + userns path — zero root, no sudoers rules.
+Both `guest install` and `guest remove` accept `--idempotency-token <key>`, a
+client-chosen key that makes a network retry idempotent: a second call with the
+same token while the first is still in-flight joins the running operation
+(install/remove runs once, and the second call returns its result) instead of
+starting a duplicate. A call with a *different* token while one is in-flight is
+refused with `OperationAlreadyRunning` (a `FAILED_PRECONDITION`). Omit the flag
+and the operation's own id (`guest-install`/`guest-remove` + package) is used as
+the key, so a repeat of an identical call still joins. The token is only used on
+the online path (a running VM or a VM auto-started for maintenance); on the
+offline `--offline` path it is accepted but unused.
 
 `guest list --json` prints `{"packages": [{"name", "description", "status"}]}`.
 

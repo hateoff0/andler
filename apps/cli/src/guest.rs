@@ -43,6 +43,11 @@ pub enum GuestAction {
         /// auto-starting a stopped VM for maintenance when needed.
         #[arg(long)]
         offline: bool,
+
+        /// Client-supplied idempotency key: a network retry with the same
+        /// token joins the in-flight install instead of starting a second one.
+        #[arg(long)]
+        idempotency_token: Option<String>,
     },
 
     Remove {
@@ -55,6 +60,11 @@ pub enum GuestAction {
         /// auto-starting a stopped VM for maintenance when needed.
         #[arg(long)]
         offline: bool,
+
+        /// Client-supplied idempotency key: a network retry with the same
+        /// token joins the in-flight remove instead of starting a second one.
+        #[arg(long)]
+        idempotency_token: Option<String>,
     },
 
     /// Apply a provision manifest (docker/images/guest-components/*/manifest.toml).
@@ -139,6 +149,7 @@ pub async fn handle(
             instance_id,
             translator_dir,
             offline,
+            idempotency_token,
         } => {
             let (resolved_id, _name) = lifecycle::resolve_echo(client, &instance_id).await;
 
@@ -178,6 +189,7 @@ pub async fn handle(
                     instance_id: resolved_id,
                     package: package.clone(),
                     offline,
+                    idempotency_token,
                 };
                 client.install_guest_agent(request).await?;
                 println!("Package `{package}` installed successfully");
@@ -187,6 +199,7 @@ pub async fn handle(
             package,
             instance_id,
             offline,
+            idempotency_token,
         } => {
             let (resolved_id, _name) = lifecycle::resolve_echo(client, &instance_id).await;
             let is_arm_translator = matches!(package.as_str(), "libndk" | "libhoudini");
@@ -203,6 +216,7 @@ pub async fn handle(
                     instance_id: resolved_id,
                     package: package.clone(),
                     offline,
+                    idempotency_token,
                 };
                 client.remove_guest_agent(request).await?;
                 println!("Package `{package}` removed successfully");

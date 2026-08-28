@@ -420,7 +420,7 @@ impl AndlerService for DaemonService {
         let id = self.daemon.resolve_instance_id(&req.instance_id).await?;
 
         self.daemon
-            .restore_snapshot(id, req.tag, req.branch)
+            .restore_snapshot(id, req.tag, req.branch, req.idempotency_token)
             .await?;
 
         Ok(Response::new(Empty {}))
@@ -473,7 +473,7 @@ impl AndlerService for DaemonService {
         let id = self.daemon.resolve_instance_id(&req.instance_id).await?;
 
         self.daemon
-            .install_guest_agent(id, req.package, req.offline)
+            .install_guest_agent(id, req.package, req.offline, req.idempotency_token)
             .await?;
 
         Ok(Response::new(Empty {}))
@@ -487,7 +487,7 @@ impl AndlerService for DaemonService {
         let id = self.daemon.resolve_instance_id(&req.instance_id).await?;
 
         self.daemon
-            .remove_guest_agent(id, req.package, req.offline)
+            .remove_guest_agent(id, req.package, req.offline, req.idempotency_token)
             .await?;
 
         Ok(Response::new(Empty {}))

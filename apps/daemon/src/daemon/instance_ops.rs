@@ -655,6 +655,7 @@ impl Daemon {
         install: bool,
         backend: &Arc<dyn HypervisorBackend>,
         backend_handle: BackendHandle,
+        idempotency_token: Option<String>,
     ) -> Result<(), DaemonError> {
         let handle = self.handle_for(id).await?;
         let action = if install { "installing" } else { "removing" };
@@ -662,6 +663,7 @@ impl Daemon {
             "guest-{}-{package}",
             if install { "install" } else { "remove" }
         );
+        let key = idempotency_token.or_else(|| Some(op_id.clone()));
         let op_id_inner = op_id.clone();
         let kind = if install {
             OperationKind::GuestInstall
@@ -710,7 +712,7 @@ impl Daemon {
                     state: OperationState::Queued,
                     error: None,
                 },
-                Some(op_id),
+                key,
                 run,
             )
             .await?
@@ -738,6 +740,7 @@ impl Daemon {
         id: InstanceId,
         package: &str,
         install: bool,
+        idempotency_token: Option<String>,
     ) -> Result<(), DaemonError> {
         let handle = self.handle_for(id).await?;
         let cfg = handle.config();
@@ -747,6 +750,7 @@ impl Daemon {
         let wait_secs = guest_agent_wait_secs();
         let action = if install { "install" } else { "remove" };
         let op_id = format!("guest-{action}-{package}");
+        let key = idempotency_token.or_else(|| Some(op_id.clone()));
         let op_id_inner = op_id.clone();
         let kind = if install {
             OperationKind::GuestInstall
@@ -898,7 +902,7 @@ impl Daemon {
                     state: OperationState::Queued,
                     error: None,
                 },
-                Some(op_id),
+                key,
                 run,
             )
             .await?
@@ -922,6 +926,7 @@ impl Daemon {
         id: InstanceId,
         package: String,
         offline: bool,
+        idempotency_token: Option<String>,
     ) -> Result<(), DaemonError> {
         let handle = self.handle_for(id).await?;
         let (state, disk_path, backend_handle, backend_kind) = {
@@ -966,9 +971,15 @@ impl Daemon {
                         message: hint.to_string(),
                     });
                 }
-
-                self.online_package_op(id, &package, true, backend, backend_handle)
-                    .await?;
+                self.online_package_op(
+                    id,
+                    &package,
+                    true,
+                    backend,
+                    backend_handle,
+                    idempotency_token.clone(),
+                )
+                .await?;
                 tracing::info!(
                     instance_id = %id,
                     package = %package,
@@ -994,7 +1005,8 @@ impl Daemon {
                             .await?;
                     }
                     _ => {
-                        self.auto_start_maintenance(id, &package, true).await?;
+                        self.auto_start_maintenance(id, &package, true, idempotency_token)
+                            .await?;
                     }
                 }
                 tracing::info!(
@@ -1013,12 +1025,12 @@ impl Daemon {
             }),
         }
     }
-
     pub async fn remove_guest_agent(
         &self,
         id: InstanceId,
         package: String,
         offline: bool,
+        idempotency_token: Option<String>,
     ) -> Result<(), DaemonError> {
         let handle = self.handle_for(id).await?;
         let (state, disk_path, backend_handle, backend_kind) = {
@@ -1063,9 +1075,15 @@ impl Daemon {
                         message: hint.to_string(),
                     });
                 }
-
-                self.online_package_op(id, &package, false, backend, backend_handle)
-                    .await?;
+                self.online_package_op(
+                    id,
+                    &package,
+                    false,
+                    backend,
+                    backend_handle,
+                    idempotency_token.clone(),
+                )
+                .await?;
                 tracing::info!(
                     instance_id = %id,
                     package = %package,
@@ -1091,7 +1109,8 @@ impl Daemon {
                             .await?;
                     }
                     _ => {
-                        self.auto_start_maintenance(id, &package, false).await?;
+                        self.auto_start_maintenance(id, &package, false, idempotency_token)
+                            .await?;
                     }
                 }
                 tracing::info!(

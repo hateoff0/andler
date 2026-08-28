@@ -106,6 +106,19 @@ expect_ok "exec confirms the installed binary" -- andler exec "$OID" -- /bin/sh 
 expect_out_grep "hello binary present" "hello-present"
 expect_ok "online remove (default path, running VM)" -- timeout 300 andler guest remove hello "$OID"
 expect_out_grep "online remove reports success" "removed successfully"
+echo "  [online idempotency token on the running VM]"
+# The `--idempotency-token` flag round-trips through the CLI -> proto -> service
+# -> daemon and is used as the in-flight-operation join key on the online path.
+# A repeat with the same token is idempotent; the join/refuse negative path is
+# pinned by the daemon unit tests (guest_maintenance).
+expect_ok "online install with a custom idempotency token" -- timeout 300 andler guest install hello "$OID" --idempotency-token tok-install-abc
+expect_out_grep "install with token reports success" "installed successfully"
+expect_ok "exec confirms the tokened install" -- andler exec "$OID" -- /bin/sh -c 'test -x /usr/bin/hello && echo hello-present'
+expect_out_grep "hello binary present after tokened install" "hello-present"
+expect_ok "online install again with the same token is idempotent" -- timeout 300 andler guest install hello "$OID" --idempotency-token tok-install-abc
+expect_out_grep "repeat token install reports success" "installed successfully"
+expect_ok "online remove with a custom idempotency token" -- timeout 300 andler guest remove hello "$OID" --idempotency-token tok-remove-abc
+expect_out_grep "remove with token reports success" "removed successfully"
 
 expect_ok "stop the guest" -- andler stop "$OID"
 expect_ok "remove the online instance" -- andler remove "$OID" --purge

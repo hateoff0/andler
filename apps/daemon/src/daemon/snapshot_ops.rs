@@ -177,6 +177,7 @@ impl Daemon {
         id: InstanceId,
         tag: String,
         branch: bool,
+        idempotency_token: Option<String>,
     ) -> Result<(), DaemonError> {
         let handle = self.handle_for(id).await?;
         let (disk_path, configured_size) = {
@@ -314,6 +315,8 @@ impl Daemon {
             })
         });
 
+        let key = idempotency_token.or_else(|| Some(format!("snapshot-restore:{tag}")));
+
         match handle
             .run_operation(
                 Operation {
@@ -325,7 +328,7 @@ impl Daemon {
                     state: OperationState::Queued,
                     error: None,
                 },
-                Some(format!("snapshot-restore:{tag}")),
+                key,
                 run,
             )
             .await?

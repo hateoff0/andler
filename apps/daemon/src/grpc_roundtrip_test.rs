@@ -9,9 +9,9 @@ use andler_rpc::proto::{
     CpuConfig, CreateInstanceRequest, DetachDiskRequest, DetachNetworkRequest, DiskConfig,
     DisplayConfig, Empty, EventStreamRequest, ExecCommandRequest, ExportInstanceDiskRequest,
     FirmwareConfig, GetInstanceConfigResponse, GpuConfig, GuestProvisionRequest, InputConfig,
-    InstanceIdRequest, InstanceStateKind, MemoryConfig, NetworkConfig, OpCancelRequest,
-    ProvisionMkdirP, RemoveInstanceRequest, Resolution, RestoreSnapshotRequest,
-    SetInstanceConfigRequest,
+    InstallGuestAgentRequest, InstanceIdRequest, InstanceStateKind, MemoryConfig, NetworkConfig,
+    OpCancelRequest, ProvisionMkdirP, RemoveGuestAgentRequest, RemoveInstanceRequest, Resolution,
+    RestoreSnapshotRequest, SetInstanceConfigRequest,
 };
 use tokio::net::TcpListener;
 use tokio_stream::wrappers::TcpListenerStream;
@@ -1402,6 +1402,7 @@ async fn snapshot_restore_branch_flag_round_trips_and_list_is_empty_for_fresh_in
             tag: "roundtrip-branch-test".to_string(),
             timeout_secs: None,
             branch: true,
+            idempotency_token: None,
         })
         .await
         .expect_err("restore of a nonexistent snapshot must fail server-side");
@@ -1524,6 +1525,53 @@ async fn stream_events_delivers_lifecycle_events_over_real_grpc() {
         "detail: {}",
         message.detail
     );
+
+    server.abort();
+}
+
+/// The `idempotency_token` field on the three long-running requests is
+/// transmitted over real gRPC: each request with a token set round-trips
+/// through the wire and reaches the handler (an unknown instance is
+/// reported as NOT_FOUND, not a wire/parse error).
+#[tokio::test]
+async fn idempotency_token_field_round_trips_over_real_grpc() {
+    let (mut client, server) = spawn_server_and_connect().await;
+    let unknown_id = "a".repeat(64);
+    let token = "client-retry-token-abc123";
+
+    let status = client
+        .install_guest_agent(InstallGuestAgentRequest {
+            instance_id: unknown_id.clone(),
+            package: "htop".to_string(),
+            offline: false,
+            idempotency_token: Some(token.to_string()),
+        })
+        .await
+        .expect_err("an unknown instance must be NOT_FOUND, not a wire error");
+    assert_eq!(status.code(), tonic::Code::NotFound);
+
+    let status = client
+        .remove_guest_agent(RemoveGuestAgentRequest {
+            instance_id: unknown_id.clone(),
+            package: "htop".to_string(),
+            offline: false,
+            idempotency_token: Some(token.to_string()),
+        })
+        .await
+        .expect_err("an unknown instance must be NOT_FOUND, not a wire error");
+    assert_eq!(status.code(), tonic::Code::NotFound);
+
+    let status = client
+        .restore_snapshot(RestoreSnapshotRequest {
+            instance_id: unknown_id.clone(),
+            tag: "snap".to_string(),
+            timeout_secs: Some(30),
+            branch: false,
+            idempotency_token: Some(token.to_string()),
+        })
+        .await
+        .expect_err("an unknown instance must be NOT_FOUND, not a wire error");
+    assert_eq!(status.code(), tonic::Code::NotFound);
 
     server.abort();
 }
