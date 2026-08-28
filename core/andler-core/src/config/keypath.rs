@@ -174,12 +174,12 @@ bool_keys!(
     firmware.enable_uefi => firmware_enable_uefi_get / firmware_enable_uefi_set,
 );
 
-fn memory_overcommit_mem_lock_get(cfg: &InstanceConfig) -> String {
-    bool_str(cfg.memory.overcommit_mem_lock)
+fn memory_mem_lock_get(cfg: &InstanceConfig) -> String {
+    bool_str(cfg.memory.mem_lock)
 }
 
-fn memory_overcommit_mem_lock_set(cfg: &mut InstanceConfig, value: &str) -> Result<(), String> {
-    cfg.memory.overcommit_mem_lock = parse_bool(value)?;
+fn memory_mem_lock_set(cfg: &mut InstanceConfig, value: &str) -> Result<(), String> {
+    cfg.memory.mem_lock = parse_bool(value)?;
     Ok(())
 }
 
@@ -454,9 +454,9 @@ pub fn config_keys() -> &'static [ConfigKey] {
             live: false,
         },
         ConfigKey {
-            key: "memory.overcommit_mem_lock",
-            get: memory_overcommit_mem_lock_get,
-            set: Some(memory_overcommit_mem_lock_set),
+            key: "memory.mem_lock",
+            get: memory_mem_lock_get,
+            set: Some(memory_mem_lock_set),
             immutable_reason: None,
             live: false,
         },

@@ -189,7 +189,7 @@ andler config --instance <instance-id> [--edit]
 | `autostart` | `true`\|`false` | Works in any state; takes effect at the next daemon restart |
 | `arm_translator` (`kind.android_profile.arm_translator`) | `none` \| `libndk` \| `libhoudini` | Android instances only, instance must be stopped; performs the same offline switch as `SwitchArmTranslator` |
 | `cpu.affinity` | read-only | Immutable via `config set`: pin the VM's threads to host CPUs by editing `affinity = [0, 2, 4, 6]` in `instance.toml` — the QEMU process is `taskset`-pinned to that set, and starting an instance whose pin overlaps a running pinned instance is refused (`host CPU N is pinned by running instance …`) |
-| `memory.size_bytes` / `memory.ballooning` / `memory.zram` / `memory.ksm` / `memory.overcommit_mem_lock` / `memory.hugepages` | size string / `true`\|`false` | Instance must be stopped |
+| `memory.size_bytes` / `memory.ballooning` / `memory.zram` / `memory.ksm` / `memory.mem_lock` / `memory.hugepages` | size string / `true`\|`false` | Instance must be stopped |
 | `disk.thin_provisioning` / `disk.trim_on_shutdown` / `disk.compact_on_shutdown` / `disk.snapshot_timeout_secs` | boolean / seconds | Instance must be stopped |
 | `display.dpi` / `display.fps_limit` / `display.display_engine` / `display.fullscreen` | int / engine name / boolean | Instance must be stopped |
 | `gpu.render_backend` / `gpu.hostmem_bytes` / `gpu.blob` / `gpu.gl` | backend name / bytes / boolean | Instance must be stopped |
@@ -742,7 +742,7 @@ size_bytes = 8589934592
 ballooning = false
 zram = false
 ksm = true
-overcommit_mem_lock = false
+mem_lock = false
 hugepages = false
 
 [display]

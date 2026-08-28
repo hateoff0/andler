@@ -90,7 +90,7 @@ Memory configuration.
 | `ballooning` | `bool` | Enable memory ballooning (dynamic reclamation). |
 | `zram` | `bool` | Enable zram for compressed swap. |
 | `ksm` | `bool` | Enable Kernel Same-page Merging for deduplication. |
-| `overcommit_mem_lock` | `bool` | Enable memory overcommit via `mem-lock=on` in the QEMU cmdline (`-overcommit mem-lock=on`), preventing the guest RAM from being swapped out. |
+| `mem_lock` | `bool` | Lock the guest RAM (`mem-lock=on` in the QEMU cmdline), preventing it from being swapped out. This is per-instance mlock, not host memory overcommit — the cross-VM overcommit gate is `MemoryOvercommit`. |
 | `hugepages` | `bool` | Back the guest RAM with a hugetlbfs region (`memory-backend-file` with `mem-path=/dev/hugepages,preallocate=true`) instead of anonymous memfd, giving the guest large pages. |
 
 ### `DiskFormat`
@@ -909,7 +909,7 @@ Request for a partial configuration update by key/value.
 | Field | Type | Description |
 |-------|------|-------------|
 | `instance_ref` | `string` | Instance ID (full or prefix). |
-| `key` | `string` | Configuration key. The whitelist is the settable key-path table in `andler-core` (`config_keys()`): `name`, `cpu.cores`/`sockets`/`threads`/`priority`, `memory.size_bytes`/`ballooning`/`zram`/`ksm`, `disk.thin_provisioning`/`trim_on_shutdown`/`compact_on_shutdown`/`snapshot_timeout_secs`, `display.resolution` (any state; applied live to a running guest via the guest agent), `display.dpi`/`fps_limit`/`display_engine`/`fullscreen`, `gpu.render_backend`/`hostmem_bytes`/`blob`/`gl`, `network.mode`/`device_model`/`nat_backend`, `audio.backend`/`device`, `input.pointer_mode`/`hide_host_cursor`/`clipboard_enabled`, `firmware.enable_uefi`, `kind.android_profile.arm_translator` (Android, stopped instance). Any other key is rejected with `InvalidConfigKey` explaining why (immutable or unknown). |
+| `key` | `string` | Configuration key. The whitelist is the settable key-path table in `andler-core` (`config_keys()`): `name`, `cpu.cores`/`sockets`/`threads`/`priority`, `memory.size_bytes`/`ballooning`/`zram`/`ksm`/`mem_lock`/`hugepages`, `disk.thin_provisioning`/`trim_on_shutdown`/`compact_on_shutdown`/`snapshot_timeout_secs`, `display.resolution` (any state; applied live to a running guest via the guest agent), `display.dpi`/`fps_limit`/`display_engine`/`fullscreen`, `gpu.render_backend`/`hostmem_bytes`/`blob`/`gl`, `network.mode`/`device_model`/`nat_backend`, `audio.backend`/`device`, `input.pointer_mode`/`hide_host_cursor`/`clipboard_enabled`, `firmware.enable_uefi`, `kind.android_profile.arm_translator` (Android, stopped instance). Any other key is rejected with `InvalidC…
 | `value` | `string` | New value. |
 
 ### `GuestPackageEntry`

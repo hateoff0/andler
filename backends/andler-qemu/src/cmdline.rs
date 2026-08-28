@@ -189,7 +189,7 @@ fn memory_args(cfg: &InstanceConfig) -> Vec<String> {
         "-machine".to_string(),
         "memory-backend=mem1".to_string(),
     ];
-    if cfg.memory.overcommit_mem_lock {
+    if cfg.memory.mem_lock {
         args.push("-overcommit".to_string());
         args.push("mem-lock=on".to_string());
         args.push("-mem-prealloc".to_string());
@@ -690,9 +690,9 @@ mod tests {
     }
 
     #[test]
-    fn memory_args_overcommit_mem_lock_when_enabled() {
+    fn memory_args_mem_lock_when_enabled() {
         let mut cfg = start_sh_equivalent_config();
-        cfg.memory.overcommit_mem_lock = true;
+        cfg.memory.mem_lock = true;
         let args = memory_args(&cfg);
         assert!(args.contains(&"-overcommit".to_string()));
         assert!(args.contains(&"mem-lock=on".to_string()));

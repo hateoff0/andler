@@ -531,7 +531,7 @@ Configuration is organized into 9 sections in `InstanceConfig` (plus metadata fi
 
 1. **disk**: Path, format (qcow2/raw/vdi), size, base image, thin provisioning, trim/compact on shutdown, snapshot timeout. The instance disk is always named `disk.qcow2` inside the instance directory. The CD-ROM is not part of `DiskConfig` — it lives in `InstanceKind::LinuxVm` as `cdrom_bus` (`VirtioScsi`/`Ide`, pre-resolved from `auto` via `recommended_for_iso_filename()`)
 2. **cpu**: vCPU count (`cores`/`sockets`/`threads`), affinity (CPU pinning), priority class (`Low`/`Normal`/`High`)
-3. **memory**: `size_bytes` (not MiB), ballooning, zram, ksm, overcommit_mem_lock, hugepages
+3. **memory**: `size_bytes` (not MiB), ballooning, zram, ksm, mem_lock, hugepages
 4. **display**: `resolution` (width/height), dpi, fps_limit, display engine (`Sdl`/`Gtk`/`Spice`/`Dbus`/`None`), fullscreen. Clipboard lives in `input`, not here. The resolution is applied inside the guest: passed as QEMU fw_cfg (`opt/andler/display-resolution`) and read by guest units (`andler-display-resolution.service` → `/etc/andler/display.conf`); a running VM can be switched live via `set_guest_display_resolution` over the guest agent
 5. **gpu**: Render backend (Venus, VirtioGpu, VirGl, Cpu, Passthrough), hostmem bytes, blob, gl
 6. **network**: Mode (Nat/Bridge/Isolated), NAT backend (Slirp/Passt), interface. Isolated is accepted by config but not implemented in `andler-net`

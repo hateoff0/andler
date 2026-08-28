@@ -217,7 +217,7 @@ impl From<proto::MemoryConfig> for MemoryConfig {
             ballooning: value.ballooning,
             zram: value.zram,
             ksm: value.ksm,
-            overcommit_mem_lock: value.overcommit_mem_lock,
+            mem_lock: value.mem_lock,
             hugepages: value.hugepages,
         }
     }
@@ -230,7 +230,7 @@ impl From<MemoryConfig> for proto::MemoryConfig {
             ballooning: value.ballooning,
             zram: value.zram,
             ksm: value.ksm,
-            overcommit_mem_lock: value.overcommit_mem_lock,
+            mem_lock: value.mem_lock,
             hugepages: value.hugepages,
         }
     }
