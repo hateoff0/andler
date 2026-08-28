@@ -51,6 +51,7 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 - **`andler doctor --metrics`**: prints the daemon's internal metrics snapshot — RPC latency p50/p99 per method, error counts by gRPC status code, instance/running/active-op counts, QMP reconnect count, and running guest RAM (the running-total the memory-overcommit gate sums before spawn).
 
 - **`andler logs daemon [--follow] [--json] [--since <epoch-ms>]`**: streams the daemon's own log (the same lines it prints, same format) from an in-memory 4096-line ring — debugging never requires knowing where andlerd writes. `--follow` keeps streaming, `--json` emits `{"ts_ms":...,"line":...}` lines, `--since` filters the snapshot; all three are rejected with an instance id (instance logs keep `--source/--grep/--tail`).
+- **`andler cache` manages the base-image cache**: `andler cache list` shows every build currently cached (all Android versions/variants), and `andler cache clean` removes superseded builds (older than the freshest for each `android-major-variant` group) plus orphan manifests (`*.manifest.json` with no matching `*.qcow2`) and orphan qcow2s (`*.qcow2` with no manifest). `--dry-run` reports without deleting; `--json` emits the report. Covered by the `10_base_images.sh` e2e suite.
 
 #### Daemon
 

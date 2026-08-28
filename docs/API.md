@@ -129,6 +129,33 @@ Lists all registered instances. Supports filtering by state and name (regex, cas
 | `--json` | Output as JSON array |
 | `--full-id` / `-q` | Show the full 64-char ID instead of the 12-char short ID |
 
+### `cache`
+
+Base-image cache management — Android base images live under `$ANDROID_HOME/cache/base-images/` (`ANDROID_HOME` defaults to `~/.andler`).
+
+```bash
+# List every cached base-image build
+andler cache list
+andler cache --json list
+
+# Remove superseded builds and orphan manifests/qcow2s
+andler cache clean [--dry-run] [--json]
+```
+
+`list` prints one line per build as `{id}  {qcow2_path}`, where `id` is the manifest id (`android<major>-<variant>-<built_at>`).
+
+`clean` removes, by policy:
+
+- **Superseded builds** — every Android build older than the freshest for its `(android_major, android_variant)` group. Only one build per `(major, variant)` survives; older ones are removed.
+- **Orphan manifests** — `*.manifest.json` files with no matching `*.qcow2` next to them.
+- **Orphan qcow2s** — `*.qcow2` files with no matching `*.manifest.json`.
+
+`--dry-run` reports what would be removed without deleting anything; without it, the files are deleted. `--json` emits `{ "cache_dir", "dry_run", "removed": [{ "qcow2", "manifest", "label" }] }` — each entry names the removed file(s) and a reason (`android<major>-<variant>-<built_at>` for a superseded build, or `orphan manifest (no matching qcow2)` / `orphan qcow2 (no manifest)`).
+
+`clean` is idempotent: a cache with a single build per `(major, variant)` and no orphans removes nothing.
+
+Covered by the `10_base_images.sh` e2e suite.
+
 ### `config`
 
 ```bash

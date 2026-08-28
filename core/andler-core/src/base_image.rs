@@ -1,5 +1,6 @@
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 use thiserror::Error;
@@ -14,7 +15,7 @@ struct Manifest {
     built_at: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct BaseImageInfo {
     pub qcow2_path: PathBuf,
     pub manifest_path: PathBuf,
@@ -149,11 +150,9 @@ pub fn list_all() -> Result<Vec<BaseImageInfo>, BaseImageError> {
     collect_images()
 }
 
-/// Parses every `*.manifest.json` with a matching qcow2 next to it, regardless
-/// of the requested profile.
-fn collect_images() -> Result<Vec<BaseImageInfo>, BaseImageError> {
+fn collect_images_in(dir: &Path) -> Result<Vec<BaseImageInfo>, BaseImageError> {
     let mut found = Vec::new();
-    for manifest_path in collect_manifest_paths()? {
+    for manifest_path in collect_manifest_paths_in(dir)? {
         let Some(file_name) = manifest_path.file_name().and_then(|f| f.to_str()) else {
             continue;
         };
@@ -183,16 +182,78 @@ fn collect_images() -> Result<Vec<BaseImageInfo>, BaseImageError> {
     Ok(found)
 }
 
+fn collect_images() -> Result<Vec<BaseImageInfo>, BaseImageError> {
+    collect_images_in(&base_images_dir())
+}
+
+/// `*.manifest.json` and `*.qcow2` files in the cache root and one-level
+/// subdirectories (e.g. `cache/base-images/android13-vanilla/`). Used by
+/// `gc_candidates` to find superseded builds and orphan files.
+fn collect_cache_files(
+    dir: &Path,
+    manifests: &mut Vec<PathBuf>,
+    qcow2s: &mut Vec<PathBuf>,
+) -> Result<(), BaseImageError> {
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(source) => {
+            return Err(BaseImageError::ReadDir {
+                path: dir.to_path_buf(),
+                source,
+            })
+        }
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|f| f.to_str()) else {
+            continue;
+        };
+        if name.ends_with(".manifest.json") {
+            manifests.push(path);
+            continue;
+        }
+        if name.ends_with(".qcow2") {
+            qcow2s.push(path);
+            continue;
+        }
+        if !path.is_dir() {
+            continue;
+        }
+        let Ok(sub_entries) = fs::read_dir(&path) else {
+            continue;
+        };
+        for sub_entry in sub_entries.flatten() {
+            let sub_path = sub_entry.path();
+            let Some(sub_name) = sub_path.file_name().and_then(|f| f.to_str()) else {
+                continue;
+            };
+            if sub_name.ends_with(".manifest.json") {
+                manifests.push(sub_path);
+            } else if sub_name.ends_with(".qcow2") {
+                qcow2s.push(sub_path);
+            }
+        }
+    }
+    Ok(())
+}
+
 /// `*.manifest.json` files in the cache root and in one-level subdirectories
-/// (e.g. `cache/base-images/android13-vanilla/`). The flat root is kept working
-/// so images built before subdirectories existed are still discovered; never
-/// recurse deeper than one level — build outputs land exactly one level down.
-fn collect_manifest_paths() -> Result<Vec<PathBuf>, BaseImageError> {
-    let dir = base_images_dir();
-    let entries = match fs::read_dir(&dir) {
+/// (e.g. `cache/base-images/android13-vanilla/`). The flat root is kept
+/// working so images built before subdirectories existed are still
+/// discovered; never recurse deeper than one level — build outputs land
+/// exactly one level down.
+fn collect_manifest_paths_in(dir: &Path) -> Result<Vec<PathBuf>, BaseImageError> {
+    let entries = match fs::read_dir(dir) {
         Ok(entries) => entries,
         Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(source) => return Err(BaseImageError::ReadDir { path: dir, source }),
+        Err(source) => {
+            return Err(BaseImageError::ReadDir {
+                path: dir.to_path_buf(),
+                source,
+            })
+        }
     };
 
     let mut manifests = Vec::new();
@@ -223,6 +284,102 @@ fn collect_manifest_paths() -> Result<Vec<PathBuf>, BaseImageError> {
         }
     }
     Ok(manifests)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GcRemoval {
+    /// The qcow2 to delete. `None` for an orphan manifest.
+    pub qcow2: Option<PathBuf>,
+    /// The manifest to delete. `None` for an orphan qcow2.
+    pub manifest: Option<PathBuf>,
+    /// Identity of the image (`android{major}-{variant} built {built_at}`),
+    /// or a short reason for an orphan file.
+    pub label: String,
+}
+
+/// Base-image cache cleanup policy.
+///
+/// Returns the entries that `andler cache clean` should remove: every build
+/// older than the freshest build for its `(android_major, android_variant)`
+/// group, plus any orphan manifest (`*.manifest.json` with no matching
+/// `*.qcow2`) or orphan qcow2 (`*.qcow2` with no matching manifest). The
+/// freshest build in each group is always kept.
+pub fn gc_candidates(dir: &Path) -> Result<Vec<GcRemoval>, BaseImageError> {
+    let mut manifests = Vec::new();
+    let mut qcow2s = Vec::new();
+    collect_cache_files(dir, &mut manifests, &mut qcow2s)?;
+
+    // Group every complete image by (android_major, android_variant); keep
+    // the freshest build in each group, flag the rest.
+    let mut groups: BTreeMap<(String, String), Vec<BaseImageInfo>> = BTreeMap::new();
+    for info in collect_images_in(dir)? {
+        groups
+            .entry((info.android_major.clone(), info.android_variant.clone()))
+            .or_default()
+            .push(info);
+    }
+
+    let mut removals: Vec<GcRemoval> = Vec::new();
+    for (_, mut group) in groups {
+        // ISO-8601 UTC timestamps sort lexicographically in reverse
+        // chronological order.
+        group.sort_by(|a, b| b.built_at.cmp(&a.built_at));
+        for stale in group.into_iter().skip(1) {
+            let id = stale.id();
+            removals.push(GcRemoval {
+                qcow2: Some(stale.qcow2_path),
+                manifest: Some(stale.manifest_path),
+                label: id,
+            });
+        }
+    }
+
+    // Orphan manifests: a `*.manifest.json` whose `*.qcow2` is missing.
+    let mut qcow2_names: BTreeSet<String> = BTreeSet::new();
+    for qcow2 in &qcow2s {
+        if let Some(name) = qcow2.file_name().and_then(|f| f.to_str()) {
+            qcow2_names.insert(name.to_string());
+        }
+    }
+    for manifest in &manifests {
+        let Some(name) = manifest.file_name().and_then(|f| f.to_str()) else {
+            continue;
+        };
+        if let Some(stem) = name.strip_suffix(".manifest.json") {
+            if !qcow2_names.contains(&format!("{stem}.qcow2")) {
+                removals.push(GcRemoval {
+                    qcow2: None,
+                    manifest: Some(manifest.clone()),
+                    label: "orphan manifest (no matching qcow2)".to_string(),
+                });
+            }
+        }
+    }
+
+    // Orphan qcow2s: a `*.qcow2` whose `*.manifest.json` is missing.
+    let mut manifest_names: BTreeSet<String> = BTreeSet::new();
+    for manifest in &manifests {
+        if let Some(name) = manifest.file_name().and_then(|f| f.to_str()) {
+            manifest_names.insert(name.to_string());
+        }
+    }
+    for qcow2 in &qcow2s {
+        let Some(name) = qcow2.file_name().and_then(|f| f.to_str()) else {
+            continue;
+        };
+        if let Some(stem) = name.strip_suffix(".qcow2") {
+            if !manifest_names.contains(&format!("{stem}.manifest.json")) {
+                removals.push(GcRemoval {
+                    qcow2: Some(qcow2.clone()),
+                    manifest: None,
+                    label: "orphan qcow2 (no manifest)".to_string(),
+                });
+            }
+        }
+    }
+
+    removals.sort_by(|a, b| a.label.cmp(&b.label));
+    Ok(removals)
 }
 
 pub fn resolve(profile: &AndroidProfile) -> Result<PathBuf, BaseImageError> {
@@ -414,5 +571,92 @@ mod tests {
             profile(AndroidVersion::Android13, false).variant_label(),
             "VANILLA"
         );
+    }
+
+    #[test]
+    fn gc_candidates_flags_only_older_builds_per_group() {
+        let (_guard, dir) = EnvGuard::new();
+        // Two builds for (13, VANILLA): the older one is superseded, the freshest kept.
+        write_manifest(&dir, "old", "13", "VANILLA", "2026-01-01T00:00:00Z");
+        write_manifest(&dir, "new", "13", "VANILLA", "2026-06-01T00:00:00Z");
+        // A different (major, variant) group is untouched.
+        write_manifest(&dir, "eleven", "11", "VANILLA", "2026-05-01T00:00:00Z");
+
+        let removals = gc_candidates(&dir).unwrap();
+        assert_eq!(removals.len(), 1);
+        assert_eq!(removals[0].label, "android13-vanilla-2026-01-01T00:00:00Z");
+        assert_eq!(removals[0].qcow2, Some(dir.join("old.qcow2")));
+        assert_eq!(removals[0].manifest, Some(dir.join("old.manifest.json")));
+    }
+
+    #[test]
+    fn gc_candidates_keeps_single_build_per_group() {
+        let (_guard, dir) = EnvGuard::new();
+        write_manifest(&dir, "thirteen", "13", "VANILLA", "2026-06-01T00:00:00Z");
+        write_manifest(&dir, "eleven", "11", "GAPPS", "2026-06-01T00:00:00Z");
+
+        assert!(gc_candidates(&dir).unwrap().is_empty());
+    }
+
+    #[test]
+    fn gc_candidates_flags_orphan_manifest_without_qcow2() {
+        let (_guard, dir) = EnvGuard::new();
+        fs::write(
+            dir.join("orphan.manifest.json"),
+            r#"{"schema_version":1,"android_major":"13","android_variant":"VANILLA","built_at":"2026-01-01T00:00:00Z"}"#,
+        )
+        .unwrap();
+
+        let removals = gc_candidates(&dir).unwrap();
+        assert_eq!(removals.len(), 1);
+        assert_eq!(removals[0].label, "orphan manifest (no matching qcow2)");
+        assert!(removals[0].qcow2.is_none());
+        assert_eq!(removals[0].manifest, Some(dir.join("orphan.manifest.json")));
+    }
+
+    #[test]
+    fn gc_candidates_flags_orphan_qcow2_without_manifest() {
+        let (_guard, dir) = EnvGuard::new();
+        fs::write(dir.join("orphan.qcow2"), b"placeholder").unwrap();
+
+        let removals = gc_candidates(&dir).unwrap();
+        assert_eq!(removals.len(), 1);
+        assert_eq!(removals[0].label, "orphan qcow2 (no manifest)");
+        assert!(removals[0].manifest.is_none());
+        assert_eq!(removals[0].qcow2, Some(dir.join("orphan.qcow2")));
+    }
+
+    #[test]
+    fn gc_candidates_sorts_removals_by_label() {
+        let (_guard, dir) = EnvGuard::new();
+        // Two superseded builds plus one orphan manifest and one orphan qcow2.
+        write_manifest(&dir, "old-a", "13", "VANILLA", "2026-01-01T00:00:00Z");
+        write_manifest(&dir, "new-a", "13", "VANILLA", "2026-06-01T00:00:00Z");
+        write_manifest(&dir, "old-b", "11", "VANILLA", "2026-01-01T00:00:00Z");
+        write_manifest(&dir, "new-b", "11", "VANILLA", "2026-06-01T00:00:00Z");
+        fs::write(dir.join("orphan-manifest.manifest.json"), b"{}").unwrap();
+        fs::write(dir.join("orphan-qcow2.qcow2"), b"{}").unwrap();
+
+        let removals = gc_candidates(&dir).unwrap();
+        let labels: Vec<_> = removals.iter().map(|r| r.label.clone()).collect();
+        let mut sorted = labels.clone();
+        sorted.sort();
+        assert_eq!(labels, sorted);
+        // Superseded builds carry both files; each orphan carries only one.
+        let superseded: Vec<_> = removals
+            .iter()
+            .filter(|r| r.qcow2.is_some() && r.manifest.is_some())
+            .collect();
+        assert_eq!(superseded.len(), 2);
+        let orphan_manifests: Vec<_> = removals.iter().filter(|r| r.qcow2.is_none()).collect();
+        assert_eq!(orphan_manifests.len(), 1);
+        let orphan_qcow2s: Vec<_> = removals.iter().filter(|r| r.manifest.is_none()).collect();
+        assert_eq!(orphan_qcow2s.len(), 1);
+    }
+
+    #[test]
+    fn gc_candidates_empty_cache_returns_nothing() {
+        let (_guard, dir) = EnvGuard::new();
+        assert!(gc_candidates(&dir).unwrap().is_empty());
     }
 }

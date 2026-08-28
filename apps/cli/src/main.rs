@@ -1,3 +1,4 @@
+mod cache;
 mod clone;
 mod connect;
 mod create;
@@ -463,6 +464,19 @@ enum Command {
         metrics: bool,
     },
 
+    /// Manage the base-image cache (list builds, clean superseded ones)
+    Cache {
+        #[command(subcommand)]
+        action: cache::CacheAction,
+
+        #[arg(
+            long,
+            global = true,
+            help = "Emit the result as JSON instead of human-readable text"
+        )]
+        json: bool,
+    },
+
     /// Generate shell completion scripts
     Completions { shell: clap_complete::Shell },
 }
@@ -857,6 +871,10 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         };
     }
 
+    if let Some(Command::Cache { action, json }) = &cli.command {
+        return cache::handle(action.clone(), *json);
+    }
+
     let mut client = traced_client(&addr).await?;
 
     // Version handshake: a CLI and daemon built from different
@@ -1150,6 +1168,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         Some(Command::Detach { action }) => {
             hotplug::handle_detach(&mut client, action).await?;
         }
+        Some(Command::Cache { .. }) => unreachable!(),
         Some(Command::Doctor { .. }) => unreachable!(),
         Some(Command::Completions { .. }) => unreachable!(),
     }

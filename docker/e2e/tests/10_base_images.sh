@@ -97,6 +97,49 @@ expect_fail "create android 13 GAPPS without image fails" -- \
     --quick
 expect_err_grep "failure points at build.sh" "build.sh"
 
+echo "  [cache list / clean]"
+CACHE_HOME="$WORK/cache-home"
+mkdir -p "$CACHE_HOME/cache/base-images"
+CB="$CACHE_HOME/cache/base-images"
+
+# android13-vanilla: two builds -> the older is superseded
+qemu-img create -f qcow2 "$CB/android13-vanilla-20240101T000000Z.qcow2" 1G >/dev/null 2>&1
+printf '{"schema_version":1,"android_major":"13","android_variant":"VANILLA","built_at":"2024-01-01T00:00:00Z"}' > "$CB/android13-vanilla-20240101T000000Z.manifest.json"
+qemu-img create -f qcow2 "$CB/android13-vanilla-20240102T000000Z.qcow2" 1G >/dev/null 2>&1
+printf '{"schema_version":1,"android_major":"13","android_variant":"VANILLA","built_at":"2024-01-02T00:00:00Z"}' > "$CB/android13-vanilla-20240102T000000Z.manifest.json"
+# android11-vanilla: single build -> always kept
+qemu-img create -f qcow2 "$CB/android11-vanilla-20240101T000000Z.qcow2" 1G >/dev/null 2>&1
+printf '{"schema_version":1,"android_major":"11","android_variant":"VANILLA","built_at":"2024-01-01T00:00:00Z"}' > "$CB/android11-vanilla-20240101T000000Z.manifest.json"
+# orphan files: a manifest with no qcow2, and a qcow2 with no manifest
+printf '{"schema_version":1,"android_major":"14","android_variant":"VANILLA","built_at":"2024-01-01T00:00:00Z"}' > "$CB/android14-vanilla-20240101T000000Z.manifest.json"
+qemu-img create -f qcow2 "$CB/orphan-20240101T000000Z.qcow2" 1G >/dev/null 2>&1
+
+export ANDLER_HOME="$CACHE_HOME"
+
+expect_ok "cache list shows all complete builds" -- andler cache list
+expect_out_grep "list shows the freshest android13" "android13-vanilla-20240102T000000Z.qcow2"
+expect_out_grep "list shows the superseded android13" "android13-vanilla-2024-01-01T00:00:00Z"
+
+expect_ok "cache clean --dry-run reports without deleting" -- andler cache clean --dry-run
+expect_out_grep "dry-run lists the superseded build" "android13-vanilla-2024-01-01T00:00:00Z"
+expect_file "dry-run kept the superseded qcow2" "$CB/android13-vanilla-20240101T000000Z.qcow2"
+expect_file "dry-run kept the orphan manifest" "$CB/android14-vanilla-20240101T000000Z.manifest.json"
+
+expect_ok "cache clean removes superseded builds and orphans" -- andler cache clean
+expect_no_file "superseded qcow2 removed" "$CB/android13-vanilla-20240101T000000Z.qcow2"
+expect_no_file "superseded manifest removed" "$CB/android13-vanilla-20240101T000000Z.manifest.json"
+expect_no_file "orphan manifest removed" "$CB/android14-vanilla-20240101T000000Z.manifest.json"
+expect_no_file "orphan qcow2 removed" "$CB/orphan-20240101T000000Z.qcow2"
+expect_file "freshest android13 kept" "$CB/android13-vanilla-20240102T000000Z.qcow2"
+expect_file "android11 kept" "$CB/android11-vanilla-20240101T000000Z.qcow2"
+
+expect_ok "cache clean is idempotent once up to date" -- andler cache clean
+expect_out_grep "up to date message" "up to date"
+
+expect_ok "cache list --json emits valid JSON" -- andler cache list --json
+expect_out_grep "json includes the kept android13 build" "android13-vanilla-20240102T000000Z.qcow2"
+
+rm -rf "$CACHE_HOME"
 echo "  [cleanup]"
 for inst in $(andler list --json | jq -r '.[].id'); do
     andler remove "$inst" --purge >/dev/null 2>&1 || true
