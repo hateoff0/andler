@@ -1,3 +1,4 @@
+use crate::helpers::emit_json;
 use crate::TracedClient;
 use andler_rpc::proto::{CloneInstanceRequest, ExportInstanceDiskRequest};
 
@@ -35,7 +36,7 @@ pub async fn handle_clone(
         .await?
         .into_inner();
     if json {
-        println!("{}", clone_json(&source_instance_id, &response.instance_id));
+        emit_json(&clone_json(&source_instance_id, &response.instance_id))?;
     } else {
         println!(
             "cloned instance_id={}",
@@ -59,7 +60,7 @@ pub async fn handle_export(
         .await?
         .into_inner();
     if json {
-        println!("{}", export_json(&source_instance_id, &response.dest_path));
+        emit_json(&export_json(&source_instance_id, &response.dest_path))?;
     } else {
         println!("exported to {}", response.dest_path);
     }

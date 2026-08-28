@@ -4,6 +4,12 @@
 
 All commands connect to the daemon via gRPC. Pass `--daemon-addr <url>` before the subcommand to target a non-default daemon.
 
+### Output formats
+
+Every subcommand accepts `--json` (where it produces structured output) to emit a JSON document on **stdout** instead of human-readable text. The exact shape is given per subcommand above; the common success shapes are `{"instance_id": "<id>"}` (create/clone/export) and per-subcommand objects/arrays.
+
+Errors are unified: on any failure the CLI prints a single JSON document to **stderr** — `{"error": "<message>"}` — when `--json` was requested, and a plain actionable message to stderr otherwise. The message is the same in both cases (sanitized, truncated to 384 chars, and actionable — it says what to do next rather than echoing raw QEMU/guest-agent stderr). Exit code is non-zero on failure in both cases.
+
 ### `create`
 
 Creates a new instance. Three modes:

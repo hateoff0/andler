@@ -51,6 +51,18 @@ struct Cli {
     command: Option<Command>,
 }
 
+impl Cli {
+    /// Whether `--json` was requested for the active subcommand: the single
+    /// check for both the success output (handlers) and the unified error
+    /// output in `main`.
+    fn json_requested(&self) -> bool {
+        self.command
+            .as_ref()
+            .map(|c| c.json_requested())
+            .unwrap_or(false)
+    }
+}
+
 macro_rules! dual_id_args {
     ($name:ident $(, $($extra:tt)*)?) => {
         #[derive(Args)]
@@ -180,6 +192,17 @@ pub enum ConfigCommand {
         #[arg(long, help = "Emit the result as JSON instead of human-readable text")]
         json: bool,
     },
+}
+
+impl ConfigCommand {
+    /// Whether `--json` was requested for a config subcommand. Only
+    /// `config status` emits JSON.
+    fn json_requested(&self) -> bool {
+        match self {
+            ConfigCommand::Status { json, .. } => *json,
+            _ => false,
+        }
+    }
 }
 
 #[derive(Args)]
@@ -479,6 +502,46 @@ enum Command {
 
     /// Generate shell completion scripts
     Completions { shell: clap_complete::Shell },
+}
+
+impl Command {
+    /// Whether `--json` was requested for this subcommand: the single check
+    /// for both the success output (handlers) and the unified error output
+    /// in `main`.
+    fn json_requested(&self) -> bool {
+        match self {
+            // Struct variants: `json` is a `&bool`.
+            Command::Create { json, .. }
+            | Command::List { json, .. }
+            | Command::Clone { json, .. }
+            | Command::Export { json, .. }
+            | Command::Snapshot { json, .. }
+            | Command::Op { json, .. }
+            | Command::Disk { json, .. }
+            | Command::Guest { json, .. }
+            | Command::Cache { json, .. } => *json,
+            // Tuple variants: each has a distinct args type; read its `json` field.
+            Command::Status(args) => args.json,
+            Command::Logs(args) => args.json,
+            Command::Events(args) => args.json,
+            Command::Metrics(args) => args.json,
+            Command::Config { action, .. } => {
+                action.as_ref().map(|a| a.json_requested()).unwrap_or(false)
+            }
+            Command::Connect { .. }
+            | Command::Exec { .. }
+            | Command::Start(_)
+            | Command::Stop(_)
+            | Command::Pause(_)
+            | Command::Resume(_)
+            | Command::Remove(_)
+            | Command::Attach { .. }
+            | Command::Detach { .. }
+            | Command::Wizard {}
+            | Command::Doctor { .. }
+            | Command::Completions { .. } => false,
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -827,21 +890,46 @@ async fn check_daemon_version(client: &mut TracedClient) -> Result<(), String> {
     }
 }
 
+/// Resolves the daemon address from `--daemon-addr`, then `ANDLERD_ADDR`,
+/// then the default. Shared by `main` and `run` so the printed error and the
+/// connection attempt agree on the address.
+fn resolve_daemon_addr(cli: &Cli) -> String {
+    cli.daemon_addr
+        .clone()
+        .or_else(|| std::env::var("ANDLERD_ADDR").ok())
+        .unwrap_or_else(|| DEFAULT_DAEMON_ADDR.to_string())
+}
+
+/// Message for a CLI error, reused by both the text and JSON output paths so
+/// they never diverge. Mirrors the previous inline rendering exactly.
+fn cli_error_message(err: &(dyn std::error::Error + 'static), addr: &str) -> String {
+    if let Some(status) = err.downcast_ref::<tonic::Status>() {
+        format_grpc_error(status)
+    } else if looks_like_daemon_not_running(err) {
+        format!("andlerd is not running at {addr}.\nStart it with: andlerd")
+    } else {
+        err.to_string()
+    }
+}
+
 #[tokio::main]
 async fn main() -> std::process::ExitCode {
-    let addr = std::env::var("ANDLERD_ADDR").unwrap_or_else(|_| DEFAULT_DAEMON_ADDR.to_string());
-    let addr = Cli::try_parse()
-        .ok()
-        .and_then(|cli| cli.daemon_addr)
-        .unwrap_or(addr);
+    let cli = Cli::parse();
+    let addr = resolve_daemon_addr(&cli);
+    let json = cli.json_requested();
 
-    if let Err(err) = run().await {
-        if let Some(status) = err.downcast_ref::<tonic::Status>() {
-            eprintln!("{}", format_grpc_error(status));
-        } else if looks_like_daemon_not_running(err.as_ref()) {
-            eprintln!("andlerd is not running at {addr}.\nStart it with: andlerd");
+    if let Err(err) = run(cli, &addr).await {
+        // `--json` errors carry the same actionable message as the text
+        // path, wrapped in a stable {"error": ...} shape.
+        if json {
+            let message = cli_error_message(err.as_ref(), &addr);
+            let payload = serde_json::json!({ "error": message });
+            eprintln!(
+                "{}",
+                serde_json::to_string(&payload).unwrap_or_else(|_| r#"{"error":""}"#.into())
+            );
         } else {
-            eprintln!("Error: {err}");
+            eprintln!("{}", cli_error_message(err.as_ref(), &addr));
         }
         return std::process::ExitCode::FAILURE;
     }
@@ -849,9 +937,7 @@ async fn main() -> std::process::ExitCode {
     std::process::ExitCode::SUCCESS
 }
 
-async fn run() -> Result<(), Box<dyn std::error::Error>> {
-    let cli = Cli::parse();
-
+async fn run(cli: Cli, addr: &str) -> Result<(), Box<dyn std::error::Error>> {
     if let Some(Command::Completions { shell }) = &cli.command {
         let mut cmd = <Cli as clap::CommandFactory>::command();
         let bin_name = cmd.get_name().to_string();
@@ -859,16 +945,11 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    let addr = cli
-        .daemon_addr
-        .or_else(|| std::env::var("ANDLERD_ADDR").ok())
-        .unwrap_or_else(|| DEFAULT_DAEMON_ADDR.to_string());
-
     if let Some(Command::Doctor { metrics }) = &cli.command {
         if *metrics {
-            return doctor::print_metrics(&addr).await;
+            return doctor::print_metrics(addr).await;
         }
-        let all_ok = doctor::run(&addr).await;
+        let all_ok = doctor::run(addr).await;
         return if all_ok {
             Ok(())
         } else {
@@ -880,7 +961,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         return cache::handle(action.clone(), *json);
     }
 
-    let mut client = traced_client(&addr).await?;
+    let mut client = traced_client(addr).await?;
 
     // Version handshake: a CLI and daemon built from different
     // refactor phases would otherwise surface as an opaque protobuf error

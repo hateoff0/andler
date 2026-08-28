@@ -1,3 +1,4 @@
+use crate::helpers::emit_json;
 use crate::TracedClient;
 use andler_rpc::proto::{
     AndroidProfile as ProtoAndroidProfile, CreateAndroidInstanceRequest, CreateInstanceRequest,
@@ -205,7 +206,7 @@ pub async fn handle(
             if dry_run {
                 if json {
                     let resolved = crate::preview::resolve_linux(&req)?;
-                    println!("{}", serde_json::to_string(&resolved.cfg)?);
+                    emit_json(&resolved.cfg)?;
                 } else {
                     return crate::preview::print_linux_preview(&req);
                 }
@@ -216,7 +217,7 @@ pub async fn handle(
             let response = client.create_instance(req).await?;
             let id = response.into_inner().instance_id;
             if json {
-                println!("{}", created_json(&id));
+                emit_json(&created_json(&id))?;
             } else {
                 println!(
                     "Created instance {name} ({})",
@@ -250,7 +251,7 @@ pub async fn handle(
             if dry_run {
                 if json {
                     let resolved = crate::preview::resolve_android(&req)?;
-                    println!("{}", serde_json::to_string(&resolved.cfg)?);
+                    emit_json(&resolved.cfg)?;
                 } else {
                     return crate::preview::print_android_preview(&req);
                 }
@@ -261,7 +262,7 @@ pub async fn handle(
             let response = client.create_android_instance(req).await?;
             let id = response.into_inner().instance_id;
             if json {
-                println!("{}", created_json(&id));
+                emit_json(&created_json(&id))?;
             } else {
                 println!(
                     "Created instance {name} ({})",

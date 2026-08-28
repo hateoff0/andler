@@ -7,7 +7,7 @@ use andler_rpc::proto::{
 use std::io::IsTerminal;
 
 use crate::helpers::{
-    colorize_status, format_bytes, format_bytes_per_sec, format_size, state_kind_name,
+    colorize_status, emit_json, format_bytes, format_bytes_per_sec, format_size, state_kind_name,
 };
 use crate::{CliLogSource, ListSortKey};
 
@@ -33,7 +33,7 @@ pub async fn handle_status(
         .into_inner();
     let state = response.state();
     if json {
-        println!("{}", status_json(&instance_id, &response));
+        emit_json(&status_json(&instance_id, &response))?;
         return Ok(());
     }
     println!(
@@ -75,10 +75,15 @@ pub async fn handle_list(
         Some(raw) => match parse_state_filter(&raw) {
             Some(kind) => Some(kind),
             None => {
-                eprintln!(
+                let message = format!(
                     "unknown state {raw:?} (expected one of: Created, Starting, Running, \
                      Paused, Stopping, Stopped, Error)"
                 );
+                if json {
+                    eprintln!("{}", serde_json::json!({ "error": message }));
+                } else {
+                    eprintln!("{message}");
+                }
                 std::process::exit(2);
             }
         },
@@ -88,7 +93,12 @@ pub async fn handle_list(
         Some(pattern) => match regex::Regex::new(&pattern) {
             Ok(re) => Some(re),
             Err(err) => {
-                eprintln!("invalid --name regex {pattern:?}: {err}");
+                let message = format!("invalid --name regex {pattern:?}: {err}");
+                if json {
+                    eprintln!("{}", serde_json::json!({ "error": message }));
+                } else {
+                    eprintln!("{message}");
+                }
                 std::process::exit(2);
             }
         },
@@ -139,7 +149,7 @@ pub async fn handle_list(
                 broken_reason: entry.broken_reason.as_deref(),
             })
             .collect();
-        println!("{}", serde_json::to_string(&entries)?);
+        emit_json(&entries)?;
         return Ok(());
     }
 
@@ -214,7 +224,7 @@ pub async fn handle_config_status(
         .await?
         .into_inner();
     if json {
-        println!("{}", config_status_json(&response));
+        emit_json(&config_status_json(&response))?;
     } else {
         println!(
             "instance_id: {}",
@@ -377,7 +387,7 @@ pub async fn handle_metrics(
                 vram_total_bytes: m.vram_total_bytes,
                 gpu_load_percent: m.gpu_load_percent,
             };
-            println!("{}", serde_json::to_string(&sample)?);
+            emit_json(&sample)?;
         } else {
             let cpu = m
                 .cpu_percent

@@ -1,3 +1,4 @@
+use crate::helpers::emit_json;
 use andler_core::base_image::{self, GcRemoval};
 use andler_core::paths::base_images_dir;
 use clap::Subcommand;
@@ -43,7 +44,7 @@ fn list(json: bool) -> Result<(), Box<dyn std::error::Error>> {
         .map_err(|source| format!("cannot read base-image cache {}: {source}", dir.display()))?;
 
     if json {
-        println!("{}", serde_json::to_string_pretty(&images)?);
+        emit_json(&images)?;
         return Ok(());
     }
 
@@ -65,14 +66,11 @@ fn clean(dry_run: bool, json: bool) -> Result<(), Box<dyn std::error::Error>> {
 
     if candidates.is_empty() {
         if json {
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&CacheCleanReport {
-                    cache_dir: dir.display().to_string(),
-                    dry_run,
-                    removed: Vec::new(),
-                })?
-            );
+            emit_json(&CacheCleanReport {
+                cache_dir: dir.display().to_string(),
+                dry_run,
+                removed: Vec::new(),
+            })?;
         } else {
             println!(
                 "base-image cache is up to date (nothing superseded or orphaned in {})",
@@ -101,14 +99,11 @@ fn clean(dry_run: bool, json: bool) -> Result<(), Box<dyn std::error::Error>> {
                 label: entry.label.clone(),
             });
         }
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&CacheCleanReport {
-                cache_dir: dir.display().to_string(),
-                dry_run,
-                removed,
-            })?
-        );
+        emit_json(&CacheCleanReport {
+            cache_dir: dir.display().to_string(),
+            dry_run,
+            removed,
+        })?;
         return Ok(());
     }
 

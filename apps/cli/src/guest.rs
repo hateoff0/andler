@@ -1,3 +1,4 @@
+use crate::helpers::emit_json;
 use crate::TracedClient;
 use andler_rpc::proto::{
     AndroidBootMode as ProtoAndroidBootMode, GuestPackageEntry, GuestProvisionRequest,
@@ -119,7 +120,7 @@ pub async fn handle(
             let packages = response.into_inner().packages;
             let rows: Vec<serde_json::Value> = packages.iter().map(package_json).collect();
             if json {
-                println!("{}", packages_json(&rows));
+                emit_json(&packages_json(&rows))?;
             } else if packages.is_empty() {
                 println!("No known packages.");
             } else {

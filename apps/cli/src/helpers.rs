@@ -175,6 +175,14 @@ pub fn short_id(full: &str) -> &str {
     full.get(..12).unwrap_or(full)
 }
 
+/// Emit a value as compact JSON on stdout: the single source of truth for
+/// `--json` output so every subcommand formats identically. Streaming outputs
+/// (metrics, events) call this per sample to stay line-based.
+pub fn emit_json<T: serde::Serialize>(value: &T) -> std::result::Result<(), serde_json::Error> {
+    println!("{}", serde_json::to_string(value)?);
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -188,6 +196,14 @@ mod tests {
     #[test]
     fn short_id_returns_input_unchanged_if_shorter_than_twelve() {
         assert_eq!(short_id("abc"), "abc");
+    }
+
+    #[test]
+    fn emit_json_emits_compact_json() {
+        let value = serde_json::json!({ "instance_id": "abc", "n": 1 });
+        // Guards the helper is wired to a working serializer; the compact
+        // format itself is pinned by the E2E `--json` contract.
+        assert!(emit_json(&value).is_ok());
     }
 
     #[test]

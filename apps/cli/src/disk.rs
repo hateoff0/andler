@@ -1,4 +1,4 @@
-use crate::helpers::{ensure_qcow2_extension, format_size, parse_size};
+use crate::helpers::{emit_json, ensure_qcow2_extension, format_size, parse_size};
 use crate::DiskAction;
 use andler_disk::DiskError;
 
@@ -29,7 +29,7 @@ pub async fn handle(action: DiskAction, json: bool) -> Result<(), Box<dyn std::e
         DiskAction::Info { path } => {
             let info = andler_disk::qcow2::info(&path).await?;
             if json {
-                println!("{}", disk_info_json(&path, &info));
+                emit_json(&disk_info_json(&path, &info))?;
             } else {
                 println!("path:         {}", path.display());
                 println!("format:       {}", info.format);

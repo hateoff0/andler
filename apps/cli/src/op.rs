@@ -1,3 +1,4 @@
+use crate::helpers::emit_json;
 use crate::TracedClient;
 use andler_rpc::proto::{Empty, OpCancelRequest};
 
@@ -33,7 +34,7 @@ pub async fn handle(
                         error: &op.error,
                     })
                     .collect();
-                println!("{}", serde_json::to_string(&entries)?);
+                emit_json(&entries)?;
                 return Ok(());
             }
             if response.operations.is_empty() {

@@ -1,3 +1,4 @@
+use crate::helpers::emit_json;
 use crate::TracedClient;
 use andler_rpc::proto::{
     CreateSnapshotRequest, DeleteSnapshotRequest, InstanceIdRequest, RestoreSnapshotRequest,
@@ -123,7 +124,7 @@ pub async fn handle(
                         branch: &snap.branch,
                     })
                     .collect();
-                println!("{}", serde_json::to_string(&entries)?);
+                emit_json(&entries)?;
                 return Ok(());
             }
             if response.snapshots.is_empty() {
