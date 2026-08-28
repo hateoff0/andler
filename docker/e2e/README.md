@@ -97,6 +97,7 @@ Coverage by suite:
 | `26_affinity.sh` | CPU pinning: `cpu.affinity = [0, 1]` in `instance.toml` pins the QEMU process (verified via `/proc/<pid>/status` `Cpus_allowed_list`), an overlapping pin on a running instance is refused up front, a disjoint pin starts fine, an index beyond the host CPU count is rejected before spawn |
 | `27_overcommit_mem_lock.sh` | `memory.overcommit_mem_lock` config key: false by default, `config set` true/false round-trips through `config view`, malformed value rejected, survives a daemon restart. The QEMU arg it maps to (`-overcommit mem-lock=on`) is asserted by the cmdline unit test |
 | `28_hugepages.sh` | `memory.hugepages` config key: false by default, `config set` true/false round-trips through `config view`, malformed value rejected, survives a daemon restart. The QEMU arg it maps to (`memory-backend-file` with `mem-path=/dev/hugepages`) is asserted by the cmdline unit test |
+| `29_overcommit_gate.sh` | Memory overcommit gate: starting an instance whose guest RAM plus the RAM already used by running instances exceeds host physical RAM fails with a `MemoryOvercommit` FailedPrecondition error (`would exceed host memory`) rather than a raw QEMU spawn failure. Host RAM is read from `/proc/meminfo`; the gate's arithmetic is pinned by the daemon unit test
 
 ### Guest package ops: offline (07) + online (23)
 

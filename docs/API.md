@@ -611,7 +611,7 @@ andler doctor [--metrics]
 
 Checks the local environment for ANDLER prerequisites: KVM availability, QEMU/OVMF installation, daemon reachability, base images, and the offline-guest-operation prerequisites (`guestmount`/libguestfs on PATH, `/dev/fuse`, unprivileged user namespaces allowed — the `sysctl kernel.unprivileged_userns_clone=1` hint appears on Debian/Ubuntu when disabled). Read-only — works even if andlerd isn't running. Offline guest package ops (`--offline`) are zero-root: no sudoers rules, nothing to install.
 
-With `--metrics`, prints the daemon's internal metrics snapshot instead of the environment checks: RPC latency p50/p99 by method, error counts by gRPC status code, instance counts, active operations, and QMP reconnects (requires a reachable daemon).
+With `--metrics`, prints the daemon's internal metrics snapshot instead of the environment checks: RPC latency p50/p99 by method, error counts by gRPC status code, instance counts, active operations, QMP reconnects, and running guest RAM (the running-total the memory-overcommit gate sums before spawn; only shown when non-zero). (requires a reachable daemon).
 ### `completions`
 
 ```bash
@@ -829,7 +829,7 @@ Defined in `services/andler-rpc/proto/andler.proto`. Uses `tonic`/`prost` for Ru
 |-------------|--------------|------|
 | `NOT_FOUND` | `InstanceNotFound`, `SnapshotNotFound`, `InstanceRefNotFound`, `DiskNotAttached`, `NetworkNotAttached` | Unknown instance/snapshot/ref, or detaching a device that is not attached |
 | `UNIMPLEMENTED` | `NoBackendRegistered`, `Backend(NotImplemented)` | Backend kind not available |
-| `FAILED_PRECONDITION` | `InvalidTransition`, `InstanceNotRemovable`, `InstanceNotClonable`, `InstanceAlreadyStopped`, `SharedBaseNotSupportedForLinuxVm`, `InstanceHasLiveClones`, `SnapshotOperationRequiresRunningInstance`, `SnapshotLimitExceeded`, `GuestAgentUnavailable`, `NotAndroid`, `InstanceMustBeStopped`, `HotplugRequiresRunningInstance`, `Backend(HandleNotFound)`, `Backend(ProcessNotRunning)` | Wrong lifecycle state, resource limit, guest agent unavailable, wrong instance kind |
+| `FAILED_PRECONDITION` | `InvalidTransition`, `InstanceNotRemovable`, `InstanceNotClonable`, `InstanceAlreadyStopped`, `SharedBaseNotSupportedForLinuxVm`, `InstanceHasLiveClones`, `SnapshotOperationRequiresRunningInstance`, `SnapshotLimitExceeded`, `GuestAgentUnavailable`, `NotAndroid`, `InstanceMustBeStopped`, `HotplugRequiresRunningInstance`, `MemoryOvercommit`, `Backend(HandleNotFound)`, `Backend(ProcessNotRunning)` | Wrong lifecycle state, resource limit, guest agent unavailable, wrong instance kind |
 | `ALREADY_EXISTS` | `SnapshotAlreadyExists`, `DiskAlreadyAttached` | Duplicate snapshot tag, or disk image already attached |
 | `INVALID_ARGUMENT` | `ConvertError`, `EmptyInstanceRef`, `MalformedInstanceRef`, `AmbiguousInstanceId`, `ConfigIdMismatch`, `ConfigKindChanged`, `ConfigDiskPathChanged`, `InvalidConfig`, `InvalidConfigKey`, `MissingOvmfVarsTemplate` | Malformed request or invalid arguments |
 | `RESOURCE_EXHAUSTED` | `InsufficientDiskSpace` | Not enough free space for a snapshot operation |

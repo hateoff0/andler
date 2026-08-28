@@ -636,6 +636,7 @@ message DaemonMetricsResponse {
     uint64 running_count = 4;
     uint64 active_ops = 5;
     uint64 qmp_reconnects = 6;
+    uint64 running_ram_bytes = 7;
 }
 
 message MethodLatency {

@@ -721,7 +721,7 @@ impl AndlerService for DaemonService {
         &self,
         _request: Request<Empty>,
     ) -> Result<Response<DaemonMetricsResponse>, Status> {
-        let (instance_count, running_count, active_ops) = {
+        let (instance_count, running_count, active_ops, running_ram_bytes) = {
             let supervisors = self.daemon.supervisors.read().await;
             let mut active = 0usize;
             for handle in supervisors.values() {
@@ -733,7 +733,12 @@ impl AndlerService for DaemonService {
                 .values()
                 .filter(|h| h.state() == andler_core::InstanceState::Running)
                 .count();
-            (supervisors.len(), running, active)
+            let running_ram_bytes: u64 = supervisors
+                .values()
+                .filter(|h| h.state() == andler_core::InstanceState::Running)
+                .map(|h| h.config().memory.size_bytes)
+                .sum();
+            (supervisors.len(), running, active, running_ram_bytes)
         };
         let qmp_reconnects: u64 = self
             .daemon
@@ -741,9 +746,9 @@ impl AndlerService for DaemonService {
             .values()
             .map(|b| b.qmp_reconnect_count())
             .sum();
-        let snap = self
-            .metrics
-            .snapshot(instance_count, running_count, active_ops);
+        let snap =
+            self.metrics
+                .snapshot(instance_count, running_count, active_ops, running_ram_bytes);
 
         Ok(Response::new(DaemonMetricsResponse {
             latency: snap
@@ -765,6 +770,7 @@ impl AndlerService for DaemonService {
             running_count: snap.running_count as u64,
             active_ops: snap.active_ops as u64,
             qmp_reconnects,
+            running_ram_bytes,
         }))
     }
 

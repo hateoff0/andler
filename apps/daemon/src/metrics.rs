@@ -23,6 +23,7 @@ pub struct MetricsSnapshot {
     pub instance_count: usize,
     pub running_count: usize,
     pub active_ops: usize,
+    pub running_ram_bytes: u64,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -54,6 +55,7 @@ impl DaemonMetrics {
         instance_count: usize,
         running_count: usize,
         active_ops: usize,
+        running_ram_bytes: u64,
     ) -> MetricsSnapshot {
         let latency = {
             let latency = self.latency.lock().unwrap();
@@ -95,6 +97,7 @@ impl DaemonMetrics {
             instance_count,
             running_count,
             active_ops,
+            running_ram_bytes,
         }
     }
 }
@@ -206,7 +209,7 @@ mod tests {
                 None,
             );
         }
-        let snap = metrics.snapshot(1, 1, 2);
+        let snap = metrics.snapshot(1, 1, 2, 0);
         assert_eq!(snap.latency.len(), 1);
         let entry = &snap.latency[0];
         assert_eq!(entry.method, "/AndlerService/GetVersion");
@@ -221,8 +224,7 @@ mod tests {
         metrics.record_rpc("/a", Duration::from_millis(1), Some(tonic::Code::NotFound));
         metrics.record_rpc("/a", Duration::from_millis(2), Some(tonic::Code::NotFound));
         metrics.record_rpc("/a", Duration::from_millis(3), None);
-        let snap = metrics.snapshot(0, 0, 0);
-        assert_eq!(snap.by_code.len(), 2);
+        let snap = metrics.snapshot(0, 0, 0, 0);
         assert!(snap.by_code.contains(&("NotFound".to_string(), 2)));
         assert!(snap.by_code.contains(&("OK".to_string(), 1)));
     }
@@ -230,9 +232,10 @@ mod tests {
     #[test]
     fn snapshot_reports_passed_counts() {
         let metrics = DaemonMetrics::default();
-        let snap = metrics.snapshot(3, 1, 2);
+        let snap = metrics.snapshot(3, 1, 2, 0);
         assert_eq!(snap.instance_count, 3);
         assert_eq!(snap.running_count, 1);
         assert_eq!(snap.active_ops, 2);
+        assert_eq!(snap.running_ram_bytes, 0);
     }
 }

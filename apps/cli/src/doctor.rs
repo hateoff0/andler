@@ -303,6 +303,13 @@ pub async fn print_metrics(daemon_addr: &str) -> Result<(), Box<dyn std::error::
         "instances: {} total, {} running, {} active op(s); QMP reconnects: {}",
         snap.instance_count, snap.running_count, snap.active_ops, snap.qmp_reconnects
     );
+    if snap.running_ram_bytes > 0 {
+        println!(
+            "running guest RAM: {} across {} instance(s); the daemon refuses starts that would exceed host memory",
+            andler_core::sizes::format_size(snap.running_ram_bytes),
+            snap.running_count
+        );
+    }
     if snap.latency.is_empty() {
         println!("  (no RPC traffic recorded yet)");
     }

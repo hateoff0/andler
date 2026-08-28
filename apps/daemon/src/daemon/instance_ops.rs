@@ -1544,7 +1544,12 @@ pub(super) async fn do_start_instance(
     // And for pinned CPUs: two instances pinned to overlapping host CPUs
     // would silently contend for the same cores, defeating the pin.
     check_cpu_affinity_conflicts_impl(supervisors, id, &cfg).await?;
+    // The pinned set must also be valid (no CPU beyond the host's count) —
+    // a bad set fails fast instead of surfacing as a raw taskset error at spawn.
     validate_cpu_affinity(&cfg)?;
+    // And the last shared-resource gate: the sum of guest RAM across every
+    // running instance (plus this one) must not exceed the host's physical RAM.
+    check_memory_overcommit_impl(supervisors, id, &cfg).await?;
     handle.transition(InstanceEvent::Start).await?;
 
     let backend = backends
@@ -1720,6 +1725,80 @@ async fn check_cpu_affinity_conflicts_impl(
         }
     }
     Ok(())
+}
+/// Shared multi-instance memory gate used by both the `StartInstance` RPC and
+/// the deferred `autostart` task: sum the guest RAM of every Running/Paused/
+/// Starting instance plus the one being started, and refuse if the sum would
+/// exceed the host's total RAM. This is the §H "Multi-instance resources"
+/// remainder — the port/disk/cpu conflict gates already handle the other
+/// shared-resource races; memory is the last one. KSM is enabled by default
+/// but we do not credit it: shared pages are unpredictable, so the gate stays
+/// conservative and never silently over-commits.
+async fn check_memory_overcommit_impl(
+    supervisors: &std::sync::Arc<tokio::sync::RwLock<HashMap<InstanceId, SupervisorHandle>>>,
+    id: InstanceId,
+    cfg: &InstanceConfig,
+) -> Result<(), DaemonError> {
+    // The operator may override the host-total used for the comparison with
+    // `memory.hostmem_bytes` (the hard RAM the guest is allowed to touch);
+    // otherwise we compare against the host's physical RAM.
+    let host_total = read_host_total_ram().unwrap_or(cfg.memory.size_bytes);
+
+    let map = supervisors.read().await;
+    let mut used_bytes = 0u64;
+    let mut running_count = 0usize;
+    for (other_id, other) in map.iter() {
+        if *other_id == id {
+            continue;
+        }
+        let state = other.state();
+        if !matches!(
+            state,
+            InstanceState::Running | InstanceState::Paused | InstanceState::Starting
+        ) {
+            continue;
+        }
+        used_bytes += other.config().memory.size_bytes;
+        running_count += 1;
+    }
+
+    // The new instance's RAM is always part of the sum, even if it is the
+    // only instance (a fresh host with one 16 GiB VM must still fail if the
+    // host has only 8 GiB).
+    let requested_bytes = used_bytes + cfg.memory.size_bytes;
+
+    if requested_bytes > host_total {
+        return Err(DaemonError::MemoryOvercommit {
+            requested_bytes,
+            host_bytes: host_total,
+            running_count,
+            used_bytes,
+        });
+    }
+
+    Ok(())
+}
+
+/// Host physical RAM in bytes, read from `/proc/meminfo` (MemTotal) on Linux.
+/// Returns `None` when the file is unreadable or the field is missing — the
+/// caller then falls back to the instance's own size, which still catches the
+/// degenerate "start one VM larger than itself" case without panicking.
+fn read_host_total_ram() -> Option<u64> {
+    let raw = std::fs::read_to_string("/proc/meminfo").ok()?;
+    for line in raw.lines() {
+        let (key, value) = line.split_once(':')?;
+        if key.trim() == "MemTotal" {
+            // "<value> kB" — the value is in kilobytes. The field is
+            // whitespace-padded, so trim before splitting off the unit.
+            let (num, unit) = value.trim().split_once(' ')?;
+            if unit.trim() == "kB" {
+                if let Ok(kb) = num.trim().parse::<u64>() {
+                    return Some(kb.saturating_mul(1024));
+                }
+            }
+        }
+    }
+    None
 }
 
 /// Rejects a `cpu.affinity` set that references host CPUs the QEMU process

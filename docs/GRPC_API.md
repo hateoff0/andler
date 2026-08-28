@@ -38,7 +38,7 @@ The core service exposing all instance management operations.
 | `ListGuestPackages` | `InstanceIdRequest` | `ListGuestPackagesResponse` | Unary | Lists known guest packages and their installation status. |
 | `GuestProvision` | `GuestProvisionRequest` | `Empty` | Unary | Applies a provision manifest: online via QGA when running, offline via the guestfs appliance when stopped. |
 | `StreamDaemonLogs` | `DaemonLogsRequest` | `stream DaemonLogLine` | Server-streaming | Streams the daemon's own log from its in-memory ring (snapshot, or follow when requested). |
-| `GetDaemonMetrics` | `Empty` | `DaemonMetricsResponse` | Unary | Daemon-internal metrics snapshot: RPC latency p50/p99 by method, error counts by status code, instance/active-op counts, QMP reconnects. |
+| `GetDaemonMetrics` | `Empty` | `DaemonMetricsResponse` | Unary | Daemon-internal metrics snapshot: RPC latency p50/p99 by method, error counts by status code, instance/active-op counts, QMP reconnects, and running guest RAM (sum of running instances' sizes — the running-total the memory-overcommit gate sums before spawn). |
 | `SwitchArmTranslator` | `SwitchArmTranslatorRequest` | `Empty` | Unary | Switches the ARM translator in offline mode. |
 | `SetInstanceConfig` | `SetInstanceConfigRequest` | `Empty` | Unary | Partially updates an instance configuration by key. |
 | `SwitchAndroidBootMode` | `SwitchAndroidBootModeRequest` | `Empty` | Unary | Switches the Android boot mode in offline mode. |
@@ -863,6 +863,7 @@ Snapshot of daemon-internal metrics, served by
 | `running_count` | `uint64` | Instances in `Running` state. |
 | `active_ops` | `uint64` | Instances with a long-running operation in flight. |
 | `qmp_reconnects` | `uint64` | Total QMP control-socket resets across backends. |
+| `running_ram_bytes` | `uint64` | Total guest RAM (sum of `size_bytes`) of all `Running` instances. The daemon's memory-overcommit gate refuses a start whose running total would exceed host physical RAM. |
 
 ### `MethodLatency`
 
@@ -926,7 +927,7 @@ Single package entry.
 |-------------|--------------|------|
 | `NOT_FOUND` | `InstanceNotFound`, `SnapshotNotFound`, `SnapshotLayerMissing`, `InstanceRefNotFound`, `DiskNotAttached`, `NetworkNotAttached`, `OperationNotFound` | Unknown instance/snapshot/layer/ref, detaching a device that is not attached, or cancelling an unknown operation. |
 | `UNIMPLEMENTED` | `NoBackendRegistered`, `Backend(NotImplemented)` | Backend kind not available. |
-| `FAILED_PRECONDITION` | `InvalidTransition`, `InstanceNotRemovable`, `InstanceNotClonable`, `InstanceAlreadyStopped`, `SharedBaseNotSupportedForLinuxVm`, `InstanceHasLiveClones`, `SnapshotOperationRequiresRunningInstance`, `SnapshotLimitExceeded`, `SnapshotRequiresQcow2`, `SnapshotInternalNotRestorable`, `RestoreTargetOnArchivedBranch`, `RestoreWouldBreakClones`, `DeleteWouldBreakClones`, `CannotDeleteBaseLayer`, `GuestAgentUnavailable`, `NotAndroid`, `InstanceMustBeStopped`, `HotplugRequiresRunningInstance`, `OperationAlreadyRunning`, `OperationCancelled`, `PortForwardConflict`, `DiskInUse`, `CpuAffinityConflict`, `Backend(HandleNotFound)`, `Backend(ProcessNotRunning)` | Wrong lifecycle state, resource limit, snapshot chain constraint, guest agent unavailable, wrong instance kind, operation conflicts (one long op per instance; cancelled op), host port already forwarded by another running instance, disk file already in use by another running instance, host CPU already pinned by another running instance. |
+| `FAILED_PRECONDITION` | `InvalidTransition`, `InstanceNotRemovable`, `InstanceNotClonable`, `InstanceAlreadyStopped`, `SharedBaseNotSupportedForLinuxVm`, `InstanceHasLiveClones`, `SnapshotOperationRequiresRunningInstance`, `SnapshotLimitExceeded`, `SnapshotRequiresQcow2`, `SnapshotInternalNotRestorable`, `RestoreTargetOnArchivedBranch`, `RestoreWouldBreakClones`, `DeleteWouldBreakClones`, `CannotDeleteBaseLayer`, `GuestAgentUnavailable`, `NotAndroid`, `InstanceMustBeStopped`, `HotplugRequiresRunningInstance`, `OperationAlreadyRunning`, `OperationCancelled`, `PortForwardConflict`, `DiskInUse`, `CpuAffinityConflict`, `MemoryOvercommit`, `Backend(HandleNotFound)`, `Backend(ProcessNotRunning)` | Wrong lifecycle state, resource limit, snapshot chain constraint, guest agent unavail…
 | `ALREADY_EXISTS` | `SnapshotAlreadyExists`, `DiskAlreadyAttached` | Duplicate snapshot tag, or attaching a disk image that is already attached (including the primary disk). |
 | `INVALID_ARGUMENT` | `ConvertError`, `EmptyInstanceRef`, `MalformedInstanceRef`, `AmbiguousInstanceId`, `ConfigIdMismatch`, `ConfigKindChanged`, `ConfigDiskPathChanged`, `InvalidConfig`, `InvalidConfigKey`, `MissingOvmfVarsTemplate` | Malformed request or invalid arguments |
 | `RESOURCE_EXHAUSTED` | `InsufficientDiskSpace` | Not enough free space for a snapshot operation |

@@ -1059,6 +1059,7 @@ async fn get_daemon_metrics_round_trips_over_real_grpc() {
     assert_eq!(snap.running_count, 0);
     assert_eq!(snap.active_ops, 0);
     assert_eq!(snap.qmp_reconnects, 0);
+    assert_eq!(snap.running_ram_bytes, 0);
 
     server.abort();
 }

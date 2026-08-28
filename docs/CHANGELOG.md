@@ -20,6 +20,8 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 
 - **`memory.overcommit_mem_lock` pins the guest RAM to host memory**: set `overcommit_mem_lock = true` in `instance.toml` (or `andler config set <id> memory.overcommit_mem_lock true`) and the QEMU process is launched with `-overcommit mem-lock=on`, so the guest's RAM is locked (mlocked) and cannot be swapped out. Defaults to `false`; the key is writable only while the instance is stopped. Covered by the new `27_overcommit_mem_lock.sh` e2e suite.
 - **`memory.hugepages` backs the guest RAM with hugetlbfs**: set `hugepages = true` in `instance.toml` (or `andler config set <id> memory.hugepages true`) and the QEMU process is launched with a `memory-backend-file` object (`mem-path=/dev/hugepages,preallocate=true`) instead of anonymous `memory-backend-memfd`, so the guest's RAM is backed by large pages. Requires a mounted hugetlbfs (e.g. `mount -t hugetlbfs hugetlbfs /dev/hugepages`). Defaults to `false`; the key is writable only while the instance is stopped. Covered by the new `28_hugepages.sh` e2e suite.
+- **`andler start` refuses to overcommit host RAM**: before spawning, the daemon sums the guest RAM of every running instance plus the requested instance and rejects the start when the total exceeds the host's physical RAM (read from `/proc/meminfo`, falling back to the instance's own size when unreadable) with a `MemoryOvercommit` FailedPrecondition error (`guest RAM … would exceed host memory …; stop one or reduce sizes`) instead of a raw QEMU spawn failure. Unpinned instances are never blocked by this gate. Covered by the new `29_overcommit_gate.sh` e2e suite.
+- **`running_ram_bytes` reports the guest RAM the gate tracks**: `GetDaemonMetrics` (surfaced by `andler doctor --metrics`) now returns the sum of `size_bytes` across all `Running` instances, and `andler doctor --metrics` prints it as `running guest RAM: <size> across <n> instance(s); the daemon refuses starts that would exceed host memory`. The value is the same running-total the memory-overcommit gate sums before spawn, so an operator can see how close a host is to the limit. Covered by the daemon metrics unit test and the `GetDaemonMetrics` gRPC round-trip test.
 
 #### Autostart
 
@@ -46,8 +48,7 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 - **Log redaction**: guest-exec stdout/stderr is never logged (package install/remove output previously hit INFO — removed); QEMU/guest output lines dropped from WARN to debug (guest can print anything into the console; qemu.log/`andler logs <id>` remain the guest-log stream); guest resolv.conf diagnostics are debug-only. Documented as the redaction policy in `docs/ARCHITECTURE.md`.
 
 #### CLI
-
-- **`andler doctor --metrics`**: prints the daemon's internal metrics snapshot — RPC latency p50/p99 per method, error counts by gRPC status code, instance/running/active-op counts, QMP reconnect count.
+- **`andler doctor --metrics`**: prints the daemon's internal metrics snapshot — RPC latency p50/p99 per method, error counts by gRPC status code, instance/running/active-op counts, QMP reconnect count, and running guest RAM (the running-total the memory-overcommit gate sums before spawn).
 
 - **`andler logs daemon [--follow] [--json] [--since <epoch-ms>]`**: streams the daemon's own log (the same lines it prints, same format) from an in-memory 4096-line ring — debugging never requires knowing where andlerd writes. `--follow` keeps streaming, `--json` emits `{"ts_ms":...,"line":...}` lines, `--since` filters the snapshot; all three are rejected with an instance id (instance logs keep `--source/--grep/--tail`).
 

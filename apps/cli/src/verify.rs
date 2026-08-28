@@ -1,6 +1,7 @@
 use andler_core::InstanceKind;
 use andler_rpc::proto::{CreateAndroidInstanceRequest, CreateInstanceRequest};
 
+use crate::helpers::format_bytes;
 use crate::preview::{resolve_android, resolve_linux, Resolved};
 
 struct Check {
@@ -102,6 +103,58 @@ fn check_config_sanity(resolved: &Resolved) -> Check {
         result,
     }
 }
+/// Informational host-RAM check: the real multi-instance overcommit gate runs
+/// on the daemon (it alone sees every running instance), but the operator
+/// should still see host RAM vs the requested size before starting so the
+/// `MemoryOvercommit` refusal makes sense at a glance.
+fn check_host_ram(resolved: &Resolved) -> Check {
+    let host_total = read_host_total_ram();
+    let requested = resolved.cfg.memory.size_bytes;
+    let result = match host_total {
+        Some(total) => {
+            if requested > total {
+                Err(format!(
+                    "host {} < requested {} (this instance alone exceeds host RAM)",
+                    format_bytes(total),
+                    format_bytes(requested)
+                ))
+            } else {
+                Ok(format!(
+                    "host {} — requested {} ({:.1}% of host)",
+                    format_bytes(total),
+                    format_bytes(requested),
+                    (requested as f64 / total as f64) * 100.0
+                ))
+            }
+        }
+        None => Ok("not available — the daemon enforces the multi-instance gate".to_string()),
+    };
+    Check {
+        name: "Host memory",
+        result,
+    }
+}
+
+/// Host physical RAM in bytes from `/proc/meminfo` (MemTotal), or `None` when
+/// the file is unreadable. Mirrors the daemon's own read so the CLI and daemon
+/// agree on the number they compare against.
+fn read_host_total_ram() -> Option<u64> {
+    let raw = std::fs::read_to_string("/proc/meminfo").ok()?;
+    for line in raw.lines() {
+        let (key, value) = line.split_once(':')?;
+        if key.trim() == "MemTotal" {
+            // "<value> kB" — the value is in kilobytes. The field is
+            // whitespace-padded, so trim before splitting off the unit.
+            let (num, unit) = value.trim().split_once(' ')?;
+            if unit.trim() == "kB" {
+                if let Ok(kb) = num.parse::<u64>() {
+                    return Some(kb.saturating_mul(1024));
+                }
+            }
+        }
+    }
+    None
+}
 
 pub fn verify_linux(req: &CreateInstanceRequest) -> Result<bool, Box<dyn std::error::Error>> {
     let resolved = resolve_linux(req)?;
@@ -111,6 +164,7 @@ pub fn verify_linux(req: &CreateInstanceRequest) -> Result<bool, Box<dyn std::er
         check_disk(&resolved),
         check_ovmf(&resolved, false),
         check_config_sanity(&resolved),
+        check_host_ram(&resolved),
     ];
 
     Ok(run_checks(&resolved, checks))
@@ -155,6 +209,7 @@ pub fn verify_android(
         check_disk(&resolved),
         check_ovmf(&resolved, true),
         check_config_sanity(&resolved),
+        check_host_ram(&resolved),
     ];
     Ok(run_checks(&resolved, checks))
 }

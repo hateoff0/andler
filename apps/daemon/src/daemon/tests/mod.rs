@@ -14,6 +14,7 @@ mod guest_maintenance;
 mod health;
 mod hotplug;
 mod list_config;
+mod memory_overcommit;
 mod ops;
 mod persistence;
 mod port_conflict;

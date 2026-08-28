@@ -220,6 +220,16 @@ pub enum DaemonError {
         held_by: InstanceId,
     },
 
+    #[error(
+        "guest RAM {requested_bytes} would exceed host memory {host_bytes} \
+         ({running_count} running instance(s) already use {used_bytes}); stop one or reduce sizes"
+    )]
+    MemoryOvercommit {
+        requested_bytes: u64,
+        host_bytes: u64,
+        running_count: usize,
+        used_bytes: u64,
+    },
     #[error("instance reference must not be empty")]
     EmptyInstanceRef,
 
@@ -375,6 +385,7 @@ impl DaemonError {
             DaemonError::OperationCancelled(_) => ErrorKind::FailedPrecondition,
             DaemonError::OperationNotFound(_) => ErrorKind::NotFound,
             DaemonError::PortForwardConflict { .. } => ErrorKind::FailedPrecondition,
+            DaemonError::MemoryOvercommit { .. } => ErrorKind::FailedPrecondition,
             DaemonError::DiskInUse { .. } => ErrorKind::FailedPrecondition,
             DaemonError::CpuAffinityConflict { .. } => ErrorKind::FailedPrecondition,
             DaemonError::EmptyInstanceRef => ErrorKind::InvalidArgument,
