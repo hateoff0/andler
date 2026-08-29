@@ -7,6 +7,7 @@ pub mod disk_chain;
 pub mod error;
 pub mod events;
 pub mod fsm;
+pub mod oci_export;
 pub mod package_manager;
 pub mod paths;
 pub mod provision;

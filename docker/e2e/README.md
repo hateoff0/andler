@@ -100,6 +100,7 @@ Coverage by suite:
 | `28_hugepages.sh` | `memory.hugepages` config key: false by default, `config set` true/false round-trips through `config view`, malformed value rejected, survives a daemon restart. The QEMU arg it maps to (`memory-backend-file` with `mem-path=/dev/hugepages`) is asserted by the cmdline unit test |
 | `29_overcommit_gate.sh` | Memory overcommit gate: starting an instance whose guest RAM plus the RAM already used by running instances exceeds host physical RAM fails with a `MemoryOvercommit` FailedPrecondition error (`would exceed host memory`) rather than a raw QEMU spawn failure. Host RAM is read from `/proc/meminfo`; the gate's arithmetic is pinned by the daemon unit test
 | `30_json_output.sh` | `--json` output contract: a successful command emits a JSON document to stdout, and an error path emits `{"error": ...}` to stderr (never a bare text line) — pins the unified JSON error refactor |
+| `31_oci_export.sh` | `export-oci`: exports an instance disk as an OCI image layout directory (`oci-layout` + `index.json` + `config.json` + a rootfs blob under `blobs/sha256/`) and verifies the `index.json` parses as a manifest list (`manifests[]` with `mediaType`), `--json` output, and a nonexistent-source negative. Skips when `qemu-img` is unavailable.
 
 ### Guest package ops: offline (07) + online (23)
 

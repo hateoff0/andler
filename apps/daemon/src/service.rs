@@ -12,14 +12,15 @@ use andler_rpc::proto::{
     DaemonEventMessage, DaemonLogLine, DaemonLogsRequest, DaemonMetricsResponse,
     DeleteSnapshotRequest, DetachDiskRequest, DetachNetworkRequest, Empty, EventStreamRequest,
     ExecCommandRequest, ExecCommandResponse, ExportInstanceDiskRequest, ExportInstanceDiskResponse,
-    GetAndroidBootModeResponse, GetConfigStatusResponse, GetInstanceConfigResponse,
-    GuestPackageEntry, GuestProvisionRequest, InstallGuestAgentRequest, InstanceIdRequest,
-    InstanceListEntry, InstanceStatusResponse, ListGuestPackagesResponse, ListInstancesResponse,
-    ListSnapshotsResponse, LogLineResponse, MethodLatency, OpCancelRequest, OpListResponse,
-    OperationInfo, OperationPhase, RemoveGuestAgentRequest, RemoveInstanceRequest,
-    ResourceMetricsResponse, RestoreSnapshotRequest, SetInstanceConfigRequest, SnapshotEntry,
-    StopInstanceRequest, SwitchAndroidBootModeRequest, SwitchArmTranslatorRequest,
-    UpdateInstanceConfigRequest, VersionResponse,
+    ExportInstanceOciRequest, ExportInstanceOciResponse, GetAndroidBootModeResponse,
+    GetConfigStatusResponse, GetInstanceConfigResponse, GuestPackageEntry, GuestProvisionRequest,
+    InstallGuestAgentRequest, InstanceIdRequest, InstanceListEntry, InstanceStatusResponse,
+    ListGuestPackagesResponse, ListInstancesResponse, ListSnapshotsResponse, LogLineResponse,
+    MethodLatency, OpCancelRequest, OpListResponse, OperationInfo, OperationPhase,
+    RemoveGuestAgentRequest, RemoveInstanceRequest, ResourceMetricsResponse,
+    RestoreSnapshotRequest, SetInstanceConfigRequest, SnapshotEntry, StopInstanceRequest,
+    SwitchAndroidBootModeRequest, SwitchArmTranslatorRequest, UpdateInstanceConfigRequest,
+    VersionResponse,
 };
 use futures_core::Stream;
 use futures_util::StreamExt;
@@ -384,6 +385,33 @@ impl AndlerService for DaemonService {
             .await?;
 
         Ok(Response::new(ExportInstanceDiskResponse {
+            dest_path: req.dest_path,
+        }))
+    }
+
+    async fn export_instance_oci(
+        &self,
+        request: Request<ExportInstanceOciRequest>,
+    ) -> Result<Response<ExportInstanceOciResponse>, Status> {
+        let req = request.into_inner();
+        let source_id = self
+            .daemon
+            .resolve_instance_id(&req.source_instance_id)
+            .await?;
+
+        let disk_format = andler_core::DiskFormat::try_from(req.disk_format())?;
+        let disk_path = req.disk_path.map(Into::into);
+
+        self.daemon
+            .export_instance_oci(
+                source_id,
+                req.dest_path.clone().into(),
+                disk_format,
+                disk_path,
+            )
+            .await?;
+
+        Ok(Response::new(ExportInstanceOciResponse {
             dest_path: req.dest_path,
         }))
     }

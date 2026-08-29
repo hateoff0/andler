@@ -8,10 +8,11 @@ use andler_rpc::proto::{
     AttachDiskRequest, AttachNetworkRequest, AudioConfig, CloneInstanceRequest, CloneMode,
     CpuConfig, CreateInstanceRequest, DetachDiskRequest, DetachNetworkRequest, DiskConfig,
     DisplayConfig, Empty, EventStreamRequest, ExecCommandRequest, ExportInstanceDiskRequest,
-    FirmwareConfig, GetInstanceConfigResponse, GpuConfig, GuestProvisionRequest, InputConfig,
-    InstallGuestAgentRequest, InstanceIdRequest, InstanceStateKind, MemoryConfig, NetworkConfig,
-    OpCancelRequest, ProvisionMkdirP, RemoveGuestAgentRequest, RemoveInstanceRequest, Resolution,
-    RestoreSnapshotRequest, SetInstanceConfigRequest,
+    ExportInstanceOciRequest, FirmwareConfig, GetInstanceConfigResponse, GpuConfig,
+    GuestProvisionRequest, InputConfig, InstallGuestAgentRequest, InstanceIdRequest,
+    InstanceStateKind, MemoryConfig, NetworkConfig, OpCancelRequest, ProvisionMkdirP,
+    RemoveGuestAgentRequest, RemoveInstanceRequest, Resolution, RestoreSnapshotRequest,
+    SetInstanceConfigRequest,
 };
 use tokio::net::TcpListener;
 use tokio_stream::wrappers::TcpListenerStream;
@@ -714,6 +715,24 @@ async fn export_instance_disk_on_unknown_source_round_trips_as_not_found() {
 }
 
 #[tokio::test]
+async fn export_instance_oci_on_unknown_source_round_trips_as_not_found() {
+    let (mut client, server) = spawn_server_and_connect().await;
+
+    let status = client
+        .export_instance_oci(ExportInstanceOciRequest {
+            source_instance_id: "a".repeat(64),
+            dest_path: "/tmp/export-oci".to_string(),
+            disk_format: andler_rpc::proto::DiskFormat::Raw as i32,
+            disk_path: None,
+        })
+        .await
+        .expect_err("exporting an unregistered instance_id to OCI must fail");
+    assert_eq!(status.code(), tonic::Code::NotFound);
+
+    server.abort();
+}
+
+#[tokio::test]
 async fn export_instance_disk_linux_vm_with_qemu_img() {
     let (mut client, server) = spawn_server_and_connect().await;
 
@@ -732,6 +751,73 @@ async fn export_instance_disk_linux_vm_with_qemu_img() {
         .expect("exporting a LinuxVm should succeed when qemu-img is available");
     assert!(!response.into_inner().dest_path.is_empty());
 
+    server.abort();
+}
+
+#[tokio::test]
+async fn export_instance_oci_linux_vm_with_qemu_img() {
+    let (mut client, server) = spawn_server_and_connect().await;
+
+    let create_response = client
+        .create_instance(sample_create_instance_request())
+        .await
+        .expect("create_instance must succeed")
+        .into_inner();
+
+    // A small standalone qcow2 stands in for the instance's disk so the
+    // qcow2->raw conversion stays fast instead of materializing the 40 GiB
+    // default disk. The op's qcow2-format check still runs against it.
+    let small_disk =
+        std::env::temp_dir().join(format!("andler_oci_test_{}.qcow2", std::process::id()));
+    let _ = std::fs::remove_file(&small_disk);
+    {
+        let status = std::process::Command::new("qemu-img")
+            .args([
+                "create",
+                "-f",
+                "qcow2",
+                small_disk.to_string_lossy().as_ref(),
+                "64M",
+            ])
+            .status()
+            .expect("qemu-img must be available");
+        assert!(status.success(), "qemu-img create must succeed");
+    }
+
+    let dest_path = std::env::temp_dir().join(format!("andler_oci_export_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dest_path);
+    let response = client
+        .export_instance_oci(ExportInstanceOciRequest {
+            source_instance_id: create_response.instance_id,
+            dest_path: dest_path.to_string_lossy().to_string(),
+            disk_format: andler_rpc::proto::DiskFormat::Raw as i32,
+            disk_path: Some(small_disk.to_string_lossy().to_string()),
+        })
+        .await
+        .expect("exporting a LinuxVm to OCI should succeed when qemu-img is available");
+    assert!(!response.into_inner().dest_path.is_empty());
+
+    // The daemon wrote a conformant layout: the marker, index.json, config.json
+    // and a blob named by its own sha256 digest.
+    assert!(
+        dest_path.join("oci-layout").exists(),
+        "oci-layout marker must exist"
+    );
+    assert!(
+        dest_path.join("index.json").exists(),
+        "index.json must exist"
+    );
+    assert!(
+        dest_path.join("config.json").exists(),
+        "config.json must exist"
+    );
+    assert!(
+        dest_path.join("blobs").join("sha256").exists(),
+        "blobs/sha256 must exist"
+    );
+
+    let _ = std::fs::remove_dir_all(&dest_path);
+    let _ = std::fs::remove_file(&small_disk);
     server.abort();
 }
 

@@ -1183,6 +1183,43 @@ impl TryFrom<proto::SetInstanceConfigRequest> for SetInstanceConfigCmd {
     }
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct ExportInstanceOciCmd {
+    pub source_instance_id: InstanceId,
+    pub dest_path: PathBuf,
+    pub disk_format: DiskFormat,
+    pub disk_path: Option<PathBuf>,
+}
+
+impl TryFrom<proto::ExportInstanceOciRequest> for ExportInstanceOciCmd {
+    type Error = ConvertError;
+
+    fn try_from(req: proto::ExportInstanceOciRequest) -> Result<Self, Self::Error> {
+        let proto_format = req.disk_format();
+        if proto_format == proto::DiskFormat::Unspecified {
+            return Err(ConvertError::MissingDiskFormat);
+        }
+        let disk_format = proto_format.try_into()?;
+        Ok(Self {
+            source_instance_id: parse_instance_id(&req.source_instance_id)?,
+            dest_path: PathBuf::from(req.dest_path),
+            disk_format,
+            disk_path: req.disk_path.map(PathBuf::from),
+        })
+    }
+}
+
+impl From<ExportInstanceOciCmd> for proto::ExportInstanceOciRequest {
+    fn from(cmd: ExportInstanceOciCmd) -> Self {
+        Self {
+            source_instance_id: cmd.source_instance_id.to_string(),
+            dest_path: cmd.dest_path.to_string_lossy().into_owned(),
+            disk_format: proto::DiskFormat::from(cmd.disk_format) as i32,
+            disk_path: cmd.disk_path.map(|p| p.to_string_lossy().into_owned()),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1844,5 +1881,56 @@ mod tests {
         req.disk = None;
         let err = update_request_to_instance_config(cfg.id, req).unwrap_err();
         assert!(matches!(err, ConvertError::MissingField("disk")));
+    }
+
+    #[test]
+    fn export_instance_oci_round_trips_through_proto() {
+        let id = InstanceId::new();
+        let cmd = ExportInstanceOciCmd {
+            source_instance_id: id.clone(),
+            dest_path: PathBuf::from("/tmp/export.tar"),
+            disk_format: DiskFormat::Qcow2,
+            disk_path: Some(PathBuf::from("/tmp/disk.qcow2")),
+        };
+        let msg: proto::ExportInstanceOciRequest = cmd.clone().into();
+        let back: ExportInstanceOciCmd = msg.try_into().unwrap();
+        assert_eq!(cmd, back);
+    }
+    #[test]
+    fn export_instance_oci_rejects_unspecified_disk_format() {
+        let id = InstanceId::new();
+        let msg = proto::ExportInstanceOciRequest {
+            source_instance_id: id.to_string(),
+            dest_path: "/tmp/export.tar".to_string(),
+            disk_format: proto::DiskFormat::Unspecified as i32,
+            disk_path: None,
+        };
+        let err = ExportInstanceOciCmd::try_from(msg).unwrap_err();
+        assert!(matches!(err, ConvertError::MissingDiskFormat));
+    }
+    #[test]
+    fn export_instance_oci_converts_raw_disk_format() {
+        let id = InstanceId::new();
+        let msg = proto::ExportInstanceOciRequest {
+            source_instance_id: id.to_string(),
+            dest_path: "/tmp/export.tar".to_string(),
+            disk_format: proto::DiskFormat::Raw as i32,
+            disk_path: None,
+        };
+        let cmd = ExportInstanceOciCmd::try_from(msg).unwrap();
+        assert_eq!(cmd.source_instance_id, id);
+        assert_eq!(cmd.disk_format, DiskFormat::Raw);
+        assert!(cmd.disk_path.is_none());
+    }
+    #[test]
+    fn export_instance_oci_rejects_invalid_instance_id() {
+        let msg = proto::ExportInstanceOciRequest {
+            source_instance_id: "not-a-valid-id".to_string(),
+            dest_path: "/tmp/export.tar".to_string(),
+            disk_format: proto::DiskFormat::Qcow2 as i32,
+            disk_path: None,
+        };
+        let err = ExportInstanceOciCmd::try_from(msg).unwrap_err();
+        assert!(matches!(err, ConvertError::InvalidInstanceId(_)));
     }
 }

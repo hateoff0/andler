@@ -145,6 +145,32 @@ pub async fn clone_full(source: &Path, dest: &Path) -> Result<(), DiskError> {
     .await
 }
 
+/// Converts a qcow2 source image into `format` at `dest` via `qemu-img convert`.
+pub async fn convert(
+    source: &Path,
+    dest: &Path,
+    format: andler_core::DiskFormat,
+) -> Result<(), DiskError> {
+    ensure_parent_dir_exists(dest).await?;
+
+    let qemu_format = match format {
+        andler_core::DiskFormat::Qcow2 => "qcow2",
+        andler_core::DiskFormat::Raw => "raw",
+        andler_core::DiskFormat::Vdi => "vdi",
+    };
+
+    run_qemu_img(&[
+        "convert",
+        "-f",
+        "qcow2",
+        "-O",
+        qemu_format,
+        &source.to_string_lossy(),
+        &dest.to_string_lossy(),
+    ])
+    .await
+}
+
 pub async fn resize(path: &Path, new_size_bytes: u64, allow_shrink: bool) -> Result<(), DiskError> {
     let current_size_bytes = virtual_size_bytes(path).await?;
 

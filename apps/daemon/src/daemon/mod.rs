@@ -2,6 +2,7 @@ mod audit;
 mod clone_ops;
 mod disk_chain;
 mod error;
+mod export_ops;
 mod health_ops;
 mod hotplug_ops;
 mod instance_ops;

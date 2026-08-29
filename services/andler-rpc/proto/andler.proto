@@ -19,6 +19,7 @@ service AndlerService {
     rpc StreamResourceMetrics(InstanceIdRequest) returns (stream ResourceMetricsResponse);
     rpc CloneInstance(CloneInstanceRequest) returns (CreateInstanceResponse);
     rpc ExportInstanceDisk(ExportInstanceDiskRequest) returns (ExportInstanceDiskResponse);
+    rpc ExportInstanceOci(ExportInstanceOciRequest) returns (ExportInstanceOciResponse);
     rpc CreateSnapshot(CreateSnapshotRequest) returns (CreateSnapshotResponse);
     rpc RestoreSnapshot(RestoreSnapshotRequest) returns (Empty);
     rpc DeleteSnapshot(DeleteSnapshotRequest) returns (Empty);
@@ -410,6 +411,17 @@ message ExportInstanceDiskRequest {
 }
 
 message ExportInstanceDiskResponse {
+    string dest_path = 1;
+}
+
+message ExportInstanceOciRequest {
+    string source_instance_id = 1;
+    string dest_path = 2;
+    DiskFormat disk_format = 3;
+    optional string disk_path = 4;
+}
+
+message ExportInstanceOciResponse {
     string dest_path = 1;
 }
 

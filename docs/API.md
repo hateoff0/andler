@@ -251,6 +251,16 @@ Exports the instance disk as a standalone file at `dest_path`. Does not create a
 
 With `--json`, export prints `{"dest_path", "source_instance_id"}`.
 
+### `export-oci`
+
+```bash
+andler export-oci <source-id> <dest-path> --disk-format <qcow2|raw|vdi> [--disk-path <PATH>]
+```
+
+Exports the instance disk as an OCI image layout directory at `dest_path` (an `oci-layout` marker, `index.json`, `config.json`, and a rootfs layer blob under `blobs/sha256/`). Does not create a new instance. Source must be in a terminal state (`Created`, `Stopped`, or `Error`). The source disk must be qcow2; `--disk-path` overrides the source disk path.
+
+With `--json`, export-oci prints `{"dest_path", "source_instance_id"}`.
+
 ### `logs`
 
 ```bash
@@ -866,6 +876,7 @@ Defined in `services/andler-rpc/proto/andler.proto`. Uses `tonic`/`prost` for Ru
 | `StreamResourceMetrics` | `InstanceIdRequest` | `stream ResourceMetricsResponse` | Server-streaming |
 | `CloneInstance` | `CloneInstanceRequest` | `CreateInstanceResponse` | Unary |
 | `ExportInstanceDisk` | `ExportInstanceDiskRequest` | `ExportInstanceDiskResponse` | Unary |
+| `ExportInstanceOci` | `ExportInstanceOciRequest` | `ExportInstanceOciResponse` | Unary |
 | `CreateSnapshot` | `CreateSnapshotRequest` | `CreateSnapshotResponse` | Unary |
 | `RestoreSnapshot` | `RestoreSnapshotRequest` | `Empty` | Unary |
 | `DeleteSnapshot` | `DeleteSnapshotRequest` | `Empty` | Unary |

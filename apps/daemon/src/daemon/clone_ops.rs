@@ -102,7 +102,7 @@ impl Daemon {
         Ok(())
     }
 
-    async fn terminal_clonable_instance_config(
+    pub async fn terminal_clonable_instance_config(
         &self,
         id: InstanceId,
     ) -> Result<InstanceConfig, DaemonError> {

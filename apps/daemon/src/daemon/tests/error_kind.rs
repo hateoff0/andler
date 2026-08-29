@@ -205,6 +205,23 @@ fn every_error_variant_maps_to_its_documented_kind() {
             },
             ErrorKind::NotFound,
         ),
+        (
+            DaemonError::ExportRequiresQcow2 {
+                instance_id: id(),
+                format: "raw".into(),
+            },
+            ErrorKind::FailedPrecondition,
+        ),
+        (
+            DaemonError::OciExport {
+                path: std::path::PathBuf::from("/x"),
+                source: andler_core::oci_export::OciExportError::MissingFile {
+                    path: std::path::PathBuf::from("/x"),
+                    file: "oci-layout",
+                },
+            },
+            ErrorKind::FailedPrecondition,
+        ),
     ];
 
     for (err, expected) in cases {

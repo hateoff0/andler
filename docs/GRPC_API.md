@@ -29,6 +29,7 @@ The core service exposing all instance management operations.
 | `StreamResourceMetrics` | `InstanceIdRequest` | `stream ResourceMetricsResponse` | Server-streaming | Streams CPU, memory, disk, network, and GPU metrics. |
 | `CloneInstance` | `CloneInstanceRequest` | `CreateInstanceResponse` | Unary | Clones an existing instance. |
 | `ExportInstanceDisk` | `ExportInstanceDiskRequest` | `ExportInstanceDiskResponse` | Unary | Exports the disk file of a Linux or Android VM to a standalone path. |
+| `ExportInstanceOci` | `ExportInstanceOciRequest` | `ExportInstanceOciResponse` | Unary | Exports an instance's disk as an OCI image layout to a directory. |
 | `CreateSnapshot` | `CreateSnapshotRequest` | `CreateSnapshotResponse` | Unary | Creates a snapshot of a running/paused instance. |
 | `RestoreSnapshot` | `RestoreSnapshotRequest` | `Empty` | Unary | Restores an instance to a snapshot state. |
 | `DeleteSnapshot` | `DeleteSnapshotRequest` | `Empty` | Unary | Deletes a snapshot. |
@@ -718,6 +719,25 @@ Response confirming export.
 |-------|------|-------------|
 | `dest_path` | `string` | Path to the exported disk. |
 
+### `ExportInstanceOciRequest`
+
+Request to export an instance's disk as an OCI image layout to a directory.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `source_instance_id` | `string` | Source instance ID. |
+| `dest_path` | `string` | Destination directory for the OCI image layout. |
+| `disk_format` | `DiskFormat` | Target disk format for the exported image. |
+| `disk_path` | `optional string` | Override the source disk path; defaults to the instance's primary disk. |
+
+### `ExportInstanceOciResponse`
+
+Response confirming export.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `dest_path` | `string` | Path to the exported OCI image layout. |
+
 ### `CreateSnapshotRequest`
 
 Request to create a snapshot.
@@ -930,7 +950,7 @@ Single package entry.
 |-------------|--------------|------|
 | `NOT_FOUND` | `InstanceNotFound`, `SnapshotNotFound`, `SnapshotLayerMissing`, `InstanceRefNotFound`, `DiskNotAttached`, `NetworkNotAttached`, `OperationNotFound` | Unknown instance/snapshot/layer/ref, detaching a device that is not attached, or cancelling an unknown operation. |
 | `UNIMPLEMENTED` | `NoBackendRegistered`, `Backend(NotImplemented)` | Backend kind not available. |
-| `FAILED_PRECONDITION` | `InvalidTransition`, `InstanceNotRemovable`, `InstanceNotClonable`, `InstanceAlreadyStopped`, `SharedBaseNotSupportedForLinuxVm`, `InstanceHasLiveClones`, `SnapshotOperationRequiresRunningInstance`, `SnapshotLimitExceeded`, `SnapshotRequiresQcow2`, `SnapshotInternalNotRestorable`, `RestoreTargetOnArchivedBranch`, `RestoreWouldBreakClones`, `DeleteWouldBreakClones`, `CannotDeleteBaseLayer`, `GuestAgentUnavailable`, `NotAndroid`, `InstanceMustBeStopped`, `HotplugRequiresRunningInstance`, `OperationAlreadyRunning`, `OperationCancelled`, `PortForwardConflict`, `DiskInUse`, `CpuAffinityConflict`, `MemoryOvercommit`, `Backend(HandleNotFound)`, `Backend(ProcessNotRunning)` | Wrong lifecycle state, resource limit, snapshot chain constraint, guest agent unavail…
+| `FAILED_PRECONDITION` | `InvalidTransition`, `InstanceNotRemovable`, `InstanceNotClonable`, `InstanceAlreadyStopped`, `SharedBaseNotSupportedForLinuxVm`, `InstanceHasLiveClones`, `SnapshotOperationRequiresRunningInstance`, `SnapshotLimitExceeded`, `SnapshotRequiresQcow2`, `ExportRequiresQcow2`, `OciExport`, `SnapshotInternalNotRestorable`, `RestoreTargetOnArchivedBranch`, `RestoreWouldBreakClones`, `DeleteWouldBreakClones`, `CannotDeleteBaseLayer`, `GuestAgentUnavailable`, `NotAndroid`, `InstanceMustBeStopped`, `HotplugRequiresRunningInstance`, `OperationAlreadyRunning`, `OperationCancelled`, `PortForwardConflict`, `DiskInUse`, `CpuAffinityConflict`, `MemoryOvercommit`, `Backend(HandleNotFound)`, `Backend(ProcessNotRunning)` | Wrong lifecycle state, resource limit, snapshot chain constraint, guest agent unavail…
 | `ALREADY_EXISTS` | `SnapshotAlreadyExists`, `DiskAlreadyAttached` | Duplicate snapshot tag, or attaching a disk image that is already attached (including the primary disk). |
 | `INVALID_ARGUMENT` | `ConvertError`, `EmptyInstanceRef`, `MalformedInstanceRef`, `AmbiguousInstanceId`, `ConfigIdMismatch`, `ConfigKindChanged`, `ConfigDiskPathChanged`, `InvalidConfig`, `InvalidConfigKey`, `MissingOvmfVarsTemplate` | Malformed request or invalid arguments |
 | `RESOURCE_EXHAUSTED` | `InsufficientDiskSpace` | Not enough free space for a snapshot operation |
@@ -954,6 +974,7 @@ Single package entry.
 - **`ResourceMetricsResponse`** fields are all optional because metrics may be unavailable (e.g., GPU on non-AMD hardware).
 - **`CloneInstanceRequest`** supports three modes with different cost/independence trade-offs.
 - **`ExportInstanceDisk`** is a separate RPC from cloning because it does not create a new instance.
+- **`ExportInstanceOci`** exports an instance's disk as an OCI image layout (an `oci-layout` marker, `index.json`, `config.json`, and a rootfs layer blob under `blobs/sha256/`). The source disk must be qcow2 (`ExportRequiresQcow2` → `FAILED_PRECONDITION` otherwise); the target `disk_format` selects the qemu-img conversion (`qcow2`, `raw`, `vdi`). `disk_path` overrides the source disk.
 - **Attach/Detach** require the instance to be `RUNNING` or `PAUSED` (`HotplugRequiresRunningInstance` → `FAILED_PRECONDITION` otherwise). Attached devices are appended to `extra_disks`/`extra_networks`, persisted in `instance.toml`, and re-created from the command line at the next `StartInstance` — no `UpdateInstanceConfig` needed. Detach identifies disks by path and networks by list index; a detach never deletes the disk image file.
 
 ---

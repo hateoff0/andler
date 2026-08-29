@@ -7,6 +7,7 @@ mod doctor;
 mod edit;
 mod events;
 mod exec;
+mod export_oci;
 mod guest;
 mod helpers;
 mod hotplug;
@@ -437,6 +438,22 @@ enum Command {
         json: bool,
     },
 
+    /// Export an instance's disk as an OCI image layout
+    ExportOci {
+        source_instance_id: String,
+
+        dest_path: String,
+
+        #[arg(long, value_enum)]
+        disk_format: CliDiskFormat,
+
+        #[arg(long)]
+        disk_path: Option<String>,
+
+        #[arg(long, help = "Emit the result as JSON instead of human-readable text")]
+        json: bool,
+    },
+
     /// Manage QEMU snapshots (create, restore, delete, list)
     Snapshot {
         #[command(subcommand)]
@@ -547,6 +564,7 @@ impl Command {
             | Command::Clone { json, .. }
             | Command::Export { json, .. }
             | Command::Snapshot { json, .. }
+            | Command::ExportOci { json, .. }
             | Command::Op { json, .. }
             | Command::Disk { json, .. }
             | Command::Guest { json, .. }
@@ -782,6 +800,25 @@ impl From<CliCloneMode> for andler_rpc::proto::CloneMode {
             CliCloneMode::Linked => andler_rpc::proto::CloneMode::Linked,
             CliCloneMode::FullStandalone => andler_rpc::proto::CloneMode::FullStandalone,
             CliCloneMode::SharedBase => andler_rpc::proto::CloneMode::SharedBase,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum CliDiskFormat {
+    Qcow2,
+
+    Raw,
+
+    Vdi,
+}
+
+impl From<CliDiskFormat> for andler_rpc::proto::DiskFormat {
+    fn from(value: CliDiskFormat) -> Self {
+        match value {
+            CliDiskFormat::Qcow2 => andler_rpc::proto::DiskFormat::Qcow2,
+            CliDiskFormat::Raw => andler_rpc::proto::DiskFormat::Raw,
+            CliDiskFormat::Vdi => andler_rpc::proto::DiskFormat::Vdi,
         }
     }
 }
@@ -1209,6 +1246,24 @@ async fn run(cli: Cli, addr: &str) -> Result<(), Box<dyn std::error::Error>> {
             json,
         }) => {
             clone::handle_export(&mut client, source_instance_id, dest_path, json).await?;
+        }
+
+        Some(Command::ExportOci {
+            source_instance_id,
+            dest_path,
+            disk_format,
+            disk_path,
+            json,
+        }) => {
+            export_oci::handle_export_oci(
+                &mut client,
+                source_instance_id,
+                dest_path,
+                disk_format,
+                disk_path,
+                json,
+            )
+            .await?;
         }
         Some(Command::Snapshot { action, json }) => {
             let instance_id = match &action {

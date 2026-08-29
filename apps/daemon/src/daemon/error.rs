@@ -117,6 +117,22 @@ pub enum DaemonError {
     },
 
     #[error(
+        "export of instance {instance_id} to OCI requires a qcow2 disk (current format: {format}); \
+         convert the disk to qcow2 first"
+    )]
+    ExportRequiresQcow2 {
+        instance_id: InstanceId,
+        format: String,
+    },
+
+    #[error("failed to build OCI image layout at {path}: {source}")]
+    OciExport {
+        path: PathBuf,
+        #[source]
+        source: andler_core::oci_export::OciExportError,
+    },
+
+    #[error(
         "snapshot layer file {path} of instance {instance_id} is missing; \
          the chain may have been tampered with — restart the daemon to reconcile"
     )]
@@ -375,6 +391,8 @@ impl DaemonError {
             }
             DaemonError::SnapshotLimitExceeded { .. } => ErrorKind::FailedPrecondition,
             DaemonError::SnapshotRequiresQcow2 { .. } => ErrorKind::FailedPrecondition,
+            DaemonError::ExportRequiresQcow2 { .. } => ErrorKind::FailedPrecondition,
+            DaemonError::OciExport { .. } => ErrorKind::FailedPrecondition,
             DaemonError::SnapshotLayerMissing { .. } => ErrorKind::NotFound,
             DaemonError::SnapshotInternalNotRestorable { .. } => ErrorKind::FailedPrecondition,
             DaemonError::RestoreTargetOnArchivedBranch { .. } => ErrorKind::FailedPrecondition,
