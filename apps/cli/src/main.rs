@@ -104,22 +104,36 @@ enum ConnectLevel {
     Adb,
 }
 
-dual_id_args!(StartArgs);
-dual_id_args!(PauseArgs);
-dual_id_args!(ResumeArgs);
+dual_id_args!(StartArgs,
+    #[arg(long)]
+    pub json: bool,
+);
+dual_id_args!(PauseArgs,
+    #[arg(long)]
+    pub json: bool,
+);
+dual_id_args!(ResumeArgs,
+    #[arg(long)]
+    pub json: bool,
+);
 dual_id_args!(StatusArgs,
     #[arg(long)]
     pub json: bool,
 );
-
 dual_id_args!(StopArgs,
     #[arg(long, help = "SIGTERM the guest OS (default: immediate SIGKILL)")]
     pub graceful: bool,
+
+    #[arg(long)]
+    pub json: bool,
 );
 
 dual_id_args!(RemoveArgs,
     #[arg(long, help = "Also delete the disk image and instance directory")]
     pub purge: bool,
+
+    #[arg(long)]
+    pub json: bool,
 );
 
 #[derive(Args)]
@@ -338,6 +352,11 @@ enum Command {
         /// Command and arguments to run in the guest
         #[arg(last = true, required = true, num_args = 1..)]
         argv: Vec<String>,
+
+        /// Emit the result as JSON (exit_code, stdout, stderr) instead of
+        /// printing stdout/stderr directly
+        #[arg(long)]
+        json: bool,
     },
 
     /// Start a stopped instance (boots QEMU)
@@ -454,12 +473,20 @@ enum Command {
     Attach {
         #[command(subcommand)]
         action: AttachAction,
+
+        /// Emit the result as JSON instead of the human-readable message
+        #[arg(long)]
+        json: bool,
     },
 
     /// Hot-unplug a disk or network device from a running instance
     Detach {
         #[command(subcommand)]
         action: DetachAction,
+
+        /// Emit the result as JSON instead of the human-readable message
+        #[arg(long)]
+        json: bool,
     },
 
     /// Manage guest packages and Android boot mode (requires the andlerd daemon)
@@ -485,6 +512,10 @@ enum Command {
         /// instance/active-op counts, QMP reconnect count.
         #[arg(long)]
         metrics: bool,
+
+        /// Emit the check results as JSON instead of the human-readable report
+        #[arg(long)]
+        json: bool,
     },
 
     /// Manage the base-image cache (list builds, clean superseded ones)
@@ -519,7 +550,11 @@ impl Command {
             | Command::Op { json, .. }
             | Command::Disk { json, .. }
             | Command::Guest { json, .. }
-            | Command::Cache { json, .. } => *json,
+            | Command::Cache { json, .. }
+            | Command::Exec { json, .. }
+            | Command::Doctor { json, .. }
+            | Command::Attach { json, .. }
+            | Command::Detach { json, .. } => *json,
             // Tuple variants: each has a distinct args type; read its `json` field.
             Command::Status(args) => args.json,
             Command::Logs(args) => args.json,
@@ -529,16 +564,12 @@ impl Command {
                 action.as_ref().map(|a| a.json_requested()).unwrap_or(false)
             }
             Command::Connect { .. }
-            | Command::Exec { .. }
             | Command::Start(_)
             | Command::Stop(_)
             | Command::Pause(_)
             | Command::Resume(_)
             | Command::Remove(_)
-            | Command::Attach { .. }
-            | Command::Detach { .. }
             | Command::Wizard {}
-            | Command::Doctor { .. }
             | Command::Completions { .. } => false,
         }
     }
@@ -945,11 +976,11 @@ async fn run(cli: Cli, addr: &str) -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    if let Some(Command::Doctor { metrics }) = &cli.command {
+    if let Some(Command::Doctor { metrics, json }) = &cli.command {
         if *metrics {
             return doctor::print_metrics(addr).await;
         }
-        let all_ok = doctor::run(addr).await;
+        let all_ok = doctor::run(addr, *json).await;
         return if all_ok {
             Ok(())
         } else {
@@ -1034,24 +1065,28 @@ async fn run(cli: Cli, addr: &str) -> Result<(), Box<dyn std::error::Error>> {
         Some(Command::Connect { instance_id, level }) => {
             connect::handle_connect(&mut client, instance_id, level).await?;
         }
-        Some(Command::Exec { instance_id, argv }) => {
-            exec::handle_exec(&mut client, instance_id, argv).await?;
+        Some(Command::Exec {
+            instance_id,
+            argv,
+            json,
+        }) => {
+            exec::handle_exec(&mut client, instance_id, argv, json).await?;
         }
         Some(Command::Start(args)) => {
             let id = args.resolve_id()?;
-            lifecycle::handle_start(&mut client, id.to_string()).await?;
+            lifecycle::handle_start(&mut client, id.to_string(), args.json).await?;
         }
         Some(Command::Stop(args)) => {
             let id = args.resolve_id()?;
-            lifecycle::handle_stop(&mut client, id.to_string(), args.graceful).await?;
+            lifecycle::handle_stop(&mut client, id.to_string(), args.graceful, args.json).await?;
         }
         Some(Command::Pause(args)) => {
             let id = args.resolve_id()?;
-            lifecycle::handle_pause(&mut client, id.to_string()).await?;
+            lifecycle::handle_pause(&mut client, id.to_string(), args.json).await?;
         }
         Some(Command::Resume(args)) => {
             let id = args.resolve_id()?;
-            lifecycle::handle_resume(&mut client, id.to_string()).await?;
+            lifecycle::handle_resume(&mut client, id.to_string(), args.json).await?;
         }
         Some(Command::Status(args)) => {
             let id = args.resolve_id()?;
@@ -1068,7 +1103,7 @@ async fn run(cli: Cli, addr: &str) -> Result<(), Box<dyn std::error::Error>> {
         }
         Some(Command::Remove(args)) => {
             let id = args.resolve_id()?;
-            lifecycle::handle_remove(&mut client, id.to_string(), args.purge).await?;
+            lifecycle::handle_remove(&mut client, id.to_string(), args.purge, args.json).await?;
         }
         Some(Command::Config { action, flags }) => match action {
             Some(ConfigCommand::View { instance_id }) => {
@@ -1248,11 +1283,11 @@ async fn run(cli: Cli, addr: &str) -> Result<(), Box<dyn std::error::Error>> {
         Some(Command::Guest { action, json }) => {
             guest::handle(&mut client, action, json).await?;
         }
-        Some(Command::Attach { action }) => {
-            hotplug::handle_attach(&mut client, action).await?;
+        Some(Command::Attach { action, json }) => {
+            hotplug::handle_attach(&mut client, action, json).await?;
         }
-        Some(Command::Detach { action }) => {
-            hotplug::handle_detach(&mut client, action).await?;
+        Some(Command::Detach { action, json }) => {
+            hotplug::handle_detach(&mut client, action, json).await?;
         }
         Some(Command::Cache { .. }) => unreachable!(),
         Some(Command::Doctor { .. }) => unreachable!(),

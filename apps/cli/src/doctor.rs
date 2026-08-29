@@ -136,6 +136,15 @@ fn cap_net_admin_check() -> Check {
 fn offline_checks() -> Vec<Check> {
     let mut checks = Vec::new();
 
+    checks.push(match which("oras") {
+        Some(p) => ok("oras", p.display().to_string()),
+        None => warn(
+            "oras",
+            "not found in PATH — OCI export/import will fail",
+            "install oras (https://oras.land/); it is the OCI registry client andler uses",
+        ),
+    });
+
     checks.push(match which("guestmount") {
         Some(p) => ok("guestmount (FUSE)", p.display().to_string()),
         None => warn(
@@ -259,13 +268,35 @@ fn print_section(title: &str, checks: &[Check]) -> bool {
 /// on a different machine (via --daemon-addr / ANDLERD_ADDR), run
 /// `andler doctor` there too — the hypervisor/offline checks describe
 /// andlerd's environment, not this one.
-pub async fn run(daemon_addr: &str) -> bool {
-    println!("andler doctor\n");
-
+pub async fn run(daemon_addr: &str, json: bool) -> bool {
     let hypervisor = hypervisor_checks();
     let offline = offline_checks();
     let daemon = daemon_check(daemon_addr).await;
     let base_images = base_image_check();
+
+    if json {
+        let all_ok = all_sections_ok(
+            &hypervisor,
+            &offline,
+            std::slice::from_ref(&daemon),
+            std::slice::from_ref(&base_images),
+        );
+        match serde_json::to_string(&serde_json::json!({
+            "overall": if all_ok { "ok" } else { "needs_attention" },
+            "checks": flatten_checks(
+                &hypervisor,
+                &offline,
+                std::slice::from_ref(&daemon),
+                std::slice::from_ref(&base_images),
+            ),
+        })) {
+            Ok(s) => println!("{s}"),
+            Err(e) => eprintln!("failed to serialize doctor output: {e}"),
+        }
+        return all_ok;
+    }
+
+    println!("andler doctor\n");
 
     let hv_ok = print_section("Hypervisor", &hypervisor);
     let offline_ok = print_section("Offline guest operations (guestmount + userns)", &offline);
@@ -285,6 +316,62 @@ pub async fn run(daemon_addr: &str) -> bool {
     }
 
     all_ok
+}
+
+/// Whether every check across all four doctor sections passed (no warn/fail).
+fn all_sections_ok(
+    hypervisor: &[Check],
+    offline: &[Check],
+    daemon: &[Check],
+    base_images: &[Check],
+) -> bool {
+    hypervisor
+        .iter()
+        .chain(offline)
+        .chain(daemon)
+        .chain(base_images)
+        .all(|c| matches!(c.status, Status::Ok(_)))
+}
+
+/// Flattens every check into a JSON object: name, status (ok/warn/fail),
+/// detail, and fix (when present). Used by `doctor --json`.
+fn flatten_checks<'a>(
+    hypervisor: &'a [Check],
+    offline: &'a [Check],
+    daemon: &'a [Check],
+    base_images: &'a [Check],
+) -> Vec<serde_json::Value> {
+    let mut checks = Vec::new();
+    for check in hypervisor
+        .iter()
+        .chain(offline)
+        .chain(daemon)
+        .chain(base_images)
+    {
+        let (status, detail) = match &check.status {
+            Status::Ok(detail) => ("ok", detail.as_str()),
+            Status::Warn(detail) => ("warn", detail.as_str()),
+            Status::Fail(detail) => ("fail", detail.as_str()),
+        };
+        let mut map = serde_json::Map::new();
+        map.insert(
+            "name".into(),
+            serde_json::Value::String(check.name.to_string()),
+        );
+        map.insert(
+            "status".into(),
+            serde_json::Value::String(status.to_string()),
+        );
+        map.insert(
+            "detail".into(),
+            serde_json::Value::String(detail.to_string()),
+        );
+        if let Some(fix) = &check.fix {
+            map.insert("fix".into(), serde_json::Value::String(fix.clone()));
+        }
+        checks.push(serde_json::Value::Object(map));
+    }
+    checks
 }
 
 /// `andler doctor --metrics` — prints the daemon's internal metrics

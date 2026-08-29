@@ -1,7 +1,7 @@
+use crate::helpers::{emit_json, state_kind_name};
 use crate::TracedClient;
 use andler_rpc::proto::{InstanceIdRequest, RemoveInstanceRequest, StopInstanceRequest};
 use std::io::IsTerminal;
-
 pub async fn resolve_echo(
     client: &mut TracedClient,
     instance_id: &str,
@@ -28,9 +28,40 @@ fn print_echo(verb: &str, id: &str, name: Option<&str>) {
     }
 }
 
+/// Emit the instance's post-transition state, honoring the `--json` contract:
+/// on request, emit a JSON document (the single source of truth); otherwise
+/// print the human-readable "{verb} {id} ({name})" line. Called after
+/// start/stop/pause/resume so a caller gets the authoritative state.
+async fn emit_status(
+    client: &mut TracedClient,
+    id: &str,
+    name: Option<&str>,
+    verb: &str,
+    json: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let response = client
+        .get_instance_status(InstanceIdRequest {
+            instance_id: id.to_string(),
+        })
+        .await?
+        .into_inner();
+    if json {
+        emit_json(&serde_json::json!({
+            "instance_id": crate::helpers::short_id(id),
+            "state": state_kind_name(response.state()),
+            "detail": response.detail,
+            "error_message": response.error_message,
+        }))?;
+    } else {
+        print_echo(verb, id, name);
+    }
+    Ok(())
+}
+
 pub async fn handle_start(
     client: &mut TracedClient,
     instance_id: String,
+    json: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     client
         .start_instance(InstanceIdRequest {
@@ -38,14 +69,14 @@ pub async fn handle_start(
         })
         .await?;
     let (id, name) = resolve_echo(client, &instance_id).await;
-    print_echo("started", &id, name.as_deref());
-    Ok(())
+    emit_status(client, &id, name.as_deref(), "started", json).await
 }
 
 pub async fn handle_stop(
     client: &mut TracedClient,
     instance_id: String,
     graceful: bool,
+    json: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     client
         .stop_instance(StopInstanceRequest {
@@ -54,13 +85,13 @@ pub async fn handle_stop(
         })
         .await?;
     let (id, name) = resolve_echo(client, &instance_id).await;
-    print_echo("stopped", &id, name.as_deref());
-    Ok(())
+    emit_status(client, &id, name.as_deref(), "stopped", json).await
 }
 
 pub async fn handle_pause(
     client: &mut TracedClient,
     instance_id: String,
+    json: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     client
         .pause_instance(InstanceIdRequest {
@@ -68,13 +99,13 @@ pub async fn handle_pause(
         })
         .await?;
     let (id, name) = resolve_echo(client, &instance_id).await;
-    print_echo("paused", &id, name.as_deref());
-    Ok(())
+    emit_status(client, &id, name.as_deref(), "paused", json).await
 }
 
 pub async fn handle_resume(
     client: &mut TracedClient,
     instance_id: String,
+    json: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     client
         .resume_instance(InstanceIdRequest {
@@ -82,14 +113,14 @@ pub async fn handle_resume(
         })
         .await?;
     let (id, name) = resolve_echo(client, &instance_id).await;
-    print_echo("resumed", &id, name.as_deref());
-    Ok(())
+    emit_status(client, &id, name.as_deref(), "resumed", json).await
 }
 
 pub async fn handle_remove(
     client: &mut TracedClient,
     instance_id: String,
     purge: bool,
+    json: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (id, name) = resolve_echo(client, &instance_id).await;
     if purge && std::io::stdin().is_terminal() {
@@ -111,6 +142,10 @@ pub async fn handle_remove(
     client
         .remove_instance(RemoveInstanceRequest { instance_id, purge })
         .await?;
-    print_echo("removed", &id, name.as_deref());
+    if json {
+        emit_json(&serde_json::json!({ "instance_id": crate::helpers::short_id(&id) }))?;
+    } else {
+        print_echo("removed", &id, name.as_deref());
+    }
     Ok(())
 }

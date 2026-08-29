@@ -40,6 +40,7 @@ fn proto_network_config(
 pub async fn handle_attach(
     client: &mut TracedClient,
     action: AttachAction,
+    json: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     match action {
         AttachAction::Disk {
@@ -55,7 +56,7 @@ pub async fn handle_attach(
             }
             let response = client
                 .attach_disk(AttachDiskRequest {
-                    instance_id,
+                    instance_id: instance_id.clone(),
                     path: path
                         .map(|p| p.to_string_lossy().into_owned())
                         .unwrap_or_default(),
@@ -63,10 +64,22 @@ pub async fn handle_attach(
                 })
                 .await?
                 .into_inner();
-            println!(
-                "disk attached: {} (extra disk index {})",
-                response.path, response.index
-            );
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string(&serde_json::json!({
+                        "action": "attach_disk",
+                        "instance_id": instance_id,
+                        "path": response.path,
+                        "index": response.index,
+                    }))?
+                );
+            } else {
+                println!(
+                    "disk attached: {} (extra disk index {})",
+                    response.path, response.index
+                );
+            }
         }
         AttachAction::Net {
             instance_id,
@@ -77,12 +90,23 @@ pub async fn handle_attach(
         } => {
             let response = client
                 .attach_network(AttachNetworkRequest {
-                    instance_id,
+                    instance_id: instance_id.clone(),
                     network: Some(proto_network_config(mode, bridge, model, nat_backend)),
                 })
                 .await?
                 .into_inner();
-            println!("network attached: extra network index {}", response.index);
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string(&serde_json::json!({
+                        "action": "attach_network",
+                        "instance_id": instance_id,
+                        "index": response.index,
+                    }))?
+                );
+            } else {
+                println!("network attached: extra network index {}", response.index);
+            }
         }
     }
     Ok(())
@@ -91,25 +115,48 @@ pub async fn handle_attach(
 pub async fn handle_detach(
     client: &mut TracedClient,
     action: DetachAction,
+    json: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     match action {
         DetachAction::Disk { instance_id, path } => {
             client
                 .detach_disk(DetachDiskRequest {
-                    instance_id,
+                    instance_id: instance_id.clone(),
                     path: path.to_string_lossy().into_owned(),
                 })
                 .await?;
-            println!("disk detached (the image file was kept)");
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string(&serde_json::json!({
+                        "action": "detach_disk",
+                        "instance_id": instance_id,
+                        "path": path,
+                    }))?
+                );
+            } else {
+                println!("disk detached (the image file was kept)");
+            }
         }
         DetachAction::Net { instance_id, index } => {
             client
                 .detach_network(DetachNetworkRequest {
-                    instance_id,
+                    instance_id: instance_id.clone(),
                     index: index as u32,
                 })
                 .await?;
-            println!("network detached (extra network index {index})");
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string(&serde_json::json!({
+                        "action": "detach_network",
+                        "instance_id": instance_id,
+                        "index": index,
+                    }))?
+                );
+            } else {
+                println!("network detached (extra network index {index})");
+            }
         }
     }
     Ok(())

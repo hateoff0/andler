@@ -107,6 +107,8 @@ andler resume <instance-id>
 
 Resumes a paused instance via QMP `cont` command. Instance must be in `Paused` state.
 
+With `--json`, each transition prints the post-transition status `{ "instance_id", "state", "detail", "error_message" }` (all four fields always present; `error_message` is empty when the transition had no error).
+
 ### `status`
 
 ```bash
@@ -214,6 +216,8 @@ Without `--purge`: removes the instance record and its registry files (`instance
 With `--purge`: also deletes `disk.path` and `firmware.ovmf_vars_path`. Never deletes `base_image` or `ovmf_code_path` (shared across instances).
 
 Instance must be in a terminal state (`Created`, `Stopped`, or `Error`). Use `stop` first for running instances.
+
+With `--json`, remove prints `{ "instance_id" }`.
 
 With `--purge`, refuses if the instance has live `Linked` clones (deleting the source disk would break them).
 
@@ -472,6 +476,7 @@ andler exec <instance-id> -- sh -c 'echo hi > /tmp/marker'
 
 Requires the instance Running/Paused with a responsive `qemu-guest-agent`;
 stdout/stderr are relayed and the CLI exits with the guest's exit code.
+With `--json`, prints `{ "exit_code", "stdout", "stderr" }`; the CLI still exits with the guest's exit code.
 
 ### `guest`
 
@@ -628,7 +633,10 @@ andler attach net <instance-id> --nat-backend passt
 | `--model <model>` | net | Device model (default `virtio-net-pci`) |
 | `--nat-backend <slirp\|passt>` | net | NAT implementation (default `slirp`) |
 
+With `--json`, prints `{ "action": "attach_disk", "instance_id", "path", "index" }` (attach disk), `{ "action": "attach_network", "instance_id", "index" }` (attach net), `{ "action": "detach_disk", "instance_id", "path" }` (detach disk), or `{ "action": "detach_network", "instance_id", "index" }` (detach net).
 Prints the resolved disk path + index, or the network index (0-based, in attach order). Attaching an already-attached path (including the primary disk) fails with `already attached`. Extra disks are **not** covered by snapshots (`snapshot create` snapshots the primary `drive-disk0` only).
+
+With `--json`, detach prints the same `{ "action", "instance_id", "path"/"index" }` object as attach.
 
 ### `detach`
 
@@ -659,6 +667,8 @@ andler doctor [--metrics]
 ```
 
 Checks the local environment for ANDLER prerequisites: KVM availability, QEMU/OVMF installation, daemon reachability, base images, and the offline-guest-operation prerequisites (`guestmount`/libguestfs on PATH, `/dev/fuse`, unprivileged user namespaces allowed — the `sysctl kernel.unprivileged_userns_clone=1` hint appears on Debian/Ubuntu when disabled). Read-only — works even if andlerd isn't running. Offline guest package ops (`--offline`) are zero-root: no sudoers rules, nothing to install.
+
+With `--json`, prints `{ "overall": "ok"|"needs_attention", "checks": [ ... ] }` — the same `overall`/`checks` document the human-readable report is derived from.
 
 With `--metrics`, prints the daemon's internal metrics snapshot instead of the environment checks: RPC latency p50/p99 by method, error counts by gRPC status code, instance counts, active operations, QMP reconnects, and running guest RAM (the running-total the memory-overcommit gate sums before spawn; only shown when non-zero). (requires a reachable daemon).
 ### `completions`
