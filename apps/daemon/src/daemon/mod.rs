@@ -46,6 +46,17 @@ pub struct Daemon {
     /// supervised by a paired watcher that logs panic; we hold the
     /// JoinHandle so a panic is observed (AGENTS tokio::spawn rule).
     autostart_tasks: std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>,
+    /// Serializes the check→resource-claim critical section of every
+    /// start across all instances (§H multi-instance): the four
+    /// per-start resource gates (host port, disk path, pinned CPU, guest
+    /// RAM) only count Running/Paused/Starting peers, so two instances
+    /// still in Created and started concurrently would both pass the
+    /// pairwise checks and both spawn against the same disk/port. Holding
+    /// this lock across check→Start transition makes the first instance
+    /// own its resources the moment it leaves Created, so a parallel
+    /// start's checks see it as active and refuse. Held only across the
+    /// fast check+transition, never across the (slow) spawn.
+    start_lock: std::sync::Arc<tokio::sync::Mutex<()>>,
 }
 
 const EVENT_CHANNEL_CAPACITY: usize = 256;
@@ -329,6 +340,7 @@ impl Daemon {
             store: Some(store),
             events,
             autostart_tasks: std::sync::Mutex::new(Vec::new()),
+            start_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
         };
         spawn_qmp_relays(
             daemon.events.clone(),
@@ -351,6 +363,7 @@ impl Daemon {
             store,
             events,
             autostart_tasks: std::sync::Mutex::new(Vec::new()),
+            start_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
         };
         spawn_qmp_relays(
             daemon.events.clone(),
@@ -370,6 +383,7 @@ impl Daemon {
     async fn spawn_autostart_tasks(&self) {
         let supervisors = self.supervisors.clone();
         let backends = self.backends.clone();
+        let start_lock = self.start_lock.clone();
         let ids: Vec<InstanceId> = {
             let map = supervisors.read().await;
             map.iter()
@@ -388,7 +402,9 @@ impl Daemon {
         );
         let join = tokio::spawn(async move {
             for id in ids {
-                match instance_ops::do_start_instance(&supervisors, &backends, id).await {
+                match instance_ops::do_start_instance(&start_lock, &supervisors, &backends, id)
+                    .await
+                {
                     Ok(()) => {}
                     Err(err) => {
                         tracing::error!(

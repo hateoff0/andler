@@ -346,7 +346,7 @@ impl Daemon {
     }
 
     pub async fn start_instance(&self, id: InstanceId) -> Result<(), DaemonError> {
-        do_start_instance(&self.supervisors, &self.backends, id).await
+        do_start_instance(&self.start_lock, &self.supervisors, &self.backends, id).await
     }
 
     /// Refuses to start an instance whose `network.port_forwards` host
@@ -1541,6 +1541,7 @@ fn spawn_compact_on_shutdown(id: InstanceId, disk: andler_core::DiskConfig) {
 /// must use the same path so supervisor/QMP/exit-watcher guarantees
 /// stay uniform; the only difference is how `&self` is obtained.
 pub(super) async fn do_start_instance(
+    start_lock: &tokio::sync::Mutex<()>,
     supervisors: &std::sync::Arc<tokio::sync::RwLock<HashMap<InstanceId, SupervisorHandle>>>,
     backends: &HashMap<BackendKind, Arc<dyn HypervisorBackend>>,
     id: InstanceId,
@@ -1552,24 +1553,36 @@ pub(super) async fn do_start_instance(
             .ok_or(DaemonError::InstanceNotFound(id))?
     };
     let cfg = handle.config();
-    // Checked before the Start transition so a refused start leaves the
-    // instance in Created, not stuck in Starting. Same port-conflict
-    // check as the RPC path (see check_port_forward_conflicts).
-    check_port_forward_conflicts_impl(supervisors, id, &cfg).await?;
-    // Same for the disk: QEMU takes an exclusive write lock on the disk
-    // file, so a second instance pointing at the same disk would fail
-    // with an opaque lock error at spawn — refuse it up front.
-    check_disk_conflicts_impl(supervisors, id, &cfg).await?;
-    // And for pinned CPUs: two instances pinned to overlapping host CPUs
-    // would silently contend for the same cores, defeating the pin.
-    check_cpu_affinity_conflicts_impl(supervisors, id, &cfg).await?;
-    // The pinned set must also be valid (no CPU beyond the host's count) —
-    // a bad set fails fast instead of surfacing as a raw taskset error at spawn.
-    validate_cpu_affinity(&cfg)?;
-    // And the last shared-resource gate: the sum of guest RAM across every
-    // running instance (plus this one) must not exceed the host's physical RAM.
-    check_memory_overcommit_impl(supervisors, id, &cfg).await?;
-    handle.transition(InstanceEvent::Start).await?;
+
+    // Hold the global start lock across the check→resource-claim critical
+    // section so concurrent starts serialize: once this instance reaches
+    // Starting it owns its disk/host-port/pinned-CPU/guest-RAM, and a
+    // parallel start's per-start gates see it as active and refuse. Without
+    // this, two instances still in Created and started concurrently both
+    // pass the pairwise checks (the peer is only Created, never counted)
+    // and both spawn against the same disk or host port — the §H
+    // multi-instance TOCTOU race. Released before the slow spawn below.
+    let _guard = start_lock.lock().await;
+    {
+        // Checked before the Start transition so a refused start leaves the
+        // instance in Created, not stuck in Starting. Same port-conflict
+        // check as the RPC path (see check_port_forward_conflicts).
+        check_port_forward_conflicts_impl(supervisors, id, &cfg).await?;
+        // Same for the disk: QEMU takes an exclusive write lock on the disk
+        // file, so a second instance pointing at the same disk would fail
+        // with an opaque lock error at spawn — refuse it up front.
+        check_disk_conflicts_impl(supervisors, id, &cfg).await?;
+        // And for pinned CPUs: two instances pinned to overlapping host CPUs
+        // would silently contend for the same cores, defeating the pin.
+        check_cpu_affinity_conflicts_impl(supervisors, id, &cfg).await?;
+        // The pinned set must also be valid (no CPU beyond the host's count) —
+        // a bad set fails fast instead of surfacing as a raw taskset error at spawn.
+        validate_cpu_affinity(&cfg)?;
+        // And the last shared-resource gate: the sum of guest RAM across every
+        // running instance (plus this one) must not exceed the host's physical RAM.
+        check_memory_overcommit_impl(supervisors, id, &cfg).await?;
+        handle.transition(InstanceEvent::Start).await?;
+    }
 
     let backend = backends
         .get(&cfg.backend)

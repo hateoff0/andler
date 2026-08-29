@@ -15,6 +15,7 @@ mod health;
 mod hotplug;
 mod list_config;
 mod memory_overcommit;
+mod multi_instance;
 mod ops;
 mod persistence;
 mod port_conflict;
