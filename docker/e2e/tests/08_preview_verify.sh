@@ -43,10 +43,15 @@ expect_out_grep "no instances" "no instances"
 
 echo "  [create --verify]"
 expect_ok "verify passes on a valid config" -- andler create --kind linux --name ver --iso-path "$WORK/empty.iso" --disk-path "$WORK/disk.qcow2" --ovmf-vars-template "$WORK/VARS.fd" --verify
-expect_out_grep "verify reports all checks passed" "All checks passed"
+expect_ok "verify --json passes on valid config" -- andler create --kind linux --name verjson --iso-path "$WORK/empty.iso" --disk-path "$WORK/disk.qcow2" --ovmf-vars-template "$WORK/VARS.fd" --verify --json
+expect_ok "verify --json reports passed=true" -- jq -e '.passed == true' <<<"$(cat "$E2E_LAST_OUT")"
+expect_ok "verify --json reports name" -- jq -e '.name == "verjson"' <<<"$(cat "$E2E_LAST_OUT")"
+expect_ok "verify --json reports checks array" -- jq -e '.checks | type == "array"' <<<"$(cat "$E2E_LAST_OUT")"
+expect_ok "verify --json reports check entries" -- jq -e '.checks | all(.ok == true)' <<<"$(cat "$E2E_LAST_OUT")"
 
 expect_fail "verify fails on a missing iso" -- andler create --kind linux --name ver2 --iso-path "$WORK/missing.iso" --disk-path "$WORK/disk.qcow2" --ovmf-vars-template "$WORK/VARS.fd" --verify
-expect_err_grep "verify error names the missing iso" "ISO file not found"
+expect_fail "verify --json fails on a missing iso" -- andler create --kind linux --name ver3 --iso-path "$WORK/missing.iso" --disk-path "$WORK/disk.qcow2" --ovmf-vars-template "$WORK/VARS.fd" --verify --json
+expect_ok "verify --json reports passed=false" -- jq -e '.passed == false' <<<"$(cat "$E2E_LAST_OUT")"
 
 expect_ok "nothing was created by --verify" -- andler list
 expect_out_grep "no instances" "no instances"

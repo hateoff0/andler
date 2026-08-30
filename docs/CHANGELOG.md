@@ -19,7 +19,7 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 
 #### --json CLI output
 - **`--json` output for more commands**: `create` (real and `--dry-run`), `clone`, `export`, `disk info`, `guest list`, `config status`, and `status` now accept `--json` for machine-readable output. `create --dry-run --json` serializes the resolved `InstanceConfig`; `clone`/`export` report the new id/dest plus the `source_instance_id`; `disk info` reports `{path, format, virtual_size, actual_size, backing_file}`; `guest list` reports `{packages: [{name, description, status}]}`; `config status` and `status` report the instance id, state, and any error. On failure the CLI prints a single `{"error": "<message>"}` document to stderr (when `--json` was requested) or the same actionable message as plain text; the message is sanitized and actionable in both cases. Covered by the `02_config`, `03_disk`, `05_clone_export`, `07_guest`, `08_preview_verify`, and `30_json_output` e2e suites.
-- **`exec` reports `{exit_code, stdout, stderr}` (the CLI still exits with the guest's exit code); `attach`/`detach` report `{action, instance_id, path|index}`; `doctor` reports `{overall, checks}`. Lifecycle `start`/`stop`/`pause`/`resume` report the post-transition `{instance_id, state, detail, error_message}` and `remove` reports `{instance_id}`.**
+- **`exec` reports `{exit_code, stdout, stderr}` (the CLI still exits with the guest's exit code); `attach`/`detach` report `{action, instance_id, path|index}`; `doctor` reports `{overall, checks}`; `create --verify` reports `{name, passed, checks:[...]}`.**
 
 #### OCI image export
 

@@ -70,9 +70,11 @@ andler create \
 | `--overlay-size-gib <size>` | No | Overlay disk size in GiB (default: 128, Android only) |
 | `--linked-overlay` | No | Use a linked (backing-file) overlay instead of a standalone copy (Android only) |
 | `--template <name>` | No | VM template applied over the defaults and under the CLI flags (merge order: defaults < template < flags). Built-ins: `headless` (CPU renderer, no display/audio) and `desktop` (Venus GPU, SDL display, audio). User templates live in `~/.andler/templates/<name>.toml` and accept the same partial sections. Only supported with `--kind linux` in this phase. |
-| `--json` | Output as a JSON object: `{"instance_id": "<id>"}` for a real create; with `--dry-run --json`, the fully resolved `InstanceConfig` (all config sections) serialized as JSON |
+| `--json` | Output as a JSON object: `{"instance_id": "<id>"}` for a real create; with `--dry-run --json`, the fully resolved `InstanceConfig` (all config sections) serialized as JSON; with `--verify --json`, a `{"name","passed","checks":[...]}` report (see below) |
 
 On success both file and CLI modes print `Created instance <name> (<id>)`. TOML mode requires `disk_path` and `iso_path`; a missing field is a clean error (`missing required field disk_path in instance file`), and an unknown `android_version` is rejected (`unsupported value for android_version: 12`).
+
+With `--verify --json`, the output is a single JSON object: `{"name": <instance name>, "passed": <bool>, "checks": [{"name": <check name>, "ok": <bool>, "detail": <human-readable string>}]}`. `passed` is `true` only when every check passes. Exit code is `1` on failure (nothing was created) and `0` on success, identical to the text mode.
 
 ### `start`
 

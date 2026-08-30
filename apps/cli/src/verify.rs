@@ -1,15 +1,61 @@
 use andler_core::InstanceKind;
 use andler_rpc::proto::{CreateAndroidInstanceRequest, CreateInstanceRequest};
 
-use crate::helpers::format_bytes;
+use crate::helpers::{emit_json, format_bytes};
 use crate::preview::{resolve_android, resolve_linux, Resolved};
+use serde::Serialize;
 
+#[derive(Serialize)]
+struct VerifyReport {
+    name: String,
+    passed: bool,
+    checks: Vec<VerifyCheck>,
+}
+
+#[derive(Serialize)]
+struct VerifyCheck {
+    name: &'static str,
+    ok: bool,
+    detail: String,
+}
 struct Check {
     name: &'static str,
     result: Result<String, String>,
 }
 
-fn run_checks(resolved: &Resolved, checks: Vec<Check>) -> bool {
+fn run_checks(resolved: &Resolved, checks: Vec<Check>, json: bool) -> bool {
+    if json {
+        // Structured report for `create --verify --json`: one entry per check
+        // with its pass/fail and human-readable detail, plus the aggregate
+        // `passed` flag. Kept separate from the human printer below so the
+        // wire shape stays stable while the text output can keep evolving.
+        let mut report_checks = Vec::with_capacity(checks.len());
+        let mut all_passed = true;
+        for check in &checks {
+            let (ok, detail) = match &check.result {
+                Ok(detail) => (true, detail.clone()),
+                Err(detail) => {
+                    all_passed = false;
+                    (false, detail.clone())
+                }
+            };
+            report_checks.push(VerifyCheck {
+                name: check.name,
+                ok,
+                detail,
+            });
+        }
+        let report = VerifyReport {
+            name: resolved.cfg.name.clone(),
+            passed: all_passed,
+            checks: report_checks,
+        };
+        if let Err(e) = emit_json(&report) {
+            eprintln!("failed to emit verify report as JSON: {e}");
+        }
+        return all_passed;
+    }
+
     println!("─── Verifying instance config ─────────────────────────────────");
     println!("Name: {}", resolved.cfg.name);
     println!();
@@ -156,7 +202,10 @@ fn read_host_total_ram() -> Option<u64> {
     None
 }
 
-pub fn verify_linux(req: &CreateInstanceRequest) -> Result<bool, Box<dyn std::error::Error>> {
+pub fn verify_linux(
+    req: &CreateInstanceRequest,
+    json: bool,
+) -> Result<bool, Box<dyn std::error::Error>> {
     let resolved = resolve_linux(req)?;
 
     let checks = vec![
@@ -167,11 +216,12 @@ pub fn verify_linux(req: &CreateInstanceRequest) -> Result<bool, Box<dyn std::er
         check_host_ram(&resolved),
     ];
 
-    Ok(run_checks(&resolved, checks))
+    Ok(run_checks(&resolved, checks, json))
 }
 
 pub fn verify_android(
     req: &CreateAndroidInstanceRequest,
+    json: bool,
 ) -> Result<bool, Box<dyn std::error::Error>> {
     let resolved = resolve_android(req)?;
 
@@ -211,7 +261,7 @@ pub fn verify_android(
         check_config_sanity(&resolved),
         check_host_ram(&resolved),
     ];
-    Ok(run_checks(&resolved, checks))
+    Ok(run_checks(&resolved, checks, json))
 }
 
 #[cfg(test)]
@@ -371,7 +421,7 @@ mod tests {
                 result: Err("broken".to_string()),
             },
         ];
-        assert!(!run_checks(&resolved, checks));
+        assert!(!run_checks(&resolved, checks, false));
     }
 
     #[test]
@@ -387,6 +437,36 @@ mod tests {
                 result: Ok("also fine".to_string()),
             },
         ];
-        assert!(run_checks(&resolved, checks));
+        assert!(run_checks(&resolved, checks, false));
+    }
+    #[test]
+    fn verify_report_serializes_spec_field_names() {
+        let report = VerifyReport {
+            name: "test-vm".to_string(),
+            passed: false,
+            checks: vec![
+                VerifyCheck {
+                    name: "Disk",
+                    ok: true,
+                    detail: "ok".to_string(),
+                },
+                VerifyCheck {
+                    name: "OVMF firmware",
+                    ok: false,
+                    detail: "missing".to_string(),
+                },
+            ],
+        };
+        let json = serde_json::to_string(&report).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        // Every key the CLI consumer relies on must be present with the right type.
+        assert_eq!(parsed["name"], "test-vm");
+        assert_eq!(parsed["passed"], false);
+        assert!(parsed["checks"].is_array());
+        assert_eq!(parsed["checks"][0]["name"], "Disk");
+        assert_eq!(parsed["checks"][0]["ok"], true);
+        assert_eq!(parsed["checks"][0]["detail"], "ok");
+        assert_eq!(parsed["checks"][1]["name"], "OVMF firmware");
+        assert_eq!(parsed["checks"][1]["ok"], false);
     }
 }

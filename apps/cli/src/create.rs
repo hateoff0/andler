@@ -85,7 +85,7 @@ pub async fn handle(
                     return crate::preview::print_linux_preview(&req);
                 }
                 if verify {
-                    return exit_on_verify_result(crate::verify::verify_linux(&req)?);
+                    return exit_on_verify_result(crate::verify::verify_linux(&req, json)?);
                 }
                 let created_name = req.name.clone();
                 let response = client.create_instance(req).await?;
@@ -100,7 +100,7 @@ pub async fn handle(
                     return crate::preview::print_android_preview(&req);
                 }
                 if verify {
-                    return exit_on_verify_result(crate::verify::verify_android(&req)?);
+                    return exit_on_verify_result(crate::verify::verify_android(&req, json)?);
                 }
                 let created_name = req.name.clone();
                 let response = client.create_android_instance(req).await?;
@@ -212,7 +212,7 @@ pub async fn handle(
                 }
             }
             if verify {
-                return exit_on_verify_result(crate::verify::verify_linux(&req)?);
+                return exit_on_verify_result(crate::verify::verify_linux(&req, json)?);
             }
             let response = client.create_instance(req).await?;
             let id = response.into_inner().instance_id;
@@ -257,7 +257,7 @@ pub async fn handle(
                 }
             }
             if verify {
-                return exit_on_verify_result(crate::verify::verify_android(&req)?);
+                return exit_on_verify_result(crate::verify::verify_android(&req, json)?);
             }
             let response = client.create_android_instance(req).await?;
             let id = response.into_inner().instance_id;
