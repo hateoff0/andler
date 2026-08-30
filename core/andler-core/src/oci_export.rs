@@ -112,10 +112,10 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
     out
 }
 
-/// `{"imageSpecVersion": "1.1.0"}` — the marker file every OCI layout needs.
+/// `{"imageLayoutVersion": "1.1.0"}` — the marker file every OCI layout needs.
 pub fn oci_layout_json() -> String {
     serde_json::to_string_pretty(&serde_json::json!({
-        "imageSpecVersion": OCI_SPEC_VERSION,
+        "imageLayoutVersion": OCI_SPEC_VERSION,
     }))
     .expect("oci-layout marker is static and serializes")
 }
@@ -483,9 +483,14 @@ mod tests {
     }
 
     #[test]
-    fn oci_layout_marker_is_spec_version() {
+    fn oci_layout_marker_uses_spec_field_name() {
+        // The marker's field name is a wire contract, not an internal detail:
+        // real OCI tools (oras, skopeo, crane) reject a layout whose
+        // `oci-layout` omits `imageLayoutVersion`. Assert the exact spec field
+        // name, not just a value the code would write by coincidence.
         let parsed: serde_json::Value = serde_json::from_str(&oci_layout_json()).unwrap();
-        assert_eq!(parsed["imageSpecVersion"], OCI_SPEC_VERSION);
+        assert_eq!(parsed["imageLayoutVersion"], OCI_SPEC_VERSION);
+        assert!(parsed.get("imageSpecVersion").is_none());
     }
 
     #[test]

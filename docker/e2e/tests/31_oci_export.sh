@@ -23,6 +23,16 @@ expect_file "config.json written" "$DEST/config.json"
 expect_file "blobs/sha256 written" "$DEST/blobs/sha256"
 
 echo "  [layout conformance]"
+
+# The `oci-layout` marker's field name is a wire contract: real OCI tools
+# (oras, skopeo, crane) reject a layout whose marker omits `imageLayoutVersion`.
+# Assert the exact spec field name, not just that the file exists.
+LAYOUT_VERSION="$(jq -r '.imageLayoutVersion' "$DEST/oci-layout")"
+[[ "$LAYOUT_VERSION" == "1.1.0" ]] || fail "oci-layout marker must write imageLayoutVersion=1.1.0"
+LAYOUT_SPECIFIC="$(jq 'has("imageSpecVersion")' "$DEST/oci-layout")"
+[[ "$LAYOUT_SPECIFIC" == "false" ]] || fail "oci-layout marker must not use the non-spec field imageSpecVersion"
+pass "oci-layout marker uses spec field imageLayoutVersion"
+
 # index.json references exactly one manifest with platform arch amd64.
 MANIFEST_COUNT="$(jq '.manifests | length' "$DEST/index.json")"
 [[ "$MANIFEST_COUNT" == "1" ]] || fail "index.json must reference exactly one manifest"
