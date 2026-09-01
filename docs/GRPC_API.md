@@ -826,7 +826,7 @@ Request to install a package in the guest OS.
 | `instance_id` | `string` | Instance ID. |
 | `package` | `string` | Package name (e.g., `spice-vdagent`). |
 | `offline` | `bool` | Force the offline path (guestmount FUSE + userns chroot — zero root) instead of the smart path: online via guest agent, auto-starting a stopped VM for maintenance when needed. |
-| `idempotency_token` | `optional string` | Client-supplied key that makes a network retry idempotent; a retry with the same token joins the in-flight install, a retry with a different token is refused with `OperationAlreadyRunning`. A cancelled install is never joined: a same-key retry after `op cancel` starts a fresh install. |
+| `idempotency_token` | `optional string` | Client-supplied key that makes a network retry idempotent; a retry with the same token joins the in-flight install, a retry with a different token is refused with `OperationAlreadyRunning`. A cancelled install is never joined: a same-key retry after `op cancel` starts a fresh install. A retry that arrives while the maintenance auto-start is still booting or stopping the VM follows the same rule instead of the lifecycle-state gate. |
 
 ### `RemoveGuestAgentRequest`
 
@@ -837,7 +837,7 @@ Request to remove a package from the guest OS.
 | `instance_id` | `string` | Instance ID. |
 | `package` | `string` | Package name. |
 | `offline` | `bool` | Force the offline path (guestmount FUSE + userns chroot — zero root) instead of the smart path: online via guest agent, auto-starting a stopped VM for maintenance when needed. |
-| `idempotency_token` | `optional string` | Client-supplied key that makes a network retry idempotent; a retry with the same token joins the in-flight remove, a retry with a different token is refused with `OperationAlreadyRunning`. A cancelled remove is never joined: a same-key retry after `op cancel` starts a fresh remove. |
+| `idempotency_token` | `optional string` | Client-supplied key that makes a network retry idempotent; a retry with the same token joins the in-flight remove, a retry with a different token is refused with `OperationAlreadyRunning`. A cancelled remove is never joined: a same-key retry after `op cancel` starts a fresh remove. A retry that arrives while the maintenance auto-start is still booting or stopping the VM follows the same rule instead of the lifecycle-state gate. |
 
 ### `GuestProvisionRequest`
 

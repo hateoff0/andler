@@ -643,6 +643,26 @@ impl Daemon {
         install_result.map_err(DaemonError::Backend)
     }
 
+    /// The operation id shared by the online path and the maintenance
+    /// auto-start for one package, and the fallback join key when no
+    /// idempotency token was supplied.
+    fn guest_package_op_id(package: &str, install: bool) -> String {
+        format!(
+            "guest-{}-{package}",
+            if install { "install" } else { "remove" }
+        )
+    }
+
+    /// The in-flight-operation join key for a guest package request: the
+    /// caller's idempotency token, or the operation's own id.
+    fn guest_package_key(
+        package: &str,
+        install: bool,
+        idempotency_token: Option<String>,
+    ) -> Option<String> {
+        idempotency_token.or_else(|| Some(Self::guest_package_op_id(package, install)))
+    }
+
     /// Runs a guest-side package operation on an already-running VM as a
     /// supervisor operation — cancellable between the agent check and the
     /// command, progress visible on the event bus, same idempotency key as
@@ -659,11 +679,8 @@ impl Daemon {
     ) -> Result<(), DaemonError> {
         let handle = self.handle_for(id).await?;
         let action = if install { "installing" } else { "removing" };
-        let op_id = format!(
-            "guest-{}-{package}",
-            if install { "install" } else { "remove" }
-        );
-        let key = idempotency_token.or_else(|| Some(op_id.clone()));
+        let op_id = Self::guest_package_op_id(package, install);
+        let key = Self::guest_package_key(package, install, idempotency_token);
         let op_id_inner = op_id.clone();
         let kind = if install {
             OperationKind::GuestInstall
@@ -749,8 +766,8 @@ impl Daemon {
 
         let wait_secs = guest_agent_wait_secs();
         let action = if install { "install" } else { "remove" };
-        let op_id = format!("guest-{action}-{package}");
-        let key = idempotency_token.or_else(|| Some(op_id.clone()));
+        let op_id = Self::guest_package_op_id(package, install);
+        let key = Self::guest_package_key(package, install, idempotency_token);
         let op_id_inner = op_id.clone();
         let kind = if install {
             OperationKind::GuestInstall
@@ -921,6 +938,41 @@ impl Daemon {
         }
     }
 
+    /// A request that arrives mid-transition (the maintenance auto-start is
+    /// booting or stopping the VM) cannot start its own operation, but it
+    /// must still follow the supervisor's accept rule: a same-key retry
+    /// joins the in-flight operation and a different key is refused with
+    /// `OperationAlreadyRunning`. Only when nothing is in flight does the
+    /// state gate answer.
+    async fn join_in_flight_guest_op(
+        &self,
+        handle: &SupervisorHandle,
+        id: InstanceId,
+        package: &str,
+        install: bool,
+        idempotency_token: Option<String>,
+        state: &InstanceState,
+    ) -> Result<(), DaemonError> {
+        let key = Self::guest_package_key(package, install, idempotency_token);
+        match handle.join_active(key).await? {
+            Some(joined) => {
+                tracing::warn!(
+                    instance_id = %id,
+                    joined = %joined,
+                    "package operation joined an in-flight one"
+                );
+                Ok(())
+            }
+            None => Err(DaemonError::GuestAgentUnavailable {
+                instance_id: id,
+                message: format!(
+                    "instance is in state {state:?}; must be Running/Paused (online) \
+                     or Created/Stopped (offline)"
+                ),
+            }),
+        }
+    }
+
     pub async fn install_guest_agent(
         &self,
         id: InstanceId,
@@ -1016,13 +1068,10 @@ impl Daemon {
                 );
                 Ok(())
             }
-            other => Err(DaemonError::GuestAgentUnavailable {
-                instance_id: id,
-                message: format!(
-                    "instance is in state {other:?}; must be Running/Paused (online) \
-                     or Created/Stopped (offline)"
-                ),
-            }),
+            other => {
+                self.join_in_flight_guest_op(&handle, id, &package, true, idempotency_token, other)
+                    .await
+            }
         }
     }
     pub async fn remove_guest_agent(
@@ -1120,13 +1169,10 @@ impl Daemon {
                 );
                 Ok(())
             }
-            other => Err(DaemonError::GuestAgentUnavailable {
-                instance_id: id,
-                message: format!(
-                    "instance is in state {other:?}; must be Running/Paused (online) \
-                     or Created/Stopped (offline)"
-                ),
-            }),
+            other => {
+                self.join_in_flight_guest_op(&handle, id, &package, false, idempotency_token, other)
+                    .await
+            }
         }
     }
 

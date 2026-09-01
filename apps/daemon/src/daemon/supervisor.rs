@@ -73,6 +73,13 @@ pub(crate) enum SupervisorCommand {
     GetActiveOp {
         ack: oneshot::Sender<Option<Operation>>,
     },
+    /// Answers the accept rule for a request that cannot start its own
+    /// operation: the instance is mid-transition, and the caller must
+    /// follow the same idempotency discipline `RunOperation` applies.
+    JoinActive {
+        key: Option<String>,
+        ack: oneshot::Sender<Result<Option<OpId>, DaemonError>>,
+    },
     Shutdown,
 }
 
@@ -87,6 +94,20 @@ pub(crate) enum OpAccept {
     /// An operation with the same idempotency key is already active; the
     /// caller joins it (progress is visible on the event bus).
     Joined { op_id: OpId },
+}
+
+/// The supervisor's own accept rule for a request carrying an idempotency
+/// key. `RunOperation` and `JoinActive` share it so the two paths can
+/// never disagree about which request joins and which is refused.
+#[derive(Debug)]
+enum JoinDecision {
+    /// An operation with this key is in flight and will do the work.
+    Joined(OpId),
+    /// A different operation is in flight.
+    Busy { active: Operation },
+    /// Nothing in flight — or the in-flight operation was cancelled and
+    /// will never complete its work, so a retry must start fresh.
+    Free,
 }
 
 /// Long-running operation body: owns its progress handle, checks
@@ -248,6 +269,20 @@ impl SupervisorHandle {
         ack_rx
             .await
             .map_err(|_| DaemonError::InstanceSupervisorGone(self.id))
+    }
+
+    pub(crate) async fn join_active(
+        &self,
+        key: Option<String>,
+    ) -> Result<Option<OpId>, DaemonError> {
+        let (ack_tx, ack_rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SupervisorCommand::JoinActive { key, ack: ack_tx })
+            .await
+            .map_err(|_| DaemonError::InstanceSupervisorGone(self.id))?;
+        ack_rx
+            .await
+            .map_err(|_| DaemonError::InstanceSupervisorGone(self.id))?
     }
 
     pub(crate) async fn shutdown(&self) {
@@ -441,6 +476,15 @@ impl InstanceSupervisor {
                         SupervisorCommand::GetActiveOp { ack } => {
                             let _ = ack.send(self.active_op.clone());
                         }
+                        SupervisorCommand::JoinActive { key, ack } => {
+                            let _ = ack.send(match self.join_decision(key.as_ref()) {
+                                JoinDecision::Joined(op_id) => Ok(Some(op_id)),
+                                JoinDecision::Busy { active } => {
+                                    Err(self.already_running(&active))
+                                }
+                                JoinDecision::Free => Ok(None),
+                            });
+                        }
                         SupervisorCommand::Shutdown => break,
                     }
                 }
@@ -463,29 +507,19 @@ impl InstanceSupervisor {
         done_tx: oneshot::Sender<Result<(), DaemonError>>,
         ack: oneshot::Sender<Result<Option<OpId>, DaemonError>>,
     ) {
-        if let Some(active) = &self.active_op {
-            if key.is_some() && key == self.active_op_key {
-                if self.active_op_cancelled {
-                    // A cancelled op never completes its work; a same-key
-                    // retry must start fresh here rather than join an op that
-                    // is merely unwinding through its gate.
-                    self.active_op = None;
-                    self.active_op_key = None;
-                    self.active_op_seq = None;
-                    self.op_cancel = None;
-                    self.active_op_cancelled = false;
-                } else {
-                    let _ = ack.send(Ok(Some(active.op_id.clone())));
-                    return;
-                }
-            } else {
-                let _ = ack.send(Err(DaemonError::OperationAlreadyRunning {
-                    instance_id: self.id,
-                    active_op_id: active.op_id.clone(),
-                    active_kind: active.kind,
-                }));
+        match self.join_decision(key.as_ref()) {
+            JoinDecision::Joined(op_id) => {
+                let _ = ack.send(Ok(Some(op_id)));
                 return;
             }
+            JoinDecision::Busy { active } => {
+                let _ = ack.send(Err(self.already_running(&active)));
+                return;
+            }
+            // Nothing in flight, or a cancelled op that will never complete
+            // its work: start fresh and overwrite any superseded
+            // bookkeeping (the generation guard ignores the late ack).
+            JoinDecision::Free => {}
         }
 
         let (cancel_tx, cancel_rx) = watch::channel(false);
@@ -518,6 +552,33 @@ impl InstanceSupervisor {
             let _ = op_done_tx.send(seq);
         });
         let _ = ack.send(Ok(None));
+    }
+
+    fn join_decision(&self, key: Option<&String>) -> JoinDecision {
+        match &self.active_op {
+            Some(active) => {
+                if key.is_some() && key == self.active_op_key.as_ref() {
+                    if self.active_op_cancelled {
+                        JoinDecision::Free
+                    } else {
+                        JoinDecision::Joined(active.op_id.clone())
+                    }
+                } else {
+                    JoinDecision::Busy {
+                        active: active.clone(),
+                    }
+                }
+            }
+            None => JoinDecision::Free,
+        }
+    }
+
+    fn already_running(&self, active: &Operation) -> DaemonError {
+        DaemonError::OperationAlreadyRunning {
+            instance_id: self.id,
+            active_op_id: active.op_id.clone(),
+            active_kind: active.kind,
+        }
     }
 
     async fn apply_transition(

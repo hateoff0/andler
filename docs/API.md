@@ -547,6 +547,12 @@ offline `--offline` path it is accepted but unused.
 A cancelled operation is never joined: after `op cancel`, a same-key repeat
 (token or no token) starts a fresh install/remove instead of joining the
 cancelled operation.
+A request that reaches the daemon while the maintenance auto-start is still
+booting (or stopping) the VM follows the same rule instead of the
+lifecycle-state gate: a same-key repeat joins the in-flight operation and a
+different token is refused with `OperationAlreadyRunning`; the
+`must be Running/Paused (online) or Created/Stopped (offline)` error is
+returned only when no operation is in flight.
 
 `guest list --json` prints `{"packages": [{"name", "description", "status"}]}`.
 

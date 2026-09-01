@@ -450,6 +450,7 @@ struct GateBackend {
     removes: AtomicUsize,
     spawns: AtomicUsize,
     release: tokio::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<()>>,
+    spawn_block: Option<tokio::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<()>>>,
 }
 
 impl GateBackend {
@@ -459,6 +460,23 @@ impl GateBackend {
             removes: AtomicUsize::new(0),
             spawns: AtomicUsize::new(0),
             release: tokio::sync::Mutex::new(release),
+            spawn_block: None,
+        }
+    }
+
+    /// A backend whose `spawn` blocks on a second gate as well, so a test
+    /// can hold an auto-start mid-boot with the instance verifiably
+    /// `Starting` while its operation is already active.
+    fn blocking_spawn(
+        release: tokio::sync::mpsc::UnboundedReceiver<()>,
+        spawn_block: tokio::sync::mpsc::UnboundedReceiver<()>,
+    ) -> Self {
+        GateBackend {
+            installs: AtomicUsize::new(0),
+            removes: AtomicUsize::new(0),
+            spawns: AtomicUsize::new(0),
+            release: tokio::sync::Mutex::new(release),
+            spawn_block: Some(tokio::sync::Mutex::new(spawn_block)),
         }
     }
 }
@@ -475,6 +493,9 @@ impl andler_core::HypervisorBackend for GateBackend {
 
     async fn spawn(&self, _cfg: &InstanceConfig) -> Result<BackendHandle, BackendError> {
         self.spawns.fetch_add(1, Ordering::SeqCst);
+        if let Some(spawn_block) = &self.spawn_block {
+            let _ = spawn_block.lock().await.recv().await;
+        }
         Ok(BackendHandle("gate-mock:vm".to_string()))
     }
 
@@ -615,6 +636,112 @@ async fn wait_for_installs(mock: &Arc<GateBackend>, n: usize) {
         );
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
+}
+
+/// A stopped instance whose backend blocks both `spawn` and
+/// `guest_exec_install`, so a test can hold the maintenance auto-start
+/// mid-boot: the instance is verifiably `Starting` while the operation is
+/// active, which is exactly the interleaving the state-gate-only tests miss.
+async fn stopped_instance_with_blocking_spawn(
+    dir: &std::path::Path,
+) -> (
+    Arc<Daemon>,
+    Arc<GateBackend>,
+    tokio::sync::mpsc::UnboundedSender<()>,
+    tokio::sync::mpsc::UnboundedSender<()>,
+    InstanceId,
+) {
+    let mut daemon = Daemon::new();
+    let mut cfg = sample_config();
+    cfg.disk.path = dir.join("disk.qcow2");
+    std::fs::write(&cfg.disk.path, b"x").unwrap();
+    let id = cfg.id;
+    let (release_tx, release_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (spawn_tx, spawn_rx) = tokio::sync::mpsc::unbounded_channel();
+    let mock = Arc::new(GateBackend::blocking_spawn(release_rx, spawn_rx));
+    register_with_state(&daemon, cfg, InstanceState::Stopped, None).await;
+    daemon
+        .backends
+        .insert(andler_core::BackendKind::Qemu, mock.clone());
+    (Arc::new(daemon), mock, spawn_tx, release_tx, id)
+}
+
+/// Waits until the instance reaches `want` (bounded, so a stall reports as
+/// a test failure instead of a deadlock).
+async fn wait_for_state(daemon: &Arc<Daemon>, id: InstanceId, want: InstanceState) {
+    let handle = daemon.handle_for(id).await.unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while handle.state() != want {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the instance never reached {want:?}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+}
+
+/// A retry that arrives while the maintenance auto-start is mid-boot must
+/// follow the idempotency rule, not the instance-state gate: a same-key
+/// retry joins the in-flight operation and a different key is refused.
+#[tokio::test]
+async fn retry_during_maintenance_boot_follows_the_accept_rule() {
+    let dir = TestTempDir::new();
+    let (daemon, mock, spawn_release, release, id) =
+        stopped_instance_with_blocking_spawn(dir.path()).await;
+    let handle = daemon.handle_for(id).await.unwrap();
+
+    let first = tokio::spawn({
+        let daemon = Arc::clone(&daemon);
+        async move {
+            daemon
+                .install_guest_agent(id, "htop".to_string(), false, Some("tok-A".to_string()))
+                .await
+        }
+    });
+    wait_for_active_operation(&daemon, id).await;
+    wait_for_state(&daemon, id, InstanceState::Starting).await;
+
+    let joined = daemon
+        .install_guest_agent(id, "htop".to_string(), false, Some("tok-A".to_string()))
+        .await;
+    assert!(
+        joined.is_ok(),
+        "a same-key retry during the maintenance boot must join, got: {joined:?}"
+    );
+
+    let busy = daemon
+        .install_guest_agent(id, "htop".to_string(), false, Some("tok-B".to_string()))
+        .await;
+    assert!(
+        matches!(busy, Err(DaemonError::OperationAlreadyRunning { .. })),
+        "a different-key retry during the maintenance boot must be refused, got: {busy:?}"
+    );
+
+    // Let the boot finish, the install run, and the VM stop again.
+    let _ = spawn_release.send(());
+    let _ = release.send(());
+    let first_result = first
+        .await
+        .expect("the maintenance install task runs to completion");
+    assert!(
+        first_result.is_ok(),
+        "the maintenance install must succeed, got: {first_result:?}"
+    );
+
+    assert_eq!(
+        mock.installs.load(Ordering::SeqCst),
+        1,
+        "only the first install ran; the same-key retry joined it"
+    );
+    assert_eq!(
+        handle.state(),
+        InstanceState::Stopped,
+        "the auto-started maintenance VM is stopped again"
+    );
+    assert!(
+        handle.active_operation().await.unwrap().is_none(),
+        "the operation must be finished after the install returns"
+    );
 }
 
 /// A network retry that carries the SAME idempotency token joins the
