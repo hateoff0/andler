@@ -362,6 +362,8 @@ A repeat with the same token while a restore is in-flight joins the running
 restore; a repeat with a *different* token is refused with
 `OperationAlreadyRunning`. Omit the flag and the operation's own id is used as
 the key.
+A cancelled restore is never joined: after `op cancel`, a same-key repeat
+starts a fresh restore.
 
 `delete` asks for confirmation on an interactive terminal (answering `n` prints `Cancelled.` and keeps the snapshot).
 
@@ -542,6 +544,9 @@ and the operation's own id (`guest-install`/`guest-remove` + package) is used as
 the key, so a repeat of an identical call still joins. The token is only used on
 the online path (a running VM or a VM auto-started for maintenance); on the
 offline `--offline` path it is accepted but unused.
+A cancelled operation is never joined: after `op cancel`, a same-key repeat
+(token or no token) starts a fresh install/remove instead of joining the
+cancelled operation.
 
 `guest list --json` prints `{"packages": [{"name", "description", "status"}]}`.
 

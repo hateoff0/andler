@@ -603,6 +603,20 @@ async fn wait_for_active_operation(daemon: &Arc<Daemon>, id: InstanceId) {
     }
 }
 
+/// Waits until the gate backend has been entered `n` times (bounded so a
+/// stall reports as a test failure, never a deadlock). Reaching the second
+/// install is the observable proof that a same-key retry started fresh.
+async fn wait_for_installs(mock: &Arc<GateBackend>, n: usize) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while mock.installs.load(Ordering::SeqCst) < n {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "install #{n} never started"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+}
+
 /// A network retry that carries the SAME idempotency token joins the
 /// in-flight operation instead of starting a second one.
 #[tokio::test]
@@ -684,5 +698,165 @@ async fn install_with_different_idempotency_token_is_refused() {
         mock.installs.load(Ordering::SeqCst),
         1,
         "only one install must run; the different-token retry was refused"
+    );
+}
+
+/// A RUNNING instance whose backend blocks `guest_exec_install` on a gate,
+/// plus the sender used to release it. Exercises the online guest-exec path
+/// (running VM), which the stopped-instance join test does not reach.
+async fn running_instance_with_gate_backend(
+    dir: &std::path::Path,
+) -> (
+    Arc<Daemon>,
+    Arc<GateBackend>,
+    tokio::sync::mpsc::UnboundedSender<()>,
+    InstanceId,
+) {
+    let mut daemon = Daemon::new();
+    let mut cfg = sample_config();
+    cfg.disk.path = dir.join("disk.qcow2");
+    std::fs::write(&cfg.disk.path, b"x").unwrap();
+    let id = cfg.id;
+    let (release_tx, release_rx) = tokio::sync::mpsc::unbounded_channel();
+    let mock = Arc::new(GateBackend::new(release_rx));
+    register_with_state(
+        &daemon,
+        cfg,
+        InstanceState::Running,
+        Some(BackendHandle("gate-mock:vm".to_string())),
+    )
+    .await;
+    daemon
+        .backends
+        .insert(andler_core::BackendKind::Qemu, mock.clone());
+    (Arc::new(daemon), mock, release_tx, id)
+}
+
+/// Two concurrent online installs (running VM, no idempotency token) must
+/// not both run: the second joins the first via the shared op_id key.
+#[tokio::test]
+async fn two_concurrent_online_installs_run_once() {
+    let dir = TestTempDir::new();
+    let (daemon, mock, release, id) = running_instance_with_gate_backend(dir.path()).await;
+
+    let first = tokio::spawn({
+        let daemon = Arc::clone(&daemon);
+        async move {
+            daemon
+                .install_guest_agent(id, "htop".to_string(), false, None)
+                .await
+        }
+    });
+    wait_for_active_operation(&daemon, id).await;
+
+    let second = daemon
+        .install_guest_agent(id, "htop".to_string(), false, None)
+        .await;
+    assert!(
+        second.is_ok(),
+        "the second concurrent install must join the first, got: {second:?}"
+    );
+
+    let _ = release.send(());
+    let first_result = first
+        .await
+        .expect("the first install task runs to completion");
+    assert!(
+        first_result.is_ok(),
+        "the joined install must succeed once the gate is released: {first_result:?}"
+    );
+
+    assert_eq!(
+        mock.installs.load(Ordering::SeqCst),
+        1,
+        "only one install must run; the second joined the first"
+    );
+}
+
+/// A guest install cancelled mid-flight (still in-flight, blocked on the
+/// gate) must not be silently joined by a same-key retry: the retry has to
+/// run a fresh install, because the cancelled op never completes its work.
+#[tokio::test]
+async fn cancelled_online_install_retry_runs_fresh() {
+    let dir = TestTempDir::new();
+    let (daemon, mock, release, id) = running_instance_with_gate_backend(dir.path()).await;
+    let handle = daemon.handle_for(id).await.unwrap();
+    // Hold the first install in-flight on the gate.
+    let first = tokio::spawn({
+        let daemon = Arc::clone(&daemon);
+        async move {
+            daemon
+                .install_guest_agent(id, "htop".to_string(), false, None)
+                .await
+        }
+    });
+    wait_for_active_operation(&daemon, id).await;
+    // Cancel the in-flight op; it stays in-flight until the gate releases.
+    let cancelled = handle
+        .cancel_operation("guest-install-htop")
+        .await
+        .expect("cancel must reach the in-flight install operation");
+    assert!(cancelled);
+
+    // Retry with the same (no-token) key while the cancelled op is still
+    // unwinding: it must start a fresh operation, not join the cancelled
+    // one. Spawned concurrently — the fresh install blocks on the same gate.
+    let retry = tokio::spawn({
+        let daemon = Arc::clone(&daemon);
+        async move {
+            daemon
+                .install_guest_agent(id, "htop".to_string(), false, None)
+                .await
+        }
+    });
+    wait_for_installs(&mock, 2).await;
+
+    // Release the cancelled op: it unwinds on its own schedule, and the
+    // fresh install must still be the active one afterwards — a third
+    // same-key request joins it instead of starting a third install.
+    let _ = release.send(());
+
+    let first_result = first
+        .await
+        .expect("the cancelled install task runs to its cancellation");
+    assert!(
+        matches!(first_result, Err(DaemonError::OperationCancelled(_))),
+        "the cancelled op must report cancellation, got: {first_result:?}"
+    );
+
+    // Let the supervisor observe the superseded op's completion before the
+    // next request: without the per-start generation token that is exactly
+    // where the fresh install gets mistaken for a finished one.
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    let third = tokio::spawn({
+        let daemon = Arc::clone(&daemon);
+        async move {
+            daemon
+                .install_guest_agent(id, "htop".to_string(), false, None)
+                .await
+        }
+    });
+    let joined = tokio::time::timeout(std::time::Duration::from_secs(5), third)
+        .await
+        .expect("a same-key request must join the running install, never start a third");
+    assert!(
+        joined.is_ok(),
+        "the third same-key request must join, got: {joined:?}"
+    );
+
+    // Release the fresh install.
+    let _ = release.send(());
+    let retry_result = retry
+        .await
+        .expect("the fresh install task runs to completion");
+    assert!(
+        retry_result.is_ok(),
+        "the same-key retry must run a fresh install, got: {retry_result:?}"
+    );
+
+    assert_eq!(
+        mock.installs.load(Ordering::SeqCst),
+        2,
+        "a cancelled op's retry must run a fresh install, not join the cancelled op"
     );
 }

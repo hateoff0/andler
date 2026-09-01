@@ -273,9 +273,18 @@ struct InstanceSupervisor {
     live_resolution: Option<Resolution>,
     active_op: Option<Operation>,
     active_op_key: Option<String>,
+    /// True while the active operation has been cancelled but is still
+    /// unwinding (e.g. blocked on a gate). A same-key retry must start
+    /// fresh here, not join an op that will never complete its work.
+    active_op_cancelled: bool,
+    /// Generation token of the operation in `active_op`. A superseded
+    /// (cancelled) op keeps running until it unwinds; its completion must
+    /// not clear the operation that replaced it.
+    active_op_seq: Option<u64>,
+    next_op_seq: u64,
     op_cancel: Option<watch::Sender<bool>>,
-    op_done_tx: mpsc::UnboundedSender<OpId>,
-    op_done_rx: mpsc::UnboundedReceiver<OpId>,
+    op_done_tx: mpsc::UnboundedSender<u64>,
+    op_done_rx: mpsc::UnboundedReceiver<u64>,
 }
 
 pub(crate) fn spawn_supervisor(
@@ -290,7 +299,7 @@ pub(crate) fn spawn_supervisor(
     let (state_tx, state_rx) = watch::channel(state.clone());
     let (handle_tx, handle_rx) = watch::channel(handle.clone());
     let (config_tx, config_rx) = watch::channel(config.clone());
-    let (op_done_tx, op_done_rx) = mpsc::unbounded_channel::<OpId>();
+    let (op_done_tx, op_done_rx) = mpsc::unbounded_channel::<u64>();
 
     // The registry directory (instances_root/<id>) owns instance.toml and
     // events.jsonl. It is NOT derived from disk.path — a config can point
@@ -316,6 +325,9 @@ pub(crate) fn spawn_supervisor(
         live_resolution: None,
         active_op: None,
         active_op_key: None,
+        active_op_cancelled: false,
+        active_op_seq: None,
+        next_op_seq: 0,
         op_cancel: None,
         op_done_tx,
         op_done_rx,
@@ -354,10 +366,17 @@ impl InstanceSupervisor {
             tokio::select! {
                 done = self.op_done_rx.recv() => {
                     match done {
-                        Some(_op_id) => {
-                            self.active_op = None;
-                            self.active_op_key = None;
-                            self.op_cancel = None;
+                        Some(seq) => {
+                            // A superseded op unwinds after its replacement
+                            // was already accepted; its completion must not
+                            // clear the operation that took its place.
+                            if self.active_op_seq == Some(seq) {
+                                self.active_op = None;
+                                self.active_op_key = None;
+                                self.active_op_seq = None;
+                                self.active_op_cancelled = false;
+                                self.op_cancel = None;
+                            }
                         }
                         None => break,
                     }
@@ -409,6 +428,7 @@ impl InstanceSupervisor {
                                 Some(active) if active.op_id == op_id => {
                                     if let Some(cancel_tx) = &self.op_cancel {
                                         let _ = cancel_tx.send(true);
+                                        self.active_op_cancelled = true;
                                         true
                                     } else {
                                         false
@@ -445,24 +465,39 @@ impl InstanceSupervisor {
     ) {
         if let Some(active) = &self.active_op {
             if key.is_some() && key == self.active_op_key {
-                let _ = ack.send(Ok(Some(active.op_id.clone())));
+                if self.active_op_cancelled {
+                    // A cancelled op never completes its work; a same-key
+                    // retry must start fresh here rather than join an op that
+                    // is merely unwinding through its gate.
+                    self.active_op = None;
+                    self.active_op_key = None;
+                    self.active_op_seq = None;
+                    self.op_cancel = None;
+                    self.active_op_cancelled = false;
+                } else {
+                    let _ = ack.send(Ok(Some(active.op_id.clone())));
+                    return;
+                }
+            } else {
+                let _ = ack.send(Err(DaemonError::OperationAlreadyRunning {
+                    instance_id: self.id,
+                    active_op_id: active.op_id.clone(),
+                    active_kind: active.kind,
+                }));
                 return;
             }
-            let _ = ack.send(Err(DaemonError::OperationAlreadyRunning {
-                instance_id: self.id,
-                active_op_id: active.op_id.clone(),
-                active_kind: active.kind,
-            }));
-            return;
         }
 
-        let op_id = op.op_id.clone();
         let (cancel_tx, cancel_rx) = watch::channel(false);
         let events = self.events.clone();
         let audit_dir = self.audit_dir.clone();
         let op_done_tx = self.op_done_tx.clone();
+        let seq = self.next_op_seq;
+        self.next_op_seq += 1;
         self.active_op = Some(op.clone());
         self.active_op_key = key;
+        self.active_op_seq = Some(seq);
+        self.active_op_cancelled = false;
         self.op_cancel = Some(cancel_tx);
 
         tokio::spawn(async move {
@@ -480,7 +515,7 @@ impl InstanceSupervisor {
             // handle); the sub-task only forwards the result.
             let result = run(progress).await;
             let _ = done_tx.send(result);
-            let _ = op_done_tx.send(op_id);
+            let _ = op_done_tx.send(seq);
         });
         let _ = ack.send(Ok(None));
     }

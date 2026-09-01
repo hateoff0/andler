@@ -769,7 +769,7 @@ Request to restore a snapshot. The instance must be stopped.
 | `tag` | `string` | Snapshot tag. |
 | `timeout_secs` | `optional uint64` | Accepted for compatibility; unused — snapshot operations are synchronous. |
 | `branch` | `bool` | True: keep the current chain as an archived branch and continue from the target. False (default): discard layers newer than the target. |
-| `idempotency_token` | `optional string` | Client-supplied key that makes a network retry idempotent; a retry with the same token joins the in-flight restore, a retry with a different token is refused with `OperationAlreadyRunning`. Used on the online restore path. |
+| `idempotency_token` | `optional string` | Client-supplied key that makes a network retry idempotent; a retry with the same token joins the in-flight restore, a retry with a different token is refused with `OperationAlreadyRunning`. A cancelled restore is never joined: a same-key retry after `op cancel` starts a fresh restore. Used on the online restore path. |
 
 ### `DeleteSnapshotRequest`
 
@@ -826,7 +826,7 @@ Request to install a package in the guest OS.
 | `instance_id` | `string` | Instance ID. |
 | `package` | `string` | Package name (e.g., `spice-vdagent`). |
 | `offline` | `bool` | Force the offline path (guestmount FUSE + userns chroot — zero root) instead of the smart path: online via guest agent, auto-starting a stopped VM for maintenance when needed. |
-| `idempotency_token` | `optional string` | Client-supplied key that makes a network retry idempotent; a retry with the same token joins the in-flight install, a retry with a different token is refused with `OperationAlreadyRunning`. |
+| `idempotency_token` | `optional string` | Client-supplied key that makes a network retry idempotent; a retry with the same token joins the in-flight install, a retry with a different token is refused with `OperationAlreadyRunning`. A cancelled install is never joined: a same-key retry after `op cancel` starts a fresh install. |
 
 ### `RemoveGuestAgentRequest`
 
@@ -837,7 +837,7 @@ Request to remove a package from the guest OS.
 | `instance_id` | `string` | Instance ID. |
 | `package` | `string` | Package name. |
 | `offline` | `bool` | Force the offline path (guestmount FUSE + userns chroot — zero root) instead of the smart path: online via guest agent, auto-starting a stopped VM for maintenance when needed. |
-| `idempotency_token` | `optional string` | Client-supplied key that makes a network retry idempotent; a retry with the same token joins the in-flight remove, a retry with a different token is refused with `OperationAlreadyRunning`. |
+| `idempotency_token` | `optional string` | Client-supplied key that makes a network retry idempotent; a retry with the same token joins the in-flight remove, a retry with a different token is refused with `OperationAlreadyRunning`. A cancelled remove is never joined: a same-key retry after `op cancel` starts a fresh remove. |
 
 ### `GuestProvisionRequest`
 
