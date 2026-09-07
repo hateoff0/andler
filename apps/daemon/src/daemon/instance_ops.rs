@@ -14,6 +14,8 @@ use andler_core::{
     InstanceState, MutatorOp, Operation, OperationKind, OperationState, Resolution,
     INSTANCE_ID_HEX_LEN,
 };
+use tokio::sync::broadcast;
+use tokio::sync::RwLock;
 
 /// Checks that the files this instance needs to boot are still present on disk.
 /// Catches the case where the instance directory was deleted or moved outside
@@ -109,8 +111,32 @@ impl Daemon {
         cfg: InstanceConfig,
         instance_dir: PathBuf,
     ) -> Result<InstanceId, DaemonError> {
+        Self::register_instance(
+            &self.supervisors,
+            &self.backends,
+            &self.events,
+            cfg,
+            instance_dir,
+        )
+        .await
+    }
+
+    /// The registry-side half of registration, against the pieces a
+    /// supervisor operation holds by value: an operation body runs in its
+    /// own task and cannot borrow the daemon, so a clone that registers the
+    /// instance it created needs the pieces directly. `create_instance_in`
+    /// is the `&self` view of this — one implementation, two views.
+    pub(crate) async fn register_instance(
+        supervisors: &Arc<RwLock<HashMap<InstanceId, SupervisorHandle>>>,
+        backends: &HashMap<BackendKind, Arc<dyn HypervisorBackend>>,
+        events: &broadcast::Sender<DaemonEvent>,
+        cfg: InstanceConfig,
+        instance_dir: PathBuf,
+    ) -> Result<InstanceId, DaemonError> {
         cfg.validate().map_err(DaemonError::InvalidConfig)?;
-        self.backend_for(cfg.backend)?;
+        if !backends.contains_key(&cfg.backend) {
+            return Err(DaemonError::NoBackendRegistered(cfg.backend));
+        }
 
         let id = cfg.id;
         let handle = spawn_supervisor(
@@ -119,11 +145,11 @@ impl Daemon {
             cfg.clone(),
             InstanceState::Created,
             None,
-            self.event_sender(),
+            events.clone(),
         );
-        self.supervisors.write().await.insert(id, handle);
+        supervisors.write().await.insert(id, handle);
 
-        let _ = self.event_sender().send(DaemonEvent {
+        let _ = events.send(DaemonEvent {
             ts_ms: chrono::Utc::now().timestamp_millis() as u64,
             instance_id: Some(id),
             kind: EventKind::Log {

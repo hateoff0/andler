@@ -1,5 +1,5 @@
 use super::common::TestTempDir;
-use super::supervisor::{OpAccept, OpRunner};
+use super::supervisor::{IdOpAccept, IdOpRunner, OpAccept, OpRunner};
 use super::*;
 use andler_core::{EventKind, InstanceEvent, Operation, OperationKind, OperationState};
 use std::time::Duration;
@@ -190,6 +190,152 @@ async fn same_key_joins_second_operation() {
     done.await
         .expect("first operation must finish")
         .expect("Ok");
+}
+
+fn test_op_with(id: InstanceId, kind: OperationKind, op_id: &str) -> Operation {
+    Operation {
+        op_id: op_id.to_string(),
+        instance_id: id,
+        kind,
+        phases: vec![("phase-a".to_string(), 1.0)],
+        progress: 0.0,
+        state: OperationState::Queued,
+        error: None,
+    }
+}
+
+fn blocked_id_run(new_id: andler_core::InstanceId) -> IdOpRunner {
+    Box::new(move |mut progress| {
+        Box::pin(async move {
+            progress.enter_phase("phase-a");
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            progress.finish(Ok(()));
+            Ok(new_id)
+        })
+    })
+}
+
+/// The contract a retried clone relies on: a same-key join learns the id the
+/// running operation is creating, never the id the joiner invented for
+/// itself, and a different key is still refused.
+#[tokio::test]
+async fn clone_join_reports_the_instance_the_running_operation_creates() {
+    let (_dir, handle, id) = sample_supervisor().await;
+    let first_id = InstanceId::new();
+    let joiner_id = InstanceId::new();
+
+    let first = handle
+        .run_id_operation(
+            test_op_with(id, OperationKind::Clone, "clone-1"),
+            Some("clone-key".to_string()),
+            first_id,
+            blocked_id_run(first_id),
+        )
+        .await
+        .expect("first clone must be accepted");
+    assert!(matches!(first, IdOpAccept::Started { .. }));
+
+    let second = handle
+        .run_id_operation(
+            test_op_with(id, OperationKind::Clone, "clone-2"),
+            Some("clone-key".to_string()),
+            joiner_id,
+            blocked_id_run(joiner_id),
+        )
+        .await
+        .expect("a same-key clone retry must join");
+    match second {
+        IdOpAccept::Joined { op_id, new_id } => {
+            assert_eq!(op_id, "clone-1", "the joiner names the running op");
+            assert_eq!(
+                new_id, first_id,
+                "the joiner must learn the running op's id, not its own"
+            );
+            assert_ne!(new_id, joiner_id, "the joiner's own id must be dropped");
+        }
+        IdOpAccept::Started { .. } => panic!("expected Joined for a duplicate key"),
+    }
+
+    let different = handle
+        .run_id_operation(
+            test_op_with(id, OperationKind::Clone, "clone-3"),
+            Some("other-key".to_string()),
+            InstanceId::new(),
+            blocked_id_run(InstanceId::new()),
+        )
+        .await
+        .expect_err("a different key must be refused while a clone is active");
+    assert!(matches!(
+        different,
+        DaemonError::OperationAlreadyRunning { .. }
+    ));
+
+    let IdOpAccept::Started { done } = first else {
+        unreachable!()
+    };
+    done.await
+        .expect("done channel must resolve")
+        .expect("the running clone creates its instance");
+}
+
+/// A token reused across operations that do not create an instance cannot
+/// report an id: the reply must be a refusal, never an invented instance.
+#[tokio::test]
+async fn clone_join_over_a_non_clone_operation_is_refused() {
+    let (_dir, handle, id) = sample_supervisor().await;
+
+    let run: OpRunner = Box::new(|mut progress| {
+        Box::pin(async move {
+            progress.enter_phase("phase-a");
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            progress.finish(Ok(()));
+            Ok(())
+        })
+    });
+    let first = handle
+        .run_operation(
+            test_op_with(id, OperationKind::SnapshotDelete, "delete-1"),
+            Some("shared".to_string()),
+            run,
+        )
+        .await
+        .expect("the unit-shaped operation must be accepted");
+    assert!(matches!(first, OpAccept::Started { .. }));
+
+    let err = handle
+        .run_id_operation(
+            test_op_with(id, OperationKind::Clone, "clone-1"),
+            Some("shared".to_string()),
+            InstanceId::new(),
+            blocked_id_run(InstanceId::new()),
+        )
+        .await
+        .expect_err("a clone cannot join an operation that creates no instance");
+    assert!(
+        matches!(err, DaemonError::OperationAlreadyRunning { active_kind: OperationKind::SnapshotDelete, .. } if true),
+        "must name the running operation instead of inventing an id, got: {err:?}"
+    );
+
+    let OpAccept::Started { done } = first else {
+        unreachable!()
+    };
+    done.await.expect("resolve").expect("Ok");
+
+    // Once the running operation is gone the same key starts fresh again.
+    let fresh = handle
+        .run_id_operation(
+            test_op_with(id, OperationKind::Clone, "clone-2"),
+            Some("shared".to_string()),
+            InstanceId::new(),
+            blocked_id_run(InstanceId::new()),
+        )
+        .await
+        .expect("the key must be free after the operation finished");
+    assert!(matches!(fresh, IdOpAccept::Started { .. }));
+    let IdOpAccept::Started { done } = fresh else {
+        unreachable!()
+    };
+    done.await.expect("resolve").expect("Ok");
 }
 
 #[tokio::test]

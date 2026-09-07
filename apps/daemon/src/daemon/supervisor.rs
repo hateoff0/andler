@@ -1,3 +1,4 @@
+use std::future::Future;
 use std::path::PathBuf;
 use std::time::SystemTime;
 
@@ -66,6 +67,18 @@ pub(crate) enum SupervisorCommand {
         done_tx: oneshot::Sender<Result<(), DaemonError>>,
         ack: oneshot::Sender<Result<Option<OpId>, DaemonError>>,
     },
+    /// Same accept rule as `RunOperation`, for an operation that reports the
+    /// id of the instance it creates (a clone). A same-key joiner learns that
+    /// id from the in-flight operation, so a retried request gets the same
+    /// answer as the request it retried.
+    RunIdOperation {
+        op: Operation,
+        key: Option<String>,
+        new_id: InstanceId,
+        run: IdOpRunner,
+        done_tx: oneshot::Sender<Result<InstanceId, DaemonError>>,
+        ack: oneshot::Sender<Result<Option<(OpId, InstanceId)>, DaemonError>>,
+    },
     CancelOperation {
         op_id: OpId,
         ack: oneshot::Sender<Result<bool, DaemonError>>,
@@ -96,13 +109,31 @@ pub(crate) enum OpAccept {
     Joined { op_id: OpId },
 }
 
+/// Outcome of enqueueing an operation that creates an instance.
+#[derive(Debug)]
+pub(crate) enum IdOpAccept {
+    /// Fresh operation; the daemon waits on the paired `done_tx` for the
+    /// id of the instance it created.
+    Started {
+        done: oneshot::Receiver<Result<InstanceId, DaemonError>>,
+    },
+    /// A same-key clone is already in flight; the joiner learns the id that
+    /// operation is creating (progress is visible on the event bus).
+    Joined { op_id: OpId, new_id: InstanceId },
+}
+
 /// The supervisor's own accept rule for a request carrying an idempotency
 /// key. `RunOperation` and `JoinActive` share it so the two paths can
 /// never disagree about which request joins and which is refused.
 #[derive(Debug)]
 enum JoinDecision {
-    /// An operation with this key is in flight and will do the work.
-    Joined(OpId),
+    /// An operation with this key is in flight and will do the work. A
+    /// clone reports the instance id it is creating, so a retried request
+    /// gets the same answer as the request it retried.
+    Joined {
+        active: Operation,
+        new_id: Option<InstanceId>,
+    },
     /// A different operation is in flight.
     Busy { active: Operation },
     /// Nothing in flight — or the in-flight operation was cancelled and
@@ -115,9 +146,17 @@ enum JoinDecision {
 pub(crate) type OpRunner = Box<
     dyn FnOnce(
             OpProgress,
-        ) -> std::pin::Pin<
-            Box<dyn std::future::Future<Output = Result<(), DaemonError>> + Send>,
-        > + Send,
+        ) -> std::pin::Pin<Box<dyn Future<Output = Result<(), DaemonError>> + Send>>
+        + Send,
+>;
+
+/// Operation body that reports the id of the instance it created.
+pub(crate) type IdOpRunner = Box<
+    dyn FnOnce(
+            OpProgress,
+        )
+            -> std::pin::Pin<Box<dyn Future<Output = Result<InstanceId, DaemonError>> + Send>>
+        + Send,
 >;
 
 /// File-vs-memory config picture, produced by `ReloadConfig`.
@@ -246,6 +285,35 @@ impl SupervisorHandle {
         }
     }
 
+    pub(crate) async fn run_id_operation(
+        &self,
+        op: Operation,
+        key: Option<String>,
+        new_id: InstanceId,
+        run: IdOpRunner,
+    ) -> Result<IdOpAccept, DaemonError> {
+        let (done_tx, done_rx) = oneshot::channel();
+        let (ack_tx, ack_rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SupervisorCommand::RunIdOperation {
+                op,
+                key,
+                new_id,
+                run,
+                done_tx,
+                ack: ack_tx,
+            })
+            .await
+            .map_err(|_| DaemonError::InstanceSupervisorGone(self.id))?;
+        match ack_rx
+            .await
+            .map_err(|_| DaemonError::InstanceSupervisorGone(self.id))??
+        {
+            None => Ok(IdOpAccept::Started { done: done_rx }),
+            Some((op_id, new_id)) => Ok(IdOpAccept::Joined { op_id, new_id }),
+        }
+    }
+
     pub(crate) async fn cancel_operation(&self, op_id: &str) -> Result<bool, DaemonError> {
         let (ack_tx, ack_rx) = oneshot::channel();
         self.cmd_tx
@@ -308,6 +376,10 @@ struct InstanceSupervisor {
     live_resolution: Option<Resolution>,
     active_op: Option<Operation>,
     active_op_key: Option<String>,
+    /// The instance id an in-flight clone is creating; reported to a
+    /// same-key joiner so a retried clone reports the instance the first
+    /// request created, not one it invented itself.
+    active_op_new_id: Option<InstanceId>,
     /// True while the active operation has been cancelled but is still
     /// unwinding (e.g. blocked on a gate). A same-key retry must start
     /// fresh here, not join an op that will never complete its work.
@@ -360,6 +432,7 @@ pub(crate) fn spawn_supervisor(
         live_resolution: None,
         active_op: None,
         active_op_key: None,
+        active_op_new_id: None,
         active_op_cancelled: false,
         active_op_seq: None,
         next_op_seq: 0,
@@ -408,6 +481,7 @@ impl InstanceSupervisor {
                             if self.active_op_seq == Some(seq) {
                                 self.active_op = None;
                                 self.active_op_key = None;
+                                self.active_op_new_id = None;
                                 self.active_op_seq = None;
                                 self.active_op_cancelled = false;
                                 self.op_cancel = None;
@@ -458,6 +532,17 @@ impl InstanceSupervisor {
                         } => {
                             self.start_operation(op, key, run, done_tx, ack).await;
                         }
+                        SupervisorCommand::RunIdOperation {
+                            op,
+                            key,
+                            new_id,
+                            run,
+                            done_tx,
+                            ack,
+                        } => {
+                            self.start_id_operation(op, key, new_id, run, done_tx, ack)
+                                .await;
+                        }
                         SupervisorCommand::CancelOperation { op_id, ack } => {
                             let cancelled = match &self.active_op {
                                 Some(active) if active.op_id == op_id => {
@@ -478,7 +563,9 @@ impl InstanceSupervisor {
                         }
                         SupervisorCommand::JoinActive { key, ack } => {
                             let _ = ack.send(match self.join_decision(key.as_ref()) {
-                                JoinDecision::Joined(op_id) => Ok(Some(op_id)),
+                                JoinDecision::Joined { active, .. } => {
+                                    Ok(Some(active.op_id))
+                                }
                                 JoinDecision::Busy { active } => {
                                     Err(self.already_running(&active))
                                 }
@@ -508,8 +595,8 @@ impl InstanceSupervisor {
         ack: oneshot::Sender<Result<Option<OpId>, DaemonError>>,
     ) {
         match self.join_decision(key.as_ref()) {
-            JoinDecision::Joined(op_id) => {
-                let _ = ack.send(Ok(Some(op_id)));
+            JoinDecision::Joined { active, .. } => {
+                let _ = ack.send(Ok(Some(active.op_id)));
                 return;
             }
             JoinDecision::Busy { active } => {
@@ -530,6 +617,7 @@ impl InstanceSupervisor {
         self.next_op_seq += 1;
         self.active_op = Some(op.clone());
         self.active_op_key = key;
+        self.active_op_new_id = None;
         self.active_op_seq = Some(seq);
         self.active_op_cancelled = false;
         self.op_cancel = Some(cancel_tx);
@@ -554,6 +642,67 @@ impl InstanceSupervisor {
         let _ = ack.send(Ok(None));
     }
 
+    /// Clone-shaped `start_operation`: same accept rule, but the body
+    /// reports the id of the instance it created and a same-key joiner
+    /// learns it from `active_op_new_id`.
+    async fn start_id_operation(
+        &mut self,
+        op: Operation,
+        key: Option<String>,
+        new_id: InstanceId,
+        run: IdOpRunner,
+        done_tx: oneshot::Sender<Result<InstanceId, DaemonError>>,
+        ack: oneshot::Sender<Result<Option<(OpId, InstanceId)>, DaemonError>>,
+    ) {
+        match self.join_decision(key.as_ref()) {
+            JoinDecision::Joined {
+                active,
+                new_id: Some(new_id),
+            } => {
+                let _ = ack.send(Ok(Some((active.op_id, new_id))));
+                return;
+            }
+            // A token held by an operation that creates no instance (a
+            // client reusing a token across different operations) cannot
+            // report an id: refuse rather than invent one.
+            JoinDecision::Joined { active, .. } | JoinDecision::Busy { active } => {
+                let _ = ack.send(Err(self.already_running(&active)));
+                return;
+            }
+            JoinDecision::Free => {}
+        }
+
+        let (cancel_tx, cancel_rx) = watch::channel(false);
+        let events = self.events.clone();
+        let audit_dir = self.audit_dir.clone();
+        let op_done_tx = self.op_done_tx.clone();
+        let seq = self.next_op_seq;
+        self.next_op_seq += 1;
+        self.active_op = Some(op.clone());
+        self.active_op_key = key;
+        self.active_op_new_id = Some(new_id);
+        self.active_op_seq = Some(seq);
+        self.active_op_cancelled = false;
+        self.op_cancel = Some(cancel_tx);
+
+        tokio::spawn(async move {
+            let mut progress = OpProgress::new(
+                op.kind,
+                op.instance_id,
+                op.op_id,
+                op.phases,
+                events,
+                audit_dir,
+                cancel_rx,
+            );
+            progress.mark_running();
+            let result = run(progress).await;
+            let _ = done_tx.send(result);
+            let _ = op_done_tx.send(seq);
+        });
+        let _ = ack.send(Ok(None));
+    }
+
     fn join_decision(&self, key: Option<&String>) -> JoinDecision {
         match &self.active_op {
             Some(active) => {
@@ -561,7 +710,10 @@ impl InstanceSupervisor {
                     if self.active_op_cancelled {
                         JoinDecision::Free
                     } else {
-                        JoinDecision::Joined(active.op_id.clone())
+                        JoinDecision::Joined {
+                            active: active.clone(),
+                            new_id: self.active_op_new_id,
+                        }
                     }
                 } else {
                     JoinDecision::Busy {

@@ -2,6 +2,10 @@ use super::common::*;
 use super::*;
 use andler_core::{AndroidBootMode, AndroidProfile, ArmTranslator, CloneMode};
 use std::path::PathBuf;
+use std::time::Duration;
+
+use super::supervisor::{IdOpAccept, IdOpRunner, OpAccept, OpRunner};
+use andler_core::{Operation, OperationKind, OperationState};
 
 #[tokio::test]
 async fn clone_on_unknown_instance_returns_instance_not_found() {
@@ -12,6 +16,7 @@ async fn clone_on_unknown_instance_returns_instance_not_found() {
             "clone".to_string(),
             PathBuf::from("/tmp/instances"),
             CloneMode::Linked,
+            None,
         )
         .await
         .unwrap_err();
@@ -31,6 +36,7 @@ async fn clone_rejects_linux_vm_with_shared_base() {
             "clone".to_string(),
             PathBuf::from("/tmp/instances"),
             CloneMode::SharedBase,
+            None,
         )
         .await
         .unwrap_err();
@@ -61,6 +67,7 @@ async fn clone_rejects_non_terminal_source_state() {
             "clone".to_string(),
             dir.path().to_path_buf(),
             CloneMode::Linked,
+            None,
         )
         .await
         .unwrap_err();
@@ -223,6 +230,7 @@ async fn clone_linux_vm_linked_mode_is_allowed() {
             "clone".to_string(),
             dir.path().to_path_buf(),
             CloneMode::Linked,
+            None,
         )
         .await
         .unwrap_err();
@@ -252,6 +260,7 @@ async fn clone_linux_vm_full_standalone_mode_is_allowed() {
             "clone".to_string(),
             dir.path().to_path_buf(),
             CloneMode::FullStandalone,
+            None,
         )
         .await
         .unwrap_err();
@@ -281,6 +290,7 @@ async fn clone_linux_vm_shared_base_mode_returns_shared_base_not_supported() {
             "clone".to_string(),
             dir.path().to_path_buf(),
             CloneMode::SharedBase,
+            None,
         )
         .await
         .unwrap_err();
@@ -304,7 +314,7 @@ async fn export_linux_vm_disk_does_not_block_on_instance_kind() {
     let id = daemon.create_instance(cfg).await.unwrap();
 
     let err = daemon
-        .export_instance_disk(id, dir.path().join("exported.qcow2"))
+        .export_instance_disk(id, dir.path().join("exported.qcow2"), None)
         .await
         .unwrap_err();
     assert!(
@@ -337,6 +347,7 @@ async fn clone_linux_vm_rejects_non_terminal_source_state() {
             "clone".to_string(),
             dir.path().to_path_buf(),
             CloneMode::Linked,
+            None,
         )
         .await
         .unwrap_err();
@@ -366,7 +377,7 @@ async fn export_linux_vm_disk_creates_standalone_file() {
 
     let export_path = dir.path().join("exported.qcow2");
     daemon
-        .export_instance_disk(id, export_path.clone())
+        .export_instance_disk(id, export_path.clone(), None)
         .await
         .unwrap();
 
@@ -425,6 +436,7 @@ async fn clone_instance_with_linked_mode_creates_overlay_pointing_at_source_disk
             "clone-of-source".to_string(),
             instances_root.clone(),
             CloneMode::Linked,
+            None,
         )
         .await
         .unwrap();
@@ -496,6 +508,7 @@ async fn clone_instance_with_full_standalone_mode_has_no_base_image() {
             "standalone-clone".to_string(),
             instances_root,
             CloneMode::FullStandalone,
+            None,
         )
         .await
         .unwrap();
@@ -554,6 +567,7 @@ async fn clone_instance_with_shared_base_mode_survives_source_purge() {
             "shared-base-clone".to_string(),
             instances_root,
             CloneMode::SharedBase,
+            None,
         )
         .await
         .unwrap();
@@ -613,6 +627,7 @@ async fn clone_instance_of_a_clone_is_allowed() {
             "clone-a".to_string(),
             instances_root.clone(),
             CloneMode::Linked,
+            None,
         )
         .await
         .unwrap();
@@ -623,6 +638,7 @@ async fn clone_instance_of_a_clone_is_allowed() {
             "clone-b".to_string(),
             instances_root,
             CloneMode::Linked,
+            None,
         )
         .await
         .unwrap();
@@ -686,7 +702,7 @@ async fn export_instance_disk_creates_standalone_file_without_registering_instan
 
     let export_path = dir.join("exported.qcow2");
     daemon
-        .export_instance_disk(source_id, export_path.clone())
+        .export_instance_disk(source_id, export_path.clone(), None)
         .await
         .unwrap();
 
@@ -697,4 +713,144 @@ async fn export_instance_disk_creates_standalone_file_without_registering_instan
     assert_eq!(instances_before[0].id, source_id);
 
     tokio::fs::remove_dir_all(&dir).await.ok();
+}
+
+/// A retried clone carries the same default join key (source, name and mode
+/// identify the instance being created), so the retry must join the clone
+/// already running and report the instance that operation creates — never a
+/// second instance of its own.
+#[tokio::test]
+async fn clone_retry_with_the_same_default_key_reports_the_running_instance() {
+    let dir = TestTempDir::new();
+    let daemon = Daemon::new();
+    let mut cfg = sample_config(); // LinuxVm
+    cfg.disk.path = dir.path().join("disk.qcow2");
+    cfg.firmware.ovmf_vars_path = dir.path().join("VARS.fd");
+    let id = daemon.create_instance(cfg).await.unwrap();
+
+    let starter_id = InstanceId::new();
+    let run: IdOpRunner = Box::new(move |mut progress| {
+        Box::pin(async move {
+            progress.enter_phase("clone-disk");
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            progress.finish(Ok(()));
+            Ok(starter_id)
+        })
+    });
+    let accept = daemon
+        .handle_for(id)
+        .await
+        .unwrap()
+        .run_id_operation(
+            Operation {
+                op_id: "clone-running".to_string(),
+                instance_id: id,
+                kind: OperationKind::Clone,
+                phases: vec![("clone-disk".to_string(), 1.0)],
+                progress: 0.0,
+                state: OperationState::Queued,
+                error: None,
+            },
+            Some(format!("clone:{id}:clone:Linked")),
+            starter_id,
+            run,
+        )
+        .await
+        .unwrap();
+    assert!(matches!(accept, IdOpAccept::Started { .. }));
+
+    let joined = daemon
+        .clone_instance(
+            id,
+            "clone".to_string(),
+            dir.path().to_path_buf(),
+            CloneMode::Linked,
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        joined, starter_id,
+        "a retried clone must report the instance being created"
+    );
+
+    let err = daemon
+        .clone_instance(
+            id,
+            "clone".to_string(),
+            dir.path().to_path_buf(),
+            CloneMode::Linked,
+            Some("other-token".to_string()),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, DaemonError::OperationAlreadyRunning { .. }),
+        "a different token must be refused while a clone is active, got: {err:?}"
+    );
+
+    let IdOpAccept::Started { done } = accept else {
+        unreachable!()
+    };
+    done.await.unwrap().unwrap();
+}
+
+/// A retried export to the same destination joins the export already
+/// running instead of starting a second convert.
+#[tokio::test]
+async fn export_retry_with_the_same_default_key_joins_the_running_export() {
+    let dir = TestTempDir::new();
+    let daemon = Daemon::new();
+    let mut cfg = sample_config();
+    cfg.disk.path = dir.path().join("disk.qcow2");
+    let id = daemon.create_instance(cfg).await.unwrap();
+
+    let dest = dir.path().join("exported.qcow2");
+    let run: OpRunner = Box::new(|mut progress| {
+        Box::pin(async move {
+            progress.enter_phase("convert");
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            progress.finish(Ok(()));
+            Ok(())
+        })
+    });
+    let accept = daemon
+        .handle_for(id)
+        .await
+        .unwrap()
+        .run_operation(
+            Operation {
+                op_id: "export-running".to_string(),
+                instance_id: id,
+                kind: OperationKind::Export,
+                phases: vec![("convert".to_string(), 1.0)],
+                progress: 0.0,
+                state: OperationState::Queued,
+                error: None,
+            },
+            Some(format!("export:{id}:{}", dest.display())),
+            run,
+        )
+        .await
+        .unwrap();
+    assert!(matches!(accept, OpAccept::Started { .. }));
+
+    daemon
+        .export_instance_disk(id, dest.clone(), None)
+        .await
+        .unwrap();
+
+    let err = daemon
+        .export_instance_disk(id, dest.clone(), Some("other-token".to_string()))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, DaemonError::OperationAlreadyRunning { .. }),
+        "a different token must be refused while an export is active, got: {err:?}"
+    );
+
+    let OpAccept::Started { done } = accept else {
+        unreachable!()
+    };
+    done.await.unwrap().unwrap();
 }
