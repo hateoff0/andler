@@ -110,6 +110,7 @@ pub struct Operation {
 pub enum OperationKind {
     Create,
     Clone,
+    Export,
     Start,
     Stop,
     SnapshotCreate,
