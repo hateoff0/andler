@@ -24,6 +24,7 @@ pub async fn handle_clone(
     name: String,
     instances_root: String,
     mode: CliCloneMode,
+    idempotency_token: Option<String>,
     json: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let response = client
@@ -32,6 +33,7 @@ pub async fn handle_clone(
             new_name: name,
             instances_root,
             mode: andler_rpc::proto::CloneMode::from(mode) as i32,
+            idempotency_token,
         })
         .await?
         .into_inner();
@@ -50,12 +52,14 @@ pub async fn handle_export(
     client: &mut TracedClient,
     source_instance_id: String,
     dest_path: String,
+    idempotency_token: Option<String>,
     json: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let response = client
         .export_instance_disk(ExportInstanceDiskRequest {
             source_instance_id: source_instance_id.clone(),
             dest_path: dest_path.clone(),
+            idempotency_token,
         })
         .await?
         .into_inner();

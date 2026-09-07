@@ -622,6 +622,7 @@ async fn clone_instance_on_unknown_source_round_trips_as_not_found() {
             new_name: "clone".to_string(),
             instances_root: "/tmp/instances".to_string(),
             mode: CloneMode::Linked as i32,
+            idempotency_token: None,
         })
         .await
         .expect_err("cloning an unregistered instance_id must fail");
@@ -646,6 +647,7 @@ async fn clone_instance_linux_vm_linked_with_qemu_img() {
             new_name: "clone".to_string(),
             instances_root: "/tmp/instances".to_string(),
             mode: CloneMode::Linked as i32,
+            idempotency_token: None,
         })
         .await
         .expect("cloning a LinuxVm with Linked should succeed when qemu-img is available");
@@ -672,6 +674,7 @@ async fn clone_instance_rejects_unspecified_mode_as_invalid_argument() {
             new_name: "clone".to_string(),
             instances_root: "/tmp/instances".to_string(),
             mode: CloneMode::Unspecified as i32,
+            idempotency_token: None,
         })
         .await
         .expect_err("an unspecified clone mode must be rejected");
@@ -690,6 +693,7 @@ async fn clone_instance_rejects_malformed_instance_id() {
             new_name: "clone".to_string(),
             instances_root: "/tmp/instances".to_string(),
             mode: CloneMode::Linked as i32,
+            idempotency_token: None,
         })
         .await
         .expect_err("a malformed instance_id must be rejected before reaching Daemon");
@@ -706,6 +710,7 @@ async fn export_instance_disk_on_unknown_source_round_trips_as_not_found() {
         .export_instance_disk(ExportInstanceDiskRequest {
             source_instance_id: "a".repeat(64),
             dest_path: "/tmp/export.qcow2".to_string(),
+            idempotency_token: None,
         })
         .await
         .expect_err("exporting an unregistered instance_id must fail");
@@ -746,6 +751,7 @@ async fn export_instance_disk_linux_vm_with_qemu_img() {
         .export_instance_disk(ExportInstanceDiskRequest {
             source_instance_id: create_response.instance_id,
             dest_path: "/tmp/export.qcow2".to_string(),
+            idempotency_token: None,
         })
         .await
         .expect("exporting a LinuxVm should succeed when qemu-img is available");
@@ -837,6 +843,7 @@ async fn clone_instance_linux_vm_full_standalone_with_qemu_img() {
             new_name: "clone".to_string(),
             instances_root: "/tmp/instances".to_string(),
             mode: CloneMode::FullStandalone as i32,
+            idempotency_token: None,
         })
         .await
         .expect("LinuxVm + FullStandalone should succeed when qemu-img is available");
@@ -863,6 +870,7 @@ async fn clone_instance_linux_vm_shared_base_rejected_as_failed_precondition() {
             new_name: "clone".to_string(),
             instances_root: "/tmp/instances".to_string(),
             mode: CloneMode::SharedBase as i32,
+            idempotency_token: None,
         })
         .await
         .expect_err("LinuxVm + SharedBase must be rejected");
@@ -1657,6 +1665,28 @@ async fn idempotency_token_field_round_trips_over_real_grpc() {
         })
         .await
         .expect_err("an unknown instance must be NOT_FOUND, not a wire error");
+    assert_eq!(status.code(), tonic::Code::NotFound);
+
+    let status = client
+        .clone_instance(CloneInstanceRequest {
+            source_instance_id: unknown_id.clone(),
+            new_name: "clone".to_string(),
+            instances_root: "/tmp/instances".to_string(),
+            mode: CloneMode::Linked as i32,
+            idempotency_token: Some(token.to_string()),
+        })
+        .await
+        .expect_err("an unknown clone source must be NOT_FOUND, not a wire error");
+    assert_eq!(status.code(), tonic::Code::NotFound);
+
+    let status = client
+        .export_instance_disk(ExportInstanceDiskRequest {
+            source_instance_id: unknown_id.clone(),
+            dest_path: "/tmp/export.qcow2".to_string(),
+            idempotency_token: Some(token.to_string()),
+        })
+        .await
+        .expect_err("an unknown export source must be NOT_FOUND, not a wire error");
     assert_eq!(status.code(), tonic::Code::NotFound);
 
     server.abort();

@@ -425,6 +425,12 @@ enum Command {
 
         #[arg(long, value_enum)]
         mode: CliCloneMode,
+
+        /// Client-supplied idempotency key: a network retry with the same
+        /// token joins the clone already running instead of creating a second
+        /// instance.
+        #[arg(long)]
+        idempotency_token: Option<String>,
         #[arg(long, help = "Emit the result as JSON instead of human-readable text")]
         json: bool,
     },
@@ -433,6 +439,11 @@ enum Command {
     Export {
         source_instance_id: String,
         dest_path: String,
+
+        /// Client-supplied idempotency key: a network retry with the same
+        /// token joins the export already running to the same destination.
+        #[arg(long)]
+        idempotency_token: Option<String>,
 
         #[arg(long, help = "Emit the result as JSON instead of human-readable text")]
         json: bool,
@@ -1228,6 +1239,7 @@ async fn run(cli: Cli, addr: &str) -> Result<(), Box<dyn std::error::Error>> {
             name,
             instances_root,
             mode,
+            idempotency_token,
             json,
         }) => {
             clone::handle_clone(
@@ -1236,6 +1248,7 @@ async fn run(cli: Cli, addr: &str) -> Result<(), Box<dyn std::error::Error>> {
                 name,
                 instances_root,
                 mode,
+                idempotency_token,
                 json,
             )
             .await?;
@@ -1243,9 +1256,17 @@ async fn run(cli: Cli, addr: &str) -> Result<(), Box<dyn std::error::Error>> {
         Some(Command::Export {
             source_instance_id,
             dest_path,
+            idempotency_token,
             json,
         }) => {
-            clone::handle_export(&mut client, source_instance_id, dest_path, json).await?;
+            clone::handle_export(
+                &mut client,
+                source_instance_id,
+                dest_path,
+                idempotency_token,
+                json,
+            )
+            .await?;
         }
 
         Some(Command::ExportOci {

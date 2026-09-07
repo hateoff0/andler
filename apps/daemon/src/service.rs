@@ -362,7 +362,13 @@ impl AndlerService for DaemonService {
 
         let id = self
             .daemon
-            .clone_instance(source_id, req.new_name, req.instances_root.into(), mode)
+            .clone_instance(
+                source_id,
+                req.new_name,
+                req.instances_root.into(),
+                mode,
+                req.idempotency_token,
+            )
             .await?;
 
         Ok(Response::new(CreateInstanceResponse {
@@ -381,7 +387,11 @@ impl AndlerService for DaemonService {
             .await?;
 
         self.daemon
-            .export_instance_disk(source_id, req.dest_path.clone().into())
+            .export_instance_disk(
+                source_id,
+                req.dest_path.clone().into(),
+                req.idempotency_token,
+            )
             .await?;
 
         Ok(Response::new(ExportInstanceDiskResponse {
