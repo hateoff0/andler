@@ -5,17 +5,35 @@ use std::str::FromStr;
 use crate::TracedClient;
 use andler_core::InstanceId;
 use andler_rpc::proto::{Empty, InstanceIdRequest, InstanceStateKind};
+use serde::Serialize;
 
+use crate::helpers::emit_json;
 use crate::ConnectLevel;
+
+#[derive(Serialize)]
+struct ConnectReport {
+    instance_id: String,
+    level: &'static str,
+    /// Host port to reach the guest on, for `ssh`/`adb`. Absent for
+    /// `console`, which has no port — it's a local unix socket.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    host_port: Option<u16>,
+}
 
 /// `andler connect` — single entry point to the guest. The best available
 /// level is chosen for the instance's effective profile; `--level` forces
 /// one. Phase 2 ships `console` (works on any VM, any state that runs QEMU)
 /// and `exec` (needs the guest agent); ssh/adb land with provisioning.
+///
+/// `--json` resolves and reports the level/port that would be used and
+/// stops there — it never launches the interactive session (console pumps
+/// raw terminal bytes, ssh/adb hand this process's stdio to a child — there
+/// is no "result" to wrap in JSON for either, only a decision to report).
 pub async fn handle_connect(
     client: &mut TracedClient,
     instance_id: String,
     level: ConnectLevel,
+    json: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let full_id = resolve_full_id(client, &instance_id).await?;
 
@@ -33,10 +51,16 @@ pub async fn handle_connect(
         .into());
     }
 
-    match level {
-        ConnectLevel::Console => connect_console(&full_id).await,
-        ConnectLevel::Ssh => connect_via_port_forward(client, &full_id, 22, "ssh").await,
-        ConnectLevel::Adb => connect_via_port_forward(client, &full_id, 5555, "adb").await,
+    let resolved = match level {
+        ConnectLevel::Console => ResolvedLevel::Console,
+        ConnectLevel::Ssh => ResolvedLevel::PortForward {
+            guest_port: 22,
+            what: "ssh",
+        },
+        ConnectLevel::Adb => ResolvedLevel::PortForward {
+            guest_port: 5555,
+            what: "adb",
+        },
         // Effective profile (kind × boot_mode): an Android
         // instance booted into linux mode is reached over ssh, one booted
         // into android over adb; plain Linux VMs keep the serial console.
@@ -55,12 +79,74 @@ pub async fn handle_connect(
             }) && config.boot_mode
                 == andler_rpc::proto::AndroidBootMode::Linux as i32;
             if is_android_booted_linux {
-                connect_via_port_forward(client, &full_id, 22, "ssh").await
+                ResolvedLevel::PortForward {
+                    guest_port: 22,
+                    what: "ssh",
+                }
             } else {
-                connect_console(&full_id).await
+                ResolvedLevel::Console
             }
         }
+    };
+
+    if json {
+        let (level_name, host_port) = match resolved {
+            ResolvedLevel::Console => ("console", None),
+            ResolvedLevel::PortForward { guest_port, what } => (
+                what,
+                Some(resolve_host_port(client, &full_id, guest_port).await?),
+            ),
+        };
+        emit_json(&ConnectReport {
+            instance_id: full_id,
+            level: level_name,
+            host_port,
+        })?;
+        return Ok(());
     }
+
+    match resolved {
+        ResolvedLevel::Console => connect_console(&full_id).await,
+        ResolvedLevel::PortForward { guest_port, what } => {
+            connect_via_port_forward(client, &full_id, guest_port, what).await
+        }
+    }
+}
+
+enum ResolvedLevel {
+    Console,
+    PortForward { guest_port: u16, what: &'static str },
+}
+
+/// Looks up the host port forwarded to `guest_port`, without launching
+/// anything. Shared by the interactive path and `--json`.
+async fn resolve_host_port(
+    client: &mut TracedClient,
+    full_id: &str,
+    guest_port: u16,
+) -> Result<u16, Box<dyn std::error::Error>> {
+    let config = client
+        .get_instance_config(InstanceIdRequest {
+            instance_id: full_id.to_string(),
+        })
+        .await?
+        .into_inner()
+        .network
+        .ok_or_else(|| "daemon returned no network config".to_string())?;
+
+    config
+        .port_forwards
+        .iter()
+        .find(|f| f.guest_port == guest_port as u32)
+        .map(|f| f.host_port as u16)
+        .ok_or_else(|| {
+            format!(
+                "no port forward to guest port {guest_port} on {full_id}; add \
+                 `network.port_forwards = [\"tcp:2222->{guest_port}\"]` (host:guest) to \
+                 instance.toml before starting, then `andler connect --level ssh`"
+            )
+            .into()
+        })
 }
 
 /// Spawns an external client (ssh / adb) pointed at the guest's forwarded
@@ -74,27 +160,7 @@ async fn connect_via_port_forward(
     guest_port: u16,
     what: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let config = client
-        .get_instance_config(InstanceIdRequest {
-            instance_id: full_id.to_string(),
-        })
-        .await?
-        .into_inner()
-        .network
-        .ok_or_else(|| "daemon returned no network config".to_string())?;
-
-    let host_port = config
-        .port_forwards
-        .iter()
-        .find(|f| f.guest_port == guest_port as u32)
-        .map(|f| f.host_port)
-        .ok_or_else(|| {
-            format!(
-                "no port forward to guest port {guest_port} on {full_id}; add \
-                 `network.port_forwards = [\"tcp:2222->{guest_port}\"]` (host:guest) to \
-                 instance.toml before starting, then `andler connect --level {what}`"
-            )
-        })?;
+    let host_port = resolve_host_port(client, full_id, guest_port).await?;
 
     let (cmd, args): (&str, Vec<String>) = match what {
         "ssh" => (

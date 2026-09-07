@@ -1,13 +1,24 @@
+use crate::helpers::{emit_json, which};
 use crate::TracedClient;
 use andler_core::InstanceConfig;
 use andler_rpc::convert;
 use andler_rpc::proto::InstanceIdRequest;
+use serde::Serialize;
 
-use crate::helpers::which;
+#[derive(Serialize)]
+struct EditReport {
+    instance_id: String,
+    changed: bool,
+    /// Top-level config sections that actually differ, e.g. `["cpu",
+    /// "network"]`. Sourced from the same serialized comparison the
+    /// `keypath` exhaustiveness test uses, not a second hand-rolled diff.
+    changed_keys: Vec<String>,
+}
 
 pub async fn handle(
     client: &mut TracedClient,
     instance_id: String,
+    json: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let response = client
         .get_instance_config(InstanceIdRequest {
@@ -47,7 +58,15 @@ pub async fn handle(
         .map_err(|e| format!("failed to read back {}: {e}", toml_path.display()))?;
 
     if edited_toml == original_toml {
-        println!("No changes made.");
+        if json {
+            emit_json(&EditReport {
+                instance_id: resolved_ref,
+                changed: false,
+                changed_keys: Vec::new(),
+            })?;
+        } else {
+            println!("No changes made.");
+        }
         return Ok(());
     }
 
@@ -64,11 +83,44 @@ pub async fn handle(
         }
     };
 
-    let request = convert::instance_config_to_update_request(edited, resolved_ref);
+    let changed_keys = changed_top_level_keys(&original, &edited);
+
+    let request = convert::instance_config_to_update_request(edited, resolved_ref.clone());
     client.update_instance_config(request).await?;
 
-    println!("Config updated. Restart instance to apply changes.");
+    if json {
+        emit_json(&EditReport {
+            instance_id: resolved_ref,
+            changed: true,
+            changed_keys,
+        })?;
+    } else {
+        println!("Config updated. Restart instance to apply changes.");
+    }
     Ok(())
+}
+
+/// Top-level fields that differ between two configs, by serialized value —
+/// the same technique `keypath`'s exhaustiveness test uses to walk
+/// `InstanceConfig`, applied here to compare instead of enumerate. Field
+/// names are reported as-is (`cpu`, `network`, `name`, ...); nested
+/// differences are not expanded further, since "which section changed" is
+/// enough for a script deciding whether e.g. a restart is warranted.
+fn changed_top_level_keys(before: &InstanceConfig, after: &InstanceConfig) -> Vec<String> {
+    let (Ok(before), Ok(after)) = (serde_json::to_value(before), serde_json::to_value(after))
+    else {
+        return Vec::new();
+    };
+    let (Some(before), Some(after)) = (before.as_object(), after.as_object()) else {
+        return Vec::new();
+    };
+    let mut keys: Vec<String> = before
+        .keys()
+        .filter(|key| before.get(*key) != after.get(*key))
+        .cloned()
+        .collect();
+    keys.sort();
+    keys
 }
 
 fn run_editor(path: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {

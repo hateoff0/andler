@@ -190,6 +190,12 @@ pub enum ConfigCommand {
 
     Edit {
         instance_id: Option<String>,
+        #[arg(
+            long,
+            help = "Emit the applied change (or lack of one) as JSON instead of \
+                    human-readable text; the interactive edit itself is unaffected"
+        )]
+        json: bool,
     },
 
     Set {
@@ -215,6 +221,7 @@ impl ConfigCommand {
     fn json_requested(&self) -> bool {
         match self {
             ConfigCommand::Status { json, .. } => *json,
+            ConfigCommand::Edit { json, .. } => *json,
             _ => false,
         }
     }
@@ -345,6 +352,12 @@ enum Command {
 
         #[arg(long, value_enum, default_value = "auto")]
         level: ConnectLevel,
+
+        #[arg(
+            long,
+            help = "Resolve and report the level/port as JSON instead of connecting"
+        )]
+        json: bool,
     },
 
     /// Run a command in the guest through the guest agent (exit code relayed)
@@ -589,11 +602,12 @@ impl Command {
             Command::Logs(args) => args.json,
             Command::Events(args) => args.json,
             Command::Metrics(args) => args.json,
-            Command::Config { action, .. } => {
-                action.as_ref().map(|a| a.json_requested()).unwrap_or(false)
-            }
-            Command::Connect { .. }
-            | Command::Start(_)
+            Command::Config { action, flags } => action
+                .as_ref()
+                .map(|a| a.json_requested())
+                .unwrap_or(flags.json),
+            Command::Connect { json, .. } => *json,
+            Command::Start(_)
             | Command::Stop(_)
             | Command::Pause(_)
             | Command::Resume(_)
@@ -1110,8 +1124,12 @@ async fn run(cli: Cli, addr: &str) -> Result<(), Box<dyn std::error::Error>> {
             )
             .await?;
         }
-        Some(Command::Connect { instance_id, level }) => {
-            connect::handle_connect(&mut client, instance_id, level).await?;
+        Some(Command::Connect {
+            instance_id,
+            level,
+            json,
+        }) => {
+            connect::handle_connect(&mut client, instance_id, level, json).await?;
         }
         Some(Command::Exec {
             instance_id,
@@ -1161,12 +1179,12 @@ async fn run(cli: Cli, addr: &str) -> Result<(), Box<dyn std::error::Error>> {
                     .ok_or("instance ID required")?;
                 status::handle_config(&mut client, id.to_string()).await?;
             }
-            Some(ConfigCommand::Edit { instance_id }) => {
+            Some(ConfigCommand::Edit { instance_id, json }) => {
                 let id = instance_id
                     .as_deref()
                     .or(flags.instance.as_deref())
                     .ok_or("instance ID required")?;
-                edit::handle(&mut client, id.to_string()).await?;
+                edit::handle(&mut client, id.to_string(), json).await?;
             }
             Some(ConfigCommand::Status { instance_id, json }) => {
                 let id = instance_id
@@ -1195,7 +1213,7 @@ async fn run(cli: Cli, addr: &str) -> Result<(), Box<dyn std::error::Error>> {
                     .as_deref()
                     .ok_or("instance ID required: use --instance or a subcommand")?;
                 if flags.edit {
-                    edit::handle(&mut client, id.to_string()).await?;
+                    edit::handle(&mut client, id.to_string(), flags.json).await?;
                 } else if flags.file.is_some() {
                     eprintln!("config --file not yet implemented");
                 } else {
