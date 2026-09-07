@@ -403,11 +403,13 @@ message CloneInstanceRequest {
     string new_name = 2;
     string instances_root = 3;
     CloneMode mode = 4;
+    optional string idempotency_token = 5;
 }
 
 message ExportInstanceDiskRequest {
     string source_instance_id = 1;
     string dest_path = 2;
+    optional string idempotency_token = 3;
 }
 
 message ExportInstanceDiskResponse {
