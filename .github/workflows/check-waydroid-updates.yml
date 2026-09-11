@@ -1,0 +1,33 @@
+name: Check for new Waydroid images
+
+# Runs on a schedule so nobody has to remember to check SourceForge by hand.
+# workflow_dispatch is the manual "check right now" button in the Actions UI.
+on:
+  schedule:
+    - cron: "0 */6 * * *"   # every 6 hours
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Report what would be built without triggering it"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  actions: write   # required to trigger build-base-image.yml
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check SourceForge and trigger builds for anything new
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/check_waydroid_updates.py \
+            --repo "${{ github.repository }}" \
+            --trigger-workflow build-base-image.yml \
+            ${{ inputs.dry_run && '--dry-run' || '' }}

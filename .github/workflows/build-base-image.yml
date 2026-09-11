@@ -1,0 +1,105 @@
+name: Build base image
+
+# Triggered by check-waydroid-updates.yml when it finds something new, or
+# manually (Actions tab -> this workflow -> Run workflow) to rebuild/backfill
+# a specific combination on demand.
+on:
+  workflow_dispatch:
+    inputs:
+      android_major:
+        description: "Android version"
+        required: true
+        type: choice
+        options: ["13", "11"]
+      android_variant:
+        description: "Package set"
+        required: true
+        type: choice
+        options: ["VANILLA", "GAPPS"]
+
+permissions:
+  contents: write   # to create the release and upload assets
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      # Standard runners ship ~25-29 GiB free; the rootfs + waydroid images
+      # + qcow2 should fit, but this buys margin cheaply before a multi-GiB
+      # build rather than finding out mid-build.
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: false
+          docker-images: false   # we need Docker for the build itself
+
+      - uses: docker/setup-buildx-action@v3
+
+      # build.sh does its own "sudo -v" up front (needed by build-disk.sh's
+      # partitioning step later). The default runner user already has
+      # passwordless sudo, so this does not prompt -- but it is exactly the
+      # kind of thing that silently hangs a non-interactive shell if that
+      # assumption is ever wrong, so it is worth watching the first real run.
+      - name: Build image (docker build + build-disk.sh)
+        run: docker/images/build.sh "${{ inputs.android_major }}" "${{ inputs.android_variant }}"
+
+      - name: Locate build output
+        id: locate
+        run: |
+          set -euo pipefail
+          variant_lower=$(echo "${{ inputs.android_variant }}" | tr '[:upper:]' '[:lower:]')
+          dir="$HOME/.andler/cache/base-images/android${{ inputs.android_major }}-${variant_lower}"
+          qcow2=$(ls -t "$dir"/*.qcow2 | head -1)
+          echo "qcow2=$qcow2" >> "$GITHUB_OUTPUT"
+          echo "manifest=${qcow2%.qcow2}.manifest.json" >> "$GITHUB_OUTPUT"
+
+      - name: Verify the image and manifest agree before publishing anything
+        run: |
+          set -euo pipefail
+          qemu-img check "${{ steps.locate.outputs.qcow2 }}"
+          python3 -c "
+          import hashlib, json
+          m = json.load(open('${{ steps.locate.outputs.manifest }}'))
+          actual = hashlib.sha256(open('${{ steps.locate.outputs.qcow2 }}', 'rb').read()).hexdigest()
+          assert actual == m['sha256'], f'manifest says {m[\"sha256\"]}, actual file hashes to {actual}'
+          print('qcow2 sha256 matches manifest.json: OK')
+          "
+
+      # GitHub Release assets are capped at 2 GiB each. Compress, then split
+      # into parts safely under that (1900 MiB leaves headroom).
+      - name: Compress and split for the 2 GiB asset limit
+        id: package
+        run: |
+          set -euo pipefail
+          qcow2="${{ steps.locate.outputs.qcow2 }}"
+          zstd -T0 -19 --long=27 "$qcow2" -o "$qcow2.zst"
+          split -b 1900M -d --additional-suffix=.part "$qcow2.zst" "$qcow2.zst."
+          rm "$qcow2.zst"
+          ls -lh "$qcow2".zst.*.part
+
+      - name: Record part checksums in the manifest
+        run: |
+          python3 .github/scripts/add_parts_to_manifest.py \
+            "${{ steps.locate.outputs.manifest }}" \
+            "${{ steps.locate.outputs.qcow2 }}".zst.*.part
+
+      - name: Publish as a GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          variant_lower=$(echo "${{ inputs.android_variant }}" | tr '[:upper:]' '[:lower:]')
+          tag="base-image-android${{ inputs.android_major }}-${variant_lower}-$(date -u +%Y%m%d-%H%M%S)"
+          gh release create "$tag" \
+            --repo "${{ github.repository }}" \
+            --title "Base image: Android ${{ inputs.android_major }} (${{ inputs.android_variant }})" \
+            --notes "Automated build. android_images in manifest.json names the exact Waydroid system/vendor files used. Download all .part files plus manifest.json, verify each against manifest.json, concatenate in numeric order, decompress with zstd." \
+            "${{ steps.locate.outputs.manifest }}" \
+            "${{ steps.locate.outputs.qcow2 }}".zst.*.part
