@@ -169,6 +169,15 @@ Reads the release catalog published by the project's CI (`.github/workflows/buil
 | `fetch_base_image` | `async (&ImageSource, &RemoteImage, bool, &ProgressSink) -> Result<FetchOutcome, DiskError>` | Download every part (sha256-verified while streaming, restart-on-failure, verified leftovers of an interrupted run reused), concatenate them into one zstd stream, unpack into `<stem>.qcow2.partial` while hashing, compare against the manifest's `sha256`, then rename the image and write the manifest bytes exactly as published into `~/.andler/cache/base-images/<android>-<variant>/`. `force` re-downloads an already-cached build; without it, a cached build is returned as `reused` without any request. |
 | `installed_image` | `(manifest_id: &str) -> Option<BaseImageInfo>` | The cached build with that manifest id, if any |
 
+Split seam for the next pass: this module is past the 600–800-line mark that
+the repo treats as a design signal. It has two jobs that do not share state —
+reading the catalog (`ImageSource`, the release-JSON types, `list_remote`, the
+repository/single-asset payload shaping) and fetching one build
+(`fetch_base_image`, per-part download, zstd unpack, verification, atomic
+install) — and the test module follows the same split (fixture server and
+catalog parsing vs install/reuse/corruption), so `base_image_download/{mod,listing,fetch}.rs`
+is the split to make, not a merge candidate.
+
 Design notes: the parts are byte ranges of a *single* compressed stream (GitHub caps a release asset at 2 GiB), so they are concatenated — `ChainedReader` — before decompression rather than decompressed individually; a release that publishes one uncompressed `<stem>.qcow2` is supported too, and refused when its manifest carries no sha256 (an unverifiable image is never installed). Progress goes through a clonable `ProgressSink` because unpacking runs on the blocking pool while the download loop runs on the async runtime. Network I/O is bounded: 15 s connect, 60 s per-read stall guard, 3 attempts per asset.
 
 ### ARM Translation — Design Notes, Fix History & Reference Comparison
