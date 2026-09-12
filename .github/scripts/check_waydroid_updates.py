@@ -24,6 +24,8 @@ import pathlib
 import subprocess
 import sys
 import tempfile
+import time
+import urllib.error
 import urllib.request
 import xml.etree.ElementTree as ET
 
@@ -40,13 +42,36 @@ LINEAGE_TAG = {
 COMPONENTS = ["system", "vendor"]
 VARIANTS = ["VANILLA", "GAPPS"]
 REQUEST_TIMEOUT_S = 30
+RSS_ATTEMPTS = 4
+USER_AGENT = "andler-image-builder/1 (+https://github.com/andler-project/andler)"
 
 
 def fetch_rss(path: str) -> ET.Element:
+    """GET one SourceForge RSS feed, retrying transient failures.
+
+    docker/images/base/rootfs/.../fetch-waydroid-images.py's own sf_rss()
+    carries this exact comment: "single network failure on small RSS
+    request breaks entire build" -- SourceForge's RSS endpoint is flaky
+    enough in practice that a bare single attempt fails often, including
+    with a plain 404 rather than a 5xx. This script deliberately does not
+    import that function (see module docstring), but dropping its retry
+    behavior while copying its URL scheme was a mistake: the flakiness is a
+    property of the endpoint, not of that particular caller.
+    """
     url = SF_RSS_URL + path
-    req = urllib.request.Request(url, headers={"User-Agent": "andler-ci-check/1"})
-    with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT_S) as resp:  # noqa: S310 (fixed sourceforge.net host)
-        return ET.fromstring(resp.read())
+    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+    last_error: Exception | None = None
+    for attempt in range(1, RSS_ATTEMPTS + 1):
+        try:
+            with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT_S) as resp:  # noqa: S310 (fixed sourceforge.net host)
+                return ET.fromstring(resp.read())
+        except (urllib.error.URLError, TimeoutError, ConnectionError, ET.ParseError) as exc:
+            last_error = exc
+            if attempt < RSS_ATTEMPTS:
+                delay = 5 * attempt
+                print(f"    RSS feed {path}: failed ({exc}), retrying in {delay}s...")
+                time.sleep(delay)
+    raise RuntimeError(f"failed to fetch RSS feed {path} after {RSS_ATTEMPTS} attempts: {last_error}")
 
 
 def latest_matching(root: ET.Element, version_tag: str) -> str | None:
@@ -125,12 +150,14 @@ def main() -> int:
     args = ap.parse_args()
 
     any_triggered = False
+    had_error = False
     for android_major in LINEAGE_TAG:
         try:
             current = latest_for(android_major)
-        except Exception as exc:  # network/parse failure: fail loudly, do not treat as "nothing new"
+        except Exception as exc:  # exhausted retries inside fetch_rss: a real, persistent failure
             print(f"::error::android{android_major}: failed to check SourceForge RSS: {exc}")
-            return 1
+            had_error = True
+            continue  # android11/13 are independent checks; one failing shouldn't hide the other
 
         if not current.get("system") or not current.get("vendor"):
             print(f"::warning::android{android_major}: no matching system/vendor entry in the "
@@ -149,9 +176,9 @@ def main() -> int:
             else:
                 print(f"  {variant}: up to date, nothing to do")
 
-    if not any_triggered:
+    if not any_triggered and not had_error:
         print("Nothing new on SourceForge -- no builds triggered.")
-    return 0
+    return 1 if had_error else 0
 
 
 if __name__ == "__main__":
