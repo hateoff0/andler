@@ -42,6 +42,16 @@ jobs:
 
       - uses: docker/setup-buildx-action@v3
 
+      # build-disk.sh checks for: docker, sgdisk, losetup, mkfs.ext4,
+      # mkfs.vfat/mkfs.fat, qemu-img, tar, python3. docker/tar/python3/losetup
+      # (util-linux) and mkfs.ext4 (e2fsprogs) are already on ubuntu-latest;
+      # sgdisk, mkfs.vfat and qemu-img are not, and build-disk.sh fails fast
+      # on the first one it can't find rather than listing all of them at
+      # once -- installing everything it might ask for up front instead of
+      # discovering the list one failed run at a time.
+      - name: Install build-disk.sh's host dependencies
+        run: sudo apt-get update && sudo apt-get install -y gdisk dosfstools qemu-utils
+
       # build.sh does its own "sudo -v" up front (needed by build-disk.sh's
       # partitioning step later). The default runner user already has
       # passwordless sudo, so this does not prompt -- but it is exactly the
