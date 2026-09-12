@@ -139,6 +139,28 @@ that runs the real script against a local Range-capable HTTP server and exercise
 fresh download, cache reuse (asserting zero re-download requests), byte-level resume,
 and the MD5-mismatch fatal path.
 
+### Build-time package sources and their failure modes
+
+The rootfs installs from three pacman repositories: official Arch
+(`core`/`extra`), CachyOS (`linux-cachyos` plus the v3/v4 package sets) and
+Chaotic-AUR.
+
+Chaotic-AUR is the only one whose bootstrap hardcodes downloadable URLs, and it
+is the one that has taken builds down: `cdn-mirror.chaotic.cx` answers 503 while
+its regional mirrors serve the same files. The Dockerfile now takes the keyring
+and mirrorlist from the first mirror that answers (`geo → cdn → us-ca → sg →
+de`), and if none does, the build continues *without* the repository — every
+package this image installs resolves from official + CachyOS (checked
+2026-09-13: `waydroid` is in `extra` at 1.6.3-1, and the full install list of
+~20 packages resolves without Chaotic-AUR). A package that later needs
+Chaotic-AUR still fails loudly at the install step with `target not found`, so
+the fallback cannot hide a broken dependency list.
+
+Removing the repository outright would drop a flaky external dependency, but it
+also changes which `waydroid` build ends up in the image (Arch's packaged
+version instead of the AUR build), and that needs a full build plus a boot check
+on a KVM host — a deliberate follow-up, not a drive-by change.
+
 ## Architecture: one base image for both modes (Android/Linux)
 
 An Android instance is Linux + Waydroid. Therefore the same base image

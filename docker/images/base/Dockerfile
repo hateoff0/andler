@@ -26,12 +26,45 @@ RUN curl -fsSL --retry 3 --retry-delay 5 https://mirror.cachyos.org/cachyos-repo
     yes | pacman -Scc --noconfirm
 
 # Chaotic-AUR repo (pre-built waydroid from AUR)
-RUN pacman-key --recv-key 3056513887B78AEB --keyserver keyserver.ubuntu.com && \
-    pacman-key --lsign-key 3056513887B78AEB && \
-    pacman -U --noconfirm \
-        'https://cdn-mirror.chaotic.cx/chaotic-aur/chaotic-keyring.pkg.tar.zst' \
-        'https://cdn-mirror.chaotic.cx/chaotic-aur/chaotic-mirrorlist.pkg.tar.zst' && \
-    printf '\n[chaotic-aur]\nInclude = /etc/pacman.d/chaotic-mirrorlist\n' >> /etc/pacman.conf && \
+#
+# Two failure modes are handled here, because anything that fails at this point
+# wastes the kernel + waydroid install that follows:
+#   * the CDN (cdn-mirror.chaotic.cx) answers 503 while its regional mirrors
+#     serve the same files, so the keyring/mirrorlist come from the first
+#     mirror that answers instead of one hardcoded host;
+#   * if no mirror answers at all, the build continues without the repo. Every
+#     package installed below resolves from the official and cachyos repos
+#     (`waydroid` itself is in `extra` now), so an outage degrades the image
+#     rather than aborting a 20-minute build — and a package that later needs
+#     chaotic-aur still fails loudly with "target not found".
+# `${base}` is a shell variable, not a build ARG: there is no matching ARG/ENV,
+# so buildx passes it through to the shell untouched (checked against buildx,
+# which build.sh requires). Escaping it as \${base} would hand the shell the
+# literal string and every URL would be wrong.
+RUN set -e; \
+    for base in \
+        https://geo-mirror.chaotic.cx \
+        https://cdn-mirror.chaotic.cx \
+        https://us-ca-mirror.chaotic.cx \
+        https://sg-mirror.chaotic.cx \
+        https://de-mirror.chaotic.cx ; do \
+      echo "==> chaotic-aur bootstrap from ${base}"; \
+      if curl -fsSL --connect-timeout 15 --retry 3 --retry-delay 5 \
+             -o /tmp/chaotic-keyring.pkg.tar.zst "${base}/chaotic-aur/chaotic-keyring.pkg.tar.zst" && \
+         curl -fsSL --connect-timeout 15 --retry 3 --retry-delay 5 \
+             -o /tmp/chaotic-mirrorlist.pkg.tar.zst "${base}/chaotic-aur/chaotic-mirrorlist.pkg.tar.zst"; then \
+        break; \
+      fi; \
+    done; \
+    if [ -s /tmp/chaotic-keyring.pkg.tar.zst ] && [ -s /tmp/chaotic-mirrorlist.pkg.tar.zst ]; then \
+      pacman-key --recv-key 3056513887B78AEB --keyserver keyserver.ubuntu.com && \
+      pacman-key --lsign-key 3056513887B78AEB && \
+      pacman -U --noconfirm /tmp/chaotic-keyring.pkg.tar.zst /tmp/chaotic-mirrorlist.pkg.tar.zst && \
+      printf '\n[chaotic-aur]\nInclude = /etc/pacman.d/chaotic-mirrorlist\n' >> /etc/pacman.conf; \
+    else \
+      echo "WARNING: no chaotic-aur mirror answered; building without chaotic-aur"; \
+    fi; \
+    rm -f /tmp/chaotic-*.pkg.tar.zst; \
     pacman -Sy --noconfirm
 
 # Overlay configs BEFORE kernel install — mkinitcpio and UKI hook must exist before pacman -S linux-cachyos
