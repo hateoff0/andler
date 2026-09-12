@@ -208,7 +208,7 @@ pub async fn handle(
                     let resolved = crate::preview::resolve_linux(&req)?;
                     emit_json(&resolved.cfg)?;
                 } else {
-                    return crate::preview::print_linux_preview(&req);
+                    crate::preview::print_linux_preview(&req)?;
                 }
             }
             if verify {
@@ -253,7 +253,7 @@ pub async fn handle(
                     let resolved = crate::preview::resolve_android(&req)?;
                     emit_json(&resolved.cfg)?;
                 } else {
-                    return crate::preview::print_android_preview(&req);
+                    crate::preview::print_android_preview(&req)?;
                 }
             }
             if verify {
