@@ -220,6 +220,16 @@ andler CLI → gRPC → daemon
   └─ stopped: andler-disk → guestmount (FUSE) → unshare --user --map-root-user --mount → chroot → package manager (apt needs APT::Sandbox::User=root + ForceIPv4 in userns)
 ```
 
+## Base images (cache, manifest, release downloads)
+
+An Android (or Linux-from-the-same-image) instance boots an overlay whose backing file is a **base image**: a bootable qcow2 built by `docker/images/build.sh` (Arch + CachyOS kernel + Waydroid), one build per (Android version, package set) — `VANILLA` or `GAPPS`.
+
+**Cache layout** (`~/.andler/cache/base-images/`): `<stem>.qcow2` with a `<stem>.manifest.json` sidecar, either flat in the cache root (legacy) or in a one-level `android<major>-<variant>/` subdirectory — the layout `build.sh` writes and the one `base_image::resolve` scans. The manifest is the image's identity: `android_major`, `android_variant`, `built_at`, `sha256`, `file_size_bytes`, and — for published builds — `compression` plus the `parts` list. `base_image::resolve(profile)` picks the newest matching build; the daemon calls it when a client omits `base_image_path`, and `BaseImagePin` (id + sha256) records what an instance was created from.
+
+**Release downloads**: the same builds are published as GitHub releases (`base-image-android<major>-<variant>-<ts>` tags, one `<stem>.manifest.json` asset plus `<stem>.qcow2.zst.NN.part` assets — zstd-compressed and split because a release asset is capped at 2 GiB). `services/andler-disk/src/base_image_download.rs` reads that catalog, verifies every part against the sha256 its manifest declares, streams the concatenated parts through a zstd decoder into a staging file, verifies the unpacked qcow2 against the manifest's `sha256`, and only then renames it (plus the manifest bytes exactly as published) into the cache. Verified parts of an interrupted download are reused; a build already in the cache is reported as reused without a request. `ANDLERD_IMAGE_REPO` and `ANDLERD_IMAGE_API_BASE` point the daemon at a mirror or a fixture server.
+
+The daemon is the only component that talks HTTP: `ListRemoteBaseImages` (unary) and `DownloadBaseImage` (server-streaming progress) are the route the CLI uses today and a GUI will use later, and the wizard offers a download when no local image matches the requested configuration.
+
 ## Instance Lifecycle FSM
 
 ```

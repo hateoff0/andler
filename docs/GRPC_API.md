@@ -54,6 +54,8 @@ The core service exposing all instance management operations.
 | `GetVersion` | `Empty` | `VersionResponse` | Unary | Returns the daemon's build version (the CLI handshakes on this before every command). |
 | `StreamEvents` | `EventStreamRequest` | `stream DaemonEventMessage` | Server-streaming | Streams daemon events (lifecycle transitions, operations, QMP events, log lines) from the live bus, optionally filtered to one instance. |
 | `ApplyGuestProfile` | `InstanceIdRequest` | `ApplyGuestProfileResponse` | Unary | Applies the guest-side work the instance's own config selects (ARM translator, SPICE clipboard agent) and reports one classified outcome per selection. Online via the guest agent on a running VM, offline via the libguestfs appliance otherwise. |
+| `ListRemoteBaseImages` | `ListRemoteBaseImagesRequest` | `ListRemoteBaseImagesResponse` | Unary | Lists the base images published as GitHub releases by the project's CI, newest build per (Android version, package set), with its download size and local cache state. The daemon owns all HTTP, so the CLI and a future GUI share this route. |
+| `DownloadBaseImage` | `DownloadBaseImageRequest` | `stream BaseImageDownloadProgress` | Server-streaming | Resolves one published build, downloads and sha256-verifies its assets, unpacks the zstd stream and installs the image into `~/.andler/cache/base-images/`. Progress messages carry the phase, asset, index and byte counters; the final one carries the installed path. |
 
 ---
 
@@ -870,6 +872,31 @@ CLI resolves relative paths against the manifest directory),
 
 The RPC fails only when the instance itself is unknown/unresolvable — a selection that cannot be applied is reported as `SKIPPED` or `FAILED` inside the response, never as a gRPC error, so a partial apply is visible per selection. A disk with no installed guest OS (e.g. an ISO-install VM before the OS is installed) is `SKIPPED`, not an error.
 
+### `ListRemoteBaseImagesRequest` / `ListRemoteBaseImagesResponse`
+
+Request fields: `android_version` (`AndroidVersion`; `UNSPECIFIED` = every published version), `android_variant` (`"VANILLA"`/`"GAPPS"`, empty = both). Both are filters — unlike instance configs, an omitted value here means "no filter", not "missing field".
+
+Response: `source` (human-readable `owner/repo` + API base, for display) and `images` (`repeated RemoteBaseImageEntry`).
+
+`RemoteBaseImageEntry` fields: `id` (`android<major>-<variant>-<built_at>`, the same identity a base-image pin records), `android_major`, `android_variant`, `built_at`, `release_tag`, `download_bytes` (compressed bytes to transfer), optional `installed_bytes` (uncompressed size), `installed`, `installed_path`.
+
+A version/package-set combination the pipeline never published produces an empty list, not an error; an unreachable release index is a `NOT_FOUND` whose message names the source and `ANDLERD_IMAGE_REPO`.
+
+### `DownloadBaseImageRequest` / `BaseImageDownloadProgress`
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `android_version` | `AndroidVersion` | Version of the build to download (`UNSPECIFIED` falls back to `release_tag`). |
+| `android_variant` | `string` | `"VANILLA"` or `"GAPPS"`. |
+| `release_tag` | `string` | One exact release; when set it wins over version/variant. |
+| `force` | `bool` | Re-download even when the same build is already cached. |
+
+With neither a version nor a release tag the request is rejected with `INVALID_ARGUMENT` before the stream starts.
+
+`BaseImageDownloadProgress`: `phase` (`BaseImageDownloadPhase`: `RESOLVING`, `DOWNLOADING`, `VERIFYING`, `EXTRACTING`, `INSTALLING`, `DONE`), `asset` (published asset name, or the image stem while unpacking), `asset_index`/`asset_count`, `downloaded_bytes`/`total_bytes`, `message` (`DONE` carries "already cached" or "downloaded and verified"), `installed_path` (set on `DONE`).
+
+Verification is not optional: each `*.qcow2.zst.NN.part` is checked against the sha256 its release manifest declares, and the unpacked qcow2 against the manifest's own `sha256`, before the image is renamed into the cache. A mismatch fails the stream and installs nothing — an already-cached build under the same path is left untouched.
+
 ### `DaemonLogsRequest`
 
 | Field | Type | Description |
@@ -959,7 +986,7 @@ Single package entry.
 
 | gRPC Status | Daemon Error | When |
 |-------------|--------------|------|
-| `NOT_FOUND` | `InstanceNotFound`, `SnapshotNotFound`, `SnapshotLayerMissing`, `InstanceRefNotFound`, `DiskNotAttached`, `NetworkNotAttached`, `OperationNotFound` | Unknown instance/snapshot/layer/ref, detaching a device that is not attached, or cancelling an unknown operation. |
+| `NOT_FOUND` | `InstanceNotFound`, `SnapshotNotFound`, `SnapshotLayerMissing`, `InstanceRefNotFound`, `DiskNotAttached`, `NetworkNotAttached`, `OperationNotFound`, `BaseImageUnavailable` | Unknown instance/snapshot/layer/ref, detaching a device that is not attached, or cancelling an unknown operation. |
 | `UNIMPLEMENTED` | `NoBackendRegistered`, `Backend(NotImplemented)` | Backend kind not available. |
 | `FAILED_PRECONDITION` | `InvalidTransition`, `InstanceNotRemovable`, `InstanceNotClonable`, `InstanceAlreadyStopped`, `SharedBaseNotSupportedForLinuxVm`, `InstanceHasLiveClones`, `SnapshotOperationRequiresRunningInstance`, `SnapshotLimitExceeded`, `SnapshotRequiresQcow2`, `ExportRequiresQcow2`, `OciExport`, `SnapshotInternalNotRestorable`, `RestoreTargetOnArchivedBranch`, `RestoreWouldBreakClones`, `DeleteWouldBreakClones`, `CannotDeleteBaseLayer`, `GuestAgentUnavailable`, `NotAndroid`, `InstanceMustBeStopped`, `HotplugRequiresRunningInstance`, `OperationAlreadyRunning`, `OperationCancelled`, `PortForwardConflict`, `DiskInUse`, `CpuAffinityConflict`, `MemoryOvercommit`, `Backend(HandleNotFound)`, `Backend(ProcessNotRunning)` | Wrong lifecycle state, resource limit, snapshot chain constraint, guest agent unavail…
 | `ALREADY_EXISTS` | `SnapshotAlreadyExists`, `DiskAlreadyAttached` | Duplicate snapshot tag, or attaching a disk image that is already attached (including the primary disk). |
@@ -986,6 +1013,7 @@ Single package entry.
 - **`CloneInstanceRequest`** supports three modes with different cost/independence trade-offs.
 - **`ExportInstanceDisk`** is a separate RPC from cloning because it does not create a new instance.
 - **`ExportInstanceOci`** exports an instance's disk as an OCI image layout (an `oci-layout` marker, `index.json`, `config.json`, and a rootfs layer blob under `blobs/sha256/`). The source disk must be qcow2 (`ExportRequiresQcow2` → `FAILED_PRECONDITION` otherwise); the target `disk_format` selects the qemu-img conversion (`qcow2`, `raw`, `vdi`). `disk_path` overrides the source disk.
+- **Base-image catalog errors are actionable, never internal**: `ListRemoteBaseImages` and `DownloadBaseImage` fail with `NOT_FOUND` (`BaseImageUnavailable`) that distinguishes "this host cannot reach the release index" from "the pipeline has not published this combination", and in the latter case names both `docker/images/build.sh` and `andler image list`. `ANDLERD_IMAGE_REPO` / `ANDLERD_IMAGE_API_BASE` move the source.
 - **Attach/Detach** require the instance to be `RUNNING` or `PAUSED` (`HotplugRequiresRunningInstance` → `FAILED_PRECONDITION` otherwise). Attached devices are appended to `extra_disks`/`extra_networks`, persisted in `instance.toml`, and re-created from the command line at the next `StartInstance` — no `UpdateInstanceConfig` needed. Detach identifies disks by path and networks by list index; a detach never deletes the disk image file.
 
 ---

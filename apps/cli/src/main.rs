@@ -11,6 +11,7 @@ mod export_oci;
 mod guest;
 mod helpers;
 mod hotplug;
+mod image;
 mod instance_file;
 mod lifecycle;
 mod op;
@@ -572,6 +573,19 @@ enum Command {
         json: bool,
     },
 
+    /// Base images published by the release pipeline: list and download them
+    Image {
+        #[command(subcommand)]
+        action: image::ImageAction,
+
+        #[arg(
+            long,
+            global = true,
+            help = "Emit the result as JSON instead of human-readable text"
+        )]
+        json: bool,
+    },
+
     /// Generate shell completion scripts
     Completions { shell: clap_complete::Shell },
 }
@@ -593,6 +607,7 @@ impl Command {
             | Command::Disk { json, .. }
             | Command::Guest { json, .. }
             | Command::Cache { json, .. }
+            | Command::Image { json, .. }
             | Command::Exec { json, .. }
             | Command::Doctor { json, .. }
             | Command::Attach { json, .. }
@@ -1384,6 +1399,7 @@ async fn run(cli: Cli, addr: &str) -> Result<(), Box<dyn std::error::Error>> {
             hotplug::handle_detach(&mut client, action, json).await?;
         }
         Some(Command::Cache { .. }) => unreachable!(),
+        Some(Command::Image { action, json }) => image::handle(&mut client, action, json).await?,
         Some(Command::Doctor { .. }) => unreachable!(),
         Some(Command::Completions { .. }) => unreachable!(),
     }

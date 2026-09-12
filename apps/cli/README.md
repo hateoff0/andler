@@ -106,6 +106,15 @@ Size format: `64GB`, `128000MB`, `1T`, `512000` (bytes). Case-insensitive.
 
 Known packages: `spice-vdagent` (shared folders), `qemu-guest-agent` (host-guest communication), `spice-webdavd` (webdav shared folders).
 
+## Base Images
+
+| Command | Description |
+|---------|-------------|
+| `andler image list [--android-version <11\|13>] [--variant <vanilla\|gapps>] [--json]` | List the base images published by the project's release pipeline (GitHub releases), newest build per Android version + package set, with the download size and whether each one is already cached locally. `--json` reports `{source, images:[{id, android_major, android_variant, built_at, release_tag, download_bytes, installed_bytes, installed, installed_path}]}` |
+| `andler image download (--android-version <11\|13> --variant <vanilla\|gapps> \| --release-tag <tag>) [--force] [--json]` | Download, verify and install one published build into `~/.andler/cache/base-images/<android>-<variant>/`. Every `.part` asset is checked against the sha256 in the release manifest and the unpacked image against the manifest's own sha256 before anything is installed; an already-cached build is reused unless `--force`. `--json` streams one progress document per line (`phase`, `asset`, `asset_index`/`asset_count`, `downloaded_bytes`/`total_bytes`, `installed_path`). `ANDLERD_IMAGE_REPO`/`ANDLERD_IMAGE_API_BASE` on the daemon point at another source |
+
+`andler cache list`/`cache clean` (Configuration & Editing) work on whatever is in that cache, downloaded or locally built.
+
 ## Daemon Address
 
 Override with `--daemon-addr <url>` before the subcommand, or `ANDLERD_ADDR` env var. Default: `http://127.0.0.1:50051`.
@@ -262,6 +271,7 @@ backend = "None"
 - Missing required Linux field fails
 - Missing file → `Read` error
 - Invalid TOML → `Parse` error
+- Image command: the release-catalog JSON shape and progress-line rendering
 
 ## Metrics Output Format
 
@@ -296,6 +306,7 @@ GPU fields (vram, gpu) appear when AMD, NVIDIA, or Intel GPU data is available.
 | `create.rs` | — | `Create` command — builds gRPC request from CLI flags |
 | `edit.rs` | — | `Edit` command — open config in `$EDITOR`, send changes to daemon |
 | `disk.rs` | — | `Disk` command — create, info, resize, compact |
+| `image.rs` | — | `Image` command — list published base images, download+verify one into the cache |
 | `guest.rs` | — | `Guest` command — install/remove/list packages, `apply` (config-driven guest selections), boot-mode get/switch in guest OS |
 | `status.rs` | — | `Status`, `List`, `Config`, `Logs`, `Metrics` commands |
 | `snapshot.rs` | — | `Snapshot` command — create, restore, delete, list (with spinner) |

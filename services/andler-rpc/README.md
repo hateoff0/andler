@@ -33,6 +33,8 @@ gRPC protocol definition (`proto/andler.proto`) and generated server/client code
 | `SwitchAndroidBootMode` | `SwitchAndroidBootModeRequest` | `Empty` | Unary | Switch Android boot mode for AndroidVm |
 | `GetAndroidBootMode` | `InstanceIdRequest` | `GetAndroidBootModeResponse` | Unary | Get current Android boot mode |
 | `ApplyGuestProfile` | `InstanceIdRequest` | `ApplyGuestProfileResponse` | Unary | Apply the guest-side work the instance's own config selects (ARM translator, SPICE clipboard agent); one classified outcome per selection |
+| `ListRemoteBaseImages` | `ListRemoteBaseImagesRequest` | `ListRemoteBaseImagesResponse` | Unary | Published base images from the release catalog (GitHub releases), with local cache state; the daemon owns all HTTP, so CLI and GUI share this route |
+| `DownloadBaseImage` | `DownloadBaseImageRequest` | `stream BaseImageDownloadProgress` | Server-streaming | Resolve one published build, verify it against the release manifest's sha256, install it into `~/.andler/cache/base-images/`; each message carries phase/asset/byte counters, the final one the installed path |
 
 ## Key Proto Messages
 
@@ -54,6 +56,8 @@ gRPC protocol definition (`proto/andler.proto`) and generated server/client code
 - **`AudioConfig`**: `backend`, `device`.
 - **`InputConfig`**: `pointer_mode`, `hide_host_cursor`, `clipboard_enabled`.
 - **`GuestProfileEntry` / `GuestProfileStatus`**: `name` (`arm-translator`, `spice-vdagent`), `status` (`APPLIED`/`ALREADY_PRESENT`/`SKIPPED`/`FAILED`), `message` — one entry per selection, so a partial apply is visible instead of implied.
+- **`RemoteBaseImageEntry`**: `id` (`android<major>-<variant>-<built_at>`), version/variant/`built_at`, `release_tag`, `download_bytes`, optional `installed_bytes`, `installed` + `installed_path`.
+- **`BaseImageDownloadProgress` / `BaseImageDownloadPhase`**: phase (`RESOLVING`/`DOWNLOADING`/`VERIFYING`/`EXTRACTING`/`INSTALLING`/`DONE`), asset name + index/count, downloaded/total bytes, `message`, and `installed_path` on `DONE`.
 
 ### Instance Lifecycle
 
@@ -101,7 +105,7 @@ Bidirectional conversions between proto and domain types:
 
 ### Notable Conversion Details
 
-- Guest-profile outcomes convert through `guest_profile_convert` (`GuestSelectionOutcome` → `GuestProfileEntry`), mirroring `provision_convert` for mutator ops.
+- Guest-profile outcomes convert through `guest_profile_convert` (`GuestSelectionOutcome` → `GuestProfileEntry`), mirroring `provision_convert` for mutator ops. Base-image download types live in `andler-disk`, which this crate does not depend on, so their proto messages are built in the daemon (`daemon/image_ops.rs`) instead.
 
 - `RenderBackend` and `NetworkMode` are `oneof` in proto (not C-style enums) because their domain equivalents carry data in variants (`Passthrough { gpu_pci_id }`, `Bridge { interface }`).
 - `DisplayEngine::None` maps to proto `DisplayNone` (not `UNSPECIFIED`).

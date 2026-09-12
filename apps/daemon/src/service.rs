@@ -3,32 +3,35 @@ use std::sync::Arc;
 
 use andler_core::EventKind;
 use andler_core::{CloneMode, InstanceConfig};
+use andler_disk::base_image_download::ProgressSink;
 use andler_rpc::convert;
 use andler_rpc::guest_profile_convert;
 use andler_rpc::proto::andler_service_server::AndlerService;
 use andler_rpc::proto::{
-    ApplyGuestProfileResponse, AttachDiskRequest, AttachDiskResponse, AttachNetworkRequest,
-    AttachNetworkResponse, CloneInstanceRequest, CodeCount, ConfigKeyDiff,
-    CreateAndroidInstanceRequest, CreateInstanceRequest, CreateInstanceResponse,
-    CreateSnapshotRequest, CreateSnapshotResponse, DaemonEventMessage, DaemonLogLine,
-    DaemonLogsRequest, DaemonMetricsResponse, DeleteSnapshotRequest, DetachDiskRequest,
-    DetachNetworkRequest, Empty, EventStreamRequest, ExecCommandRequest, ExecCommandResponse,
-    ExportInstanceDiskRequest, ExportInstanceDiskResponse, ExportInstanceOciRequest,
-    ExportInstanceOciResponse, GetAndroidBootModeResponse, GetConfigStatusResponse,
-    GetInstanceConfigResponse, GuestPackageEntry, GuestProvisionRequest, InstallGuestAgentRequest,
-    InstanceIdRequest, InstanceListEntry, InstanceStatusResponse, ListGuestPackagesResponse,
-    ListInstancesResponse, ListSnapshotsResponse, LogLineResponse, MethodLatency, OpCancelRequest,
-    OpListResponse, OperationInfo, OperationPhase, RemoveGuestAgentRequest, RemoveInstanceRequest,
-    ResourceMetricsResponse, RestoreSnapshotRequest, SetInstanceConfigRequest, SnapshotEntry,
-    StopInstanceRequest, SwitchAndroidBootModeRequest, SwitchArmTranslatorRequest,
-    UpdateInstanceConfigRequest, VersionResponse,
+    AndroidVersion, ApplyGuestProfileResponse, AttachDiskRequest, AttachDiskResponse,
+    AttachNetworkRequest, AttachNetworkResponse, BaseImageDownloadPhase, BaseImageDownloadProgress,
+    CloneInstanceRequest, CodeCount, ConfigKeyDiff, CreateAndroidInstanceRequest,
+    CreateInstanceRequest, CreateInstanceResponse, CreateSnapshotRequest, CreateSnapshotResponse,
+    DaemonEventMessage, DaemonLogLine, DaemonLogsRequest, DaemonMetricsResponse,
+    DeleteSnapshotRequest, DetachDiskRequest, DetachNetworkRequest, DownloadBaseImageRequest,
+    Empty, EventStreamRequest, ExecCommandRequest, ExecCommandResponse, ExportInstanceDiskRequest,
+    ExportInstanceDiskResponse, ExportInstanceOciRequest, ExportInstanceOciResponse,
+    GetAndroidBootModeResponse, GetConfigStatusResponse, GetInstanceConfigResponse,
+    GuestPackageEntry, GuestProvisionRequest, InstallGuestAgentRequest, InstanceIdRequest,
+    InstanceListEntry, InstanceStatusResponse, ListGuestPackagesResponse, ListInstancesResponse,
+    ListRemoteBaseImagesRequest, ListRemoteBaseImagesResponse, ListSnapshotsResponse,
+    LogLineResponse, MethodLatency, OpCancelRequest, OpListResponse, OperationInfo, OperationPhase,
+    RemoteBaseImageEntry, RemoveGuestAgentRequest, RemoveInstanceRequest, ResourceMetricsResponse,
+    RestoreSnapshotRequest, SetInstanceConfigRequest, SnapshotEntry, StopInstanceRequest,
+    SwitchAndroidBootModeRequest, SwitchArmTranslatorRequest, UpdateInstanceConfigRequest,
+    VersionResponse,
 };
 use futures_core::Stream;
 use futures_util::StreamExt;
 use std::pin::Pin;
 use tonic::{Request, Response, Status};
 
-use crate::daemon::{Daemon, DaemonError, ErrorKind};
+use crate::daemon::{image_ops, Daemon, DaemonError, ErrorKind, ImageSelector};
 use crate::firmware::OvmfPaths;
 
 pub struct DaemonService {
@@ -94,6 +97,9 @@ impl AndlerService for DaemonService {
 
     type StreamDaemonLogsStream =
         Pin<Box<dyn Stream<Item = Result<DaemonLogLine, Status>> + Send + 'static>>;
+
+    type DownloadBaseImageStream =
+        Pin<Box<dyn Stream<Item = Result<BaseImageDownloadProgress, Status>> + Send + 'static>>;
 
     async fn create_instance(
         &self,
@@ -865,6 +871,107 @@ impl AndlerService for DaemonService {
         }))
     }
 
+    async fn list_remote_base_images(
+        &self,
+        request: Request<ListRemoteBaseImagesRequest>,
+    ) -> Result<Response<ListRemoteBaseImagesResponse>, Status> {
+        let req = request.into_inner();
+        let selector = ImageSelector {
+            android_major: android_major_from_version(req.android_version()),
+            android_variant: Some(req.android_variant).filter(|variant| !variant.is_empty()),
+            release_tag: None,
+        };
+        let (entries, source) = self.daemon.list_remote_base_images(&selector).await?;
+        Ok(Response::new(ListRemoteBaseImagesResponse {
+            images: entries
+                .into_iter()
+                .map(|entry| RemoteBaseImageEntry {
+                    id: entry.id,
+                    android_major: entry.android_major,
+                    android_variant: entry.android_variant,
+                    built_at: entry.built_at,
+                    release_tag: entry.release_tag,
+                    download_bytes: entry.download_bytes,
+                    installed_bytes: entry.installed_bytes,
+                    installed: entry.installed,
+                    installed_path: entry.installed_path.display().to_string(),
+                })
+                .collect(),
+            source,
+        }))
+    }
+
+    async fn download_base_image(
+        &self,
+        request: Request<DownloadBaseImageRequest>,
+    ) -> Result<Response<Self::DownloadBaseImageStream>, Status> {
+        let req = request.into_inner();
+        let selector = ImageSelector {
+            android_major: android_major_from_version(req.android_version()),
+            android_variant: Some(req.android_variant).filter(|variant| !variant.is_empty()),
+            release_tag: Some(req.release_tag).filter(|tag| !tag.is_empty()),
+        };
+        // Fail on an unusable selector before the stream starts: a rejected
+        // request must be a rejected RPC, not a stream that immediately dies.
+        selector.validate().map_err(Status::from)?;
+
+        let daemon = self.daemon.clone();
+        let force = req.force;
+        // The download runs in its own task so the handler keeps yielding
+        // progress while it works; the guard aborts it when the client goes
+        // away mid-transfer instead of letting a multi-GB fetch finish
+        // unobserved.
+        let stream = async_stream::stream! {
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<BaseImageDownloadProgress>();
+            let resolving = BaseImageDownloadProgress {
+                phase: BaseImageDownloadPhase::Resolving.into(),
+                message: format!("resolving {}", selector.describe()),
+                ..Default::default()
+            };
+            yield Ok(resolving);
+
+            let sink = ProgressSink::new(move |progress| {
+                // The receiver is gone once the client disconnects; there is
+                // no external effect to report on a closed in-process channel.
+                let _ = tx.send(image_ops::progress_to_proto(&progress));
+            });
+            let mut task = AbortOnDrop(tokio::spawn(async move {
+                daemon.download_base_image(&selector, force, &sink).await
+            }));
+
+            while let Some(message) = rx.recv().await {
+                yield Ok(message);
+            }
+
+            match (&mut task.0).await {
+                Ok(Ok(outcome)) => {
+                    let message = if outcome.reused {
+                        "already cached — nothing to download".to_string()
+                    } else {
+                        "downloaded and verified".to_string()
+                    };
+                    yield Ok(BaseImageDownloadProgress {
+                        phase: BaseImageDownloadPhase::Done.into(),
+                        message,
+                        installed_path: outcome.qcow2_path.display().to_string(),
+                        ..Default::default()
+                    });
+                }
+                Ok(Err(err)) => yield Err(Status::from(err)),
+                Err(join_err) if join_err.is_panic() => {
+                    yield Err(Status::internal(format!(
+                        "base-image download task panicked: {join_err}"
+                    )));
+                }
+                Err(join_err) => yield Err(Status::cancelled(format!(
+                    "base-image download task was cancelled: {join_err}"
+                ))),
+            }
+        };
+
+        Ok(Response::new(Box::pin(stream)))
+    }
+
     async fn apply_guest_profile(
         &self,
         request: Request<InstanceIdRequest>,
@@ -877,5 +984,26 @@ impl AndlerService for DaemonService {
         Ok(Response::new(
             guest_profile_convert::apply_profile_response(&outcomes),
         ))
+    }
+}
+
+/// `AndroidVersion::UNSPECIFIED` means "no version filter" for the image
+/// catalog RPCs — the requests are filters, not instance configs, so the
+/// missing-field rule does not apply here.
+fn android_major_from_version(version: AndroidVersion) -> Option<String> {
+    match version {
+        AndroidVersion::Android11 => Some("11".to_string()),
+        AndroidVersion::Android13 => Some("13".to_string()),
+        AndroidVersion::Unspecified => None,
+    }
+}
+
+/// Aborts the joined task when the streaming RPC is dropped early (client
+/// disconnect, cancelled GUI download); a completed handle aborts as a no-op.
+struct AbortOnDrop<T>(tokio::task::JoinHandle<T>);
+
+impl<T> Drop for AbortOnDrop<T> {
+    fn drop(&mut self) {
+        self.0.abort();
     }
 }

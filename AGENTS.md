@@ -435,6 +435,8 @@ A multi-phase architecture rework (see Branching) is tracked by a plan file crea
 | `ANDLERD_OVMF_VARS` | daemon | Override OVMF_VARS template path |
 | `ANDLERD_HEALTH_CHECK_INTERVAL_SECS` | daemon | Health-check interval (default 30s, `0` disables) |
 | `ANDLERD_DEV_RESTART=1` | daemon | Dev restart mode: SIGTERM/Ctrl+C leaves VMs running (QEMU survives the daemon and is adopted on the next start) |
+| `ANDLERD_IMAGE_REPO` | daemon | `owner/repo` whose GitHub releases hold the base images (default `hateoff0/andler`) |
+| `ANDLERD_IMAGE_API_BASE` | daemon | API base the release catalog is read from (default `https://api.github.com`; point it at a mirror or a fixture server) |
 | `RUST_LOG` | daemon | tracing filter (overrides `-v`/`-vv` verbosity) |
 | `ANDLERD_ADDR` | cli | Daemon address (default `http://127.0.0.1:50051`); `--daemon-addr` flag overrides |
 | `ANDLER_HOME` | both | Root of all andler data (default `~/.andler`) |

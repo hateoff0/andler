@@ -14,6 +14,8 @@ mod supervisor;
 mod types;
 
 pub use error::{DaemonError, ErrorKind};
+pub use image_ops::ImageSelector;
+pub(crate) mod image_ops;
 pub(crate) use supervisor::{spawn_supervisor, SupervisorHandle};
 
 use futures_core::stream::BoxStream;

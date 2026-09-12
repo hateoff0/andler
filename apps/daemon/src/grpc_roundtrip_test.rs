@@ -7,12 +7,12 @@ use andler_rpc::proto::andler_service_server::AndlerServiceServer;
 use andler_rpc::proto::{
     AttachDiskRequest, AttachNetworkRequest, AudioConfig, CloneInstanceRequest, CloneMode,
     CpuConfig, CreateInstanceRequest, DetachDiskRequest, DetachNetworkRequest, DiskConfig,
-    DisplayConfig, Empty, EventStreamRequest, ExecCommandRequest, ExportInstanceDiskRequest,
-    ExportInstanceOciRequest, FirmwareConfig, GetInstanceConfigResponse, GpuConfig,
-    GuestProvisionRequest, InputConfig, InstallGuestAgentRequest, InstanceIdRequest,
-    InstanceStateKind, MemoryConfig, NetworkConfig, OpCancelRequest, ProvisionMkdirP,
-    RemoveGuestAgentRequest, RemoveInstanceRequest, Resolution, RestoreSnapshotRequest,
-    SetInstanceConfigRequest,
+    DisplayConfig, DownloadBaseImageRequest, Empty, EventStreamRequest, ExecCommandRequest,
+    ExportInstanceDiskRequest, ExportInstanceOciRequest, FirmwareConfig, GetInstanceConfigResponse,
+    GpuConfig, GuestProvisionRequest, InputConfig, InstallGuestAgentRequest, InstanceIdRequest,
+    InstanceStateKind, ListRemoteBaseImagesRequest, MemoryConfig, NetworkConfig, OpCancelRequest,
+    ProvisionMkdirP, RemoveGuestAgentRequest, RemoveInstanceRequest, Resolution,
+    RestoreSnapshotRequest, SetInstanceConfigRequest,
 };
 use tokio::net::TcpListener;
 use tokio_stream::wrappers::TcpListenerStream;
@@ -1738,6 +1738,62 @@ async fn apply_guest_profile_round_trips_over_real_grpc() {
             .contains(&format!("andler guest install spice-vdagent {id}")),
         "the skip must tell the user how to finish the job later: {}",
         entry.message
+    );
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn download_base_image_without_a_selector_is_rejected_over_real_grpc() {
+    let (mut client, server) = spawn_server_and_connect().await;
+
+    let status = client
+        .download_base_image(DownloadBaseImageRequest {
+            android_version: andler_rpc::proto::AndroidVersion::Unspecified as i32,
+            android_variant: String::new(),
+            release_tag: String::new(),
+            force: false,
+        })
+        .await
+        .expect_err("without a version or a release tag there is nothing to download");
+
+    assert_eq!(status.code(), tonic::Code::InvalidArgument);
+    assert!(
+        status.message().contains("android_version"),
+        "the rejection must name the alternatives: {}",
+        status.message()
+    );
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn list_remote_base_images_reports_an_unreachable_index_as_not_found() {
+    let (mut client, server) = spawn_server_and_connect().await;
+    // Point the catalog at a port nothing listens on: the daemon must turn
+    // the transport failure into an actionable NOT_FOUND instead of leaking
+    // a transport error to the client.
+    std::env::set_var(
+        andler_disk::base_image_download::API_BASE_ENV,
+        "http://127.0.0.1:1",
+    );
+
+    let result = client
+        .list_remote_base_images(ListRemoteBaseImagesRequest {
+            android_version: andler_rpc::proto::AndroidVersion::Android13 as i32,
+            android_variant: "VANILLA".to_string(),
+        })
+        .await;
+
+    std::env::remove_var(andler_disk::base_image_download::API_BASE_ENV);
+
+    let status =
+        result.expect_err("an unreachable release index must not look like an empty catalog");
+    assert_eq!(status.code(), tonic::Code::NotFound);
+    assert!(
+        status.message().contains("ANDLERD_IMAGE_REPO"),
+        "the error must say how to point the daemon elsewhere: {}",
+        status.message()
     );
 
     server.abort();

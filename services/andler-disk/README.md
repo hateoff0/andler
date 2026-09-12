@@ -158,6 +158,19 @@ Downloads and caches ARM translator archives (ZIP files) under `~/.andler/cache/
 |----------|-----------|-------------|
 | `ensure_translator` | `(translator: ArmTranslator, android_version: &str) -> Result<PathBuf, DiskError>` | Ensure the translator is downloaded and extracted. Returns the cache path (`<arm-translators>/<dir_name>`). Skips the download if the detect file already exists in cache; otherwise picks the URL/MD5 for the requested `android_version` from `TranslatorInfo::dl_links` (error if no link matches), downloads, verifies the MD5 (`BadChecksum` path), and unzips. Extraction flattens the GitHub `<repo>-<commit>/prebuilts/` archive wrapper, so `bin/`/`etc/`/`lib/`/`lib64/` land directly under the cache root (this is also what makes the detect-file cache hit work). |
 
+### `base_image_download` — Published Base Images
+
+Reads the release catalog published by the project's CI (`.github/workflows/build-base-image.yml`) and installs a build into the local base-image cache.
+
+| Function | Signature | Description |
+|----------|-----------|-------------|
+| `ImageSource::from_env` | `() -> ImageSource` | `ANDLERD_IMAGE_REPO` (default `hateoff0/andler`) + `ANDLERD_IMAGE_API_BASE` (default `https://api.github.com`) |
+| `list_remote` | `async (&ImageSource, &ImageFilter) -> Result<Vec<RemoteImage>, DiskError>` | Read the releases JSON, keep the `base-image-android*` tags (drafts/prereleases skipped), fetch each release's `<stem>.manifest.json` and build the installable descriptor. Newest build per (Android version, package set) first. A release with an unreadable manifest or a missing part asset is skipped with a warning instead of failing the listing. |
+| `fetch_base_image` | `async (&ImageSource, &RemoteImage, bool, &ProgressSink) -> Result<FetchOutcome, DiskError>` | Download every part (sha256-verified while streaming, restart-on-failure, verified leftovers of an interrupted run reused), concatenate them into one zstd stream, unpack into `<stem>.qcow2.partial` while hashing, compare against the manifest's `sha256`, then rename the image and write the manifest bytes exactly as published into `~/.andler/cache/base-images/<android>-<variant>/`. `force` re-downloads an already-cached build; without it, a cached build is returned as `reused` without any request. |
+| `installed_image` | `(manifest_id: &str) -> Option<BaseImageInfo>` | The cached build with that manifest id, if any |
+
+Design notes: the parts are byte ranges of a *single* compressed stream (GitHub caps a release asset at 2 GiB), so they are concatenated — `ChainedReader` — before decompression rather than decompressed individually; a release that publishes one uncompressed `<stem>.qcow2` is supported too, and refused when its manifest carries no sha256 (an unverifiable image is never installed). Progress goes through a clonable `ProgressSink` because unpacking runs on the blocking pool while the download loop runs on the async runtime. Network I/O is bounded: 15 s connect, 60 s per-read stall guard, 3 attempts per asset.
+
 ### ARM Translation — Design Notes, Fix History & Reference Comparison
 
 How `guest install libndk`/`libhoudini` works, what was broken before, and
@@ -319,6 +332,10 @@ the overlay to inspect `bin/`, `etc/`, `lib/`, `lib64/`, `build.prop` and
 | `AgentNotInstalled` | `package: String` | Package not found in guest for removal |
 | `GuestAgentUnavailable` | `instance_id: String` | Guest agent (qemu-ga) not available for online operations |
 | `InsufficientDiskSpace` | `path`, `required_bytes`, `available_bytes` | Not enough free space on `path`'s filesystem for the operation (pre-checked, not a failure mid-operation) |
+| `NoGuestOs` | `path` | The disk holds no filesystem libguestfs can inspect (an ISO-install VM before the OS is installed); `guestmount -i`'s "no operating system was found" is turned into this type so callers classify it instead of pattern-matching text |
+| `ImageIndex` | `url`, `message` | The base-image release catalog could not be read (unreachable API, HTTP error, unparseable release index) |
+| `ImageDownload` | `asset`, `message` | One published asset could not be transferred (request failure, HTTP error, truncated body, retries exhausted) |
+| `ImageVerify` | `message` | A downloaded part, or the unpacked image, does not match the sha256 its manifest declares |
 
 ## Tests
 
@@ -333,6 +350,7 @@ the overlay to inspect `bin/`, `etc/`, `lib/`, `lib64/`, `build.prop` and
 - **`arm_translator`**: `detect_current_translator_returns_none_on_empty_dir`, `build_prop_content_sorts_keys_and_appends_newline`, `resolve_entry_paths_expands_wildcards_in_parent_dir`, `resolve_entry_paths_returns_empty_for_unmatched_wildcard`.
 - **`translator_download`**: `extract_zip_flattens_repo_prebuilts_prefix`, `flatten_prebuilts_does_not_touch_already_flat_payload_dirs`, `flatten_prebuilts_errors_on_collision_instead_of_silently_skipping` (plus offline download/checksum error paths).
 - **`arm_translator`**: `detect_current_translator_returns_none_on_empty_dir`, `build_prop_content_sorts_keys_and_appends_newline`, `resolve_entry_paths_expands_wildcards_in_parent_dir`, `resolve_entry_paths_slash_star_matches_whole_directory`, `resolve_entry_paths_returns_empty_for_unmatched_wildcard`, `base_build_prop_reads_plain_layout_and_errors_without_source`, `base_build_prop_prefers_plain_layout_over_system_image`, `parse_build_prop_skips_blank_and_comment_lines`.
+- **`base_image_download`**: real HTTP against a local fixture server (a hand-rolled listener serving the release JSON, the manifest and the `.part` assets): `list_remote_reads_the_published_catalog`, `list_remote_filters_by_version_and_variant`, `list_remote_skips_a_release_with_a_missing_part_asset`, `fetch_installs_a_verified_image_into_the_cache` (byte-identical payload, manifest provenance, scratch dir removed, progress phases and byte counters), `fetch_reuses_an_already_installed_build_without_touching_the_network`, `fetch_reuses_verified_parts_after_an_interrupted_download`, `fetch_replaces_a_cached_build_when_forced`, `fetch_refuses_a_part_that_does_not_match_its_manifest`, `fetch_refuses_a_payload_that_does_not_match_the_manifest_sha256`, `fetch_reports_an_unreachable_host_and_installs_nothing`, plus `chained_reader_concatenates_parts_in_order` and the env/filter parsing tests.
 - **`translator`**: `resolve_ndk_has_links`, `resolve_houdini_has_links`, `resolve_none_has_no_links`, `dir_names` (asserts `"ndk"`/`"houdini"`/`"none"`), `managed_prop_keys_cover_every_translator_key`, `houdini_init_rc_matches_reference_binfmt_registration` (byte-identical to `tests/fixtures/houdini.rc`, the waydroid-helper reference).
 
 ### With `qemu-img` (integration tests, `#[ignore]`)

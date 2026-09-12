@@ -43,6 +43,8 @@ service AndlerService {
     rpc GetVersion(Empty) returns (VersionResponse);
     rpc StreamEvents(EventStreamRequest) returns (stream DaemonEventMessage);
     rpc CancelOperation(OpCancelRequest) returns (Empty);
+    rpc ListRemoteBaseImages(ListRemoteBaseImagesRequest) returns (ListRemoteBaseImagesResponse);
+    rpc DownloadBaseImage(DownloadBaseImageRequest) returns (stream BaseImageDownloadProgress);
     rpc ApplyGuestProfile(InstanceIdRequest) returns (ApplyGuestProfileResponse);
 }
 
@@ -733,6 +735,75 @@ message GuestPackageEntry {
     string name = 1;
     string description = 2;
     string status = 3;
+}
+
+// Base images published as GitHub releases by the CI pipeline
+// (.github/workflows/build-base-image.yml). The daemon is the only component
+// that talks HTTP, so both the CLI and a future GUI drive downloads through
+// these two RPCs.
+message ListRemoteBaseImagesRequest {
+    // UNSPECIFIED = every published Android version.
+    AndroidVersion android_version = 1;
+    // "VANILLA" or "GAPPS"; empty = both.
+    string android_variant = 2;
+}
+
+message RemoteBaseImageEntry {
+    // Build id (`android<major>-<variant>-<built_at>`), the same identity a
+    // base-image pin records.
+    string id = 1;
+    string android_major = 2;
+    string android_variant = 3;
+    string built_at = 4;
+    string release_tag = 5;
+    // Compressed bytes to transfer for this image.
+    uint64 download_bytes = 6;
+    // Size of the installed qcow2, when the published manifest records it.
+    optional uint64 installed_bytes = 7;
+    bool installed = 8;
+    string installed_path = 9;
+}
+
+message ListRemoteBaseImagesResponse {
+    repeated RemoteBaseImageEntry images = 1;
+    // Where the catalog came from (`owner/repo` + API base), for display.
+    string source = 2;
+}
+
+message DownloadBaseImageRequest {
+    // UNSPECIFIED falls back to release_tag.
+    AndroidVersion android_version = 1;
+    // "VANILLA" or "GAPPS".
+    string android_variant = 2;
+    // Exact release tag; when set it wins over android_version/variant.
+    string release_tag = 3;
+    // Re-download even when the same build is already cached.
+    bool force = 4;
+}
+
+enum BaseImageDownloadPhase {
+    BASE_IMAGE_DOWNLOAD_PHASE_UNSPECIFIED = 0;
+    RESOLVING = 1;
+    DOWNLOADING = 2;
+    VERIFYING = 3;
+    EXTRACTING = 4;
+    INSTALLING = 5;
+    DONE = 6;
+}
+
+message BaseImageDownloadProgress {
+    BaseImageDownloadPhase phase = 1;
+    // Asset being transferred (its published name), or the image stem while
+    // the payload is unpacked.
+    string asset = 2;
+    uint32 asset_index = 3;
+    uint32 asset_count = 4;
+    uint64 downloaded_bytes = 5;
+    uint64 total_bytes = 6;
+    // Human-readable detail for this step (e.g. the reused-cache notice).
+    string message = 7;
+    // Set on DONE: where the image landed in the local cache.
+    string installed_path = 8;
 }
 
 // Applies the guest-side work an instance's own configuration asks for

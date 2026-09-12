@@ -105,6 +105,9 @@ CMD ["cargo", "test", "--workspace", "--offline", "--", "--ignored"]
 # --- e2e: slim runtime with the full test suite -----------------------------
 FROM debian:bookworm-slim AS e2e
 
+# python3 serves the 32_image_download fixture "release server" (a local
+# static tree); zstd builds that fixture's published asset shape, the same
+# compression the release workflow uses.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates \
         curl \
@@ -117,6 +120,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         kmod \
         ovmf \
         procps \
+        python3 \
+        zstd \
         guestfs-tools \
         libguestfs-tools \
         linux-image-amd64 \

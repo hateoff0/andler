@@ -34,6 +34,9 @@ pub enum DaemonError {
     #[error("{0}")]
     BaseImagePinMismatch(String),
 
+    #[error("{0}")]
+    BaseImageUnavailable(String),
+
     #[error("firmware error: {0}")]
     Firmware(String),
 
@@ -377,6 +380,7 @@ impl DaemonError {
             | DaemonError::Store(_)
             | DaemonError::InstanceSupervisorGone(_) => ErrorKind::Internal,
             DaemonError::BaseImagePinMismatch(_) => ErrorKind::FailedPrecondition,
+            DaemonError::BaseImageUnavailable(_) => ErrorKind::NotFound,
             DaemonError::InstanceNotRemovable(_, _) => ErrorKind::FailedPrecondition,
             DaemonError::ConfigMigrationConflict { .. } => ErrorKind::FailedPrecondition,
             DaemonError::ConfigFileInvalid { .. } => ErrorKind::InvalidArgument,

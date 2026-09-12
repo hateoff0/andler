@@ -217,6 +217,13 @@ Each sub-config has a `reference_default()` method that produces sensible defaul
   - `resolve(...)`: Pure function — resolves profile into a full `InstanceConfig` with overlay disk. Does not download or create files.
 **Waydroid note**: AndroidVm is not a separate hypervisor — it's LinuxVm with a Waydroid guest image and an overlay disk on top of it. The difference is entirely in the `DiskConfig` used (overlay vs. standalone).
 
+### `base_image` — Base Image Cache & Manifests
+
+- **`ImageManifest`**: the `<stem>.manifest.json` sidecar in one shape for both a locally built image (identity fields only) and a published release (`schema_version`, `sha256`, `file_size_bytes`, `compression`, `parts[]`). Only `android_major`, `android_variant` and `built_at` are required; everything the release pipeline adds is optional so older/hand-written manifests still parse.
+- **`install_subdir(major, variant)`**: `android<major>-<variant_lower>` — the cache subdirectory `docker/images/build.sh` writes to and discovery scans.
+- **`info_for(path)` / `read_manifest(path)` / `parse_manifest(bytes)` / `manifest_path_for(qcow2)`**: manifest lookup next to an image; `id()` (the `android<major>-<variant>-<built_at>` build label) and `parts_total_bytes()`.
+- **`resolve(profile)` / `list_matching(profile)` / `list_all()`**: newest matching build for a profile, and the whole cache for tooling (`andler cache list`, `andler doctor`). `gc_candidates(dir)` is the cleanup policy (superseded builds + orphan files).
+
 ### `guest_profile` — Guest-Side Selections
 
 - **`guest_selections(cfg)`**: the guest-side work an instance's own config asks for — the ARM translator when `kind.android_profile.arm_translator` is not `None`, `GuestSelectionKind::Package("spice-vdagent")` when `input.clipboard_enabled`. Pure: no I/O, no disk.
@@ -246,6 +253,7 @@ Each sub-config has a `reference_default()` method that produces sensible defaul
 | `fsm` | `happy_path_start_pause_resume_stop`, `cannot_resume_from_running`, `cannot_pause_from_created`, `fail_is_reachable_from_every_active_state`, `terminal_states_accept_only_start`, `started_from_stopped_or_error_goes_to_starting` |
 | `android_profile` | `cache_key_differs_on_arm_translator`, `cache_key_differs_on_gapps`, `resolve_produces_overlay_disk_pointing_at_base_image`, `android_version_round_trips_through_serde` |
 | `guest_profile` | `android_with_a_translator_and_clipboard_asks_for_both`, `android_without_a_translator_only_asks_for_clipboard`, `clipboard_disabled_drops_the_agent_selection`, `linux_with_clipboard_asks_only_for_the_agent`, `disk_path_does_not_influence_the_selection_list`, `failure_outcome_carries_a_retry_command_for_the_selection` |
+| `base_image` | `parses_a_published_release_manifest`, `parses_a_locally_built_manifest_without_release_fields`, `manifest_missing_identity_fields_is_a_parse_error`, `install_subdir_matches_build_sh_layout`, `manifest_path_for_sits_next_to_the_image`, `resolve_picks_freshest_matching_manifest`, `gc_candidates_*` |
 | `config::instance` | `instance_id_is_unique`, `config_round_trips_through_serde_json` |
 | `config::cpu` | `reference_default_matches_start_sh` |
 | `config::memory` | `reference_default_matches_start_sh` |

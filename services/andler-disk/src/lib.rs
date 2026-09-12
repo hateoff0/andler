@@ -1,4 +1,5 @@
 pub mod arm_translator;
+pub mod base_image_download;
 pub mod boot_mode;
 pub mod clone;
 pub mod diskspace;

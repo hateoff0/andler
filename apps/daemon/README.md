@@ -83,6 +83,8 @@ Overridable via:
 | `stream_resource_metrics` | `async fn(InstanceId) -> Result<BoxStream<'static, ResourceMetrics>, DaemonError>` | Empty stream if not found |
 | `switch_arm_translator` | `async fn(InstanceId, ArmTranslator, Option<PathBuf>) -> Result<TranslatorSwitch, DaemonError>` | Switch ARM translator for Android, requires `is_disk_idle`; the result says whether it installed or found the requested translator already in place |
 | `apply_guest_profile` | `async fn(InstanceId) -> Result<Vec<GuestSelectionOutcome>, DaemonError>` | Apply the guest-side work the instance's config selects (ARM translator, clipboard agent), classified per selection |
+| `list_remote_base_images` | `async fn(&ImageSelector) -> Result<(Vec<RemoteImageEntry>, String), DaemonError>` | Published base images (release catalog) with local cache state |
+| `download_base_image` | `async fn(&ImageSelector, bool, &ProgressSink) -> Result<FetchOutcome, DaemonError>` | Download, verify and install one published build into the local cache |
 | `set_instance_config` | `async fn(InstanceId, key: &str, value: &str) -> Result<(), DaemonError>` | Partial config update by key with persistence. Whitelist: `display.resolution` (any state — applied live to a running guest via QGA and persisted for next boot via fw_cfg), `name`, `arm_translator` (both require `is_disk_idle`) |
 | `set_display_resolution` | `async fn(InstanceId, value: &str) -> Result<(), DaemonError>` | `display.resolution` path: parses `WxH`, pushes to a `Running`/`Paused` guest via `backend.set_guest_display_resolution`, persists the config |
 
@@ -211,6 +213,10 @@ Handles: `run_health_check_once` (spawned periodically from `main.rs`, `ANDLERD_
 ### `daemon/guest_profile.rs` — Guest Selections Apply
 
 `Daemon::apply_guest_profile(id)` turns the instance's own config into guest-side work (`andler_core::guest_profile::guest_selections`: the ARM translator when one is selected, `spice-vdagent` when clipboard sharing is on) and applies each selection through the state-appropriate path — the libguestfs appliance while the disk is idle, the QGA guest agent on a running VM. It never takes the auto-start maintenance path (applying a profile must not boot a VM). Outcomes are classified per selection (`applied` / `already_present` / `skipped` / `failed`); a disk with no installed guest OS is a `skipped` outcome with the retry command, and one failure does not abort the rest.
+
+### `daemon/image_ops.rs` — Published Base Images
+
+`Daemon::list_remote_base_images` reads the release catalog published by the CI workflow through `andler-disk`'s downloader and resolves each build's local cache state; `Daemon::download_base_image` resolves the selector (release tag, or version + package set), downloads, verifies and installs the image, forwarding phase/byte progress to the caller. `ANDLERD_IMAGE_REPO` / `ANDLERD_IMAGE_API_BASE` pick the source. Errors are turned into actionable text (`BaseImageUnavailable`: either "the pipeline has not published this combination" or "this host cannot reach the release index", both naming the next command).
 
 ### `daemon/query_ops.rs` — Status & Streaming
 

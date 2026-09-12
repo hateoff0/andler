@@ -8,11 +8,58 @@ use thiserror::Error;
 use crate::android_profile::AndroidProfile;
 use crate::paths::base_images_dir;
 
-#[derive(Debug, Deserialize)]
-struct Manifest {
-    android_major: String,
-    android_variant: String,
-    built_at: String,
+/// One split part of a published release asset: `<stem>.qcow2.zst.NN.part`.
+/// The split exists only because GitHub caps a release asset at 2 GiB, so a
+/// part is a byte range of one compressed stream, not a self-contained file.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, serde::Serialize)]
+pub struct ManifestPart {
+    pub name: String,
+    pub sha256: String,
+    pub size_bytes: u64,
+}
+
+/// The `<stem>.manifest.json` sidecar, in one shape for both layouts: a
+/// locally built image (build-disk.sh writes the core fields, no parts) and a
+/// image published as a GitHub release (add_parts_to_manifest.py appends
+/// `compression` + `parts` and keeps the same core fields). Only the three
+/// identity fields are required — everything the release pipeline adds is
+/// optional so a hand-written or older manifest still parses.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct ImageManifest {
+    pub android_major: String,
+    pub android_variant: String,
+    pub built_at: String,
+    #[serde(default)]
+    pub schema_version: u32,
+    /// sha256 of the final (decompressed) qcow2 the release ships.
+    #[serde(default)]
+    pub sha256: Option<String>,
+    #[serde(default)]
+    pub file_size_bytes: Option<u64>,
+    /// `"zstd"` when the shipped parts are one compressed stream.
+    #[serde(default)]
+    pub compression: Option<String>,
+    #[serde(default)]
+    pub parts: Vec<ManifestPart>,
+}
+
+impl ImageManifest {
+    /// Stable id of this image build: the manifest fields that uniquely
+    /// identify what the image contains. The qcow2 content can change
+    /// without the id changing (a rebuild with the same label), which is
+    /// exactly why the pin pairs the id with a content sha256.
+    pub fn id(&self) -> String {
+        format!(
+            "android{}-{}-{}",
+            self.android_major,
+            self.android_variant.to_lowercase(),
+            self.built_at
+        )
+    }
+
+    pub fn parts_total_bytes(&self) -> u64 {
+        self.parts.iter().map(|part| part.size_bytes).sum()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -37,16 +84,56 @@ impl BaseImageInfo {
             self.built_at
         )
     }
+
+    /// Re-reads the full manifest (parts, sha256, compression) — the fields
+    /// the downloader needs and `BaseImageInfo` does not carry.
+    pub fn manifest(&self) -> Option<ImageManifest> {
+        read_manifest(&self.manifest_path).ok()
+    }
+}
+
+/// `<stem>.qcow2` → `<stem>.manifest.json`: the sidecar always sits next to
+/// the image it describes, for a locally built file and a downloaded release
+/// asset alike.
+pub fn manifest_path_for(qcow2_path: &std::path::Path) -> PathBuf {
+    qcow2_path.with_extension("manifest.json")
+}
+
+/// Cache subdirectory for one (android major, package set) pair — the layout
+/// `docker/images/build.sh` writes to and `collect_images_in` scans.
+pub fn install_subdir(android_major: &str, android_variant: &str) -> String {
+    format!(
+        "android{}-{}",
+        android_major,
+        android_variant.to_lowercase()
+    )
+}
+
+pub fn parse_manifest(raw: &[u8]) -> Result<ImageManifest, BaseImageError> {
+    serde_json::from_slice(raw).map_err(|source| BaseImageError::ManifestParse {
+        path: PathBuf::from("<remote>"),
+        source,
+    })
+}
+
+pub fn read_manifest(manifest_path: &std::path::Path) -> Result<ImageManifest, BaseImageError> {
+    let raw = fs::read(manifest_path).map_err(|source| BaseImageError::ReadFile {
+        path: manifest_path.to_path_buf(),
+        source,
+    })?;
+    serde_json::from_slice(&raw).map_err(|source| BaseImageError::ManifestParse {
+        path: manifest_path.to_path_buf(),
+        source,
+    })
 }
 
 /// Reads the manifest describing the image at `qcow2_path` (a
 /// `<stem>.manifest.json` next to it), if present.
 pub fn info_for(qcow2_path: &std::path::Path) -> Option<BaseImageInfo> {
-    let manifest_path = qcow2_path.with_extension("manifest.json");
+    let manifest_path = manifest_path_for(qcow2_path);
     let file_name = manifest_path.file_name()?.to_str()?;
     let stem = file_name.strip_suffix(".manifest.json")?;
-    let raw = fs::read_to_string(&manifest_path).ok()?;
-    let manifest: Manifest = serde_json::from_str(&raw).ok()?;
+    let manifest = read_manifest(&manifest_path).ok()?;
     let qcow2 = manifest_path.with_file_name(format!("{stem}.qcow2"));
     if qcow2 != qcow2_path {
         return None;
@@ -116,6 +203,13 @@ pub enum BaseImageError {
         #[source]
         source: std::io::Error,
     },
+
+    #[error("cannot parse base image manifest {path:?}: {source}")]
+    ManifestParse {
+        path: PathBuf,
+        #[source]
+        source: serde_json::Error,
+    },
 }
 
 impl AndroidProfile {
@@ -159,11 +253,7 @@ fn collect_images_in(dir: &Path) -> Result<Vec<BaseImageInfo>, BaseImageError> {
         let Some(stem) = file_name.strip_suffix(".manifest.json") else {
             continue;
         };
-        let raw = match fs::read_to_string(&manifest_path) {
-            Ok(raw) => raw,
-            Err(_) => continue,
-        };
-        let manifest: Manifest = match serde_json::from_str(&raw) {
+        let manifest = match read_manifest(&manifest_path) {
             Ok(manifest) => manifest,
             Err(_) => continue,
         };
@@ -658,5 +748,74 @@ mod tests {
     fn gc_candidates_empty_cache_returns_nothing() {
         let (_guard, dir) = EnvGuard::new();
         assert!(gc_candidates(&dir).unwrap().is_empty());
+    }
+
+    #[test]
+    fn parses_a_published_release_manifest() {
+        let raw = br#"{
+            "schema_version": 1,
+            "source_image": "andler-base:android13-vanilla",
+            "built_at": "2026-08-01T10:20:30Z",
+            "file_size_bytes": 4294967296,
+            "sha256": "aa11",
+            "android_major": "13",
+            "android_variant": "VANILLA",
+            "compression": "zstd",
+            "parts": [
+                {"name": "linux-waydroid-android13-vanilla-abc.qcow2.zst.00", "sha256": "bb22", "size_bytes": 100},
+                {"name": "linux-waydroid-android13-vanilla-abc.qcow2.zst.01", "sha256": "cc33", "size_bytes": 40}
+            ]
+        }"#;
+
+        let manifest = parse_manifest(raw).unwrap();
+
+        assert_eq!(manifest.id(), "android13-vanilla-2026-08-01T10:20:30Z");
+        assert_eq!(manifest.compression.as_deref(), Some("zstd"));
+        assert_eq!(manifest.sha256.as_deref(), Some("aa11"));
+        assert_eq!(manifest.parts.len(), 2);
+        assert_eq!(
+            manifest.parts[0].name,
+            "linux-waydroid-android13-vanilla-abc.qcow2.zst.00"
+        );
+        assert_eq!(manifest.parts_total_bytes(), 140);
+    }
+
+    #[test]
+    fn parses_a_locally_built_manifest_without_release_fields() {
+        let raw = br#"{"schema_version":1,"android_major":"11","android_variant":"GAPPS","built_at":"2026-01-01T00:00:00Z"}"#;
+
+        let manifest = parse_manifest(raw).unwrap();
+
+        assert!(manifest.parts.is_empty());
+        assert!(manifest.compression.is_none());
+        assert!(manifest.sha256.is_none());
+        assert_eq!(manifest.parts_total_bytes(), 0);
+    }
+
+    #[test]
+    fn manifest_missing_identity_fields_is_a_parse_error() {
+        let raw = br#"{"schema_version":1,"android_major":"13","built_at":"2026-01-01T00:00:00Z"}"#;
+
+        let err = parse_manifest(raw).unwrap_err();
+
+        assert!(matches!(err, BaseImageError::ManifestParse { .. }), "{err}");
+    }
+
+    #[test]
+    fn install_subdir_matches_build_sh_layout() {
+        assert_eq!(install_subdir("13", "VANILLA"), "android13-vanilla");
+        assert_eq!(install_subdir("11", "GAPPS"), "android11-gapps");
+    }
+
+    #[test]
+    fn manifest_path_for_sits_next_to_the_image() {
+        assert_eq!(
+            manifest_path_for(&PathBuf::from(
+                "/cache/android13-vanilla/linux-waydroid-android13-vanilla-abc.qcow2"
+            )),
+            PathBuf::from(
+                "/cache/android13-vanilla/linux-waydroid-android13-vanilla-abc.manifest.json"
+            )
+        );
     }
 }

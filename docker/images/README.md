@@ -426,6 +426,27 @@ partitioning — `build-disk.sh` also prints the file size to the console on
 completion). It is then used as the `backing_file` in the existing overlay
 mechanism of `andler-disk`.
 
+## Downloading a published image instead of building one
+
+The same builds are published as GitHub releases by
+`.github/workflows/build-base-image.yml` (tag
+`base-image-android<major>-<variant>-<timestamp>`; assets: one
+`<stem>.manifest.json` plus `<stem>.qcow2.zst.NN.part` files, because a release
+asset is capped at 2 GiB). The runtime side of that contract lives in
+`services/andler-disk/src/base_image_download.rs`:
+
+```bash
+andler image list                       # what the pipeline has published
+andler image download --android-version 13 --variant vanilla
+```
+
+A downloaded image lands in the same cache this document describes
+(`~/.andler/cache/base-images/android<major>-<variant>/<stem>.qcow2` plus the
+published manifest), so `base_image::resolve`, `andler cache list|clean`, and
+`andler create --base-image-path` treat it exactly like a locally built one. The
+daemon reads the catalog from `ANDLERD_IMAGE_REPO` (default `hateoff0/andler`)
+and `ANDLERD_IMAGE_API_BASE` (default `https://api.github.com`).
+
 ## Base image discovery
 
 `core/andler-core/src/base_image.rs` scans `base_images_dir()`
