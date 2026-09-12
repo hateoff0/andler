@@ -4,7 +4,7 @@ name: Check for new Waydroid images
 # workflow_dispatch is the manual "check right now" button in the Actions UI.
 on:
   schedule:
-    - cron: "0 */6 * * *"   # every 6 hours
+    - cron: "0 6 * * *"   # once a day at 06:00 UTC
   workflow_dispatch:
     inputs:
       dry_run:

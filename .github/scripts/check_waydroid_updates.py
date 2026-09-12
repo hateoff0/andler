@@ -21,6 +21,7 @@ from __future__ import annotations
 import argparse
 import json
 import pathlib
+import re
 import subprocess
 import sys
 import tempfile
@@ -32,15 +33,23 @@ import xml.etree.ElementTree as ET
 SF_PROJECT = "waydroid"
 SF_RSS_URL = f"https://sourceforge.net/projects/{SF_PROJECT}/rss?path="
 
-# android_major -> substring that identifies that LineageOS line in the
-# SourceForge filenames. Android 11 (lineage-18.1) is frozen upstream but
-# still checked -- if it ever resumes, this picks it up with no code change.
-LINEAGE_TAG = {
-    "13": "lineage-20.0",
-    "11": "lineage-18.1",
+# Bare LineageOS version per android_major -- same name and same values as
+# fetch-waydroid-images.py's own LINEAGE_VERSION, kept in sync with that
+# file by hand since this script deliberately doesn't import it.
+LINEAGE_VERSION = {
+    "13": "20.0",
+    "11": "18.1",
 }
-COMPONENTS = ["system", "vendor"]
 VARIANTS = ["VANILLA", "GAPPS"]
+
+# Asymmetric on purpose: system images are nested under .../lineage/,
+# vendor images are not (confirmed against fetch-waydroid-images.py
+# directly). An earlier version of this script assumed a shared
+# /images/{component}/lineage/waydroid_x86_64 template and 404'd on vendor
+# every run -- this is that fix.
+SYSTEM_RSS_PATH = "/images/system/lineage/waydroid_x86_64"
+VENDOR_RSS_PATH = "/images/vendor/waydroid_x86_64"
+
 REQUEST_TIMEOUT_S = 30
 RSS_ATTEMPTS = 4
 USER_AGENT = "andler-image-builder/1 (+https://github.com/andler-project/andler)"
@@ -74,24 +83,45 @@ def fetch_rss(path: str) -> ET.Element:
     raise RuntimeError(f"failed to fetch RSS feed {path} after {RSS_ATTEMPTS} attempts: {last_error}")
 
 
-def latest_matching(root: ET.Element, version_tag: str) -> str | None:
-    """Filename of the newest RSS entry whose title contains version_tag.
-    SourceForge lists release-directory RSS items newest-first, so the
-    first match is the latest release for that line."""
+def latest_matching(root: ET.Element, pattern: str) -> str | None:
+    """Filename of the newest RSS entry whose basename matches pattern.
+
+    Mirrors fetch-waydroid-images.py's own latest_matching(): SourceForge
+    lists items newest-first, an item's title's last path segment is the
+    real filename, and matching is a real anchored regex search -- not a
+    loose substring check. Substring-on-lineage-tag alone can't tell a
+    VANILLA system zip from a GAPPS one; they share the same tag.
+    """
+    rx = re.compile(pattern)
     for item in root.iter("item"):
         title = (item.findtext("title") or "").strip()
-        if version_tag in title:
-            return title.lstrip("/").split("/")[-1]
+        name = title.rsplit("/", 1)[-1]
+        if rx.search(name):
+            return name
     return None
 
 
-def latest_for(android_major: str) -> dict[str, str | None]:
-    version_tag = LINEAGE_TAG[android_major]
-    result: dict[str, str | None] = {}
-    for component in COMPONENTS:
-        root = fetch_rss(f"/images/{component}/lineage/waydroid_x86_64")
-        result[component] = latest_matching(root, version_tag)
-    return result
+def latest_for(android_major: str) -> dict:
+    """{'system': {'VANILLA': name|None, 'GAPPS': name|None}, 'vendor': name|None}
+
+    Patterns copied verbatim from fetch-waydroid-images.py's system_pattern/
+    vendor_pattern. Vendor has no VANILLA/GAPPS split -- it's always
+    "MAINLINE" and shared by both variants, which is also why it's fetched
+    once per android_major here, not once per variant.
+    """
+    lineage = LINEAGE_VERSION[android_major]
+
+    system_root = fetch_rss(SYSTEM_RSS_PATH)
+    system: dict[str, str | None] = {}
+    for variant in VARIANTS:
+        pattern = rf"^lineage-{re.escape(lineage)}[._-].*-{variant}-waydroid_x86_64-system\.zip$"
+        system[variant] = latest_matching(system_root, pattern)
+
+    vendor_root = fetch_rss(VENDOR_RSS_PATH)
+    vendor_pattern = rf"^lineage-{re.escape(lineage)}[._-].*-MAINLINE-waydroid_x86_64-vendor\.zip$"
+    vendor = latest_matching(vendor_root, vendor_pattern)
+
+    return {"system": system, "vendor": vendor}
 
 
 def published_manifest_text(repo: str, android_major: str, variant: str) -> str | None:
@@ -117,7 +147,7 @@ def published_manifest_text(repo: str, android_major: str, variant: str) -> str 
         return (pathlib.Path(tmp) / "manifest.json").read_text()
 
 
-def needs_build(current: dict[str, str | None], published_text: str | None) -> bool:
+def needs_build(wanted_filenames: list[str], published_text: str | None) -> bool:
     if published_text is None:
         return True
     # Substring match against the raw manifest text rather than a parsed
@@ -126,7 +156,7 @@ def needs_build(current: dict[str, str | None], published_text: str | None) -> b
     # fetch-waydroid-images.py this script does not need to know precisely
     # to answer "is this exact file already published". Robust to minor
     # schema changes on the manifest side; adjust if it ever proves wrong.
-    return any(name and name not in published_text for name in current.values())
+    return any(name not in published_text for name in wanted_filenames)
 
 
 def trigger_build(repo: str, workflow: str, android_major: str, variant: str, dry_run: bool) -> None:
@@ -151,7 +181,7 @@ def main() -> int:
 
     any_triggered = False
     had_error = False
-    for android_major in LINEAGE_TAG:
+    for android_major in LINEAGE_VERSION:
         try:
             current = latest_for(android_major)
         except Exception as exc:  # exhausted retries inside fetch_rss: a real, persistent failure
@@ -159,22 +189,27 @@ def main() -> int:
             had_error = True
             continue  # android11/13 are independent checks; one failing shouldn't hide the other
 
-        if not current.get("system") or not current.get("vendor"):
-            print(f"::warning::android{android_major}: no matching system/vendor entry in the "
-                  f"RSS feed (feed layout may have changed) -- skipping this version this run")
+        if not current["vendor"]:
+            print(f"::warning::android{android_major}: no vendor image matched for this lineage "
+                  f"version (feed layout may have changed) -- skipping this version this run")
             continue
 
-        print(f"android{android_major}: latest system={current['system']!r} vendor={current['vendor']!r}")
-
         for variant in VARIANTS:
+            system_name = current["system"].get(variant)
+            if not system_name:
+                print(f"::warning::android{android_major} {variant}: no system image matched "
+                      f"-- skipping")
+                continue
+
+            print(f"android{android_major} {variant}: system={system_name!r} vendor={current['vendor']!r}")
             published_text = published_manifest_text(args.repo, android_major, variant)
-            if needs_build(current, published_text):
+            if needs_build([system_name, current["vendor"]], published_text):
                 status = "never built" if published_text is None else "update available"
-                print(f"  {variant}: NEW ({status})")
+                print(f"  -> NEW ({status})")
                 any_triggered = True
                 trigger_build(args.repo, args.trigger_workflow, android_major, variant, args.dry_run)
             else:
-                print(f"  {variant}: up to date, nothing to do")
+                print("  -> up to date, nothing to do")
 
     if not any_triggered and not had_error:
         print("Nothing new on SourceForge -- no builds triggered.")
