@@ -172,12 +172,20 @@ jobs:
           git_rev=$(jq -r '.git_rev' "${{ steps.locate.outputs.manifest }}")
           title="Base image: Android ${{ inputs.android_major }} (${{ inputs.android_variant }}) — $(date -u +%Y-%m-%d) ($git_rev)"
 
+          # --prerelease: this is unreviewed, automated CI output -- a base image for
+          # Waydroid, not a reviewed release of andler itself. Marking it this way gives
+          # it a permanent "Pre-release" badge everywhere GitHub lists releases, so it
+          # reads as a build artifact rather than a project release at a glance, without
+          # needing a second repository. `gh release list` (used by
+          # check_waydroid_updates.py) still returns prereleases by default, so this
+          # doesn't hide anything from the checker -- only --exclude-pre-releases would.
           for attempt in 1 2 3; do
             if gh release create "$tag" \
                  --repo "${{ github.repository }}" \
                  --title "$title" \
                  --notes-file release_notes.md \
                  --latest=false \
+                 --prerelease \
                  "${{ steps.locate.outputs.manifest }}" \
                  "$sums_path" \
                  "${{ steps.locate.outputs.qcow2 }}".zst.*.part
