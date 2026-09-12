@@ -16,8 +16,9 @@ expect_out_grep "dry-run header" "Dry run: this would create"
 expect_out_grep "dry-run kind" "Type: *Linux VM"
 expect_out_grep "dry-run disk line" "^Disk:"
     expect_ok "create --json dry-run" -- andler create --kind linux --name dry-json --iso-path "$WORK/empty.iso" --disk-path "$WORK/dry-json.qcow2" --ovmf-vars-template "$WORK/VARS.fd" --dry-run --json
-    expect_ok "create --json dry-run reports name" -- jq -e '.name == "dry-json"' <<<"$(cat "$E2E_LAST_OUT")"
-    expect_ok "create --json dry-run reports LinuxVm kind" -- jq -e '.kind | has("LinuxVm")' <<<"$(cat "$E2E_LAST_OUT")"
+    cp "$E2E_LAST_OUT" "$WORK/dry-run.json"
+    expect_ok "create --json dry-run reports name" -- jq -e '.name == "dry-json"' "$WORK/dry-run.json"
+    expect_ok "create --json dry-run reports LinuxVm kind" -- jq -e '.kind | has("LinuxVm")' "$WORK/dry-run.json"
 
 expect_ok "nothing was created by --dry-run" -- andler list
 expect_out_grep "no instances" "no instances"
@@ -44,14 +45,15 @@ expect_out_grep "no instances" "no instances"
 echo "  [create --verify]"
 expect_ok "verify passes on a valid config" -- andler create --kind linux --name ver --iso-path "$WORK/empty.iso" --disk-path "$WORK/disk.qcow2" --ovmf-vars-template "$WORK/VARS.fd" --verify
 expect_ok "verify --json passes on valid config" -- andler create --kind linux --name verjson --iso-path "$WORK/empty.iso" --disk-path "$WORK/disk.qcow2" --ovmf-vars-template "$WORK/VARS.fd" --verify --json
-expect_ok "verify --json reports passed=true" -- jq -e '.passed == true' <<<"$(cat "$E2E_LAST_OUT")"
-expect_ok "verify --json reports name" -- jq -e '.name == "verjson"' <<<"$(cat "$E2E_LAST_OUT")"
-expect_ok "verify --json reports checks array" -- jq -e '.checks | type == "array"' <<<"$(cat "$E2E_LAST_OUT")"
-expect_ok "verify --json reports check entries" -- jq -e '.checks | all(.ok == true)' <<<"$(cat "$E2E_LAST_OUT")"
+cp "$E2E_LAST_OUT" "$WORK/verify-ok.json"
+expect_ok "verify --json reports passed=true" -- jq -e '.passed == true' "$WORK/verify-ok.json"
+expect_ok "verify --json reports name" -- jq -e '.name == "verjson"' "$WORK/verify-ok.json"
+expect_ok "verify --json reports checks array" -- jq -e '.checks | type == "array"' "$WORK/verify-ok.json"
+expect_ok "verify --json reports check entries" -- jq -e '.checks | all(.ok == true)' "$WORK/verify-ok.json"
 
 expect_fail "verify fails on a missing iso" -- andler create --kind linux --name ver2 --iso-path "$WORK/missing.iso" --disk-path "$WORK/disk.qcow2" --ovmf-vars-template "$WORK/VARS.fd" --verify
 expect_fail "verify --json fails on a missing iso" -- andler create --kind linux --name ver3 --iso-path "$WORK/missing.iso" --disk-path "$WORK/disk.qcow2" --ovmf-vars-template "$WORK/VARS.fd" --verify --json
-expect_ok "verify --json reports passed=false" -- jq -e '.passed == false' <<<"$(cat "$E2E_LAST_OUT")"
+expect_ok "verify --json reports passed=false" -- jq -e '.passed == false' "$E2E_LAST_OUT"
 
 expect_ok "nothing was created by --verify" -- andler list
 expect_out_grep "no instances" "no instances"

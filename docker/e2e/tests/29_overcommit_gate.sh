@@ -21,9 +21,17 @@ OVERCOMMIT=$((HOST_BYTES + 1073741824))
 
 pass "host RAM is ${HOST_KB} kB (${HOST_BYTES} bytes); requesting ${OVERCOMMIT} bytes"
 
+# `iso_path` and `ovmf_vars_path` are required fields of the TOML file and are
+# canonicalized (so the files have to exist), even for a VM that boots neither
+# an ISO nor UEFI.
+touch "$WORK/empty.iso"
+qemu-img create -f raw "$WORK/VARS.fd" 4M >/dev/null 2>&1
+
 cat > "$WORK/instance.toml" <<EOF
 name = "e2e-overcommit"
+iso_path = "$WORK/empty.iso"
 disk_path = "$WORK/disk.qcow2"
+ovmf_vars_path = "$WORK/VARS.fd"
 
 [memory]
 size_bytes = $OVERCOMMIT

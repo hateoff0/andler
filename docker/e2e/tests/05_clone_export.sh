@@ -25,8 +25,9 @@ LINKED="$(andler clone "$SRC" --name linked-clone --instances-root "$ANDROID_ROO
 [[ -n "$LINKED" ]] || fail "empty id from clone --mode linked"
 pass "clone --mode linked"
     expect_ok "clone --json" -- andler clone "$SRC" --name linked-clone-json --instances-root "$ANDROID_ROOT" --mode linked --json
-    expect_ok "clone --json reports source_instance_id" -- jq -e '.source_instance_id == "'"$SRC"'"' <<<"$(cat "$E2E_LAST_OUT")"
-    expect_ok "clone --json reports instance_id" -- jq -e '.instance_id | test("^[0-9a-f]{64}$")' <<<"$(cat "$E2E_LAST_OUT")"
+    cp "$E2E_LAST_OUT" "$WORK/clone.json"
+    expect_ok "clone --json reports source_instance_id" -- jq -e '.source_instance_id == "'"$SRC"'"' "$WORK/clone.json"
+    expect_ok "clone --json reports instance_id" -- jq -e '.instance_id | test("^[0-9a-f]{64}$")' "$WORK/clone.json"
 
 expect_fail "remove --purge on source with a live linked clone" -- andler remove "$SRC" --purge
 expect_err_grep "live-clone protection message" "live"
@@ -79,24 +80,31 @@ echo "  [export]"
 expect_ok "export to a standalone file" -- andler export "$SRC" "$WORK/exported-android-disk.qcow2"
 expect_file "exported disk exists" "$WORK/exported-android-disk.qcow2"
     expect_ok "export --json" -- andler export "$SRC" "$WORK/exported-android-disk.qcow2" --json
-    expect_ok "export --json reports dest_path" -- jq -e '.dest_path == "'"$WORK/exported-android-disk.qcow2"'"' <<<"$(cat "$E2E_LAST_OUT")"
-    expect_ok "export --json reports source_instance_id" -- jq -e '.source_instance_id == "'"$SRC"'"' <<<"$(cat "$E2E_LAST_OUT")"
+    cp "$E2E_LAST_OUT" "$WORK/export.json"
+    expect_ok "export --json reports dest_path" -- jq -e '.dest_path == "'"$WORK/exported-android-disk.qcow2"'"' "$WORK/export.json"
+    expect_ok "export --json reports source_instance_id" -- jq -e '.source_instance_id == "'"$SRC"'"' "$WORK/export.json"
 
 expect_fail "export of a nonexistent source" -- andler export "$UNKNOWN_ID" "$WORK/x.qcow2"
 
 LIST_AFTER_EXPORT="$(andler list)"
 LIST_AFTER_EXPORT_COUNT="$(wc -l <<<"$LIST_AFTER_EXPORT")"
-if [[ "$LIST_AFTER_EXPORT_COUNT" -eq 4 ]]; then
-    pass "export registers no new instance (4 instances)"
+# source-android + linked + standalone + shared-base + linked-clone-json:
+# the --json clone above creates a real instance too.
+if [[ "$LIST_AFTER_EXPORT_COUNT" -eq 5 ]]; then
+    pass "export registers no new instance (5 instances)"
 else
     echo "$LIST_AFTER_EXPORT"
-    fail "expected 4 instances after export, got $LIST_AFTER_EXPORT_COUNT"
+    fail "expected 5 instances after export, got $LIST_AFTER_EXPORT_COUNT"
 fi
 
 echo "  [cleanup]"
 expect_ok "remove standalone clone" -- andler remove "$STANDALONE" --purge
 expect_ok "remove shared-base clone" -- andler remove "$SHARED" --purge
 expect_ok "remove linked clone" -- andler remove "$LINKED" --purge
+# The --json clone is a real linked clone of the source: leaving it behind
+# makes the source unpurgeable and fails the suite's own cleanup.
+LINKED_JSON="$(jq -r '.instance_id' "$WORK/clone.json")"
+expect_ok "remove the --json linked clone" -- andler remove "$LINKED_JSON" --purge
 expect_ok "remove source after clones are gone" -- andler remove "$SRC" --purge
 
 expect_ok "list empty" -- andler list
