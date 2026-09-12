@@ -16,22 +16,50 @@ on:
         required: true
         type: choice
         options: ["VANILLA", "GAPPS"]
+      zstd_level:
+        description: "zstd compression level (see workflow comments: 19 barely beat 9 on real Android image data, at much higher CPU cost)"
+        required: false
+        type: choice
+        default: "9"
+        options: ["6", "9", "12", "15", "19"]
+      system_image_name:
+        description: "Waydroid system zip name (filled in automatically when triggered by check-waydroid-updates.yml; leave blank for a manual/backfill build)"
+        required: false
+        type: string
+        default: ""
+      vendor_image_name:
+        description: "Waydroid vendor zip name (same as above)"
+        required: false
+        type: string
+        default: ""
 
 permissions:
   contents: write   # to create the release and upload assets
+
+concurrency:
+  group: build-base-image-${{ inputs.android_major }}-${{ inputs.android_variant }}
+  cancel-in-progress: false   # never kill a multi-GiB build in progress; queue the newer request instead
 
 jobs:
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 120
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6   # v5/v6 run on Node 24 -- resolves the Node 20 deprecation
+                                     # warning outright rather than waiting for it to matter
 
       # Standard runners ship ~25-29 GiB free; the rootfs + waydroid images
       # + qcow2 should fit, but this buys margin cheaply before a multi-GiB
       # build rather than finding out mid-build.
+      #
+      # Pinned to a commit rather than @main: this action has had no tagged
+      # release in years and its own README's quick-start still says to use
+      # @main, so there's no version tag to pin to instead -- but a
+      # contents:write job pulling in ANY third-party action on a floating
+      # branch ref is worth freezing regardless. This is main's HEAD as of
+      # 2026-09-12; bump deliberately if a newer commit is ever needed.
       - name: Free disk space
-        uses: jlumbroso/free-disk-space@main
+        uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # main
         with:
           tool-cache: true
           android: true
@@ -40,7 +68,7 @@ jobs:
           large-packages: false
           docker-images: false   # we need Docker for the build itself
 
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v4   # also Node 24 native as of v4
 
       # build-disk.sh checks for: docker, sgdisk, losetup, mkfs.ext4,
       # mkfs.vfat/mkfs.fat, qemu-img, tar, python3. docker/tar/python3/losetup
@@ -74,22 +102,33 @@ jobs:
         run: |
           set -euo pipefail
           qemu-img check "${{ steps.locate.outputs.qcow2 }}"
-          python3 -c "
-          import hashlib, json
-          m = json.load(open('${{ steps.locate.outputs.manifest }}'))
-          actual = hashlib.sha256(open('${{ steps.locate.outputs.qcow2 }}', 'rb').read()).hexdigest()
-          assert actual == m['sha256'], f'manifest says {m[\"sha256\"]}, actual file hashes to {actual}'
-          print('qcow2 sha256 matches manifest.json: OK')
-          "
+          python3 .github/scripts/verify_manifest.py \
+            "${{ steps.locate.outputs.manifest }}" \
+            "${{ steps.locate.outputs.qcow2 }}" \
+            --system-image "${{ inputs.system_image_name }}" \
+            --vendor-image "${{ inputs.vendor_image_name }}"
 
       # GitHub Release assets are capped at 2 GiB each. Compress, then split
       # into parts safely under that (1900 MiB leaves headroom).
+      #
+      # Level defaults to 9, not 19: the first real build (android13-vanilla,
+      # 2026-09-12) went from 2.00 GiB to 1.95 GiB at -19 --long=27 -- a 2.4%
+      # reduction for the slowest, most CPU-hungry setting zstd has short of
+      # --ultra. Android system images are mostly already-compressed
+      # formats (APKs, oat/art, images), so there's little left for a high
+      # search effort to find; --long=27 (kept as-is) is almost certainly
+      # doing the real work here, by catching large repeated/sparse regions
+      # regardless of level. zstd_level is a workflow input specifically so
+      # this can be tuned from real numbers instead of another guess --
+      # the achieved ratio and the time taken are both recorded below.
       - name: Compress and split for the 2 GiB asset limit
         id: package
         run: |
           set -euo pipefail
           qcow2="${{ steps.locate.outputs.qcow2 }}"
-          zstd -T0 -19 --long=27 "$qcow2" -o "$qcow2.zst"
+          SECONDS=0
+          zstd -T0 -"${{ inputs.zstd_level }}" --long=27 "$qcow2" -o "$qcow2.zst"
+          echo "elapsed_seconds=$SECONDS" >> "$GITHUB_OUTPUT"
           split -b 1900M -d --additional-suffix=.part "$qcow2.zst" "$qcow2.zst."
           rm "$qcow2.zst"
           ls -lh "$qcow2".zst.*.part
@@ -98,18 +137,74 @@ jobs:
         run: |
           python3 .github/scripts/add_parts_to_manifest.py \
             "${{ steps.locate.outputs.manifest }}" \
-            "${{ steps.locate.outputs.qcow2 }}".zst.*.part
+            "${{ steps.locate.outputs.qcow2 }}".zst.*.part \
+            --zstd-level "${{ inputs.zstd_level }}"
+
+      - name: Render release notes
+        id: notes
+        run: |
+          set -euo pipefail
+          run_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          python3 .github/scripts/render_release_notes.py \
+            "${{ steps.locate.outputs.manifest }}" \
+            --repo "${{ github.repository }}" \
+            --run-url "$run_url" \
+            --run-number "${{ github.run_number }}" \
+            --compress-seconds "${{ steps.package.outputs.elapsed_seconds }}" \
+            > release_notes.md
+          echo "run_url=$run_url" >> "$GITHUB_OUTPUT"
 
       - name: Publish as a GitHub Release
+        id: publish
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           variant_lower=$(echo "${{ inputs.android_variant }}" | tr '[:upper:]' '[:lower:]')
           tag="base-image-android${{ inputs.android_major }}-${variant_lower}-$(date -u +%Y%m%d-%H%M%S)"
-          gh release create "$tag" \
-            --repo "${{ github.repository }}" \
-            --title "Base image: Android ${{ inputs.android_major }} (${{ inputs.android_variant }})" \
-            --notes "Automated build. android_images in manifest.json names the exact Waydroid system/vendor files used. Download all .part files plus manifest.json, verify each against manifest.json, concatenate in numeric order, decompress with zstd." \
-            "${{ steps.locate.outputs.manifest }}" \
-            "${{ steps.locate.outputs.qcow2 }}".zst.*.part
+          sums_path="$(dirname "${{ steps.locate.outputs.manifest }}")/SHA256SUMS"
+          # Title carries date + short rev: every release so far has shared the exact
+          # same title ("Base image: Android 13 (VANILLA)"), which makes the releases
+          # list impossible to scan at a glance -- the tag has the timestamp, but the
+          # title is what's visually prominent in the list view. Read git_rev back out
+          # of the manifest rather than re-deriving it, so the title can never disagree
+          # with what render_release_notes.py already put in the notes body.
+          git_rev=$(jq -r '.git_rev' "${{ steps.locate.outputs.manifest }}")
+          title="Base image: Android ${{ inputs.android_major }} (${{ inputs.android_variant }}) — $(date -u +%Y-%m-%d) ($git_rev)"
+
+          for attempt in 1 2 3; do
+            if gh release create "$tag" \
+                 --repo "${{ github.repository }}" \
+                 --title "$title" \
+                 --notes-file release_notes.md \
+                 --latest=false \
+                 "${{ steps.locate.outputs.manifest }}" \
+                 "$sums_path" \
+                 "${{ steps.locate.outputs.qcow2 }}".zst.*.part
+            then
+              echo "tag=$tag" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            echo "gh release create failed (attempt $attempt/3)" >&2
+            # A failed attempt can still have created the release and uploaded some
+            # assets before hitting a network error partway through a multi-GiB
+            # upload. Clean up before retrying, or the next attempt just fails
+            # immediately on "tag already exists" instead of actually retrying.
+            gh release delete "$tag" --repo "${{ github.repository }}" --yes --cleanup-tag 2>/dev/null || true
+            sleep $((10 * attempt))
+          done
+          echo "::error::gh release create failed after 3 attempts -- the build succeeded and was verified, only publishing failed. Re-run this workflow with the same inputs rather than rebuilding from scratch." >&2
+          exit 1
+
+      - name: Add build summary
+        if: always()
+        run: |
+          {
+            echo "# Build result: ${{ job.status }}"
+            echo
+            if [ -f release_notes.md ]; then
+              cat release_notes.md
+            else
+              echo "Build did not reach the point of generating release notes -- check the failed step above."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

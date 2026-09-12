@@ -16,9 +16,15 @@ permissions:
   contents: read
   actions: write   # required to trigger build-base-image.yml
 
+concurrency:
+  group: check-waydroid-updates
+  cancel-in-progress: true   # cheap and idempotent -- a fresher check can just supersede an older one
+
 jobs:
   check:
     runs-on: ubuntu-latest
+    timeout-minutes: 15   # generous vs. the worst case in check_waydroid_updates.py's own retry math,
+                           # just a safety net against an unexpected hang eating Actions minutes forever
     steps:
       - uses: actions/checkout@v4
 

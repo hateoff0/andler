@@ -8,18 +8,17 @@ this only needs the *latest filename* per version, not to download/verify/
 extract anything, and staying decoupled means a change to one script can't
 silently break the other.
 
-"Already published" is read back from the Releases themselves (the most
-recent base-image-<major>-<variant>-* release's manifest.json asset) rather
-than from a separate state file kept in the repo -- one source of truth,
-same reasoning as PLAN.md section 1 (desired-state config): a second,
-separately-updated record of "what we last built" can drift from reality,
-the release list cannot.
+Already published" is read back from the Releases themselves
+(the most recent base-image---* release's manifest.json asset) rather than from a
+separate state file kept in the repo -- one source of truth, same reasoning as the desired-state config:
+a second, separately-updated record of "what we last built" can drift from reality, the release list cannot.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import pathlib
 import re
 import subprocess
@@ -159,7 +158,15 @@ def needs_build(wanted_filenames: list[str], published_text: str | None) -> bool
     return any(name not in published_text for name in wanted_filenames)
 
 
-def trigger_build(repo: str, workflow: str, android_major: str, variant: str, dry_run: bool) -> None:
+def trigger_build(repo: str, workflow: str, android_major: str, variant: str,
+                   system_name: str, vendor_name: str, dry_run: bool) -> None:
+    """Dispatch build-base-image.yml, passing along the exact system/vendor
+    filenames this check just saw on SourceForge. build-base-image.yml's
+    verify_manifest.py step uses these to fill manifest.json's
+    'android_images' if build-disk.sh left it empty -- without this,
+    published manifests never name what they contain, needs_build() below
+    can never find a match, and every scheduled run rebuilds everything
+    again regardless of whether anything actually changed."""
     print(f"  -> {'[dry-run] would trigger' if dry_run else 'triggering'} "
           f"build: android{android_major} {variant}")
     if dry_run:
@@ -167,9 +174,29 @@ def trigger_build(repo: str, workflow: str, android_major: str, variant: str, dr
     subprocess.run(
         ["gh", "workflow", "run", workflow, "--repo", repo,
          "-f", f"android_major={android_major}",
-         "-f", f"android_variant={variant}"],
+         "-f", f"android_variant={variant}",
+         "-f", f"system_image_name={system_name}",
+         "-f", f"vendor_image_name={vendor_name}"],
         check=True,
     )
+
+
+def write_step_summary(rows: list[tuple[str, str, str, str]]) -> None:
+    """Append a small markdown table to $GITHUB_STEP_SUMMARY, if set (it
+    isn't when running this script outside Actions, e.g. locally). Lets
+    anyone glance at the Actions run and see what was checked without
+    opening the log -- exactly the kind of visibility this script's own
+    docstring says a silent SourceForge/RSS failure needs, applied here to
+    the routine, non-failure case too."""
+    summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
+    if not summary_path:
+        return
+    with open(summary_path, "a") as f:
+        f.write("### Waydroid image check\n\n")
+        f.write("| Track | Variant | Result | Latest system image |\n")
+        f.write("|---|---|---|---|\n")
+        for track, variant, result, detail in rows:
+            f.write(f"| {track} | {variant} | {result} | `{detail}` |\n")
 
 
 def main() -> int:
@@ -181,17 +208,22 @@ def main() -> int:
 
     any_triggered = False
     had_error = False
+    summary_rows: list[tuple[str, str, str, str]] = []
+
     for android_major in LINEAGE_VERSION:
+        track = f"android{android_major}"
         try:
             current = latest_for(android_major)
         except Exception as exc:  # exhausted retries inside fetch_rss: a real, persistent failure
             print(f"::error::android{android_major}: failed to check SourceForge RSS: {exc}")
             had_error = True
+            summary_rows.append((track, "—", "❌ check failed", str(exc)[:80]))
             continue  # android11/13 are independent checks; one failing shouldn't hide the other
 
         if not current["vendor"]:
             print(f"::warning::android{android_major}: no vendor image matched for this lineage "
                   f"version (feed layout may have changed) -- skipping this version this run")
+            summary_rows.append((track, "—", "⚠️ no vendor match", ""))
             continue
 
         for variant in VARIANTS:
@@ -199,6 +231,7 @@ def main() -> int:
             if not system_name:
                 print(f"::warning::android{android_major} {variant}: no system image matched "
                       f"-- skipping")
+                summary_rows.append((track, variant, "⚠️ no system match", ""))
                 continue
 
             print(f"android{android_major} {variant}: system={system_name!r} vendor={current['vendor']!r}")
@@ -207,9 +240,15 @@ def main() -> int:
                 status = "never built" if published_text is None else "update available"
                 print(f"  -> NEW ({status})")
                 any_triggered = True
-                trigger_build(args.repo, args.trigger_workflow, android_major, variant, args.dry_run)
+                trigger_build(args.repo, args.trigger_workflow, android_major, variant,
+                               system_name, current["vendor"], args.dry_run)
+                result = "🔍 would trigger" if args.dry_run else "🔨 triggered"
+                summary_rows.append((track, variant, f"{result} ({status})", system_name))
             else:
                 print("  -> up to date, nothing to do")
+                summary_rows.append((track, variant, "✅ up to date", system_name))
+
+    write_step_summary(summary_rows)
 
     if not any_triggered and not had_error:
         print("Nothing new on SourceForge -- no builds triggered.")
