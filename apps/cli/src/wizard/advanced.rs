@@ -1,10 +1,11 @@
 use andler_core::{AudioBackend, CdromBus, NetworkMode, PointerMode, RenderBackend, Resolution};
 use andler_firmware::HardwareDefaults;
-use inquire::{Confirm, CustomType, Select, Text};
+use inquire::{Confirm, CustomType, MultiSelect, Select, Text};
 
 use crate::CliArmTranslator;
 
 use super::basic::{AndroidBasicResult, LinuxBasicResult};
+use super::ui;
 use super::{map_inquire_err, WizardError};
 
 const MIN_GPU_MEMORY_MIB: u64 = 256;
@@ -16,6 +17,11 @@ const MAX_CPU_CORES: u32 = 128;
 const MIN_MEMORY_GIB: u64 = 1;
 const MAX_MEMORY_GIB: u64 = 1024;
 
+/// The advanced answers, in the shape the request builders consume.
+///
+/// `Default` is the wizard's recommended configuration; the first pass fills
+/// every field from the user's answers (falling back to hardware detection),
+/// and the "modify" pass rewrites only the groups the user picks.
 #[derive(Debug, Clone)]
 pub struct AdvancedConfig {
     pub cdrom_bus: Option<CdromBus>,
@@ -31,10 +37,77 @@ pub struct AdvancedConfig {
     pub memory_gib: u64,
     pub arm_translator: Option<CliArmTranslator>,
     pub gapps: bool,
-    pub microg: bool,
     pub network_mode: NetworkMode,
     pub bridge_interface: Option<String>,
     pub linked_overlay: bool,
+}
+
+impl Default for AdvancedConfig {
+    fn default() -> Self {
+        Self {
+            cdrom_bus: None,
+            compact_on_shutdown: false,
+            gpu_render: RenderBackend::Venus,
+            gpu_memory_mib: 4096,
+            display_resolution: Resolution::new(1920, 1080),
+            fullscreen: false,
+            audio_backend: AudioBackend::Pipewire,
+            clipboard_enabled: true,
+            input_pointer: PointerMode::Tablet,
+            cpu_cores: 4,
+            memory_gib: 8,
+            arm_translator: None,
+            gapps: false,
+            network_mode: NetworkMode::Nat,
+            bridge_interface: None,
+            linked_overlay: false,
+        }
+    }
+}
+
+/// One screenful of related questions. Re-asking a whole group beats
+/// re-asking every question when the user came back to change one thing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Group {
+    BootDisks,
+    DisplayGpu,
+    Devices,
+    CpuMemory,
+    Network,
+    Android,
+}
+
+impl Group {
+    fn label(&self) -> &'static str {
+        match self {
+            Group::BootDisks => "Boot & disks (CD-ROM bus, compact on shutdown)",
+            Group::DisplayGpu => "Display & GPU (render backend, memory, resolution, fullscreen)",
+            Group::Devices => "Devices (audio, clipboard, input pointer)",
+            Group::CpuMemory => "CPU & memory (cores, RAM)",
+            Group::Network => "Network (NAT / bridge / isolated)",
+            Group::Android => "Android (GApps, ARM translator, disk overlay)",
+        }
+    }
+}
+
+fn ask_groups(groups: &[Group]) -> Result<Vec<Group>, WizardError> {
+    if groups.is_empty() {
+        return Ok(Vec::new());
+    }
+    let options: Vec<String> = groups.iter().map(|g| g.label().to_string()).collect();
+    let picked = MultiSelect::new("Which settings do you want to change?", options)
+        .with_help_message(
+            "Space toggles an entry, Enter confirms. \
+             Nothing selected keeps the current configuration as it is.",
+        )
+        .prompt()
+        .map_err(map_inquire_err)?;
+
+    Ok(groups
+        .iter()
+        .filter(|g| picked.iter().any(|picked| picked == g.label()))
+        .copied()
+        .collect())
 }
 
 pub fn run_linux(
@@ -42,49 +115,25 @@ pub fn run_linux(
     detected: &HardwareDefaults,
     prefilled: Option<&AdvancedConfig>,
 ) -> Result<AdvancedConfig, WizardError> {
-    let pref = prefilled;
+    let mut config = prefilled.cloned().unwrap_or_default();
+    let wanted = wanted_groups(
+        &[
+            Group::BootDisks,
+            Group::DisplayGpu,
+            Group::Devices,
+            Group::CpuMemory,
+            Group::Network,
+        ],
+        prefilled,
+    )?;
 
-    let cdrom_bus = if result.iso_path.is_empty() {
-        None
-    } else {
-        let recommended =
-            CdromBus::recommended_for_iso_filename(std::path::Path::new(&result.iso_path));
-        Some(ask_cdrom_bus(
-            std::path::Path::new(&result.iso_path)
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or(&result.iso_path),
-            recommended,
-            pref.and_then(|p| p.cdrom_bus),
-        )?)
-    };
+    ask_boot_disks(result, detected, prefilled, &mut config, &wanted)?;
+    ask_display_gpu(detected, prefilled, &mut config, &wanted)?;
+    ask_devices(detected, prefilled, &mut config, &wanted)?;
+    ask_cpu_memory(prefilled, &mut config, &wanted)?;
+    ask_network(prefilled, &mut config, &wanted)?;
 
-    let network_mode = ask_network_mode(pref.map(|p| p.network_mode.clone()))?;
-    let bridge_interface = if let NetworkMode::Bridge { .. } = network_mode {
-        ask_bridge_interface(pref.and_then(|p| p.bridge_interface.clone()))?
-    } else {
-        None
-    };
-
-    Ok(AdvancedConfig {
-        cdrom_bus,
-        compact_on_shutdown: ask_compact_on_shutdown(pref.map(|p| p.compact_on_shutdown))?,
-        gpu_render: ask_gpu_render(detected, pref.map(|p| p.gpu_render.clone()))?,
-        gpu_memory_mib: ask_gpu_memory(pref.map(|p| p.gpu_memory_mib))?,
-        display_resolution: ask_display_resolution(pref.map(|p| p.display_resolution))?,
-        fullscreen: ask_fullscreen(pref.map(|p| p.fullscreen))?,
-        audio_backend: ask_audio_backend(detected, pref.map(|p| p.audio_backend))?,
-        clipboard_enabled: ask_clipboard_enabled(pref.map(|p| p.clipboard_enabled))?,
-        input_pointer: ask_input_pointer(pref.map(|p| p.input_pointer))?,
-        cpu_cores: ask_cpu_cores(pref.map(|p| p.cpu_cores))?,
-        memory_gib: ask_memory_gib(pref.map(|p| p.memory_gib))?,
-        arm_translator: None,
-        gapps: false,
-        microg: false,
-        network_mode,
-        bridge_interface,
-        linked_overlay: false,
-    })
+    Ok(config)
 }
 
 pub fn run_android(
@@ -92,43 +141,153 @@ pub fn run_android(
     detected: &HardwareDefaults,
     prefilled: Option<&AdvancedConfig>,
 ) -> Result<AdvancedConfig, WizardError> {
-    let pref = prefilled;
+    let mut config = prefilled.cloned().unwrap_or_default();
+    let wanted = wanted_groups(
+        &[
+            Group::Android,
+            Group::DisplayGpu,
+            Group::Devices,
+            Group::CpuMemory,
+            Group::Network,
+        ],
+        prefilled,
+    )?;
 
-    let gapps = ask_gapps(pref.map(|p| p.gapps).or(Some(result.gapps)))?;
-    let microg = if gapps {
-        false
-    } else {
-        ask_microg(pref.map(|p| p.microg))?
-    };
-    let network_mode = ask_network_mode(pref.map(|p| p.network_mode.clone()))?;
-    let bridge_interface = if let NetworkMode::Bridge { .. } = network_mode {
-        ask_bridge_interface(pref.and_then(|p| p.bridge_interface.clone()))?
+    ask_android(result, detected, prefilled, &mut config, &wanted)?;
+    ask_display_gpu(detected, prefilled, &mut config, &wanted)?;
+    ask_devices(detected, prefilled, &mut config, &wanted)?;
+    ask_cpu_memory(prefilled, &mut config, &wanted)?;
+    ask_network(prefilled, &mut config, &wanted)?;
+
+    Ok(config)
+}
+
+/// First pass: everything. Modify pass: only what the user picked.
+fn wanted_groups(
+    all: &[Group],
+    prefilled: Option<&AdvancedConfig>,
+) -> Result<Vec<Group>, WizardError> {
+    match prefilled {
+        None => Ok(all.to_vec()),
+        Some(_) => ask_groups(all),
+    }
+}
+
+fn ask_group(wanted: &[Group], group: Group) -> bool {
+    wanted.contains(&group)
+}
+
+fn ask_android(
+    result: &AndroidBasicResult,
+    detected: &HardwareDefaults,
+    prefilled: Option<&AdvancedConfig>,
+    config: &mut AdvancedConfig,
+    wanted: &[Group],
+) -> Result<(), WizardError> {
+    if !ask_group(wanted, Group::Android) {
+        return Ok(());
+    }
+    ui::group(Group::Android.label());
+
+    config.gapps = ask_gapps(prefilled.map(|p| p.gapps).or(Some(result.gapps)))?;
+    config.arm_translator = Some(ask_arm_translator(
+        detected,
+        prefilled.and_then(|p| p.arm_translator),
+    )?);
+    config.linked_overlay = ask_linked_overlay(prefilled.map(|p| p.linked_overlay))?;
+    Ok(())
+}
+
+fn ask_boot_disks(
+    result: &LinuxBasicResult,
+    _detected: &HardwareDefaults,
+    prefilled: Option<&AdvancedConfig>,
+    config: &mut AdvancedConfig,
+    wanted: &[Group],
+) -> Result<(), WizardError> {
+    if !ask_group(wanted, Group::BootDisks) {
+        return Ok(());
+    }
+    ui::group(Group::BootDisks.label());
+
+    let recommended =
+        CdromBus::recommended_for_iso_filename(std::path::Path::new(&result.iso_path));
+    config.cdrom_bus = Some(ask_cdrom_bus(
+        &result.iso_path,
+        recommended,
+        prefilled.and_then(|p| p.cdrom_bus),
+    )?);
+    config.compact_on_shutdown = ask_compact_on_shutdown(prefilled.map(|p| p.compact_on_shutdown))?;
+    Ok(())
+}
+
+fn ask_display_gpu(
+    detected: &HardwareDefaults,
+    prefilled: Option<&AdvancedConfig>,
+    config: &mut AdvancedConfig,
+    wanted: &[Group],
+) -> Result<(), WizardError> {
+    if !ask_group(wanted, Group::DisplayGpu) {
+        return Ok(());
+    }
+    ui::group(Group::DisplayGpu.label());
+
+    config.gpu_render = ask_gpu_render(detected, prefilled.map(|p| p.gpu_render.clone()))?;
+    config.gpu_memory_mib = ask_gpu_memory(prefilled.map(|p| p.gpu_memory_mib))?;
+    config.display_resolution = ask_display_resolution(prefilled.map(|p| p.display_resolution))?;
+    config.fullscreen = ask_fullscreen(prefilled.map(|p| p.fullscreen))?;
+    Ok(())
+}
+
+fn ask_devices(
+    detected: &HardwareDefaults,
+    prefilled: Option<&AdvancedConfig>,
+    config: &mut AdvancedConfig,
+    wanted: &[Group],
+) -> Result<(), WizardError> {
+    if !ask_group(wanted, Group::Devices) {
+        return Ok(());
+    }
+    ui::group(Group::Devices.label());
+
+    config.audio_backend = ask_audio_backend(detected, prefilled.map(|p| p.audio_backend))?;
+    config.clipboard_enabled = ask_clipboard_enabled(prefilled.map(|p| p.clipboard_enabled))?;
+    config.input_pointer = ask_input_pointer(prefilled.map(|p| p.input_pointer))?;
+    Ok(())
+}
+
+fn ask_cpu_memory(
+    prefilled: Option<&AdvancedConfig>,
+    config: &mut AdvancedConfig,
+    wanted: &[Group],
+) -> Result<(), WizardError> {
+    if !ask_group(wanted, Group::CpuMemory) {
+        return Ok(());
+    }
+    ui::group(Group::CpuMemory.label());
+
+    config.cpu_cores = ask_cpu_cores(prefilled.map(|p| p.cpu_cores))?;
+    config.memory_gib = ask_memory_gib(prefilled.map(|p| p.memory_gib))?;
+    Ok(())
+}
+
+fn ask_network(
+    prefilled: Option<&AdvancedConfig>,
+    config: &mut AdvancedConfig,
+    wanted: &[Group],
+) -> Result<(), WizardError> {
+    if !ask_group(wanted, Group::Network) {
+        return Ok(());
+    }
+    ui::group(Group::Network.label());
+
+    config.network_mode = ask_network_mode(prefilled.map(|p| p.network_mode.clone()))?;
+    config.bridge_interface = if let NetworkMode::Bridge { .. } = config.network_mode {
+        ask_bridge_interface(prefilled.and_then(|p| p.bridge_interface.clone()))?
     } else {
         None
     };
-
-    Ok(AdvancedConfig {
-        cdrom_bus: None,
-        compact_on_shutdown: ask_compact_on_shutdown(pref.map(|p| p.compact_on_shutdown))?,
-        gpu_render: ask_gpu_render(detected, pref.map(|p| p.gpu_render.clone()))?,
-        gpu_memory_mib: ask_gpu_memory(pref.map(|p| p.gpu_memory_mib))?,
-        display_resolution: ask_display_resolution(pref.map(|p| p.display_resolution))?,
-        fullscreen: ask_fullscreen(pref.map(|p| p.fullscreen))?,
-        audio_backend: ask_audio_backend(detected, pref.map(|p| p.audio_backend))?,
-        clipboard_enabled: ask_clipboard_enabled(pref.map(|p| p.clipboard_enabled))?,
-        input_pointer: ask_input_pointer(pref.map(|p| p.input_pointer))?,
-        cpu_cores: ask_cpu_cores(pref.map(|p| p.cpu_cores))?,
-        memory_gib: ask_memory_gib(pref.map(|p| p.memory_gib))?,
-        arm_translator: Some(ask_arm_translator(
-            detected,
-            pref.and_then(|p| p.arm_translator),
-        )?),
-        gapps,
-        microg,
-        network_mode,
-        bridge_interface,
-        linked_overlay: ask_linked_overlay(pref.map(|p| p.linked_overlay))?,
-    })
+    Ok(())
 }
 
 fn ask_cdrom_bus(
@@ -254,9 +413,8 @@ fn ask_display_resolution(prefilled: Option<Resolution>) -> Result<Resolution, W
     let raw = Text::new("Display resolution (e.g. 1920x1080):")
         .with_default(&default)
         .with_help_message(
-            "Initial screen resolution. Format: WIDTHxHEIGHT (e.g. 1920x1080, 2560x1440). \
-             Note: not yet applied to the actual display output (QEMU's SDL/GTK backends \
-             don't take a resolution parameter) -- set it in the guest OS after boot for now.",
+            "The resolution the guest session applies at boot (QEMU fw_cfg -> weston/Plasma); \
+             any WxH the virtual display advertises works.",
         )
         .with_validator(|s: &str| match parse_resolution(s) {
             Ok(_) => Ok(inquire::validator::Validation::Valid),
@@ -301,10 +459,17 @@ fn ask_audio_backend(
     Ok(parse_audio_choice(choice))
 }
 
+/// Clipboard sharing is a pair: QEMU wires the SPICE agent channel, and the
+/// guest needs `spice-vdagent` for it to actually work. The wizard applies
+/// the guest half itself (see `wizard::apply`), so the answer here is the
+/// whole setting, not half of one.
 fn ask_clipboard_enabled(prefilled: Option<bool>) -> Result<bool, WizardError> {
     Confirm::new("Enable clipboard sharing between host and VM?")
         .with_default(prefilled.unwrap_or(true))
-        .with_help_message("Enable copy-paste between host and VM via qemu-vdagent.")
+        .with_help_message(
+            "Copy-paste between host and VM. The wizard installs the guest-side \
+             spice-vdagent right after creating the VM.",
+        )
         .prompt()
         .map_err(map_inquire_err)
 }
@@ -412,7 +577,9 @@ fn ask_arm_translator(
 
     let choice = Select::new(&prompt, ordered)
         .with_help_message(
-            "libndk — for AMD CPUs; libhoudini — for Intel CPUs; none — no ARM app support",
+            "ARM apps on an x86 guest. The translator (~18 MiB) is downloaded and installed \
+             into the instance disk right after creation; libndk — AMD CPUs, \
+             libhoudini — Intel CPUs, none — no ARM app support.",
         )
         .prompt()
         .map_err(map_inquire_err)?;
@@ -424,16 +591,9 @@ pub(super) fn ask_gapps(prefilled: Option<bool>) -> Result<bool, WizardError> {
     Confirm::new("Enable GApps?")
         .with_default(prefilled.unwrap_or(false))
         .with_help_message(
-            "Google Play Store and Google services. Requires internet to set up on first boot.",
+            "Google Play Store and Google services. This selects the GAPPS base image when \
+             one is available; on a fresh image, Play needs internet on first boot.",
         )
-        .prompt()
-        .map_err(map_inquire_err)
-}
-
-fn ask_microg(prefilled: Option<bool>) -> Result<bool, WizardError> {
-    Confirm::new("Enable MicroG?")
-        .with_default(prefilled.unwrap_or(false))
-        .with_help_message("Open-source Google Play replacement. No Google account needed.")
         .prompt()
         .map_err(map_inquire_err)
 }
@@ -508,21 +668,10 @@ pub fn parse_resolution(s: &str) -> Result<Resolution, String> {
     Ok(Resolution::new(width, height))
 }
 
-#[allow(dead_code)] // reserved for future GPU memory configuration in the wizard
-pub fn parse_gpu_memory(s: &str) -> Result<u64, String> {
-    let v: u64 = s.trim().parse().map_err(|_| "Invalid number".to_string())?;
-    if (MIN_GPU_MEMORY_MIB..=MAX_GPU_MEMORY_MIB).contains(&v) {
-        Ok(v)
-    } else {
-        Err(format!(
-            "Enter an integer between {MIN_GPU_MEMORY_MIB} and {MAX_GPU_MEMORY_MIB}, e.g. 4096"
-        ))
-    }
-}
-
 fn ask_network_mode(prefilled: Option<NetworkMode>) -> Result<NetworkMode, WizardError> {
     let options = vec!["NAT (default)", "Bridge", "Isolated (not implemented yet)"];
     let selection = Select::new("Network mode:", options)
+        .with_help_message("NAT needs no host setup; bridge requires an existing bridge interface")
         .with_starting_cursor(match prefilled {
             Some(NetworkMode::Nat) => 0,
             Some(NetworkMode::Bridge { .. }) => 1,
@@ -568,6 +717,7 @@ fn ask_bridge_interface(prefilled: Option<String>) -> Result<Option<String>, Wiz
         Ok(Some(prompt.trim().to_string()))
     }
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -603,12 +753,29 @@ mod tests {
     }
 
     #[test]
-    fn parse_gpu_memory_valid() {
-        assert_eq!(parse_gpu_memory("4096").unwrap(), 4096);
+    fn default_configuration_is_the_recommended_one() {
+        let config = AdvancedConfig::default();
+
+        assert_eq!(config.cpu_cores, 4);
+        assert_eq!(config.memory_gib, 8);
+        assert!(config.clipboard_enabled);
+        assert_eq!(config.arm_translator, None);
+        assert!(matches!(config.network_mode, NetworkMode::Nat));
     }
 
     #[test]
-    fn parse_gpu_memory_too_low() {
-        assert!(parse_gpu_memory("128").is_err());
+    fn group_labels_are_unique() {
+        let groups = [
+            Group::BootDisks,
+            Group::DisplayGpu,
+            Group::Devices,
+            Group::CpuMemory,
+            Group::Network,
+            Group::Android,
+        ];
+        let mut labels: Vec<&str> = groups.iter().map(|g| g.label()).collect();
+        labels.sort();
+        labels.dedup();
+        assert_eq!(labels.len(), groups.len());
     }
 }

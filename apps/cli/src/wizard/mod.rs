@@ -1,28 +1,24 @@
 mod advanced;
+mod apply;
+mod base_image;
 mod basic;
+mod build;
 mod summary;
+mod ui;
 
-use std::path::PathBuf;
-
-use andler_core::{
-    AndroidBootMode, ArmTranslator, AudioBackend, DisplayEngine, NetworkMode, RenderBackend,
-};
+use andler_core::{AndroidBootMode, ArmTranslator};
 use andler_firmware::{FirmwareError, HardwareDefaults};
-use andler_rpc::proto::{AndroidProfile, CreateAndroidInstanceRequest, CreateInstanceRequest};
+use andler_rpc::proto::{CreateAndroidInstanceRequest, CreateInstanceRequest};
 use inquire::{InquireError, Select};
 
-use crate::helpers::ensure_qcow2_extension;
-use crate::{CliAndroidVersion, CliArmTranslator};
+use crate::{CliAndroidVersion, TracedClient};
 
-pub use advanced::AdvancedConfig;
 pub use basic::{AndroidBasicResult, BasicResult, LinuxBasicResult};
-pub use summary::SummaryAction;
 
 #[derive(Debug)]
-#[allow(dead_code)] // variants consumed by caller; Rust can't see cross-module call sites
 #[allow(clippy::large_enum_variant)] // carries full proto requests; boxing would complicate callers
 pub enum WizardResult {
-    Linux(CreateInstanceRequest, String /* instances_root */),
+    Linux(CreateInstanceRequest),
     Android(CreateAndroidInstanceRequest),
 }
 
@@ -50,7 +46,12 @@ enum WizardMode {
     Advanced,
 }
 
-pub async fn run(partial: PartialArgs) -> Result<WizardResult, WizardError> {
+/// Resolves the wizard's answers into the request to create — the interactive
+/// flow when there is a TTY, the defaults-only flow under `--quick`.
+pub async fn run(
+    client: &mut TracedClient,
+    partial: PartialArgs,
+) -> Result<WizardResult, WizardError> {
     let detected = andler_firmware::detect_all();
 
     if partial.quick {
@@ -70,7 +71,7 @@ pub async fn run(partial: PartialArgs) -> Result<WizardResult, WizardError> {
         ));
     }
 
-    print_hardware_summary(&detected, partial.kind);
+    ui::hardware_panel(&detected, partial.kind);
 
     let mode = ask_wizard_mode()?;
     let kind = basic::ask_kind(partial.kind)?;
@@ -82,11 +83,15 @@ pub async fn run(partial: PartialArgs) -> Result<WizardResult, WizardError> {
             partial.iso_path,
             partial.instances_root,
         )?),
-        WizardKind::Android => BasicResult::Android(basic::run_android(
-            name,
-            partial.base_image_path,
-            partial.instances_root,
-        )?),
+        WizardKind::Android => BasicResult::Android(
+            basic::run_android(
+                client,
+                name,
+                partial.base_image_path,
+                partial.instances_root,
+            )
+            .await?,
+        ),
     };
 
     let mut advanced_config = match mode {
@@ -96,12 +101,14 @@ pub async fn run(partial: PartialArgs) -> Result<WizardResult, WizardError> {
         }),
         WizardMode::Basic => None,
     };
-    reresolve_android_base_image(&mut basic_result, advanced_config.as_ref(), &detected);
+    build::reresolve_android_base_image(&mut basic_result, advanced_config.as_ref(), &detected);
 
     loop {
         match summary::run(&basic_result, advanced_config.as_ref(), &detected)? {
-            SummaryAction::Create => break,
-            SummaryAction::Modify => {
+            summary::SummaryAction::Create => break,
+            summary::SummaryAction::Modify => {
+                // The modify pass asks which groups to revisit and re-asks
+                // only those, keeping everything else as configured.
                 advanced_config = Some(match &basic_result {
                     BasicResult::Linux(l) => {
                         advanced::run_linux(l, &detected, advanced_config.as_ref())?
@@ -110,127 +117,47 @@ pub async fn run(partial: PartialArgs) -> Result<WizardResult, WizardError> {
                         advanced::run_android(a, &detected, advanced_config.as_ref())?
                     }
                 });
-                reresolve_android_base_image(
+                build::reresolve_android_base_image(
                     &mut basic_result,
                     advanced_config.as_ref(),
                     &detected,
                 );
             }
-            SummaryAction::Cancel => return Err(WizardError::Cancelled),
+            summary::SummaryAction::Cancel => return Err(WizardError::Cancelled),
         }
     }
 
     match &basic_result {
         BasicResult::Linux(l) => {
             if detected.ovmf.is_err() {
-                eprintln!(
-                    "⚠  OVMF not found. Legacy BIOS will be used. \
-                     Install edk2-ovmf for UEFI support."
+                ui::warn(
+                    "OVMF not found. Legacy BIOS will be used. \
+                     Install edk2-ovmf for UEFI support.",
                 );
             }
-            let (req, root) = build_linux_request(l, advanced_config.as_ref(), &detected)?;
-            Ok(WizardResult::Linux(req, root))
+            let req = build::build_linux_request(l, advanced_config.as_ref(), &detected)?;
+            Ok(WizardResult::Linux(req))
         }
         BasicResult::Android(a) => {
-            let req = build_android_request(a, advanced_config.as_ref(), &detected)?;
+            let req = build::build_android_request(a, advanced_config.as_ref(), &detected)?;
             Ok(WizardResult::Android(req))
         }
     }
 }
 
-fn reresolve_android_base_image(
-    basic_result: &mut BasicResult,
-    advanced: Option<&AdvancedConfig>,
-    detected: &HardwareDefaults,
-) {
-    let BasicResult::Android(a) = basic_result else {
-        return;
-    };
-    let Some(adv) = advanced else {
-        return;
-    };
-    if !a.base_image_auto_resolved {
-        return;
-    }
-
-    let profile = andler_core::AndroidProfile {
-        android_version: a.android_version.into(),
-        gapps: adv.gapps,
-        microg: adv.microg,
-        arm_translator: resolve_arm_translator(Some(adv), detected).into(),
-        boot_mode: AndroidBootMode::Android,
-        base_image_pin: None,
-    };
-    match andler_core::base_image::resolve(&profile) {
-        Ok(path) => a.base_image = path.to_string_lossy().into_owned(),
-        Err(e) => eprintln!(
-            "⚠  No base image matches the current Android settings ({e}). \
-             Keeping the previous one — pick a different one manually if needed."
-        ),
-    }
-}
-
-fn print_hardware_summary(detected: &HardwareDefaults, kind: Option<WizardKind>) {
-    println!("Hardware detected:");
-
-    let render = match detected.gpu_render {
-        RenderBackend::Venus => "Venus (Vulkan 3D)",
-        RenderBackend::VirGl => "VirGL (OpenGL 3D)",
-        RenderBackend::VirtioGpu => "VirtioGPU (2D only)",
-        RenderBackend::Cpu => "CPU (software rendering)",
-        RenderBackend::Passthrough { .. } => "CPU (software rendering)",
-    };
-    println!("  GPU render: {render}");
-
-    let display = match detected.display_engine {
-        DisplayEngine::Sdl => "SDL",
-        DisplayEngine::Gtk => "GTK",
-        DisplayEngine::Spice => "SPICE",
-        DisplayEngine::Dbus => "D-Bus",
-        DisplayEngine::None => "None (headless)",
-    };
-    println!("  Display:    {display}");
-
-    let audio = match detected.audio_server {
-        AudioBackend::Pipewire => "PipeWire",
-        AudioBackend::Pulseaudio => "PulseAudio",
-        AudioBackend::None => "None",
-    };
-    println!("  Audio:      {audio}");
-
-    if kind != Some(WizardKind::Linux) {
-        let arm = match detected.arm_translator {
-            Some(ArmTranslator::Libndk) => "libndk (AMD CPU)",
-            Some(ArmTranslator::Libhoudini) => "libhoudini (Intel CPU)",
-            Some(ArmTranslator::None) | None => "none",
-        };
-        println!("  ARM:        {arm}");
-    }
-
-    match &detected.ovmf {
-        Ok(ovmf) => println!("  OVMF:       {}", ovmf.code.display()),
-        Err(err) => println!("  OVMF:       not found ({err})"),
-    }
-
-    println!();
-}
-
 fn ask_wizard_mode() -> Result<WizardMode, WizardError> {
-    let choice = Select::new(
-        "Configuration mode:",
-        vec![
-            "Use recommended settings (Basic)",
-            "Customize all settings (Advanced)",
-        ],
-    )
-    .with_help_message(
-        "Basic — only essential questions (type, name, ISO, disk size).\n\
-         Advanced — full control over GPU, display, audio, CPU, memory, and more.",
-    )
-    .prompt()
-    .map_err(map_inquire_err)?;
+    let recommended = "Recommended settings (basic)";
+    let custom = "Customize everything (advanced)";
+    let choice = Select::new("Configuration mode:", vec![recommended, custom])
+        .with_help_message(
+            "Basic — only the essential questions; everything else comes from hardware \
+             detection.\nAdvanced — full control over GPU, display, audio, CPU, memory, \
+             network and the guest packages.",
+        )
+        .prompt()
+        .map_err(map_inquire_err)?;
 
-    Ok(if choice.starts_with("Use recommended") {
+    Ok(if choice == recommended {
         WizardMode::Basic
     } else {
         WizardMode::Advanced
@@ -254,9 +181,9 @@ fn build_quick(
                 .unwrap_or_else(default_instances_root);
 
             let enable_uefi = if detected.ovmf.is_err() {
-                eprintln!(
-                    "⚠  OVMF not found. Legacy BIOS will be used. \
-                     Install edk2-ovmf for UEFI support."
+                ui::warn(
+                    "OVMF not found. Legacy BIOS will be used. \
+                     Install edk2-ovmf for UEFI support.",
                 );
                 false
             } else {
@@ -270,8 +197,8 @@ fn build_quick(
                 instances_root,
                 enable_uefi,
             };
-            let (req, root) = build_linux_request(&basic, None, detected)?;
-            Ok(WizardResult::Linux(req, root))
+            let req = build::build_linux_request(&basic, None, detected)?;
+            Ok(WizardResult::Linux(req))
         }
         WizardKind::Android => {
             if detected.ovmf.is_err() {
@@ -284,7 +211,9 @@ fn build_quick(
                 Some(path) => {
                     if !std::path::Path::new(&path).exists() {
                         return Err(WizardError::Inquire(format!(
-                            "Base image not found: {path}. Android requires a valid base image."
+                            "Base image not found: {path}. Android requires a valid base image; \
+                             download one with `andler image download`, or build one with \
+                             `docker/images/build.sh`."
                         )));
                     }
                     path
@@ -319,285 +248,56 @@ fn build_quick(
                 instances_root,
                 linked: partial.linked,
             };
-            let req = build_android_request(&basic, None, detected)?;
+            let req = build::build_android_request(&basic, None, detected)?;
             Ok(WizardResult::Android(req))
         }
     }
 }
 
-pub(crate) fn build_linux_request(
-    basic: &LinuxBasicResult,
-    advanced: Option<&AdvancedConfig>,
-    detected: &HardwareDefaults,
-) -> Result<(CreateInstanceRequest, String), WizardError> {
-    let disk_name = "disk".to_string();
-    let disk_path = ensure_qcow2_extension(&PathBuf::from(&disk_name));
-    let full_disk_path = PathBuf::from(&basic.instances_root).join(&disk_path);
-
-    let mut disk = andler_core::DiskConfig::reference_default(full_disk_path);
-    disk.size_bytes = basic
-        .disk_size_gib
-        .checked_mul(andler_core::DiskConfig::GIB)
-        .ok_or_else(|| WizardError::Inquire("disk size overflow".into()))?;
-    disk.compact_on_shutdown = advanced.map(|a| a.compact_on_shutdown).unwrap_or(false);
-
-    let cdrom_bus = if basic.iso_path.is_empty() {
-        andler_core::CdromBus::Ide
-    } else {
-        advanced.and_then(|a| a.cdrom_bus).unwrap_or_else(|| {
-            andler_core::CdromBus::recommended_for_iso_filename(std::path::Path::new(
-                &basic.iso_path,
-            ))
-        })
-    };
-
-    let gpu = build_gpu_config(advanced, detected);
-    let display = build_display_config(advanced, detected, gpu.render_backend.clone());
-    let audio = build_audio_config(advanced, detected);
-    let network = build_network_config(advanced, detected)?;
-    let input = build_input_config(advanced);
-    let cpu = build_cpu_config(advanced);
-    let memory = build_memory_config(advanced);
-
-    let ovmf_vars_template = ovmf_vars_template(detected);
-
-    let mut req = CreateInstanceRequest {
-        name: basic.name.clone(),
-        iso_path: basic.iso_path.clone(),
-        cpu: Some(cpu.into()),
-        memory: Some(memory.into()),
-        disk: Some(disk.into()),
-        display: Some(display.into()),
-        gpu: Some(gpu.into()),
-        network: Some(network.into()),
-        firmware: Some(
-            andler_core::FirmwareConfig {
-                enable_uefi: basic.enable_uefi,
-                ovmf_code_path: PathBuf::new(),
-                ovmf_vars_path: PathBuf::from(&ovmf_vars_template),
-            }
-            .into(),
-        ),
-        audio: Some(audio.into()),
-        input: Some(input.into()),
-        ..Default::default()
-    };
-    req.set_cdrom_bus(cdrom_bus.into());
-
-    Ok((req, basic.instances_root.clone()))
-}
-
-pub(crate) fn build_android_request(
-    basic: &AndroidBasicResult,
-    advanced: Option<&AdvancedConfig>,
-    detected: &HardwareDefaults,
-) -> Result<CreateAndroidInstanceRequest, WizardError> {
-    let arm_translator = resolve_arm_translator(advanced, detected);
-
-    let (gapps, microg) = if let Some(adv) = advanced {
-        (adv.gapps, adv.microg)
-    } else {
-        (basic.gapps, false)
-    };
-
-    let mut profile = AndroidProfile {
-        gapps,
-        microg,
-        ..Default::default()
-    };
-    profile.set_android_version(basic.android_version.into());
-    profile.set_arm_translator(arm_translator.into());
-
-    Ok(CreateAndroidInstanceRequest {
-        name: basic.name.clone(),
-        profile: Some(profile),
-        base_image_path: basic.base_image.clone(),
-        instances_root: basic.instances_root.clone(),
-        overlay_size_bytes: 128_u64
-            .checked_mul(andler_core::DiskConfig::GIB)
-            .ok_or_else(|| WizardError::Inquire("overlay size overflow".into()))?,
-        ovmf_vars_template: ovmf_vars_template(detected),
-        linked_overlay: advanced.map(|a| a.linked_overlay).unwrap_or(basic.linked),
-    })
-}
-
-fn build_gpu_config(
-    advanced: Option<&AdvancedConfig>,
-    detected: &HardwareDefaults,
-) -> andler_core::GpuConfig {
-    let mut gpu = andler_core::GpuConfig::reference_default();
-    gpu.render_backend = advanced
-        .map(|a| a.gpu_render.clone())
-        .unwrap_or_else(|| detected.gpu_render.clone());
-    gpu.hostmem_bytes = advanced
-        .map(|a| a.gpu_memory_mib * andler_core::GpuConfig::MIB)
-        .unwrap_or(gpu.hostmem_bytes);
-    if gpu.render_backend == RenderBackend::Cpu {
-        gpu.blob = false;
-        gpu.gl = false;
-    }
-    gpu
-}
-
-fn build_display_config(
-    advanced: Option<&AdvancedConfig>,
-    detected: &HardwareDefaults,
-    render: RenderBackend,
-) -> andler_core::DisplayConfig {
-    let mut display = andler_core::DisplayConfig::reference_default();
-    if let Some(adv) = advanced {
-        display.resolution = adv.display_resolution;
-        display.fullscreen = adv.fullscreen;
-    }
-    display.display_engine = if render == RenderBackend::Cpu {
-        DisplayEngine::None
-    } else {
-        detected.display_engine
-    };
-    display
-}
-
-fn build_audio_config(
-    advanced: Option<&AdvancedConfig>,
-    detected: &HardwareDefaults,
-) -> andler_core::AudioConfig {
-    let mut audio = andler_core::AudioConfig::reference_default();
-    audio.backend = advanced
-        .map(|a| a.audio_backend)
-        .unwrap_or(detected.audio_server);
-    audio
-}
-
-fn build_network_config(
-    advanced: Option<&AdvancedConfig>,
-    detected: &HardwareDefaults,
-) -> Result<andler_core::NetworkConfig, WizardError> {
-    let mut network = andler_core::NetworkConfig::reference_default();
-
-    match advanced.map(|a| a.network_mode.clone()) {
-        Some(NetworkMode::Bridge { .. }) => {
-            network.mode = NetworkMode::Bridge {
-                interface: advanced.unwrap().bridge_interface.clone().ok_or(
-                    WizardError::InvalidConfig("Bridge mode requires bridge interface".to_string()),
-                )?,
-            };
-        }
-        Some(NetworkMode::Isolated) => {
-            network.mode = NetworkMode::Isolated;
-        }
-        Some(NetworkMode::Nat) | None => {
-            network.nat_backend = summary::format_nat_backend(detected.passt_available);
-        }
-    }
-
-    Ok(network)
-}
-fn build_input_config(advanced: Option<&AdvancedConfig>) -> andler_core::InputConfig {
-    let mut input = andler_core::InputConfig::reference_default();
-    if let Some(adv) = advanced {
-        input.pointer_mode = adv.input_pointer;
-        input.clipboard_enabled = adv.clipboard_enabled;
-    }
-    input
-}
-
-fn build_cpu_config(advanced: Option<&AdvancedConfig>) -> andler_core::CpuConfig {
-    let mut cpu = andler_core::CpuConfig::reference_default();
-    if let Some(adv) = advanced {
-        cpu.cores = adv.cpu_cores;
-    }
-    cpu
-}
-
-fn build_memory_config(advanced: Option<&AdvancedConfig>) -> andler_core::MemoryConfig {
-    let mut memory = andler_core::MemoryConfig::reference_default();
-    if let Some(adv) = advanced {
-        memory.size_bytes = adv
-            .memory_gib
-            .checked_mul(andler_core::MemoryConfig::GIB)
-            .unwrap_or(memory.size_bytes);
-    }
-    memory
-}
-
-fn resolve_arm_translator(
-    advanced: Option<&AdvancedConfig>,
-    detected: &HardwareDefaults,
-) -> CliArmTranslator {
-    if let Some(adv) = advanced.and_then(|a| a.arm_translator) {
-        return adv;
-    }
-    detected
-        .arm_translator
-        .map(|t| match t {
-            ArmTranslator::Libndk => CliArmTranslator::Libndk,
-            ArmTranslator::Libhoudini => CliArmTranslator::Libhoudini,
-            ArmTranslator::None => CliArmTranslator::None,
-        })
-        .unwrap_or(CliArmTranslator::None)
-}
-
-fn ovmf_vars_template(detected: &HardwareDefaults) -> String {
-    match &detected.ovmf {
-        Ok(found) => found.vars_template.to_string_lossy().into_owned(),
-        Err(_) => String::new(),
-    }
-}
-
-fn default_instances_root() -> String {
-    andler_core::paths::instances_root()
-        .to_string_lossy()
-        .into_owned()
-}
-
+/// `andler wizard` (and a bare `andler create`): interact, create, apply the
+/// guest-side selections, report. Everything after the summary screen lives
+/// here so the flag paths and the wizard share one create code path.
 pub async fn handle_wizard(
-    client: &mut crate::TracedClient,
+    client: &mut TracedClient,
+    partial: PartialArgs,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let partial = PartialArgs::default();
-    let result = run(partial).await;
-    match result {
-        Ok(result) => send_result(client, result).await,
+    let quick = partial.quick;
+    let result = match run(client, partial).await {
+        Ok(result) => result,
         Err(WizardError::Cancelled) => {
             println!("Cancelled.");
-            Ok(())
+            return Ok(());
         }
-        Err(WizardError::NotTty) => {
-            eprintln!(
-                "Interactive wizard is not available (no TTY).\n\
-                 Use `andler create --kind linux --name <name> --iso-path <path> --disk-path <path>`\n\
-                 or `andler create --file vm.toml`."
-            );
+        Err(err @ WizardError::NotTty) => {
+            // A usage error, not a crash: scripts get a distinct exit code
+            // and the message names the non-interactive alternatives.
+            eprintln!("{err}");
             std::process::exit(2);
         }
-        Err(e) => Err(e.into()),
-    }
-}
+        Err(e) => return Err(e.into()),
+    };
 
-pub async fn send_result(
-    client: &mut crate::TracedClient,
-    result: WizardResult,
-) -> Result<(), Box<dyn std::error::Error>> {
-    match result {
-        WizardResult::Linux(req, _) => {
-            let id = client.create_instance(req).await?.into_inner().instance_id;
-            let short = crate::helpers::short_id(&id);
-            println!("✓ VM created: {short}");
-            println!("  andler start {short}");
-        }
-        WizardResult::Android(req) => {
-            let id = client
-                .create_android_instance(req)
-                .await?
-                .into_inner()
-                .instance_id;
-            let short = crate::helpers::short_id(&id);
-            println!("✓ Android VM created: {short}");
-            println!("  andler start {short}");
-        }
-    }
+    let id = apply::create(client, &result).await?;
+    let kind = match &result {
+        WizardResult::Linux(..) => WizardKind::Linux,
+        WizardResult::Android(_) => WizardKind::Android,
+    };
+    // `--quick` is the scripted path: it must not start a multi-MB translator
+    // download (or any other guest work) behind the caller's back. The
+    // selections stay recorded in the instance's config, and the report names
+    // the command that applies them.
+    let applied = if quick {
+        None
+    } else {
+        Some(apply::apply_guest_selections(client, &id).await)
+    };
+    apply::report(&id, kind, applied.as_ref());
+
     Ok(())
 }
 
+/// Whether the wizard may prompt at all: `ANDLER_WIZARD_NOT_TTY` forces the
+/// scripted path, otherwise stdin has to be a terminal.
 pub(crate) fn is_tty() -> bool {
     if std::env::var("ANDLER_WIZARD_NOT_TTY").is_ok() {
         return false;
@@ -651,220 +351,44 @@ pub enum WizardError {
     Firmware(#[from] FirmwareError),
 }
 
+fn default_instances_root() -> String {
+    andler_core::paths::instances_root()
+        .to_string_lossy()
+        .into_owned()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use andler_core::{AudioBackend, PointerMode, Resolution};
-    use andler_firmware::DetectedOvmf;
 
-    fn sample_detected() -> HardwareDefaults {
-        HardwareDefaults {
-            ovmf: Ok(DetectedOvmf {
-                code: PathBuf::from("/usr/share/OVMF/OVMF_CODE.fd"),
-                vars_template: PathBuf::from("/usr/share/OVMF/OVMF_VARS.fd"),
-            }),
-            gpu_render: RenderBackend::Venus,
-            display_engine: DisplayEngine::Gtk,
-            audio_server: AudioBackend::Pipewire,
-            arm_translator: Some(ArmTranslator::Libndk),
-            venus_supported: true,
-            passt_available: true,
-        }
-    }
-
-    #[test]
-    fn build_create_request_linux_basic_mode() {
-        let basic = LinuxBasicResult {
-            name: "test".into(),
-            iso_path: "/tmp/test.iso".into(),
-            disk_size_gib: 256,
-            instances_root: "/tmp/instances".into(),
-            enable_uefi: true,
-        };
-        let detected = sample_detected();
-        let (req, root) = build_linux_request(&basic, None, &detected).unwrap();
-        assert_eq!(req.name, "test");
-        assert_eq!(root, "/tmp/instances");
-        assert_eq!(req.iso_path, "/tmp/test.iso");
-    }
-
-    #[test]
-    fn build_create_request_linux_advanced_clipboard() {
-        let basic = LinuxBasicResult {
-            name: "test".into(),
-            iso_path: String::new(),
-            disk_size_gib: 128,
-            instances_root: "/tmp/instances".into(),
-            enable_uefi: true,
-        };
-        let advanced = AdvancedConfig {
-            cdrom_bus: None,
-            compact_on_shutdown: true,
-            gpu_render: RenderBackend::VirGl,
-            gpu_memory_mib: 8192,
-            display_resolution: Resolution::new(2560, 1440),
-            fullscreen: true,
-            audio_backend: AudioBackend::None,
-            clipboard_enabled: false,
-            input_pointer: PointerMode::Mouse,
-            cpu_cores: 8,
-            memory_gib: 16,
-            arm_translator: None,
-            gapps: false,
-            microg: false,
-            network_mode: NetworkMode::Nat,
-            bridge_interface: None,
-            linked_overlay: false,
-        };
-        let (req, _) = build_linux_request(&basic, Some(&advanced), &sample_detected()).unwrap();
-        let input = req.input.expect("input");
-        assert!(!input.clipboard_enabled);
-    }
-
-    #[test]
-    fn build_create_request_android_basic_mode() {
-        let basic = AndroidBasicResult {
-            name: "android".into(),
-            base_image: "/tmp/base.qcow2".into(),
-            base_image_auto_resolved: false,
-            android_version: CliAndroidVersion::Android13,
-            gapps: false,
-            disk_size_gib: 256,
-            instances_root: "/tmp/instances".into(),
-            linked: false,
-        };
-        let req = build_android_request(&basic, None, &sample_detected()).unwrap();
-        assert_eq!(req.name, "android");
-        assert_eq!(
-            req.overlay_size_bytes,
-            128 * andler_core::DiskConfig::GIB,
-            "overlay size must be the fixed 128 GiB default, not derived from disk size"
-        );
-        let profile = req.profile.expect("profile");
-        assert_eq!(profile.arm_translator(), ProtoArmTranslator::Libndk);
-    }
-
-    static ANDLER_HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    struct AndlerHomeGuard {
-        _lock: std::sync::MutexGuard<'static, ()>,
-        base: PathBuf,
-    }
-
-    impl AndlerHomeGuard {
-        fn new() -> (Self, PathBuf) {
-            static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-            let lock = ANDLER_HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-            let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            let base = std::env::temp_dir().join(format!(
-                "andler-wizard-test-home-{}-{n}",
-                std::process::id()
-            ));
-            let cache_dir = base.join("cache").join("base-images");
-            std::fs::create_dir_all(&cache_dir).unwrap();
-            std::env::set_var(andler_core::paths::ANDLER_HOME_ENV, &base);
-            (Self { _lock: lock, base }, cache_dir)
-        }
-    }
-
-    impl Drop for AndlerHomeGuard {
-        fn drop(&mut self) {
-            std::env::remove_var(andler_core::paths::ANDLER_HOME_ENV);
-            let _ = std::fs::remove_dir_all(&self.base);
-        }
-    }
-
-    fn write_manifest(dir: &std::path::Path, name: &str, major: &str, variant: &str) {
-        std::fs::write(dir.join(format!("{name}.qcow2")), b"placeholder").unwrap();
-        std::fs::write(
-            dir.join(format!("{name}.manifest.json")),
-            format!(
-                r#"{{"schema_version":1,"android_major":"{major}","android_variant":"{variant}","built_at":"2026-01-01T00:00:00Z"}}"#
-            ),
+    fn lazy_client() -> TracedClient {
+        // Nothing in these tests performs an RPC: the client exists so the
+        // wizard's signature matches the interactive flow. A lazy channel
+        // never dials, so no daemon is required.
+        let channel = tonic::transport::Channel::from_static("http://127.0.0.1:1").connect_lazy();
+        andler_rpc::proto::andler_service_client::AndlerServiceClient::with_interceptor(
+            channel,
+            crate::RequestIdInterceptor,
         )
-        .unwrap();
     }
 
-    fn sample_advanced(gapps: bool) -> AdvancedConfig {
-        AdvancedConfig {
-            cdrom_bus: None,
-            compact_on_shutdown: false,
-            gpu_render: RenderBackend::Venus,
-            gpu_memory_mib: 1024,
-            display_resolution: Resolution::new(1920, 1080),
-            fullscreen: false,
-            audio_backend: AudioBackend::None,
-            clipboard_enabled: true,
-            input_pointer: PointerMode::Mouse,
-            cpu_cores: 4,
-            memory_gib: 8,
-            arm_translator: None,
-            gapps,
-            microg: false,
-            network_mode: NetworkMode::Nat,
-            bridge_interface: None,
-            linked_overlay: false,
-        }
-    }
+    use std::path::PathBuf;
 
-    #[test]
-    fn reresolve_android_base_image_switches_to_gapps_variant() {
-        let (_guard, dir) = AndlerHomeGuard::new();
-        write_manifest(&dir, "vanilla", "13", "VANILLA");
-        write_manifest(&dir, "gapps", "13", "GAPPS");
-
-        let mut basic_result = BasicResult::Android(AndroidBasicResult {
-            name: "android".into(),
-            base_image: dir.join("vanilla.qcow2").to_string_lossy().into_owned(),
-            base_image_auto_resolved: true,
-            android_version: CliAndroidVersion::Android13,
-            gapps: false,
-            disk_size_gib: 256,
-            instances_root: "/tmp/instances".into(),
-            linked: false,
-        });
-        let advanced = sample_advanced(true);
-        reresolve_android_base_image(&mut basic_result, Some(&advanced), &sample_detected());
-
-        let BasicResult::Android(a) = &basic_result else {
-            panic!("expected Android variant");
+    #[tokio::test]
+    async fn test_wizard_not_tty() {
+        std::env::set_var("ANDLER_WIZARD_NOT_TTY", "1");
+        let partial = PartialArgs {
+            kind: Some(WizardKind::Linux),
+            name: Some("interactive-test".into()),
+            quick: false,
+            ..Default::default()
         };
-        assert_eq!(
-            a.base_image,
-            dir.join("gapps.qcow2").to_string_lossy().into_owned()
-        );
-    }
+        let mut client = lazy_client();
 
-    #[test]
-    fn reresolve_android_base_image_leaves_manually_entered_path_alone() {
-        let (_guard, _dir) = AndlerHomeGuard::new();
+        let result = run(&mut client, partial).await;
 
-        let mut basic_result = BasicResult::Android(AndroidBasicResult {
-            name: "android".into(),
-            base_image: "/tmp/hand-picked.qcow2".into(),
-            base_image_auto_resolved: false,
-            android_version: CliAndroidVersion::Android13,
-            gapps: false,
-            disk_size_gib: 256,
-            instances_root: "/tmp/instances".into(),
-            linked: false,
-        });
-        let advanced = sample_advanced(true);
-        reresolve_android_base_image(&mut basic_result, Some(&advanced), &sample_detected());
-
-        let BasicResult::Android(a) = &basic_result else {
-            panic!("expected Android variant");
-        };
-        assert_eq!(a.base_image, "/tmp/hand-picked.qcow2");
-    }
-
-    use andler_rpc::proto::ArmTranslator as ProtoArmTranslator;
-
-    fn sample_detected_no_ovmf() -> HardwareDefaults {
-        HardwareDefaults {
-            ovmf: Err(FirmwareError::OvmfVarsNotFound),
-            ..sample_detected()
-        }
+        std::env::remove_var("ANDLER_WIZARD_NOT_TTY");
+        assert!(matches!(result, Err(WizardError::NotTty)));
     }
 
     #[test]
@@ -876,10 +400,10 @@ mod tests {
             instances_root: Some("/tmp/instances".into()),
             ..Default::default()
         };
-        let result = build_quick(partial, &sample_detected_no_ovmf());
+        let result = build_quick(partial, &no_ovmf());
         assert!(result.is_ok());
         match result.unwrap() {
-            WizardResult::Linux(req, _root) => assert_eq!(req.name, "quick-linux-test"),
+            WizardResult::Linux(req) => assert_eq!(req.name, "quick-linux-test"),
             WizardResult::Android(_) => panic!("expected Linux result"),
         }
     }
@@ -894,7 +418,7 @@ mod tests {
             instances_root: Some("/tmp/instances".into()),
             ..Default::default()
         };
-        let result = build_quick(partial, &sample_detected_no_ovmf());
+        let result = build_quick(partial, &no_ovmf());
         assert!(matches!(
             result,
             Err(WizardError::Firmware(FirmwareError::OvmfVarsNotFound))
@@ -911,7 +435,7 @@ mod tests {
             instances_root: Some("/tmp/instances".into()),
             ..Default::default()
         };
-        let result = build_quick(partial, &sample_detected());
+        let result = build_quick(partial, &detected());
         assert!(matches!(
             result,
             Err(WizardError::Inquire(msg)) if msg.contains("Base image not found")
@@ -934,7 +458,7 @@ mod tests {
             linked: true,
             ..Default::default()
         };
-        let result = build_quick(partial, &sample_detected());
+        let result = build_quick(partial, &detected());
         match result {
             Ok(WizardResult::Android(req)) => {
                 assert!(
@@ -947,89 +471,66 @@ mod tests {
         }
         std::fs::remove_dir_all(&dir).unwrap();
     }
-    #[tokio::test]
-    async fn test_wizard_not_tty() {
-        std::env::set_var("ANDLER_WIZARD_NOT_TTY", "1");
-        let partial = PartialArgs {
-            kind: Some(WizardKind::Linux),
-            name: Some("interactive-test".into()),
-            quick: false,
-            ..Default::default()
-        };
-        let result = run(partial).await;
-        assert!(matches!(result, Err(WizardError::NotTty)));
-    }
 
     #[test]
-    fn test_build_network_config() {
-        let detected = sample_detected();
-
-        let advanced = AdvancedConfig {
-            cdrom_bus: None,
-            compact_on_shutdown: false,
-            gpu_render: RenderBackend::Cpu,
-            gpu_memory_mib: 0,
-            display_resolution: Resolution::new(0, 0),
-            fullscreen: false,
-            audio_backend: AudioBackend::Pulseaudio,
-            clipboard_enabled: false,
-            input_pointer: PointerMode::Mouse,
-            cpu_cores: 1,
-            memory_gib: 1,
-            arm_translator: None,
-            gapps: false,
-            microg: false,
-            network_mode: NetworkMode::Nat,
-            bridge_interface: None,
-            linked_overlay: false,
+    fn quick_android_without_a_base_image_reports_the_resolve_error() {
+        // cwd-independent: point ANDLER_HOME at an empty cache so no image
+        // can match, exactly like a fresh install.
+        let guard = EmptyCacheGuard::new();
+        let partial = PartialArgs {
+            kind: Some(WizardKind::Android),
+            name: Some("quick-no-image".into()),
+            quick: true,
+            instances_root: Some(guard.base.join("instances").to_string_lossy().into_owned()),
+            ..Default::default()
         };
-        let network = build_network_config(Some(&advanced), &detected).unwrap();
-        assert!(matches!(network.mode, NetworkMode::Nat));
 
-        let advanced_bridge = AdvancedConfig {
-            cdrom_bus: None,
-            compact_on_shutdown: false,
-            gpu_render: RenderBackend::Cpu,
-            gpu_memory_mib: 0,
-            display_resolution: Resolution::new(0, 0),
-            fullscreen: false,
-            audio_backend: AudioBackend::Pulseaudio,
-            clipboard_enabled: false,
-            input_pointer: PointerMode::Mouse,
-            cpu_cores: 1,
-            memory_gib: 1,
-            arm_translator: None,
-            gapps: false,
-            microg: false,
-            network_mode: NetworkMode::Bridge {
-                interface: "br0".to_string(),
-            },
-            bridge_interface: Some("br0".to_string()),
-            linked_overlay: false,
-        };
-        let network = build_network_config(Some(&advanced_bridge), &detected).unwrap();
-        assert!(matches!(network.mode, NetworkMode::Bridge { .. }));
+        let result = build_quick(partial, &detected());
 
-        let advanced_isolated = AdvancedConfig {
-            cdrom_bus: None,
-            compact_on_shutdown: false,
-            gpu_render: RenderBackend::Cpu,
-            gpu_memory_mib: 0,
-            display_resolution: Resolution::new(0, 0),
-            fullscreen: false,
-            audio_backend: AudioBackend::Pulseaudio,
-            clipboard_enabled: false,
-            input_pointer: PointerMode::Mouse,
-            cpu_cores: 1,
-            memory_gib: 1,
-            arm_translator: None,
-            gapps: false,
-            microg: false,
-            network_mode: NetworkMode::Isolated,
-            bridge_interface: None,
-            linked_overlay: false,
-        };
-        let network = build_network_config(Some(&advanced_isolated), &detected).unwrap();
-        assert!(matches!(network.mode, NetworkMode::Isolated));
+        match result {
+            Err(WizardError::Inquire(message)) => assert!(
+                message.contains("no base image found"),
+                "the resolve error must say no image matched: {message}"
+            ),
+            other => panic!("expected a base-image resolve failure, got {other:?}"),
+        }
+    }
+
+    fn detected() -> HardwareDefaults {
+        build::sample_detected()
+    }
+
+    fn no_ovmf() -> HardwareDefaults {
+        HardwareDefaults {
+            ovmf: Err(FirmwareError::OvmfVarsNotFound),
+            ..detected()
+        }
+    }
+
+    struct EmptyCacheGuard {
+        base: PathBuf,
+    }
+
+    impl EmptyCacheGuard {
+        fn new() -> Self {
+            let base = std::env::temp_dir().join(format!(
+                "andler-wizard-empty-cache-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            std::fs::create_dir_all(base.join("cache/base-images")).unwrap();
+            std::env::set_var(andler_core::paths::ANDLER_HOME_ENV, &base);
+            Self { base }
+        }
+    }
+
+    impl Drop for EmptyCacheGuard {
+        fn drop(&mut self) {
+            std::env::remove_var(andler_core::paths::ANDLER_HOME_ENV);
+            let _ = std::fs::remove_dir_all(&self.base);
+        }
     }
 }

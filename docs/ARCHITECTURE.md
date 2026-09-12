@@ -210,7 +210,7 @@ The wizard (and `andler guest apply <id>`) does not carry a separate list of "th
 | `skipped` | cannot apply in this state — e.g. a disk with no installed guest OS (`DiskError::NoGuestOs`), or a translator switch while the VM runs; the message carries the command that finishes the job later |
 | `failed` | the attempt errored; the message carries the retry command |
 
-One failing selection never aborts the others: the clipboard agent is still installed when the translator download fails, and creation itself is already done by then — the VM exists and stays usable.
+One failing selection never aborts the others: the clipboard agent is still installed when the translator download fails, and creation itself is already done by then — the VM exists and stays usable. `andler create`'s wizard runs this immediately after creating, which is why the summary screen lists what "will be installed inside the VM".
 
 ## Data Flow (guest operations)
 

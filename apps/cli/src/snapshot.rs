@@ -1,26 +1,11 @@
 use crate::helpers::emit_json;
+use crate::helpers::spinner;
+use crate::SnapshotAction;
 use crate::TracedClient;
 use andler_rpc::proto::{
     CreateSnapshotRequest, DeleteSnapshotRequest, InstanceIdRequest, RestoreSnapshotRequest,
 };
-use indicatif::{ProgressBar, ProgressStyle};
 use std::io::IsTerminal;
-use std::time::Duration;
-
-use crate::SnapshotAction;
-
-fn spinner(message: &str) -> ProgressBar {
-    if !std::io::stderr().is_terminal() {
-        return ProgressBar::hidden();
-    }
-    let pb = ProgressBar::new_spinner();
-    if let Ok(style) = ProgressStyle::default_spinner().template("{spinner} {msg}") {
-        pb.set_style(style);
-    }
-    pb.set_message(message.to_string());
-    pb.enable_steady_tick(Duration::from_millis(100));
-    pb
-}
 
 pub async fn handle(
     client: &mut TracedClient,

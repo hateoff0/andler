@@ -65,7 +65,7 @@ andler create \
 | `--android-version <ver>` | Yes**** | Android version: `11` or `13` (****required for `--kind android`) |
 | `--base-image-path <path>` | No | Android base image qcow2; when omitted the daemon auto-discovers the freshest matching image in `~/.andler/cache/base-images/` (flat cache root or `android<version>-<variant>/` subdirectories) |
 | `--gapps` | No | Include Google Apps |
-| `--microg` | No | Include microG |
+| `--microg` | No | Record microG in the profile. **Nothing installs it yet** — no base-image variant ships MicroG and no guest step registers it (see ROADMAP); the flag is stored so a TOML round-trip keeps the choice |
 | `--arm-translator <mode>` | No | ARM→x86 translation: `none` (default), `libndk`, `libhoudini` |
 | `--overlay-size-gib <size>` | No | Overlay disk size in GiB (default: 128, Android only) |
 | `--linked-overlay` | No | Use a linked (backing-file) overlay instead of a standalone copy (Android only) |
@@ -692,7 +692,29 @@ Detaching a path/index that is not attached fails with `is not attached` and poi
 andler wizard
 ```
 
-Interactive guided instance creation wizard (also the default when `andler` is invoked with no subcommand). Walks through all configuration options with smart defaults and hardware auto-detection. Prints a full summary before creation and offers `Create VM` / `Modify advanced settings` / `Cancel`.
+Interactive guided instance creation wizard (also the default when `andler` is invoked with no subcommand).
+
+- **Flow**: hardware summary panel → configuration mode (`Recommended settings` vs `Customize everything`) → VM type → name → the type's questions → (advanced questions) → summary → create.
+- **Advanced mode** groups its questions (boot & disks, display & GPU, devices, CPU & memory, network, Android); `Change some settings` on the summary screen asks which groups to revisit instead of re-asking all of them.
+- **Summary screen**: framed panel with the identity, storage, display/GPU, device, CPU and network answers, followed by what will be **installed inside the VM** (ARM translator, clipboard agent).
+- **Create applies the answers**: immediately after the instance is created, the wizard calls the same route as `andler guest apply <id>` (see above), so a selected ARM translator or clipboard sharing is actually present in the guest. Per-selection results are printed; a failure leaves the created VM in place and prints the retry command. With `--quick` nothing is installed (a scripted create must not start a translator download on its own): the report names `andler guest apply <id>` instead.
+- **Android base image**: if no local image matches the requested Android version/package set, the wizard offers to download the newest published build (`andler image download`) — a download failure falls back to entering a path manually, it never fails the wizard.
+- **microG is not offered**: nothing implements it yet (see the `--microg` flag note above).
+
+### `image`
+
+Base images published by the release pipeline (`.github/workflows/build-base-image.yml`): one build per Android version and package set, published as GitHub releases.
+
+```bash
+andler image list [--android-version <11|13>] [--variant <vanilla|gapps>] [--json]
+andler image download (--android-version <11|13> --variant <vanilla|gapps> | --release-tag <tag>) [--force] [--json]
+```
+
+`list` prints the newest build per (version, package set) with its download size and whether it is already in `~/.andler/cache/base-images/<android>-<variant>/`; `--json` reports `{source, images:[…]}`. `download` verifies every asset against the sha256 in the release's manifest, unpacks the zstd stream, verifies the unpacked qcow2 and installs the image together with the manifest exactly as published. An already-cached build is reused (`already cached`) unless `--force`; an interrupted download resumes from its verified parts. `--json` emits one JSON document per progress line.
+
+The daemon reads `ANDLERD_IMAGE_REPO` (default `hateoff0/andler`) and `ANDLERD_IMAGE_API_BASE` (default `https://api.github.com`). A build the pipeline never published is reported with both the local build command (`docker/images/build.sh <11|13> <VANILLA|GAPPS>`) and `andler image list`.
+
+Downloaded images are ordinary cache entries: `base_image::resolve` finds them, `andler create --base-image-path <path>` uses them, and `andler cache list`/`cache clean` manage them.
 
 ### `doctor`
 

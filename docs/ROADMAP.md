@@ -113,6 +113,7 @@ every user-visible path (wizard, TOML, CLI flags, config set, config edit) must 
 
 ## Medium-term
 
+- [ ] **MicroG inside an Android VM** — nothing implements it yet: `microg` is carried through the TOML file, the proto profile and `andler create --microg`, but no base image variant ships MicroG and no guest-side step installs/registers it (unlike GApps, which is baked into the GAPPS base image at build time). The wizard deliberately no longer offers the choice until one of the two halves exists — either a `MICROG` base-image variant in `docker/images/`, or a first-boot guest step that installs the MicroG APKs into the waydroid container. Until then the flag is recorded and nothing else happens.
 - [ ] Multi-disk support (snapshot device name parameterization)
 - [ ] Live migration between hosts
 - [ ] Tauri GUI client

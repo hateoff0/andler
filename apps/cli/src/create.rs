@@ -6,7 +6,7 @@ use andler_rpc::proto::{
 use std::path::PathBuf;
 
 use crate::instance_file::{InstanceFile, InstanceFileResult};
-use crate::wizard::{PartialArgs, WizardError, WizardKind};
+use crate::wizard::{PartialArgs, WizardKind};
 use crate::{CliAndroidVersion, CliArmTranslator, CliCdromBus, CliKind};
 
 fn created_json(id: &str) -> serde_json::Value {
@@ -152,20 +152,10 @@ pub async fn handle(
             linked: linked_overlay,
         };
 
-        let result = crate::wizard::run(partial).await;
-
-        return match result {
-            Ok(result) => crate::wizard::send_result(client, result).await,
-            Err(WizardError::Cancelled) => {
-                println!("Cancelled.");
-                Ok(())
-            }
-            Err(WizardError::NotTty) => {
-                eprintln!("{}", WizardError::NotTty);
-                std::process::exit(1);
-            }
-            Err(e) => Err(e.into()),
-        };
+        // One code path for both the interactive wizard and `--quick`:
+        // resolve the answers, create the VM, then install the guest-side
+        // selections the answers imply (ARM translator, clipboard agent).
+        return crate::wizard::handle_wizard(client, partial).await;
     }
 
     let kind = kind.unwrap();
@@ -210,6 +200,7 @@ pub async fn handle(
                 } else {
                     crate::preview::print_linux_preview(&req)?;
                 }
+                return Ok(());
             }
             if verify {
                 return exit_on_verify_result(crate::verify::verify_linux(&req, json)?);
@@ -255,6 +246,7 @@ pub async fn handle(
                 } else {
                     crate::preview::print_android_preview(&req)?;
                 }
+                return Ok(());
             }
             if verify {
                 return exit_on_verify_result(crate::verify::verify_android(&req, json)?);

@@ -271,6 +271,8 @@ backend = "None"
 - Missing required Linux field fails
 - Missing file → `Read` error
 - Invalid TOML → `Parse` error
+- Wizard: `--quick` request building for Linux/Android (incl. base-image resolution failures and `--linked-overlay` forwarding), non-TTY refusal, request builders per mode, `AdvancedConfig::default` = the recommended configuration, network-mode mapping, Android group labels unique
+- Wizard presentation: panels render equal-width frames regardless of how long a base-image path is, `NO_COLOR` disables styling, summary text carries the answers and lists what will be installed inside the VM
 - Image command: the release-catalog JSON shape and progress-line rendering
 
 ## Metrics Output Format
@@ -313,10 +315,14 @@ GPU fields (vram, gpu) appear when AMD, NVIDIA, or Intel GPU data is available.
 | `lifecycle.rs` | — | `Start`, `Stop`, `Pause`, `Resume`, `Remove` commands |
 | `clone.rs` | — | `Clone`, `Export` commands |
 | `instance_file.rs` | — | TOML instance file parser |
-| `helpers.rs` | — | `parse_size`, `format_size`, `format_bytes`, `ensure_qcow2_extension`, `short_id`, `emit_json` |
-| `wizard/mod.rs` | — | Interactive wizard entry point, orchestration, `build_create_request()` |
-| `wizard/basic.rs` | — | Basic mode: kind, name, ISO, disk questions |
-| `wizard/advanced.rs` | — | Advanced mode: hardware questions with auto-detection defaults |
-| `wizard/summary.rs` | — | Summary display, Create/Modify/Cancel actions |
+| `helpers.rs` | — | `parse_size`, `format_size`, `format_bytes`, `ensure_qcow2_extension`, `spinner`, `short_id`, `emit_json` |
+| `wizard/mod.rs` | — | Wizard orchestration: `run` (answers → request), `--quick` defaults, `handle_wizard` (create + apply + report), errors |
+| `wizard/basic.rs` | — | Basic questions: kind, name, ISO, disk size, UEFI, Android version/package set |
+| `wizard/advanced.rs` | — | Advanced questions grouped by area (boot/disks, display/GPU, devices, CPU/memory, network, Android); "change some settings" re-asks only the picked groups |
+| `wizard/build.rs` | — | Config building — wizard answers → `CreateInstanceRequest`/`CreateAndroidInstanceRequest`, base-image re-resolution |
+| `wizard/ui.rs` | — | Presentation — content-sized panels, step/group headers, NO_COLOR-aware styling |
+| `wizard/base_image.rs` | — | Base-image question: local cache lookup, offering a published build for download, manual path |
+| `wizard/apply.rs` | — | Create + apply the guest selections + report (instance id, per-selection outcome, next steps) |
+| `wizard/summary.rs` | — | Summary screen (identity/storage/display/CPU/network + what will be installed inside the VM) and Create/Change/Cancel |
 | `verify.rs` | — | `--verify` flag on create — pre-flight checks (ISO, disk, OVMF, GPU memory, CPU/memory) |
 | `preview.rs` | — | `--dry-run` flag — resolves and prints what would be created including QEMU command line |

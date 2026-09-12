@@ -26,6 +26,10 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Changed
 
+#### Wizard
+
+- **The wizard is split into focused modules and its output reworked**: orchestration (`wizard/mod.rs`), questions (`basic.rs`, `advanced.rs`), config→request building (`build.rs`), presentation (`ui.rs`), the base-image choice (`base_image.rs`), create+apply+report (`apply.rs`) and the summary screen (`summary.rs`). The visual side: content-sized framed panels (a long base-image path used to break the fixed-width box), a summary grouped by identity/storage/display/CPU/network, styled step headers that honour `NO_COLOR` and stay plain when piped, and "change some settings" now asks which groups to revisit instead of re-asking every question. `AdvancedConfig` has a `Default` (the recommended configuration) the first pass fills in from hardware detection. MicroG is no longer offered by the wizard: nothing implements it yet, and offering a selection that silently does nothing is worse than not offering it (the `--microg` flag and the TOML key still exist for the file-based path — see ROADMAP).
+
 
 ### Fixed
 

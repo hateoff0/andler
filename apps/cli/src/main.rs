@@ -1081,10 +1081,10 @@ async fn run(cli: Cli, addr: &str) -> Result<(), Box<dyn std::error::Error>> {
 
     match cli.command {
         None => {
-            wizard::handle_wizard(&mut client).await?;
+            wizard::handle_wizard(&mut client, wizard::PartialArgs::default()).await?;
         }
         Some(Command::Wizard {}) => {
-            wizard::handle_wizard(&mut client).await?;
+            wizard::handle_wizard(&mut client, wizard::PartialArgs::default()).await?;
         }
         Some(Command::Create {
             file,

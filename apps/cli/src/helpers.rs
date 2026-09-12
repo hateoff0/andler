@@ -1,4 +1,5 @@
 use andler_rpc::proto::{BackendKind, InstanceStateKind};
+use std::io::IsTerminal;
 
 /// Searches $PATH, then common sbin directories that are often missing from a
 /// regular (non-root) user's PATH but are exactly where `modprobe` and friends
@@ -178,6 +179,24 @@ pub fn short_id(full: &str) -> &str {
 /// Emit a value as compact JSON on stdout: the single source of truth for
 /// `--json` output so every subcommand formats identically. Streaming outputs
 /// (metrics, events) call this per sample to stay line-based.
+/// Indeterminate progress for one blocking step (create, snapshot, …).
+/// Hidden when stderr is not a terminal, so piped output stays line-oriented.
+pub fn spinner(message: &str) -> indicatif::ProgressBar {
+    use indicatif::{ProgressBar, ProgressStyle};
+    use std::time::Duration;
+
+    if !std::io::stderr().is_terminal() {
+        return ProgressBar::hidden();
+    }
+    let pb = ProgressBar::new_spinner();
+    if let Ok(style) = ProgressStyle::default_spinner().template("{spinner} {msg}") {
+        pb.set_style(style);
+    }
+    pb.set_message(message.to_string());
+    pb.enable_steady_tick(Duration::from_millis(100));
+    pb
+}
+
 pub fn emit_json<T: serde::Serialize>(value: &T) -> std::result::Result<(), serde_json::Error> {
     println!("{}", serde_json::to_string(value)?);
     Ok(())
