@@ -9,11 +9,20 @@ use crate::error::DiskError;
 pub const DEFAULT_REPO: &str = "hateoff0/andler";
 pub const REPO_ENV: &str = "ANDLERD_IMAGE_REPO";
 pub const API_BASE_ENV: &str = "ANDLERD_IMAGE_API_BASE";
+pub const TOKEN_ENV: &str = "ANDLERD_IMAGE_TOKEN";
+/// Token variables a user is likely to already have (the `gh` CLI names).
+const TOKEN_FALLBACK_ENVS: [&str; 2] = ["GH_TOKEN", "GITHUB_TOKEN"];
 
 const DEFAULT_API_BASE: &str = "https://api.github.com";
 const RELEASE_TAG_PREFIX: &str = "base-image-android";
 const MANIFEST_SUFFIX: &str = ".manifest.json";
 const USER_AGENT: &str = "andler";
+/// API endpoints (the release index) answer with JSON.
+const ACCEPT_JSON: &str = "application/vnd.github+json";
+/// Release asset URLs answer with the bytes only for this Accept value —
+/// without it GitHub returns a JSON *description* of the asset, which parses
+/// as neither a manifest nor an image.
+const ACCEPT_ASSET: &str = "application/octet-stream";
 
 /// Newest-first releases are scanned until this many carry the release-tag
 /// prefix; every scanned release costs one manifest GET, so the cap keeps
@@ -34,6 +43,9 @@ const PROGRESS_STEP_BYTES: u64 = 8 * 1024 * 1024;
 pub struct ImageSource {
     pub repo: String,
     pub api_base: String,
+    /// Token for a private repository (and for the higher rate limit). Never
+    /// part of `describe()`/errors — it is a credential.
+    token: Option<String>,
 }
 
 impl Default for ImageSource {
@@ -51,7 +63,21 @@ impl ImageSource {
         Self {
             repo: repo.into(),
             api_base,
+            token: None,
         }
+    }
+
+    /// Same source, with an explicit token (used by tests and by callers that
+    /// resolve the credential themselves).
+    pub fn with_token(mut self, token: Option<String>) -> Self {
+        self.token = token.filter(|value| !value.trim().is_empty());
+        self
+    }
+
+    /// `true` when requests carry a credential — the release index of a
+    /// private repository is a 404 without one.
+    pub fn has_token(&self) -> bool {
+        self.token.is_some()
     }
 
     pub fn from_env() -> Self {
@@ -63,7 +89,16 @@ impl ImageSource {
             .ok()
             .filter(|value| !value.trim().is_empty())
             .unwrap_or_else(|| DEFAULT_API_BASE.to_string());
-        Self::new(repo, api_base)
+        let token = std::env::var(TOKEN_ENV)
+            .ok()
+            .into_iter()
+            .chain(
+                TOKEN_FALLBACK_ENVS
+                    .iter()
+                    .filter_map(|name| std::env::var(name).ok()),
+            )
+            .find(|value| !value.trim().is_empty());
+        Self::new(repo, api_base).with_token(token)
     }
 
     /// Human-readable source label for CLI output and error text.
@@ -77,6 +112,20 @@ impl ImageSource {
 
     fn releases_url(&self) -> String {
         format!("{}/repos/{}/releases", self.api_base, self.repo)
+    }
+
+    /// Applies the credential (when there is one) and the headers GitHub wants
+    /// from an API client. The same headers must be used for the asset
+    /// requests: for a private repository the `browser_download_url` is not
+    /// fetchable at all, only the API asset URL.
+    fn request(&self, client: &reqwest::Client, url: &str) -> reqwest::RequestBuilder {
+        let request = client
+            .get(url)
+            .header(reqwest::header::USER_AGENT, USER_AGENT);
+        match &self.token {
+            Some(token) => request.bearer_auth(token),
+            None => request,
+        }
     }
 
     fn client(&self) -> Result<reqwest::Client, DiskError> {
@@ -297,15 +346,18 @@ struct GithubRelease {
     #[serde(default)]
     draft: bool,
     #[serde(default)]
-    prerelease: bool,
-    #[serde(default)]
     assets: Vec<GithubAsset>,
 }
 
 #[derive(Debug, serde::Deserialize)]
 struct GithubAsset {
     name: String,
-    browser_download_url: String,
+    /// `https://api.github.com/repos/<owner>/<repo>/releases/assets/<id>`.
+    /// The `browser_download_url` next to it is not fetchable for a private
+    /// repository, so every request goes through this one — with
+    /// `Accept: application/octet-stream` it returns the bytes for public and
+    /// private repositories alike.
+    url: String,
     #[serde(default)]
     size: u64,
 }
@@ -320,7 +372,7 @@ pub async fn list_remote(
 ) -> Result<Vec<RemoteImage>, DiskError> {
     let client = source.client()?;
     let url = format!("{}?per_page=100", source.releases_url());
-    let raw = get_bytes(&client, &url, "release index").await?;
+    let raw = get_bytes(source, &client, &url, "release index", ACCEPT_JSON).await?;
     let releases: Vec<GithubRelease> =
         serde_json::from_slice(&raw).map_err(|e| DiskError::ImageIndex {
             url: url.clone(),
@@ -328,9 +380,14 @@ pub async fn list_remote(
         })?;
 
     let mut images: Vec<RemoteImage> = Vec::new();
+    let mut skipped: Vec<String> = Vec::new();
     let mut scanned = 0usize;
     for release in releases {
-        if release.draft || release.prerelease {
+        // Drafts are unpublished by definition. Prereleases are *accepted*:
+        // the pipeline marks every base-image build as one (it is automated,
+        // unreviewed output), and the tag prefix below is what separates image
+        // builds from real project releases.
+        if release.draft {
             continue;
         }
         if !release.tag_name.starts_with(RELEASE_TAG_PREFIX) {
@@ -341,14 +398,34 @@ pub async fn list_remote(
         }
         scanned += 1;
 
-        match remote_image_from_release(&client, &release).await {
+        match remote_image_from_release(source, &client, &release).await {
             Ok(Some(image)) if filter.matches(&image.manifest) => images.push(image),
             Ok(_) => {}
-            Err(e) => tracing::warn!(
-                release = %release.tag_name,
-                error = %e,
-                "skipping release: its published assets are incomplete"
-            ),
+            Err(e) => {
+                tracing::warn!(
+                    release = %release.tag_name,
+                    error = %e,
+                    "skipping release: its published assets are incomplete"
+                );
+                skipped.push(format!("{}: {e}", release.tag_name));
+            }
+        }
+    }
+
+    // Published releases that none of which could be read is a different
+    // situation from "the pipeline has not published this combination yet",
+    // and the operator cannot tell them apart from an empty list.
+    if images.is_empty() {
+        if let Some(reason) = skipped.first() {
+            return Err(DiskError::ImageIndex {
+                url: source.releases_url(),
+                message: format!(
+                    "found {} published base-image release(s) but could not read any of them \
+                     ({} total skipped): {reason}",
+                    skipped.len(),
+                    scanned
+                ),
+            });
         }
     }
 
@@ -371,6 +448,7 @@ pub async fn list_remote(
 }
 
 async fn remote_image_from_release(
+    source: &ImageSource,
     client: &reqwest::Client,
     release: &GithubRelease,
 ) -> Result<Option<RemoteImage>, DiskError> {
@@ -387,9 +465,16 @@ async fn remote_image_from_release(
         .unwrap_or(&manifest_asset.name)
         .to_string();
 
-    let raw = get_bytes(client, &manifest_asset.browser_download_url, "manifest").await?;
+    let raw = get_bytes(
+        source,
+        client,
+        &manifest_asset.url,
+        "manifest",
+        ACCEPT_ASSET,
+    )
+    .await?;
     let manifest = base_image::parse_manifest(&raw).map_err(|e| DiskError::ImageIndex {
-        url: manifest_asset.browser_download_url.clone(),
+        url: manifest_asset.url.clone(),
         message: format!("release {}: {e}", release.tag_name),
     })?;
 
@@ -411,7 +496,7 @@ async fn remote_image_from_release(
                 })?;
             assets.push(RemoteAsset {
                 name: asset.name.clone(),
-                url: asset.browser_download_url.clone(),
+                url: asset.url.clone(),
                 size_bytes: if asset.size == 0 {
                     part.size_bytes
                 } else {
@@ -439,7 +524,7 @@ fn single_asset_payload(release: &GithubRelease, stem: &str) -> Result<Payload, 
             .find(|asset| asset.name == name)
             .map(|asset| RemoteAsset {
                 name: asset.name.clone(),
-                url: asset.browser_download_url.clone(),
+                url: asset.url.clone(),
                 size_bytes: asset.size,
             })
     };
@@ -507,7 +592,7 @@ pub async fn fetch_base_image(
     crate::diskspace::check_available_space(&target_dir, required)?;
 
     let client = source.client()?;
-    let outcome = fetch_into(&client, image, &staging, &qcow2_path, progress).await;
+    let outcome = fetch_into(source, &client, image, &staging, &qcow2_path, progress).await;
     let remove = std::fs::remove_dir_all(&staging);
     match (outcome, remove) {
         (Ok(()), Ok(())) => {}
@@ -537,6 +622,7 @@ pub async fn fetch_base_image(
 }
 
 async fn fetch_into(
+    source: &ImageSource,
     client: &reqwest::Client,
     image: &RemoteImage,
     staging: &Path,
@@ -587,7 +673,16 @@ async fn fetch_into(
                 downloaded_bytes: downloaded,
                 total_bytes: total,
             });
-            download_asset(client, asset, &local, expected, downloaded, total, progress).await?;
+            let download = AssetDownload {
+                source,
+                client,
+                dest: &local,
+                expected_sha256: expected,
+                already_downloaded: downloaded,
+                total,
+                progress,
+            };
+            download_asset(&download, asset).await?;
         }
         downloaded += asset.size_bytes;
     }
@@ -778,28 +873,27 @@ fn extract_qcow2(
     Ok(())
 }
 
-async fn download_asset(
-    client: &reqwest::Client,
-    asset: &RemoteAsset,
-    dest: &Path,
-    expected_sha256: Option<&str>,
+/// Everything one asset download needs beyond the asset itself: the source
+/// (auth), the client, where the bytes go, what they must hash to, how far the
+/// whole walk has come, and where progress goes.
+#[derive(Clone, Copy)]
+struct AssetDownload<'a> {
+    source: &'a ImageSource,
+    client: &'a reqwest::Client,
+    dest: &'a Path,
+    expected_sha256: Option<&'a str>,
     already_downloaded: u64,
     total: u64,
-    progress: &ProgressSink,
+    progress: &'a ProgressSink,
+}
+
+async fn download_asset(
+    download: &AssetDownload<'_>,
+    asset: &RemoteAsset,
 ) -> Result<(), DiskError> {
     let mut last_error = String::new();
     for attempt in 1..=MAX_ATTEMPTS {
-        match download_asset_once(
-            client,
-            asset,
-            dest,
-            expected_sha256,
-            already_downloaded,
-            total,
-            progress,
-        )
-        .await
-        {
+        match download_asset_once(download, asset).await {
             Ok(()) => return Ok(()),
             Err(e) => {
                 last_error = e.to_string();
@@ -810,7 +904,7 @@ async fn download_asset(
                     error = %last_error,
                     "asset download attempt failed"
                 );
-                let _ = std::fs::remove_file(dest);
+                let _ = std::fs::remove_file(download.dest);
                 if attempt < MAX_ATTEMPTS {
                     tokio::time::sleep(Duration::from_secs(u64::from(attempt))).await;
                 }
@@ -824,19 +918,23 @@ async fn download_asset(
 }
 
 async fn download_asset_once(
-    client: &reqwest::Client,
+    download: &AssetDownload<'_>,
     asset: &RemoteAsset,
-    dest: &Path,
-    expected_sha256: Option<&str>,
-    already_downloaded: u64,
-    total: u64,
-    progress: &ProgressSink,
 ) -> Result<(), DiskError> {
     use sha2::Digest;
 
-    let mut response = client
-        .get(&asset.url)
-        .header(reqwest::header::USER_AGENT, USER_AGENT)
+    let AssetDownload {
+        source,
+        client,
+        dest,
+        expected_sha256,
+        already_downloaded,
+        total,
+        progress,
+    } = *download;
+
+    let mut response = source
+        .request(client, &asset.url)
         .header(reqwest::header::ACCEPT, "application/octet-stream")
         .send()
         .await
@@ -927,33 +1025,139 @@ async fn download_asset_once(
     Ok(())
 }
 
-async fn get_bytes(client: &reqwest::Client, url: &str, what: &str) -> Result<Vec<u8>, DiskError> {
+/// How long a fetched catalog document stays valid. `handler image list`
+/// followed by `handler image download` walks the same releases, and one walk
+/// costs one request per scanned release; GitHub allows 60 requests per hour
+/// without a token, so re-walking every time would spend the budget on the
+/// second call of a pair. Five minutes is short enough that a freshly
+/// published build shows up on the next attempt after a rerun.
+const CATALOG_TTL: Duration = Duration::from_secs(300);
+
+/// Fetched catalog documents, keyed by `"<accept> <url>"` — the same asset URL
+/// serves JSON metadata or bytes depending on the Accept value, so the key has
+/// to carry it.
+type CatalogCache =
+    std::sync::Mutex<std::collections::HashMap<String, (std::time::Instant, Vec<u8>)>>;
+
+fn catalog_cache() -> &'static CatalogCache {
+    static CACHE: std::sync::OnceLock<CatalogCache> = std::sync::OnceLock::new();
+    CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// Drops every cached catalog document. Tests call this so one fixture does not
+/// lend its release index to the next; an operator-facing "refresh" would use
+/// the same entry point.
+pub fn invalidate_catalog_cache() {
+    catalog_cache()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clear();
+}
+
+fn cached_document(url: &str) -> Option<Vec<u8>> {
+    let mut cache = catalog_cache().lock().unwrap_or_else(|e| e.into_inner());
+    match cache.get(url) {
+        Some((fetched_at, body)) if fetched_at.elapsed() < CATALOG_TTL => Some(body.clone()),
+        Some(_) => {
+            cache.remove(url);
+            None
+        }
+        None => None,
+    }
+}
+
+fn remember_document(url: &str, body: &[u8]) {
+    catalog_cache()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(url.to_string(), (std::time::Instant::now(), body.to_vec()));
+}
+
+/// Turns a GitHub response into something the operator can act on: a private
+/// repository without a token is a 404, a spent rate limit is a 403, and both
+/// look like generic HTTP failures otherwise.
+fn index_failure(source: &ImageSource, url: &str, what: &str, detail: String) -> DiskError {
+    let mut hint = String::new();
+    let reached_github = detail.contains("HTTP ");
+    if !reached_github {
+        // Transport failure (refused, timed out, DNS): nothing was answered, so
+        // the fix is the network or a different source — not the credential.
+        hint = format!(
+            " — cannot reach {}; check the network, or point {} / {} at a mirror or a \
+             fixture server",
+            source.api_base, REPO_ENV, API_BASE_ENV
+        );
+    } else if !source.has_token() {
+        if detail.contains("404") {
+            hint = format!(
+                " — {} is private (or the name is wrong); set {} to a token with read \
+                 access to it",
+                source.repo, TOKEN_ENV
+            );
+        } else if detail.contains("403") || detail.contains("429") {
+            hint = format!(
+                " — GitHub throttles unauthenticated requests to 60 per hour; set {} to \
+                 raise the limit",
+                TOKEN_ENV
+            );
+        }
+    } else if detail.contains("401") || detail.contains("403") {
+        hint = format!(" — check that {} can read {}", TOKEN_ENV, source.repo);
+    }
+
+    DiskError::ImageIndex {
+        url: url.to_string(),
+        message: format!("{what}: {detail}{hint}"),
+    }
+}
+
+async fn get_bytes(
+    source: &ImageSource,
+    client: &reqwest::Client,
+    url: &str,
+    what: &str,
+    accept: &str,
+) -> Result<Vec<u8>, DiskError> {
+    let cache_key = format!("{accept} {url}");
+    if let Some(body) = cached_document(&cache_key) {
+        return Ok(body);
+    }
+
     let mut last_error = String::new();
+    let mut retryable = true;
     for attempt in 1..=MAX_ATTEMPTS {
-        let result = client
-            .get(url)
-            .header(reqwest::header::USER_AGENT, USER_AGENT)
-            .header(reqwest::header::ACCEPT, "application/vnd.github+json")
+        let result = source
+            .request(client, url)
+            .header(reqwest::header::ACCEPT, accept)
             .send()
             .await;
         let outcome = match result {
             Ok(response) if response.status().is_success() => match response.bytes().await {
-                Ok(body) => return Ok(body.to_vec()),
+                Ok(body) => {
+                    let body = body.to_vec();
+                    remember_document(&cache_key, &body);
+                    return Ok(body);
+                }
                 Err(e) => format!("cannot read the response body: {e}"),
             },
-            Ok(response) => format!("HTTP {}", response.status()),
+            Ok(response) => {
+                let status = response.status();
+                // A 401/403/404 answers the same way however often it is
+                // asked; only transport failures and 5xx are worth retrying.
+                retryable = status.is_server_error();
+                format!("HTTP {status}")
+            }
             Err(e) => e.to_string(),
         };
         last_error = outcome;
-        if attempt < MAX_ATTEMPTS {
+        if attempt < MAX_ATTEMPTS && retryable {
             tokio::time::sleep(Duration::from_secs(u64::from(attempt))).await;
+        } else if !retryable {
+            break;
         }
     }
 
-    Err(DiskError::ImageIndex {
-        url: url.to_string(),
-        message: format!("{what}: {last_error}"),
-    })
+    Err(index_failure(source, url, what, last_error))
 }
 
 /// Reads a list of files as one continuous stream — the parts of one
@@ -1116,19 +1320,51 @@ mod tests {
     struct Fixture {
         base: String,
         requests: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+        auth_headers: std::sync::Arc<std::sync::Mutex<Vec<Option<String>>>>,
         shutdown: tokio::sync::oneshot::Sender<()>,
+    }
+
+    /// Captured request headers (lowercased name → value), for the assertions
+    /// about what the client sends.
+    fn header_value(request: &str, name: &str) -> Option<String> {
+        request.lines().find_map(|line| {
+            let (key, value) = line.split_once(':')?;
+            (key.trim().to_ascii_lowercase() == name).then(|| value.trim().to_string())
+        })
     }
 
     impl Fixture {
         /// `build` receives the bound base URL so asset routes can point at
         /// this server; every request is recorded.
         async fn start(build: impl FnOnce(&str) -> Vec<(String, Vec<u8>)>) -> Self {
+            Self::start_inner(build, None).await
+        }
+
+        /// Every request answers with `status` — the private-repository (404)
+        /// and rate-limit (403) shapes.
+        async fn start_answering(status: u16) -> Self {
+            Self::start_inner(|_: &str| Vec::new(), Some(status)).await
+        }
+
+        async fn start_inner(
+            build: impl FnOnce(&str) -> Vec<(String, Vec<u8>)>,
+            forced_status: Option<u16>,
+        ) -> Self {
+            let status_line = match forced_status {
+                Some(404) => "404 Not Found",
+                Some(403) => "403 Forbidden",
+                Some(401) => "401 Unauthorized",
+                Some(500) => "500 Internal Server Error",
+                _ => "500 Internal Server Error",
+            };
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let addr = listener.local_addr().unwrap();
             let routes = build(&format!("http://{addr}"));
             let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let auth_headers = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
             let (shutdown, mut rx) = tokio::sync::oneshot::channel::<()>();
             let recorded = requests.clone();
+            let recorded_auth = auth_headers.clone();
             tokio::spawn(async move {
                 loop {
                     let accepted = tokio::select! {
@@ -1138,6 +1374,8 @@ mod tests {
                     let Ok((mut socket, _)) = accepted else { break };
                     let routes = routes.clone();
                     let recorded = recorded.clone();
+                    let recorded_auth = recorded_auth.clone();
+                    let forced_status = forced_status;
                     tokio::spawn(async move {
                         use tokio::io::{AsyncReadExt, AsyncWriteExt};
                         let mut buf = vec![0u8; 8192];
@@ -1148,17 +1386,23 @@ mod tests {
                             .lock()
                             .unwrap_or_else(|e| e.into_inner())
                             .push(path.clone());
+                        recorded_auth
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .push(header_value(&request, "authorization"));
                         let route_path = path.split('?').next().unwrap_or(&path).to_string();
                         let body = routes
                             .iter()
                             .find(|(route, _)| route == &route_path)
                             .map(|(_, body)| body.clone());
-                        let head = match &body {
-                            Some(body) => format!(
+                        let head = match (forced_status, &body) {
+                            (Some(_), _) | (None, None) => format!(
+                                "HTTP/1.1 {status_line}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                            ),
+                            (None, Some(body)) => format!(
                                 "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: application/octet-stream\r\nConnection: close\r\n\r\n",
                                 body.len()
                             ),
-                            None => "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_string(),
                         };
                         let _ = socket.write_all(head.as_bytes()).await;
                         if let Some(body) = body {
@@ -1171,8 +1415,23 @@ mod tests {
             Self {
                 base: format!("http://{addr}"),
                 requests,
+                auth_headers,
                 shutdown,
             }
+        }
+
+        fn request_count(&self) -> usize {
+            self.requests
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .len()
+        }
+
+        fn auth_headers(&self) -> Vec<Option<String>> {
+            self.auth_headers
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone()
         }
 
         /// Payload-part requests only: `list_remote` fetches the manifest
@@ -1210,7 +1469,11 @@ mod tests {
 
     impl ReleaseFixture {
         fn new(payload: Vec<u8>) -> Self {
-            let manifest_asset = format!("{STEM}.manifest.json");
+            Self::with_stem(payload, STEM)
+        }
+
+        fn with_stem(payload: Vec<u8>, stem: &str) -> Self {
+            let manifest_asset = format!("{stem}.manifest.json");
             let compressed = zstd::encode_all(std::io::Cursor::new(&payload), 3).unwrap();
             let split = compressed.len() / 2;
             let parts = vec![
@@ -1247,7 +1510,7 @@ mod tests {
 
         fn releases_json_without_parts(&self, base: &str) -> Vec<u8> {
             format!(
-                r#"[{{"tag_name":"base-image-android13-vanilla-20260901-000000","draft":false,"prerelease":false,"assets":[{{"name":"{}","browser_download_url":"{}","size":{}}}]}}]"#,
+                r#"[{{"tag_name":"base-image-android13-vanilla-20260901-000000","draft":false,"assets":[{{"name":"{}","url":"{}","size":{}}}]}}]"#,
                 self.manifest_asset,
                 Self::asset_url(base, &self.manifest_asset),
                 self.manifest.len()
@@ -1256,19 +1519,25 @@ mod tests {
         }
 
         fn releases_json(&self, base: &str) -> Vec<u8> {
+            self.releases_json_with_flags(base, false, false)
+        }
+
+        /// The same release with explicit draft/prerelease flags — the
+        /// pipeline publishes prereleases and stages drafts.
+        fn releases_json_with_flags(&self, base: &str, draft: bool, prerelease: bool) -> Vec<u8> {
             let parts_json: Vec<String> = self
                 .parts
                 .iter()
                 .map(|(name, bytes)| {
                     format!(
-                        r#"{{"name":"{name}","browser_download_url":"{}","size":{}}}"#,
+                        r#"{{"name":"{name}","url":"{}","size":{}}}"#,
                         Self::asset_url(base, name),
                         bytes.len()
                     )
                 })
                 .collect();
             format!(
-                r#"[{{"tag_name":"base-image-android13-vanilla-20260901-000000","draft":false,"prerelease":false,"assets":[{{"name":"{}","browser_download_url":"{}","size":{}}},{}]}}]"#,
+                r#"[{{"tag_name":"base-image-android13-vanilla-20260901-000000","draft":{draft},"prerelease":{prerelease},"assets":[{{"name":"{}","url":"{}","size":{}}},{}]}}]"#,
                 self.manifest_asset,
                 Self::asset_url(base, &self.manifest_asset),
                 self.manifest.len(),
@@ -1305,6 +1574,11 @@ mod tests {
         payload
     }
 
+    /// Holds the process-wide ANDLER_HOME (the base-image cache lives under it)
+    /// and removes it on drop. Every test that reaches `fetch_base_image` or
+    /// `installed_image` must hold one — without it a test picks up whichever
+    /// home another test happens to be using, and that test's drop deletes the
+    /// directory mid-download.
     struct CacheGuard {
         _lock: std::sync::MutexGuard<'static, ()>,
         base: PathBuf,
@@ -1384,6 +1658,185 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn list_remote_accepts_prereleases_and_skips_drafts() {
+        // The pipeline publishes every base image as a prerelease (automated,
+        // unreviewed output) and stages the release as a draft while the parts
+        // upload. Only the tag prefix separates image builds from real project
+        // releases — treating the prerelease flag as "not for consumption"
+        // would hide every published image.
+        let fixture = ReleaseFixture::new(image_payload());
+        let server = Fixture::start(|base| {
+            let published = String::from_utf8(fixture.releases_json_with_flags(base, false, true))
+                .unwrap()
+                .trim_start_matches('[')
+                .trim_end_matches(']')
+                .to_string();
+            let draft = String::from_utf8(fixture.releases_json_with_flags(base, true, false))
+                .unwrap()
+                .trim_start_matches('[')
+                .trim_end_matches(']')
+                .to_string();
+            // Same server, but the release index carries a prerelease and a
+            // draft; the manifest/part routes stay so the listed build is
+            // installable.
+            fixture
+                .routes(base)
+                .into_iter()
+                .map(|(path, body)| {
+                    if path == "/repos/acme/andler/releases" {
+                        (path, format!("[{published},{draft}]").into_bytes())
+                    } else {
+                        (path, body)
+                    }
+                })
+                .collect()
+        })
+        .await;
+        let source = server.source("acme/andler");
+
+        let images = list_remote(&source, &ImageFilter::default()).await.unwrap();
+
+        assert_eq!(
+            images.len(),
+            1,
+            "the published prerelease is listed, the draft is not"
+        );
+        assert_eq!(
+            images[0].release_tag,
+            "base-image-android13-vanilla-20260901-000000"
+        );
+        let _ = server.shutdown.send(());
+    }
+
+    #[tokio::test]
+    async fn requests_carry_the_configured_token() {
+        let _cache = CacheGuard::new();
+        let fixture = ReleaseFixture::new(image_payload());
+        let server = Fixture::start(|base| fixture.routes(base)).await;
+
+        // Without a token the client must not invent an Authorization header.
+        let anonymous = server.source("acme/andler");
+        list_remote(&anonymous, &ImageFilter::default())
+            .await
+            .unwrap();
+        assert!(
+            server.auth_headers().iter().all(|header| header.is_none()),
+            "no credential configured, none sent: {:?}",
+            server.auth_headers()
+        );
+
+        // With one, every request (index, manifest and asset alike) carries it.
+        let anonymous_requests = server.auth_headers().len();
+        invalidate_catalog_cache();
+        let authorized = server
+            .source("acme/andler")
+            .with_token(Some("ghp_test".into()));
+        let image = list_remote(&authorized, &ImageFilter::default())
+            .await
+            .unwrap()
+            .remove(0);
+        fetch_base_image(&authorized, &image, false, &ProgressSink::silent())
+            .await
+            .unwrap();
+
+        let headers = server.auth_headers()[anonymous_requests..].to_vec();
+        assert!(
+            headers.len() >= 4,
+            "index + manifest + parts were all requested with the token: {headers:?}"
+        );
+        assert!(
+            headers
+                .iter()
+                .all(|header| header.as_deref() == Some("Bearer ghp_test")),
+            "a private repository needs the token on every request: {headers:?}"
+        );
+        let _ = server.shutdown.send(());
+    }
+
+    #[tokio::test]
+    async fn a_private_repository_without_a_token_says_how_to_fix_it() {
+        // GitHub answers 404 for the release index of a private repository
+        // when the request is unauthenticated — indistinguishable from "no
+        // such repository" unless the error explains it.
+        let server = Fixture::start_answering(404).await;
+        let source = server.source("acme/private");
+
+        let err = list_remote(&source, &ImageFilter::default())
+            .await
+            .unwrap_err();
+
+        let message = err.to_string();
+        assert!(message.contains("404"), "{message}");
+        assert!(message.contains("private"), "{message}");
+        assert!(message.contains(TOKEN_ENV), "{message}");
+        let _ = server.shutdown.send(());
+    }
+
+    #[tokio::test]
+    async fn a_throttled_index_says_how_to_fix_it() {
+        let server = Fixture::start_answering(403).await;
+        let source = server.source("acme/andler");
+
+        let err = list_remote(&source, &ImageFilter::default())
+            .await
+            .unwrap_err();
+
+        let message = err.to_string();
+        assert!(message.contains("403"), "{message}");
+        assert!(
+            message.contains("60 per hour") && message.contains(TOKEN_ENV),
+            "a spent rate limit must name the way out: {message}"
+        );
+        let _ = server.shutdown.send(());
+    }
+
+    #[tokio::test]
+    async fn a_transport_failure_is_retried_before_it_fails() {
+        // The fixture is shut down before the call: connection refused is a
+        // transport failure, so the client retries rather than giving up on
+        // the first attempt.
+        let fixture = ReleaseFixture::new(image_payload());
+        let server = Fixture::start(|base| fixture.routes(base)).await;
+        let source = server.source("acme/andler");
+        let _ = server.shutdown.send(());
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let started = std::time::Instant::now();
+        let err = list_remote(&source, &ImageFilter::default())
+            .await
+            .unwrap_err();
+
+        assert!(
+            started.elapsed() >= Duration::from_secs(3),
+            "three attempts with backoff take at least a few seconds: {:?}",
+            started.elapsed()
+        );
+        assert!(err.to_string().contains("release index"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn the_catalog_walk_is_cached_for_repeat_calls() {
+        // One walk costs a request per scanned release, and GitHub allows 60
+        // per hour anonymously — `image list` followed by `image download`
+        // must not pay for the same walk twice.
+        let fixture = ReleaseFixture::new(image_payload());
+        let server = Fixture::start(|base| fixture.routes(base)).await;
+        let source = server.source("acme/andler");
+        let first = list_remote(&source, &ImageFilter::default()).await.unwrap();
+        let requests_after_first = server.request_count();
+
+        let second = list_remote(&source, &ImageFilter::default()).await.unwrap();
+
+        assert_eq!(first.len(), second.len());
+        assert_eq!(
+            server.request_count(),
+            requests_after_first,
+            "the second walk must be served from the cache"
+        );
+        let _ = server.shutdown.send(());
+    }
+
+    #[tokio::test]
     async fn list_remote_filters_by_version_and_variant() {
         let fixture = ReleaseFixture::new(image_payload());
         let server = Fixture::start(|base| fixture.routes(base)).await;
@@ -1417,11 +1870,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn list_remote_skips_a_release_with_a_missing_part_asset() {
-        let fixture = ReleaseFixture::new(image_payload());
+    async fn list_remote_explains_releases_it_cannot_read() {
         // The release advertises a manifest that lists parts the release does
-        // not carry: an incomplete publication must not be offered as
-        // installable (and must not fail the whole listing).
+        // not carry. An empty catalog here would read as "the pipeline has not
+        // published this combination yet" — which is a different, wrong story,
+        // so the failure has to surface with the release name and the reason.
+        let fixture = ReleaseFixture::new(image_payload());
         let server = Fixture::start(|base| {
             vec![
                 (
@@ -1437,9 +1891,73 @@ mod tests {
         .await;
         let source = server.source("acme/andler");
 
+        let err = list_remote(&source, &ImageFilter::default())
+            .await
+            .unwrap_err();
+
+        let message = err.to_string();
+        assert!(message.contains("could not read any of them"), "{message}");
+        assert!(
+            message.contains("base-image-android13-vanilla-20260901-000000"),
+            "the unreadable release must be named: {message}"
+        );
+        assert!(
+            message.contains("no such asset"),
+            "the reason must survive to the operator: {message}"
+        );
+        let _ = server.shutdown.send(());
+    }
+
+    #[tokio::test]
+    async fn list_remote_still_lists_the_healthy_releases_when_another_is_broken() {
+        // A single bad publication must not hide the good ones: the broken
+        // release is skipped (with a warning in the daemon log), the healthy
+        // one is returned.
+        let broken = ReleaseFixture::new(image_payload());
+        let healthy =
+            ReleaseFixture::with_stem(image_payload(), "linux-waydroid-android13-vanilla-good1234");
+        let server = Fixture::start(|base| {
+            let broken_release = String::from_utf8(broken.releases_json_without_parts(base))
+                .unwrap()
+                .trim_start_matches('[')
+                .trim_end_matches(']')
+                .to_string();
+            let healthy_release = String::from_utf8(healthy.releases_json(base))
+                .unwrap()
+                .trim_start_matches('[')
+                .trim_end_matches(']')
+                .to_string();
+            // Broken first: it must not poison the entry after it.
+            vec![
+                (
+                    "/repos/acme/andler/releases".to_string(),
+                    format!("[{broken_release},{healthy_release}]").into_bytes(),
+                ),
+                (
+                    format!("/assets/{}", broken.manifest_asset),
+                    broken.manifest.clone(),
+                ),
+                (
+                    format!("/assets/{}", healthy.manifest_asset),
+                    healthy.manifest.clone(),
+                ),
+                (
+                    format!("/assets/{}", healthy.parts[0].0),
+                    healthy.parts[0].1.clone(),
+                ),
+                (
+                    format!("/assets/{}", healthy.parts[1].0),
+                    healthy.parts[1].1.clone(),
+                ),
+            ]
+        })
+        .await;
+        let source = server.source("acme/andler");
+
         let images = list_remote(&source, &ImageFilter::default()).await.unwrap();
 
-        assert!(images.is_empty(), "a release missing its parts is skipped");
+        assert_eq!(images.len(), 1, "the healthy release is listed: {images:?}");
+        assert_eq!(images[0].stem, "linux-waydroid-android13-vanilla-good1234");
         let _ = server.shutdown.send(());
     }
 

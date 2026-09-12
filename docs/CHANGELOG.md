@@ -9,6 +9,14 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Fixed
 
+#### Base-image downloads against the real pipeline output
+
+- **The downloader now reads what the pipeline actually publishes**: three separate mismatches made a published catalog look empty. Base-image releases are published as GitHub *pre-releases*, which the catalog walk filtered out; assets were requested through `browser_download_url`, which is not fetchable for a private repository (the API asset URL is, so every request now goes through it); and the manifest was requested with the JSON `Accept` value, so GitHub answered with a *description* of the asset instead of the manifest bytes — which parsed as "missing field `android_major`" and skipped the release. `ANDLERD_IMAGE_TOKEN` (or `GH_TOKEN`/`GITHUB_TOKEN`) supplies the credential a private repository needs and raises the rate limit from 60 to 5000 requests/hour; a `404` without a token and a spent rate limit now say so instead of surfacing a bare HTTP status. One catalog walk is cached for five minutes, and a release that exists but cannot be read is reported with its name and reason rather than as an empty catalog.
+- **`test(e2e)`: `32_image_download.sh` publishes its fixture the way the pipeline does** — pre-release flag, API asset URLs, an asset-shaped URL tree — and asserts that prerelease builds are offered while drafts are not.
+
+
+### Added
+
 - **`create --dry-run --json` created the instance it was previewing**: the JSON branches printed the resolved config and then fell through to the real `CreateInstance`/`CreateAndroidInstance` call (only the human-readable branches returned early), so a preview could create a VM — and fail with a confusing firmware error when the preview's paths were not real. Both branches now return after printing; `08_preview_verify.sh` asserts that nothing was created.
 
 

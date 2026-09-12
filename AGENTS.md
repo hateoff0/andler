@@ -437,6 +437,7 @@ A multi-phase architecture rework (see Branching) is tracked by a plan file crea
 | `ANDLERD_DEV_RESTART=1` | daemon | Dev restart mode: SIGTERM/Ctrl+C leaves VMs running (QEMU survives the daemon and is adopted on the next start) |
 | `ANDLERD_IMAGE_REPO` | daemon | `owner/repo` whose GitHub releases hold the base images (default `hateoff0/andler`) |
 | `ANDLERD_IMAGE_API_BASE` | daemon | API base the release catalog is read from (default `https://api.github.com`; point it at a mirror or a fixture server) |
+| `ANDLERD_IMAGE_TOKEN` | daemon | Token for the base-image releases: required when `ANDLERD_IMAGE_REPO` is private, and raises the GitHub rate limit from 60 to 5000 requests/hour. Falls back to `GH_TOKEN`/`GITHUB_TOKEN` |
 | `RUST_LOG` | daemon | tracing filter (overrides `-v`/`-vv` verbosity) |
 | `ANDLERD_ADDR` | cli | Daemon address (default `http://127.0.0.1:50051`); `--daemon-addr` flag overrides |
 | `ANDLER_HOME` | both | Root of all andler data (default `~/.andler`) |

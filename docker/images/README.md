@@ -466,8 +466,11 @@ A downloaded image lands in the same cache this document describes
 (`~/.andler/cache/base-images/android<major>-<variant>/<stem>.qcow2` plus the
 published manifest), so `base_image::resolve`, `andler cache list|clean`, and
 `andler create --base-image-path` treat it exactly like a locally built one. The
-daemon reads the catalog from `ANDLERD_IMAGE_REPO` (default `hateoff0/andler`)
-and `ANDLERD_IMAGE_API_BASE` (default `https://api.github.com`).
+daemon reads the catalog from `ANDLERD_IMAGE_REPO` (default `hateoff0/andler`),
+`ANDLERD_IMAGE_API_BASE` (default `https://api.github.com`) and
+`ANDLERD_IMAGE_TOKEN` (or the `GH_TOKEN`/`GITHUB_TOKEN` a `gh` user already has) —
+the token is what makes this private repository's releases readable at all, and
+it also raises GitHub's anonymous limit of 60 requests per hour to 5000.
 
 ## Base image discovery
 

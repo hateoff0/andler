@@ -871,6 +871,17 @@ enum CliAndroidVersion {
     Android13,
 }
 
+impl CliAndroidVersion {
+    /// The bare version number, for prose ("Android 13", not "Android
+    /// Android13" — the enum's Debug name is not a word).
+    pub(crate) fn number(&self) -> &'static str {
+        match self {
+            CliAndroidVersion::Android11 => "11",
+            CliAndroidVersion::Android13 => "13",
+        }
+    }
+}
+
 impl From<CliAndroidVersion> for ProtoAndroidVersion {
     fn from(value: CliAndroidVersion) -> Self {
         match value {

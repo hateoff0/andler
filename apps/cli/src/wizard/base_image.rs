@@ -64,7 +64,10 @@ pub async fn ask(
     }
     options.push(ENTER_MANUALLY.to_string());
 
-    let prompt = format!("No matching {variant} image for Android {version:?} in the cache:");
+    let prompt = format!(
+        "No matching {variant} image for Android {} in the cache:",
+        version.number()
+    );
     let choice = Select::new(&prompt, options.clone())
         .with_help_message(&match &published {
             Some(image) => format!(

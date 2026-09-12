@@ -11,10 +11,12 @@ source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 
 WORK="$E2E_WORKDIR/32-image-download"
 FIXTURE="$WORK/fixture"
-ASSETS="$FIXTURE/assets"
+# GitHub's URL space, mirrored on disk: the release index, and every asset
+# under the API asset path the release JSON points at.
 RELEASES_DIR="$FIXTURE/repos/acme/andler"
+ASSETS="$RELEASES_DIR/releases/assets"
 CACHE="$HOME/.andler/cache/base-images"
-mkdir -p "$ASSETS" "$RELEASES_DIR"
+mkdir -p "$ASSETS" "$RELEASES_DIR/releases"
 
 # Fixed port: the releases JSON carries absolute asset URLs, so the fixture
 # has to know its own address before anything is served.
@@ -50,7 +52,7 @@ build_release() {
         [[ -n "$parts_json" ]] && parts_json+=","
         [[ -n "$assets_json" ]] && assets_json+=","
         parts_json+="{\"name\":\"$name\",\"sha256\":\"$(sha256_of "$part")\",\"size_bytes\":$(stat -c%s "$part")}"
-        assets_json+="{\"name\":\"$name\",\"browser_download_url\":\"$BASE_URL/assets/$name\",\"size\":$(stat -c%s "$part")}"
+        assets_json+="{\"name\":\"$name\",\"url\":\"$BASE_URL/repos/acme/andler/releases/assets/$name\",\"size\":$(stat -c%s "$part")}"
     done
 
     local qcow_size qcow_sha
@@ -63,7 +65,9 @@ EOF
 
     local manifest_size
     manifest_size="$(stat -c%s "$ASSETS/$stem.manifest.json")"
-    printf '{"tag_name":"%s","draft":false,"prerelease":false,"assets":[{"name":"%s.manifest.json","browser_download_url":"%s/assets/%s.manifest.json","size":%s}%s]}' \
+    # `prerelease: true` is the shape the pipeline publishes (and `url` is the
+    # API asset URL, the only fetchable one for a private repository).
+    printf '{"tag_name":"%s","draft":false,"prerelease":true,"assets":[{"name":"%s.manifest.json","url":"%s/repos/acme/andler/releases/assets/%s.manifest.json","size":%s}%s]}' \
         "$tag" "$stem" "$BASE_URL" "$stem" "$manifest_size" \
         "$([[ -n "$assets_json" ]] && echo ",$assets_json")"
 }
@@ -74,8 +78,11 @@ build_release 11 "$STEM11" "$TAG11" > "$WORK/release11.json"
 # A draft release must never be offered: it is what the workflow publishes
 # while the image is still being uploaded.
 printf '{"tag_name":"base-image-android13-gapps-20260902-000000","draft":true,"prerelease":false,"assets":[]}' > "$WORK/draft.json"
+# `releases` is a directory here (the asset tree lives under
+# `releases/assets/...`), and python's http.server answers a directory request
+# with its `index.html` — which is exactly the URL shape GitHub serves.
 { printf '['; cat "$WORK/release13.json"; printf ','; cat "$WORK/release11.json"; printf ','; cat "$WORK/draft.json"; printf ']\n'; } \
-    > "$RELEASES_DIR/releases"
+    > "$RELEASES_DIR/releases/index.html"
 
 python3 -m http.server "$PORT" --directory "$FIXTURE" >"$WORK/http.log" 2>&1 &
 HTTP_PID=$!
@@ -99,6 +106,9 @@ trap cleanup EXIT
 # fixture up (same pattern as the persistence/autostart suites).
 export ANDLERD_IMAGE_REPO="acme/andler"
 export ANDLERD_IMAGE_API_BASE="$BASE_URL"
+# A configured credential must not change anything a static fixture can see —
+# the fixture both ignores it and (in the unit tests) asserts it is sent.
+export ANDLERD_IMAGE_TOKEN="e2e-fixture-token"
 stop_daemon
 start_daemon
 
@@ -119,6 +129,7 @@ expect_ok "json reports the parts total as the download size" -- \
     jq -e '.images[] | select(.android_major == "13") | .download_bytes > 0' "$WORK/list.json"
 expect_ok "json reports nothing installed" -- jq -e '[.images[].installed] | all(. == false)' "$WORK/list.json"
 expect_ok "the draft release is not offered" -- jq -e '[.images[].release_tag] | all(contains("gapps") | not)' "$WORK/list.json"
+expect_ok "prerelease builds are offered" -- jq -e '[.images[].release_tag] | length == 2' "$WORK/list.json"
 
 expect_ok "filter by android version" -- andler image list --android-version 11
 expect_out_grep "android 11 build listed" "$ID11"
@@ -141,6 +152,14 @@ ls "$CACHE/android13-vanilla"/.fetch-* >/dev/null 2>&1 \
 
 expect_ok "re-downloading the same build is a no-op" -- andler image download --android-version 13 --variant vanilla
 expect_out_grep "reuse is reported" "already cached"
+
+# The catalog walk is cached for five minutes: a second listing is served from
+# it, so `image list` + `image download` do not spend the request budget twice.
+# (The fixture cannot count requests here — python's http.server has no hook —
+# so this asserts the user-visible half: the catalog is still complete.)
+expect_ok "listing again still reports the full catalog" -- andler image list
+expect_out_grep "android 13 still listed" "$ID13"
+expect_out_grep "android 11 still listed" "$ID11"
 
 expect_ok "list reports the cached build" -- andler image list
 expect_out_grep "android 13 build is cached" "cached: $INSTALLED_13"
@@ -202,6 +221,6 @@ expect_out_grep "config points at the cached image" "android13-vanilla/$STEM13.q
 expect_ok "remove the instance" -- andler remove "$ID" --purge
 
 # Drop the fixture environment again: later suites must see the real defaults.
-unset ANDLERD_IMAGE_REPO ANDLERD_IMAGE_API_BASE
+unset ANDLERD_IMAGE_REPO ANDLERD_IMAGE_API_BASE ANDLERD_IMAGE_TOKEN
 stop_daemon
 start_daemon

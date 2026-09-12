@@ -182,7 +182,9 @@ pub fn sha256_of(path: &std::path::Path) -> Result<String, BaseImageError> {
 pub enum BaseImageError {
     #[error(
         "no base image found for Android {android_major} ({variant}) in {searched:?}. \
-         Build one first: docker/images/build.sh {android_major} {variant}"
+         Build one with `docker/images/build.sh {android_major} {variant}`, or download a \
+         published one with `andler image download --android-version {android_major} \
+         --variant {variant}`"
     )]
     NotFound {
         android_major: String,

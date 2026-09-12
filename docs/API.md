@@ -712,7 +712,11 @@ andler image download (--android-version <11|13> --variant <vanilla|gapps> | --r
 
 `list` prints the newest build per (version, package set) with its download size and whether it is already in `~/.andler/cache/base-images/<android>-<variant>/`; `--json` reports `{source, images:[…]}`. `download` verifies every asset against the sha256 in the release's manifest, unpacks the zstd stream, verifies the unpacked qcow2 and installs the image together with the manifest exactly as published. An already-cached build is reused (`already cached`) unless `--force`; an interrupted download resumes from its verified parts. `--json` emits one JSON document per progress line.
 
-The daemon reads `ANDLERD_IMAGE_REPO` (default `hateoff0/andler`) and `ANDLERD_IMAGE_API_BASE` (default `https://api.github.com`). A build the pipeline never published is reported with both the local build command (`docker/images/build.sh <11|13> <VANILLA|GAPPS>`) and `andler image list`.
+The daemon reads `ANDLERD_IMAGE_REPO` (default `hateoff0/andler`), `ANDLERD_IMAGE_API_BASE` (default `https://api.github.com`) and `ANDLERD_IMAGE_TOKEN` (unless `GH_TOKEN`/`GITHUB_TOKEN` is already set). The token is required when the repository is private — GitHub answers `404` for its release index otherwise, which the error explains — and it also raises the anonymous rate limit (60 requests/hour) to 5000.
+
+Base-image releases are published as **pre-releases** (they are automated, unreviewed CI output) and are listed like any other build: the `base-image-` tag prefix is what separates them from real project releases. Drafts are not listed. One catalog walk is cached for five minutes, so `image list` followed by `image download` does not pay for the same walk twice.
+
+A build the pipeline never published is reported with both the local build command (`docker/images/build.sh <11|13> <VANILLA|GAPPS>`) and `andler image list`; a release that exists but cannot be read is reported *as such*, naming the release and the reason, rather than as an empty catalog.
 
 Downloaded images are ordinary cache entries: `base_image::resolve` finds them, `andler create --base-image-path <path>` uses them, and `andler cache list`/`cache clean` manage them.
 

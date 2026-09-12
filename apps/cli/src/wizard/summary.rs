@@ -104,8 +104,8 @@ fn summary_text(
             panel.field(
                 "Android version",
                 format!(
-                    "{:?}{}",
-                    a.android_version,
+                    "Android {}{}",
+                    a.android_version.number(),
                     if is_basic { " (recommended)" } else { "" }
                 ),
             );

@@ -177,10 +177,12 @@ fn select_image(
 /// do about it. Every failure here is either "the pipeline has not published
 /// this yet" or "this host cannot reach the release index".
 fn image_source_error(source: &ImageSource, message: String) -> DaemonError {
+    // Deliberately short: the downloader's own message already carries the
+    // actionable hint (token, rate limit, mirror), and the daemon truncates
+    // status messages at 384 characters — a long suffix would push the part
+    // that tells the operator what to do over the edge.
     DaemonError::BaseImageUnavailable(format!(
-        "{message} — base images are published as GitHub releases by the project's CI \
-         pipeline ({}); point ANDLERD_IMAGE_REPO / ANDLERD_IMAGE_API_BASE at another \
-         source if you mirror them",
+        "{message} — published as GitHub releases by the project's CI ({})",
         source.release_page()
     ))
 }
