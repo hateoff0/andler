@@ -54,7 +54,7 @@ andler create \
 |------|----------|-------------|
 | `--file <path>` | Yes* | Path to TOML config file (*mutually exclusive with `--kind`) |
 | `--kind <type>` | Yes* | VM type: `linux` or `android` (*mutually exclusive with `--file`) |
-| `--quick` | No | Skip interactive wizard, create with all defaults. Requires `--kind`. Mutually exclusive with `--file`. |
+| `--quick` | No | Skip interactive wizard, create with all defaults. Requires `--kind`. Mutually exclusive with `--file`. The defaults' guest-side selections (ARM translator, clipboard agent) are recorded but **not** installed — run `andler guest apply <id>` for that. |
 | `--name <name>` | Yes** | Instance name (**required in CLI mode) |
 | `--ovmf-vars-template <path>` | No | Path to OVMF_VARS template (auto-detected when omitted) |
 | `--iso-path <path>` | Yes*** | Path to installer ISO (***required for `--kind linux`) |
@@ -496,6 +496,17 @@ With `--json`, prints `{ "exit_code", "stdout", "stderr" }`; the CLI still exits
 
 Guest package management — install, remove, or list packages in the guest OS. Auto-fallback: if VM is running and guest agent is available → online via the guest agent socket (`guest-exec`); if VM is stopped → offline via `guestmount` (FUSE) + an unprivileged user namespace — zero root either way.
 
+`andler guest apply <instance-id> [--json]` applies what the instance's **own configuration** asks for instead of a package named on the command line: `kind.android_profile.arm_translator` (when not `none`) installs that ARM translator, and `input.clipboard_enabled` installs `spice-vdagent` (the guest half of clipboard sharing — without it the QEMU-side setting does nothing). Each selection is applied through the state-appropriate path (offline appliance while the disk is idle, guest agent on a running VM; a translator switch needs the VM stopped) and reported on its own line:
+
+```
+✓ arm-translator: applied — libndk installed into /home/user/.andler/instances/<id>/disk.qcow2
+• spice-vdagent: already present — spice-vdagent is already installed
+- arm-translator: skipped — the ARM translator is written to the instance disk, so it needs the VM stopped (currently Running): `andler stop <id>` …
+✗ spice-vdagent: failed — … — retry with `andler guest install spice-vdagent <id>`
+```
+
+A selection the disk cannot take yet (no installed guest OS, e.g. a fresh ISO-install VM) is `skipped`, not an error, and one failing selection never aborts the others. `--json` prints `{"selections":[{"name","status","message"}]}` with `status` in `applied`/`already_present`/`skipped`/`failed`. This is the route `andler create`'s wizard calls right after creating a VM.
+
 Mode selection by instance state:
 
 | State | Behavior |
@@ -872,53 +883,17 @@ Defined in `services/andler-rpc/proto/andler.proto`. Uses `tonic`/`prost` for Ru
 
 ### Service: `AndlerService`
 
-| RPC | Request | Response | Streaming |
-|-----|---------|----------|-----------|
-| `CreateInstance` | `CreateInstanceRequest` | `CreateInstanceResponse` | Unary |
-| `CreateAndroidInstance` | `CreateAndroidInstanceRequest` | `CreateInstanceResponse` | Unary |
-| `StartInstance` | `InstanceIdRequest` | `Empty` | Unary |
-| `StopInstance` | `StopInstanceRequest` | `Empty` | Unary |
-| `PauseInstance` | `InstanceIdRequest` | `Empty` | Unary |
-| `ResumeInstance` | `InstanceIdRequest` | `Empty` | Unary |
-| `GetInstanceStatus` | `InstanceIdRequest` | `InstanceStatusResponse` | Unary |
-| `ListInstances` | `Empty` | `ListInstancesResponse` | Unary |
-| `RemoveInstance` | `RemoveInstanceRequest` | `Empty` | Unary |
-| `GetInstanceConfig` | `InstanceIdRequest` | `GetInstanceConfigResponse` | Unary |
-| `UpdateInstanceConfig` | `UpdateInstanceConfigRequest` | `Empty` | Unary |
-| `StreamInstanceLogs` | `InstanceIdRequest` | `stream LogLineResponse` | Server-streaming |
-| `StreamResourceMetrics` | `InstanceIdRequest` | `stream ResourceMetricsResponse` | Server-streaming |
-| `CloneInstance` | `CloneInstanceRequest` | `CreateInstanceResponse` | Unary |
-| `ExportInstanceDisk` | `ExportInstanceDiskRequest` | `ExportInstanceDiskResponse` | Unary |
-| `ExportInstanceOci` | `ExportInstanceOciRequest` | `ExportInstanceOciResponse` | Unary |
-| `CreateSnapshot` | `CreateSnapshotRequest` | `CreateSnapshotResponse` | Unary |
-| `RestoreSnapshot` | `RestoreSnapshotRequest` | `Empty` | Unary |
-| `DeleteSnapshot` | `DeleteSnapshotRequest` | `Empty` | Unary |
-| `ListSnapshots` | `InstanceIdRequest` | `ListSnapshotsResponse` | Unary |
-| `InstallGuestAgent` | `InstallGuestAgentRequest` | `Empty` | Unary |
-| `RemoveGuestAgent` | `RemoveGuestAgentRequest` | `Empty` | Unary |
-| `ListGuestPackages` | `InstanceIdRequest` | `ListGuestPackagesResponse` | Unary |
-| `SwitchArmTranslator` | `SwitchArmTranslatorRequest` | `Empty` | Unary |
-| `SetInstanceConfig` | `SetInstanceConfigRequest` | `Empty` | Unary |
-| `SwitchAndroidBootMode` | `SwitchAndroidBootModeRequest` | `Empty` | Unary |
-| `GetAndroidBootMode` | `InstanceIdRequest` | `GetAndroidBootModeResponse` | Unary |
-| `AttachDisk` | `AttachDiskRequest` | `AttachDiskResponse` | Unary |
-| `DetachDisk` | `DetachDiskRequest` | `Empty` | Unary |
-| `AttachNetwork` | `AttachNetworkRequest` | `AttachNetworkResponse` | Unary |
-| `DetachNetwork` | `DetachNetworkRequest` | `Empty` | Unary |
+The authoritative RPC list, request/response messages and status-code table live
+in `docs/GRPC_API.md` (that document owns the gRPC surface; this one owns the
+CLI). The CLI is a thin 1:1 wrapper: every command sends exactly one request and
+prints the response.
 
 ### Error Codes
 
-| gRPC Status | Daemon Error | When |
-|-------------|--------------|------|
-| `NOT_FOUND` | `InstanceNotFound`, `SnapshotNotFound`, `InstanceRefNotFound`, `DiskNotAttached`, `NetworkNotAttached` | Unknown instance/snapshot/ref, or detaching a device that is not attached |
-| `UNIMPLEMENTED` | `NoBackendRegistered`, `Backend(NotImplemented)` | Backend kind not available |
-| `FAILED_PRECONDITION` | `InvalidTransition`, `InstanceNotRemovable`, `InstanceNotClonable`, `InstanceAlreadyStopped`, `SharedBaseNotSupportedForLinuxVm`, `InstanceHasLiveClones`, `SnapshotOperationRequiresRunningInstance`, `SnapshotLimitExceeded`, `GuestAgentUnavailable`, `NotAndroid`, `InstanceMustBeStopped`, `HotplugRequiresRunningInstance`, `MemoryOvercommit`, `Backend(HandleNotFound)`, `Backend(ProcessNotRunning)` | Wrong lifecycle state, resource limit, guest agent unavailable, wrong instance kind |
-| `ALREADY_EXISTS` | `SnapshotAlreadyExists`, `DiskAlreadyAttached` | Duplicate snapshot tag, or disk image already attached |
-| `INVALID_ARGUMENT` | `ConvertError`, `EmptyInstanceRef`, `MalformedInstanceRef`, `AmbiguousInstanceId`, `ConfigIdMismatch`, `ConfigKindChanged`, `ConfigDiskPathChanged`, `InvalidConfig`, `InvalidConfigKey`, `MissingOvmfVarsTemplate` | Malformed request or invalid arguments |
-| `RESOURCE_EXHAUSTED` | `InsufficientDiskSpace` | Not enough free space for a snapshot operation |
-| `INTERNAL` | Other `Backend`/`Disk`/`Io`/`Store`/`Firmware` errors — including all `andler-disk` errors other than `InsufficientDiskSpace` (`AgentNotInstalled`, `AgentAlreadyInstalled`, `PackageManagerNotFound`, ...) | Backend/disk/store failures |
-
-All error messages pass through `status_message()`: control characters (other than tab) are replaced with spaces and messages longer than 384 characters are truncated before being sent as the gRPC `grpc-message` header (long multi-line package-manager stderr otherwise trips the h2 client with "h2 protocol error").
+The daemon-error → gRPC status table lives in `docs/GRPC_API.md` (Error Codes),
+sourced from the single exhaustive `DaemonError::kind()` match in
+`apps/daemon/src/daemon/error.rs`. Error messages reaching a client are
+sanitized and truncated to 384 characters by `status_message()`.
 
 ### Key Messages
 

@@ -1691,3 +1691,54 @@ async fn idempotency_token_field_round_trips_over_real_grpc() {
 
     server.abort();
 }
+
+#[tokio::test]
+async fn apply_guest_profile_round_trips_over_real_grpc() {
+    let (mut client, server) = spawn_server_and_connect().await;
+    let unknown_id = "b".repeat(64);
+
+    let status = client
+        .apply_guest_profile(InstanceIdRequest {
+            instance_id: unknown_id,
+        })
+        .await
+        .expect_err("an unknown instance must be NOT_FOUND, not a wire error");
+    assert_eq!(status.code(), tonic::Code::NotFound);
+
+    // The sample request enables clipboard sharing, so the instance wants the
+    // guest-side SPICE agent. Its disk is a placeholder with no filesystem:
+    // the RPC must report that as a *skipped* selection with the retry
+    // command, which is the whole point of classifying outcomes per entry.
+    let response = client
+        .create_instance(sample_create_instance_request())
+        .await
+        .expect("a fully-populated CreateInstanceRequest must be accepted")
+        .into_inner();
+    let id = response.instance_id;
+
+    let applied = client
+        .apply_guest_profile(InstanceIdRequest {
+            instance_id: id.clone(),
+        })
+        .await
+        .expect("applying a profile never fails on a single selection")
+        .into_inner();
+
+    assert_eq!(applied.entries.len(), 1, "{:?}", applied.entries);
+    let entry = &applied.entries[0];
+    assert_eq!(entry.name, "spice-vdagent");
+    assert_eq!(
+        entry.status,
+        andler_rpc::proto::GuestProfileStatus::Skipped as i32,
+        "a disk without a guest OS has nothing to install into: {entry:?}"
+    );
+    assert!(
+        entry
+            .message
+            .contains(&format!("andler guest install spice-vdagent {id}")),
+        "the skip must tell the user how to finish the job later: {}",
+        entry.message
+    );
+
+    server.abort();
+}

@@ -8,6 +8,17 @@ use crate::error::DiskError;
 use crate::translator::{dir_name, resolve, MANAGED_PROP_KEYS};
 use crate::translator_download;
 
+/// What a translator switch actually did — `Applied`-style reporting needs
+/// the difference between installing and finding the requested translator
+/// already in place, which the guest-side check knows for free.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TranslatorSwitch {
+    /// The requested translator was staged and written into the guest.
+    Installed,
+    /// The guest already ran the requested translator; nothing was written.
+    AlreadyInstalled,
+}
+
 fn resolve_entry_paths(root: &Path, files: &[&str]) -> Vec<PathBuf> {
     let mut out = Vec::new();
     for file in files {
@@ -60,7 +71,7 @@ pub async fn switch_translator_with(
     translator: ArmTranslator,
     translator_dir: Option<PathBuf>,
     android_version: &str,
-) -> Result<(), DiskError> {
+) -> Result<TranslatorSwitch, DiskError> {
     let info = resolve(translator);
 
     // None has no payload and no download link — the removal path only. The
@@ -95,7 +106,7 @@ pub async fn switch_translator_with(
     let current = detect_current_translator_with(mutator, &system_dir).await?;
     if current == Some(translator) {
         tracing::info!(translator = ?translator, "translator already installed, skipping");
-        return Ok(());
+        return Ok(TranslatorSwitch::AlreadyInstalled);
     }
 
     // Stage the new translator's files first and verify every upload fully
@@ -256,7 +267,7 @@ pub async fn switch_translator_with(
         .await
         .map_err(|e| DiskError::FileSystem(format!("failed to write translator config: {e}")))?;
 
-    Ok(())
+    Ok(TranslatorSwitch::Installed)
 }
 
 async fn detect_current_translator_with(

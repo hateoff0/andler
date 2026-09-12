@@ -43,6 +43,7 @@ service AndlerService {
     rpc GetVersion(Empty) returns (VersionResponse);
     rpc StreamEvents(EventStreamRequest) returns (stream DaemonEventMessage);
     rpc CancelOperation(OpCancelRequest) returns (Empty);
+    rpc ApplyGuestProfile(InstanceIdRequest) returns (ApplyGuestProfileResponse);
 }
 
 message Empty {}
@@ -732,4 +733,27 @@ message GuestPackageEntry {
     string name = 1;
     string description = 2;
     string status = 3;
+}
+
+// Applies the guest-side work an instance's own configuration asks for
+// (ARM translator for a selected non-none translator, SPICE clipboard agent
+// when clipboard sharing is enabled). Runs online through the guest agent
+// on a running VM, offline through the libguestfs appliance otherwise.
+message ApplyGuestProfileResponse {
+    repeated GuestProfileEntry entries = 1;
+}
+
+message GuestProfileEntry {
+    // Selection key: `arm-translator`, `spice-vdagent`.
+    string name = 1;
+    GuestProfileStatus status = 2;
+    string message = 3;
+}
+
+enum GuestProfileStatus {
+    GUEST_PROFILE_STATUS_UNSPECIFIED = 0;
+    APPLIED = 1;
+    ALREADY_PRESENT = 2;
+    SKIPPED = 3;
+    FAILED = 4;
 }

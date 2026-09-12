@@ -90,6 +90,15 @@ impl GuestMount {
         if !status.status.success() {
             let stderr = String::from_utf8_lossy(&status.stderr);
             let _ = std::fs::remove_dir_all(&mount);
+            // libguestfs' own wording for `-i` when inspection finds nothing
+            // to mount (e.g. an ISO-install VM whose OS is not installed
+            // yet). Callers that treat "no guest OS yet" as a normal state
+            // need this as a type, not as text to pattern-match on.
+            if stderr.contains("no operating system was found") {
+                return Err(DiskError::NoGuestOs {
+                    path: disk_path.to_path_buf(),
+                });
+            }
             return Err(DiskError::NbdSetupFailed(format!(
                 "guestmount failed on {}: {} — the image must have a root filesystem \
                  libguestfs can inspect; check that /dev/fuse is accessible",

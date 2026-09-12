@@ -20,7 +20,7 @@ The following flags define how instance configuration is provided — they are *
 |-------|-------------|
 | `--file <path>` | Path to TOML instance file (auto-detects LinuxVm/AndroidVm; mutually exclusive with `--kind`) |
 | `--kind <linux\|android>` | VM type for CLI-mode creation (requires the type's required flags below) |
-| `--quick` | Skip the wizard and create with defaults (requires `--kind`; mutually exclusive with `--file`) |
+| `--quick` | Skip the wizard and create with defaults (requires `--kind`; mutually exclusive with `--file`). Guest-side selections recorded by the defaults (ARM translator, clipboard agent) are **not** installed — run `andler guest apply <id>` for that |
 
 **Mode selection**: exactly one of `--file`, `--kind`, or neither (bare `andler create` starts the interactive wizard).
 
@@ -102,6 +102,7 @@ Size format: `64GB`, `128000MB`, `1T`, `512000` (bytes). Case-insensitive.
 | `andler guest remove <package> <instance-id>` | Remove a package from the guest OS (auto-fallback) |
 | `andler guest list <instance-id>` | List known packages and their status in the guest OS |
 | `andler guest boot-mode <instance-id> [android\|linux]` | Get (no argument) or switch the guest's boot target on an Android VM's unified base image. Requires a restart to apply. |
+| `andler guest apply <instance-id> [--json]` | Apply the guest-side work the instance's own config selects: the ARM translator when `kind.android_profile.arm_translator` is not `none`, `spice-vdagent` when `input.clipboard_enabled`. Offline through the libguestfs appliance while the disk is idle, online through the guest agent on a running VM; one classified outcome per selection (`applied`/`already present`/`skipped`/`failed`) with the retry command in the message. This is what the wizard runs right after creating a VM. |
 
 Known packages: `spice-vdagent` (shared folders), `qemu-guest-agent` (host-guest communication), `spice-webdavd` (webdav shared folders).
 
@@ -291,20 +292,20 @@ GPU fields (vram, gpu) appear when AMD, NVIDIA, or Intel GPU data is available.
 
 | Module | File | Purpose |
 |--------|------|---------|
-| `main.rs` | 769 lines | Clap CLI definition, gRPC client setup, subcommand dispatch |
-| `create.rs` | 412 lines | `Create` command — builds gRPC request from CLI flags |
-| `edit.rs` | 96 lines | `Edit` command — open config in `$EDITOR`, send changes to daemon |
-| `disk.rs` | 77 lines | `Disk` command — create, info, resize, compact |
-| `guest.rs` | 201 lines | `Guest` command — install/remove/list packages, boot-mode get/switch in guest OS |
-| `status.rs` | 681 lines | `Status`, `List`, `Config`, `Logs`, `Metrics` commands |
-| `snapshot.rs` | 109 lines | `Snapshot` command — create, restore, delete, list (with spinner) |
-| `lifecycle.rs` | 124 lines | `Start`, `Stop`, `Pause`, `Resume`, `Remove` commands |
-| `clone.rs` | 41 lines | `Clone`, `Export` commands |
-| `instance_file.rs` | 805 lines | TOML instance file parser |
-| `helpers.rs` | 366 lines | `parse_size`, `format_size`, `format_bytes`, `ensure_qcow2_extension` |
-| `wizard/mod.rs` | 776 lines | Interactive wizard entry point, orchestration, `build_create_request()` |
-| `wizard/basic.rs` | 303 lines | Basic mode: kind, name, ISO, disk questions |
-| `wizard/advanced.rs` | 604 lines | Advanced mode: 16 hardware questions with auto-detection defaults |
-| `wizard/summary.rs` | 282 lines | Summary display, Create/Modify/Cancel actions |
-| `verify.rs` | 11.0KB | `--verify` flag on create — pre-flight checks (ISO, disk, OVMF, GPU memory, CPU/memory) |
-| `preview.rs` | 6.5KB | `--dry-run` flag — resolves and prints what would be created including QEMU command line |
+| `main.rs` | — | Clap CLI definition, gRPC client setup, subcommand dispatch |
+| `create.rs` | — | `Create` command — builds gRPC request from CLI flags |
+| `edit.rs` | — | `Edit` command — open config in `$EDITOR`, send changes to daemon |
+| `disk.rs` | — | `Disk` command — create, info, resize, compact |
+| `guest.rs` | — | `Guest` command — install/remove/list packages, `apply` (config-driven guest selections), boot-mode get/switch in guest OS |
+| `status.rs` | — | `Status`, `List`, `Config`, `Logs`, `Metrics` commands |
+| `snapshot.rs` | — | `Snapshot` command — create, restore, delete, list (with spinner) |
+| `lifecycle.rs` | — | `Start`, `Stop`, `Pause`, `Resume`, `Remove` commands |
+| `clone.rs` | — | `Clone`, `Export` commands |
+| `instance_file.rs` | — | TOML instance file parser |
+| `helpers.rs` | — | `parse_size`, `format_size`, `format_bytes`, `ensure_qcow2_extension`, `short_id`, `emit_json` |
+| `wizard/mod.rs` | — | Interactive wizard entry point, orchestration, `build_create_request()` |
+| `wizard/basic.rs` | — | Basic mode: kind, name, ISO, disk questions |
+| `wizard/advanced.rs` | — | Advanced mode: hardware questions with auto-detection defaults |
+| `wizard/summary.rs` | — | Summary display, Create/Modify/Cancel actions |
+| `verify.rs` | — | `--verify` flag on create — pre-flight checks (ISO, disk, OVMF, GPU memory, CPU/memory) |
+| `preview.rs` | — | `--dry-run` flag — resolves and prints what would be created including QEMU command line |

@@ -11,6 +11,7 @@ mod disk_conflict;
 mod error_kind;
 mod events;
 mod guest_maintenance;
+mod guest_profile;
 mod health;
 mod hotplug;
 mod list_config;

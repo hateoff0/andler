@@ -7,6 +7,7 @@ pub mod disk_chain;
 pub mod error;
 pub mod events;
 pub mod fsm;
+pub mod guest_profile;
 pub mod oci_export;
 pub mod package_manager;
 pub mod paths;
@@ -48,5 +49,9 @@ pub use events::{
 pub use fsm::{InstanceEvent, InstanceState};
 pub use guest_mutator::{GuestMutator, MutatorError, MutatorOp};
 pub mod guest_mutator;
+pub use guest_profile::{
+    guest_selections, GuestSelection, GuestSelectionKind, GuestSelectionOutcome,
+    GuestSelectionStatus,
+};
 pub use package_manager::PackageManager;
 pub mod sizes;

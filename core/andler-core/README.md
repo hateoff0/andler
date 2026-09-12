@@ -217,6 +217,12 @@ Each sub-config has a `reference_default()` method that produces sensible defaul
   - `resolve(...)`: Pure function — resolves profile into a full `InstanceConfig` with overlay disk. Does not download or create files.
 **Waydroid note**: AndroidVm is not a separate hypervisor — it's LinuxVm with a Waydroid guest image and an overlay disk on top of it. The difference is entirely in the `DiskConfig` used (overlay vs. standalone).
 
+### `guest_profile` — Guest-Side Selections
+
+- **`guest_selections(cfg)`**: the guest-side work an instance's own config asks for — the ARM translator when `kind.android_profile.arm_translator` is not `None`, `GuestSelectionKind::Package("spice-vdagent")` when `input.clipboard_enabled`. Pure: no I/O, no disk.
+- **`GuestSelection` / `GuestSelectionKind`**: `Name` + either `ArmTranslator(ArmTranslator)` or `Package(&str)`, with `describe()` for CLI output.
+- **`GuestSelectionOutcome` / `GuestSelectionStatus`**: `Applied` / `AlreadyPresent` / `Skipped` / `Failed` plus a message; `GuestSelectionOutcome::failure` appends the exact retry command, which is why the wizard and `andler guest apply` can both surface a partial apply without re-deriving the command.
+
 ### `clone` — Clone Modes
 
 - **`CloneMode`**: Three ways to create a new disk from an existing instance's disk:
@@ -239,6 +245,7 @@ Each sub-config has a `reference_default()` method that produces sensible defaul
 | `clone` | `clone_mode_variants_are_distinct` |
 | `fsm` | `happy_path_start_pause_resume_stop`, `cannot_resume_from_running`, `cannot_pause_from_created`, `fail_is_reachable_from_every_active_state`, `terminal_states_accept_only_start`, `started_from_stopped_or_error_goes_to_starting` |
 | `android_profile` | `cache_key_differs_on_arm_translator`, `cache_key_differs_on_gapps`, `resolve_produces_overlay_disk_pointing_at_base_image`, `android_version_round_trips_through_serde` |
+| `guest_profile` | `android_with_a_translator_and_clipboard_asks_for_both`, `android_without_a_translator_only_asks_for_clipboard`, `clipboard_disabled_drops_the_agent_selection`, `linux_with_clipboard_asks_only_for_the_agent`, `disk_path_does_not_influence_the_selection_list`, `failure_outcome_carries_a_retry_command_for_the_selection` |
 | `config::instance` | `instance_id_is_unique`, `config_round_trips_through_serde_json` |
 | `config::cpu` | `reference_default_matches_start_sh` |
 | `config::memory` | `reference_default_matches_start_sh` |

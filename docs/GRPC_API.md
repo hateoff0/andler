@@ -53,6 +53,7 @@ The core service exposing all instance management operations.
 | `ExecCommand` | `ExecCommandRequest` | `ExecCommandResponse` | Unary | Runs an arbitrary command in the guest via the guest agent and returns its exit code plus captured stdout/stderr. |
 | `GetVersion` | `Empty` | `VersionResponse` | Unary | Returns the daemon's build version (the CLI handshakes on this before every command). |
 | `StreamEvents` | `EventStreamRequest` | `stream DaemonEventMessage` | Server-streaming | Streams daemon events (lifecycle transitions, operations, QMP events, log lines) from the live bus, optionally filtered to one instance. |
+| `ApplyGuestProfile` | `InstanceIdRequest` | `ApplyGuestProfileResponse` | Unary | Applies the guest-side work the instance's own config selects (ARM translator, SPICE clipboard agent) and reports one classified outcome per selection. Online via the guest agent on a running VM, offline via the libguestfs appliance otherwise. |
 
 ---
 
@@ -858,6 +859,16 @@ CLI resolves relative paths against the manifest directory),
 `ProvisionChmod { path, mode }` (octal mode as uint32),
 `ProvisionSymlink { target, link }`. An empty oneof is rejected as
 `MissingField`.
+
+### `ApplyGuestProfileResponse`
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `entries` | `repeated GuestProfileEntry` | One entry per selection the instance's config asks for; empty when nothing is selected. |
+
+`GuestProfileEntry`: `name` (stable key: `arm-translator`, `spice-vdagent`), `status` (`GuestProfileStatus`: `APPLIED`, `ALREADY_PRESENT`, `SKIPPED`, `FAILED`), `message` (human-readable, and for `FAILED`/`SKIPPED` the exact retry command).
+
+The RPC fails only when the instance itself is unknown/unresolvable — a selection that cannot be applied is reported as `SKIPPED` or `FAILED` inside the response, never as a gRPC error, so a partial apply is visible per selection. A disk with no installed guest OS (e.g. an ISO-install VM before the OS is installed) is `SKIPPED`, not an error.
 
 ### `DaemonLogsRequest`
 

@@ -65,4 +65,19 @@ pub enum DiskError {
         required_bytes: u64,
         available_bytes: u64,
     },
+
+    #[error(
+        "no installed guest OS found on {path} — the disk has no root filesystem \
+         libguestfs can inspect (an ISO-install VM has none until the ISO installs one)"
+    )]
+    NoGuestOs { path: PathBuf },
+
+    #[error("cannot read the base-image release index at {url}: {message}")]
+    ImageIndex { url: String, message: String },
+
+    #[error("cannot download base-image asset `{asset}`: {message}")]
+    ImageDownload { asset: String, message: String },
+
+    #[error("base-image verification failed: {message}")]
+    ImageVerify { message: String },
 }

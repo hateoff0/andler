@@ -32,6 +32,7 @@ gRPC protocol definition (`proto/andler.proto`) and generated server/client code
 | `SetInstanceConfig` | `SetInstanceConfigRequest` | `Empty` | Unary | Set a single config key-value pair on an instance |
 | `SwitchAndroidBootMode` | `SwitchAndroidBootModeRequest` | `Empty` | Unary | Switch Android boot mode for AndroidVm |
 | `GetAndroidBootMode` | `InstanceIdRequest` | `GetAndroidBootModeResponse` | Unary | Get current Android boot mode |
+| `ApplyGuestProfile` | `InstanceIdRequest` | `ApplyGuestProfileResponse` | Unary | Apply the guest-side work the instance's own config selects (ARM translator, SPICE clipboard agent); one classified outcome per selection |
 
 ## Key Proto Messages
 
@@ -52,6 +53,7 @@ gRPC protocol definition (`proto/andler.proto`) and generated server/client code
 - **`FirmwareConfig`**: `ovmf_code_path`, `ovmf_vars_path`.
 - **`AudioConfig`**: `backend`, `device`.
 - **`InputConfig`**: `pointer_mode`, `hide_host_cursor`, `clipboard_enabled`.
+- **`GuestProfileEntry` / `GuestProfileStatus`**: `name` (`arm-translator`, `spice-vdagent`), `status` (`APPLIED`/`ALREADY_PRESENT`/`SKIPPED`/`FAILED`), `message` — one entry per selection, so a partial apply is visible instead of implied.
 
 ### Instance Lifecycle
 
@@ -98,6 +100,8 @@ Bidirectional conversions between proto and domain types:
 - **`From<LogLine> for proto::LogLineResponse`**: Domain → proto (one direction only — client never sends log lines).
 
 ### Notable Conversion Details
+
+- Guest-profile outcomes convert through `guest_profile_convert` (`GuestSelectionOutcome` → `GuestProfileEntry`), mirroring `provision_convert` for mutator ops.
 
 - `RenderBackend` and `NetworkMode` are `oneof` in proto (not C-style enums) because their domain equivalents carry data in variants (`Passthrough { gpu_pci_id }`, `Bridge { interface }`).
 - `DisplayEngine::None` maps to proto `DisplayNone` (not `UNSPECIFIED`).

@@ -301,6 +301,46 @@ expect_ok "boot-mode switch back to linux" -- andler guest boot-mode "$AID" linu
 expect_ok "boot-mode get again" -- andler guest boot-mode "$AID"
 expect_out_grep "boot mode is linux" "^linux$"
 
+echo "  [deep: guest apply installs what the instance config selects]"
+# `guest apply` is what `andler create` (wizard) runs right after creating a
+# VM: it derives the guest-side work from the instance's own config and
+# reports one classified outcome per selection. The translator branch is
+# driven from the local fixture cache (seeded below) so the run needs no
+# network, exactly like the install above.
+NDK_CACHE="$HOME/.andler/cache/arm-translators/ndk"
+mkdir -p "$NDK_CACHE"
+cp -r "$XLATE/." "$NDK_CACHE/"
+pass "seeded the translator cache from the local fixture"
+# Record libndk as the instance's selection: `config set` switches the
+# translator to what the config already carries (a no-op here — the fixture
+# install above put it in place) and writes the value into instance.toml.
+expect_ok "record libndk as the instance's ARM translator" -- \
+    andler config set "$AID" kind.android_profile.arm_translator libndk
+expect_ok "the config now selects libndk" -- andler config view "$AID"
+expect_out_grep "translator recorded" "libndk"
+
+expect_ok "guest apply on the Android instance" -- timeout 300 andler guest apply "$AID"
+expect_out_grep "the translator selection is reported as already present" \
+    "arm-translator: already present"
+
+expect_ok "guest apply --json" -- andler guest apply "$AID" --json
+cp "$E2E_LAST_OUT" "$WORK/apply.json"
+expect_ok "json reports one entry per selection" -- \
+    jq -e '.selections | map(.name) | index("arm-translator") != null' "$WORK/apply.json"
+expect_ok "json reports the already-present status" -- \
+    jq -e '.selections[] | select(.name == "arm-translator") | .status == "already_present"' "$WORK/apply.json"
+
+echo "  [deep: guest apply installs the clipboard agent offline]"
+# The Linux fixture disk is a real Debian rootfs. Disabling the Android
+# instance's clipboard leaves its (waydroid) rootfs untouched, so the package
+# branch is exercised once, deterministically, on the Linux instance.
+expect_ok "disable clipboard on the Android instance" -- \
+    andler config set "$AID" input.clipboard_enabled false
+expect_ok "guest apply on the Linux instance" -- timeout 600 andler guest apply "$LID"
+expect_out_grep "clipboard agent selection applied" "spice-vdagent: applied"
+expect_ok "guest list confirms the agent" -- andler guest list "$LID"
+expect_out_grep "spice-vdagent is installed" "spice-vdagent.*installed"
+
 echo "  [cleanup]"
 expect_ok "remove android guest instance" -- andler remove "$AID" --purge
 expect_ok "remove linux guest instance" -- andler remove "$LID" --purge

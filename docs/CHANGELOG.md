@@ -11,6 +11,19 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 
 - **`create --dry-run --json` created the instance it was previewing**: the JSON branches printed the resolved config and then fell through to the real `CreateInstance`/`CreateAndroidInstance` call (only the human-readable branches returned early), so a preview could create a VM — and fail with a confusing firmware error when the preview's paths were not real. Both branches now return after printing; `08_preview_verify.sh` asserts that nothing was created.
 
+
+### Added
+
+#### Guest selections applied automatically
+
+- **`ApplyGuestProfile` RPC + `andler guest apply <id>`: an instance's own config decides what gets installed inside it**: the daemon derives the guest-side work from the config (`kind.android_profile.arm_translator` → the ARM translator, `input.clipboard_enabled` → `spice-vdagent`) and applies each selection through the state-appropriate path — the libguestfs appliance offline, the QGA guest agent on a running VM — reporting one classified outcome per selection (`applied` / `already_present` / `skipped` / `failed`) instead of stopping at the first failure. A disk with no installed guest OS is a `skipped` outcome with the retry command, not an error (`andler-disk` gained `DiskError::NoGuestOs`, so callers no longer have to pattern-match libguestfs' wording); the ARM translator reports `already_present` when the guest already runs it (`TranslatorSwitch` is now returned by `switch_translator_with`). Failures carry the exact retry command. Covered by daemon unit tests, a gRPC round-trip test, and the `guest apply` section of `07_guest.sh`.
+- **The wizard installs what it just asked for**: `andler create`'s wizard (and `andler wizard`) now runs that same apply route right after creating the VM, so a selected ARM translator or clipboard sharing is present in the guest instead of being a manual step printed at the end. A failed selection keeps the created VM and prints the retry command; the summary screen lists up front what will be installed. `--quick` (the scripted path) deliberately does not: a scripted create must not trigger a translator download behind the caller's back, so it prints `andler guest apply <id>` instead — the selections are recorded in the instance's config either way.
+
+### Changed
+
+
+### Fixed
+
 - **Online guest install ran GNU coreutils' `install` instead of the package manager**: the guest argv was built from the subcommand shapes only (`install -y <pkg>`) without the manager binary, so a running VM's `guest install hello` failed with `install: invalid option -- 'y'`. Caught by the new online e2e against a booted cloud guest; a unit test pins the full argv for apt/dnf/pacman.
 - **A retry during the maintenance auto-start was refused by the lifecycle-state gate**: a `guest install/remove` that reached the daemon while the auto-started VM was still booting (or being stopped) answered `instance is in state Starting; must be Running/Paused (online) or Created/Stopped (offline)` instead of following the idempotency rule, so a network retry with the same token failed instead of joining the operation already doing its work, and a retry with a different token reported a guest-agent problem instead of `OperationAlreadyRunning`. The daemon now consults the in-flight operation before the state gate, sharing the supervisor's own accept rule (`JoinDecision`) between `RunOperation` and the new `JoinActive`, so the state-gate error is returned only when nothing is in flight. Caught by the new deterministic `retry_during_maintenance_boot_follows_the_accept_rule` (a backend whose `spawn` blocks keeps the instance verifiably `Starting` while the operation is active); the two pre-existing join/refuse unit tests, which previously failed only under parallel load, are now deterministic.
 

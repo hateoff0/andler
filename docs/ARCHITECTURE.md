@@ -198,6 +198,20 @@ Package management and resolution changes inside a guest use a two-tier strategy
 
 ARM translators (`libndk`/`libhoudini`) use the same offline mount machinery via `switch_arm_translator`: version-keyed download (MD5-verified, cached under `~/.andler/cache/arm-translators/`), staged into `var/lib/waydroid/overlay/system`, `build.prop` updated, old translator removed only after the new one is fully staged.
 
+### Applying an instance's own selections (`ApplyGuestProfile`)
+
+The wizard (and `andler guest apply <id>`) does not carry a separate list of "things the user picked": the instance's `instance.toml` is the record, and `andler_core::guest_profile::guest_selections` turns it back into work —
+`kind.android_profile.arm_translator` (when not `none`) → the ARM translator, `input.clipboard_enabled` → the `spice-vdagent` package. The daemon then applies each selection through the state-appropriate path (QGA when the VM is running, the libguestfs appliance when the disk is idle — never the auto-start maintenance path, so applying a profile cannot boot a VM the user did not start) and returns **one classified outcome per selection**:
+
+| Outcome | Meaning |
+|---|---|
+| `applied` | installed now |
+| `already_present` | the guest already runs it (the translator switch and the package query both report this for free) |
+| `skipped` | cannot apply in this state — e.g. a disk with no installed guest OS (`DiskError::NoGuestOs`), or a translator switch while the VM runs; the message carries the command that finishes the job later |
+| `failed` | the attempt errored; the message carries the retry command |
+
+One failing selection never aborts the others: the clipboard agent is still installed when the translator download fails, and creation itself is already done by then — the VM exists and stays usable.
+
 ## Data Flow (guest operations)
 
 ```

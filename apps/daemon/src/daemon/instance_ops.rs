@@ -1442,7 +1442,7 @@ impl Daemon {
         id: InstanceId,
         translator: andler_core::android_profile::ArmTranslator,
         translator_dir: Option<PathBuf>,
-    ) -> Result<(), DaemonError> {
+    ) -> Result<andler_disk::arm_translator::TranslatorSwitch, DaemonError> {
         let handle = self.handle_for(id).await?;
         let (overlay_path, state, kind) = {
             let config = handle.config();
@@ -1469,7 +1469,7 @@ impl Daemon {
             _ => "13".to_string(),
         };
 
-        andler_disk::arm_translator::switch_translator_with(
+        let switch = andler_disk::arm_translator::switch_translator_with(
             &andler_guestfs::GuestfsMutator::new(overlay_path.clone()),
             translator,
             translator_dir,
@@ -1482,7 +1482,7 @@ impl Daemon {
             translator = ?translator,
             "ARM translator switched successfully"
         );
-        Ok(())
+        Ok(switch)
     }
 
     /// `config set`: read-modify-write one key on instance.toml (the source

@@ -1,9 +1,10 @@
 use crate::helpers::emit_json;
 use crate::TracedClient;
 use andler_rpc::proto::{
-    AndroidBootMode as ProtoAndroidBootMode, GuestPackageEntry, GuestProvisionRequest,
-    InstallGuestAgentRequest, InstanceIdRequest, RemoveGuestAgentRequest,
-    SwitchAndroidBootModeRequest, SwitchArmTranslatorRequest,
+    AndroidBootMode as ProtoAndroidBootMode, ApplyGuestProfileResponse, GuestPackageEntry,
+    GuestProfileEntry, GuestProfileStatus, GuestProvisionRequest, InstallGuestAgentRequest,
+    InstanceIdRequest, RemoveGuestAgentRequest, SwitchAndroidBootModeRequest,
+    SwitchArmTranslatorRequest,
 };
 
 use std::io::IsTerminal;
@@ -83,6 +84,13 @@ pub enum GuestAction {
         #[arg(value_enum)]
         mode: Option<CliBootMode>,
     },
+
+    /// Apply every guest-side setting the instance's own config asks for
+    /// (ARM translator, clipboard agent) — what the wizard does right after
+    /// creating a VM
+    Apply {
+        instance_id: String,
+    },
 }
 
 fn package_json(pkg: &GuestPackageEntry) -> serde_json::Value {
@@ -108,6 +116,7 @@ pub async fn handle(
             println!("       andler guest install <package> <instance-id>");
             println!("       andler guest remove <package> <instance-id>");
             println!("       andler guest boot-mode <instance-id> [android|linux]");
+            println!("       andler guest apply <instance-id>");
         }
         GuestAction::List {
             instance_id: Some(id),
@@ -287,8 +296,73 @@ pub async fn handle(
             };
             println!("Boot mode switched to `{mode_str}`. Restart the instance to apply it.");
         }
+        GuestAction::Apply { instance_id } => {
+            let (resolved_id, _name) = lifecycle::resolve_echo(client, &instance_id).await;
+            let response = client
+                .apply_guest_profile(InstanceIdRequest {
+                    instance_id: resolved_id,
+                })
+                .await?
+                .into_inner();
+            print_apply_results(&response, json)?;
+        }
     }
 
+    Ok(())
+}
+
+fn apply_entry_json(entry: &GuestProfileEntry) -> serde_json::Value {
+    serde_json::json!({
+        "name": entry.name,
+        "status": profile_status_name(entry.status()).to_string(),
+        "message": entry.message,
+    })
+}
+
+fn profile_status_name(status: GuestProfileStatus) -> &'static str {
+    match status {
+        GuestProfileStatus::Applied => "applied",
+        GuestProfileStatus::AlreadyPresent => "already_present",
+        GuestProfileStatus::Skipped => "skipped",
+        GuestProfileStatus::Failed => "failed",
+        GuestProfileStatus::Unspecified => "unspecified",
+    }
+}
+
+fn print_apply_results(
+    response: &ApplyGuestProfileResponse,
+    json: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if json {
+        let entries: Vec<serde_json::Value> =
+            response.entries.iter().map(apply_entry_json).collect();
+        emit_json(&serde_json::json!({ "selections": entries }))?;
+        return Ok(());
+    }
+
+    if response.entries.is_empty() {
+        println!("Nothing to apply: this instance's config selects no guest-side packages.");
+        return Ok(());
+    }
+
+    let mut failed = false;
+    for entry in &response.entries {
+        let (mark, label) = match entry.status() {
+            GuestProfileStatus::Applied => ("✓", "applied"),
+            GuestProfileStatus::AlreadyPresent => ("•", "already present"),
+            GuestProfileStatus::Skipped => ("-", "skipped"),
+            GuestProfileStatus::Failed => ("✗", "failed"),
+            GuestProfileStatus::Unspecified => ("?", "unknown"),
+        };
+        if entry.status() == GuestProfileStatus::Failed {
+            failed = true;
+        }
+        println!("{mark} {}: {label} — {}", entry.name, entry.message);
+    }
+
+    if failed {
+        return Err("some selections could not be applied; the commands above retry them".into());
+    }
     Ok(())
 }
 

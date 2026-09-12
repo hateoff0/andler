@@ -4,23 +4,24 @@ use std::sync::Arc;
 use andler_core::EventKind;
 use andler_core::{CloneMode, InstanceConfig};
 use andler_rpc::convert;
+use andler_rpc::guest_profile_convert;
 use andler_rpc::proto::andler_service_server::AndlerService;
 use andler_rpc::proto::{
-    AttachDiskRequest, AttachDiskResponse, AttachNetworkRequest, AttachNetworkResponse,
-    CloneInstanceRequest, CodeCount, ConfigKeyDiff, CreateAndroidInstanceRequest,
-    CreateInstanceRequest, CreateInstanceResponse, CreateSnapshotRequest, CreateSnapshotResponse,
-    DaemonEventMessage, DaemonLogLine, DaemonLogsRequest, DaemonMetricsResponse,
-    DeleteSnapshotRequest, DetachDiskRequest, DetachNetworkRequest, Empty, EventStreamRequest,
-    ExecCommandRequest, ExecCommandResponse, ExportInstanceDiskRequest, ExportInstanceDiskResponse,
-    ExportInstanceOciRequest, ExportInstanceOciResponse, GetAndroidBootModeResponse,
-    GetConfigStatusResponse, GetInstanceConfigResponse, GuestPackageEntry, GuestProvisionRequest,
-    InstallGuestAgentRequest, InstanceIdRequest, InstanceListEntry, InstanceStatusResponse,
-    ListGuestPackagesResponse, ListInstancesResponse, ListSnapshotsResponse, LogLineResponse,
-    MethodLatency, OpCancelRequest, OpListResponse, OperationInfo, OperationPhase,
-    RemoveGuestAgentRequest, RemoveInstanceRequest, ResourceMetricsResponse,
-    RestoreSnapshotRequest, SetInstanceConfigRequest, SnapshotEntry, StopInstanceRequest,
-    SwitchAndroidBootModeRequest, SwitchArmTranslatorRequest, UpdateInstanceConfigRequest,
-    VersionResponse,
+    ApplyGuestProfileResponse, AttachDiskRequest, AttachDiskResponse, AttachNetworkRequest,
+    AttachNetworkResponse, CloneInstanceRequest, CodeCount, ConfigKeyDiff,
+    CreateAndroidInstanceRequest, CreateInstanceRequest, CreateInstanceResponse,
+    CreateSnapshotRequest, CreateSnapshotResponse, DaemonEventMessage, DaemonLogLine,
+    DaemonLogsRequest, DaemonMetricsResponse, DeleteSnapshotRequest, DetachDiskRequest,
+    DetachNetworkRequest, Empty, EventStreamRequest, ExecCommandRequest, ExecCommandResponse,
+    ExportInstanceDiskRequest, ExportInstanceDiskResponse, ExportInstanceOciRequest,
+    ExportInstanceOciResponse, GetAndroidBootModeResponse, GetConfigStatusResponse,
+    GetInstanceConfigResponse, GuestPackageEntry, GuestProvisionRequest, InstallGuestAgentRequest,
+    InstanceIdRequest, InstanceListEntry, InstanceStatusResponse, ListGuestPackagesResponse,
+    ListInstancesResponse, ListSnapshotsResponse, LogLineResponse, MethodLatency, OpCancelRequest,
+    OpListResponse, OperationInfo, OperationPhase, RemoveGuestAgentRequest, RemoveInstanceRequest,
+    ResourceMetricsResponse, RestoreSnapshotRequest, SetInstanceConfigRequest, SnapshotEntry,
+    StopInstanceRequest, SwitchAndroidBootModeRequest, SwitchArmTranslatorRequest,
+    UpdateInstanceConfigRequest, VersionResponse,
 };
 use futures_core::Stream;
 use futures_util::StreamExt;
@@ -862,5 +863,19 @@ impl AndlerService for DaemonService {
             stdout: output.stdout,
             stderr: output.stderr,
         }))
+    }
+
+    async fn apply_guest_profile(
+        &self,
+        request: Request<InstanceIdRequest>,
+    ) -> Result<Response<ApplyGuestProfileResponse>, Status> {
+        let id = self
+            .daemon
+            .resolve_instance_id(&request.into_inner().instance_id)
+            .await?;
+        let outcomes = self.daemon.apply_guest_profile(id).await?;
+        Ok(Response::new(
+            guest_profile_convert::apply_profile_response(&outcomes),
+        ))
     }
 }
