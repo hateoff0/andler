@@ -261,8 +261,11 @@ pub(crate) fn reresolve_android_base_image(
     match andler_core::base_image::resolve(&profile) {
         Ok(path) => a.base_image = path.to_string_lossy().into_owned(),
         Err(e) => crate::wizard::ui::warn(&format!(
-            "No base image matches the current Android settings ({e}). \
-             Keeping the previous one — pick a different one manually if needed."
+            "No base image matches the current Android settings ({e}). Keeping the previous \
+             one — download a matching build with `andler image download --android-version \
+             {} --variant {}` and pick it, or choose a different one manually.",
+            a.android_version as u8,
+            if adv.gapps { "GAPPS" } else { "VANILLA" },
         )),
     }
 }
@@ -442,6 +445,137 @@ mod tests {
             build_network_config(Some(&missing_interface), &detected),
             Err(WizardError::InvalidConfig(_))
         ));
+    }
+
+    // --- base-image re-resolution ------------------------------------------
+    //
+    // These mutate ANDLER_HOME (the base-image cache lives under it), so they
+    // serialize on one lock across the module's tests.
+
+    static ANDLER_HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    struct AndlerHomeGuard {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        base: PathBuf,
+    }
+
+    impl AndlerHomeGuard {
+        fn new() -> (Self, PathBuf) {
+            static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let lock = ANDLER_HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let base = std::env::temp_dir().join(format!(
+                "andler-wizard-build-test-home-{}-{n}",
+                std::process::id()
+            ));
+            let cache_dir = base.join("cache").join("base-images");
+            std::fs::create_dir_all(&cache_dir).unwrap();
+            std::env::set_var(andler_core::paths::ANDLER_HOME_ENV, &base);
+            (Self { _lock: lock, base }, cache_dir)
+        }
+    }
+
+    impl Drop for AndlerHomeGuard {
+        fn drop(&mut self) {
+            std::env::remove_var(andler_core::paths::ANDLER_HOME_ENV);
+            let _ = std::fs::remove_dir_all(&self.base);
+        }
+    }
+
+    fn write_manifest(dir: &std::path::Path, name: &str, major: &str, variant: &str) {
+        std::fs::write(dir.join(format!("{name}.qcow2")), b"placeholder").unwrap();
+        std::fs::write(
+            dir.join(format!("{name}.manifest.json")),
+            format!(
+                r#"{{"schema_version":1,"android_major":"{major}","android_variant":"{variant}","built_at":"2026-01-01T00:00:00Z"}}"#
+            ),
+        )
+        .unwrap();
+    }
+
+    fn android_result(base_image: String, auto_resolved: bool) -> BasicResult {
+        BasicResult::Android(AndroidBasicResult {
+            name: "android".into(),
+            base_image,
+            base_image_auto_resolved: auto_resolved,
+            android_version: CliAndroidVersion::Android13,
+            gapps: false,
+            disk_size_gib: 256,
+            instances_root: "/tmp/instances".into(),
+            linked: false,
+        })
+    }
+
+    fn advanced_with_gapps(gapps: bool) -> AdvancedConfig {
+        AdvancedConfig {
+            gapps,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn reresolve_switches_an_auto_picked_image_to_the_gapps_variant() {
+        let (_guard, dir) = AndlerHomeGuard::new();
+        write_manifest(&dir, "vanilla", "13", "VANILLA");
+        write_manifest(&dir, "gapps", "13", "GAPPS");
+        let mut basic_result = android_result(
+            dir.join("vanilla.qcow2").to_string_lossy().into_owned(),
+            true,
+        );
+
+        reresolve_android_base_image(
+            &mut basic_result,
+            Some(&advanced_with_gapps(true)),
+            &sample_detected(),
+        );
+
+        let BasicResult::Android(a) = &basic_result else {
+            panic!("expected Android");
+        };
+        assert_eq!(
+            a.base_image,
+            dir.join("gapps.qcow2").to_string_lossy().into_owned()
+        );
+    }
+
+    #[test]
+    fn reresolve_leaves_a_manually_entered_path_alone() {
+        let (_guard, _dir) = AndlerHomeGuard::new();
+        let mut basic_result = android_result("/tmp/hand-picked.qcow2".into(), false);
+
+        reresolve_android_base_image(
+            &mut basic_result,
+            Some(&advanced_with_gapps(true)),
+            &sample_detected(),
+        );
+
+        let BasicResult::Android(a) = &basic_result else {
+            panic!("expected Android");
+        };
+        assert_eq!(a.base_image, "/tmp/hand-picked.qcow2");
+    }
+
+    #[test]
+    fn reresolve_keeps_a_downloaded_image_and_warns_when_nothing_matches() {
+        // A downloaded build is wizard-picked (auto), so flipping GApps in the
+        // advanced pass re-resolves — and, with no GAPPS build in the cache,
+        // keeps the downloaded image instead of silently creating a GAPPS
+        // profile on a VANILLA disk.
+        let (_guard, dir) = AndlerHomeGuard::new();
+        write_manifest(&dir, "vanilla", "13", "VANILLA");
+        let downloaded = dir.join("vanilla.qcow2").to_string_lossy().into_owned();
+        let mut basic_result = android_result(downloaded.clone(), true);
+
+        reresolve_android_base_image(
+            &mut basic_result,
+            Some(&advanced_with_gapps(true)),
+            &sample_detected(),
+        );
+
+        let BasicResult::Android(a) = &basic_result else {
+            panic!("expected Android");
+        };
+        assert_eq!(a.base_image, downloaded);
     }
 
     #[test]

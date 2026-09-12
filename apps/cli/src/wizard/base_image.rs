@@ -207,8 +207,13 @@ async fn download(
         ));
     }
     ui::success(&format!("Base image ready: {installed}"));
+    // The wizard picked this build out of the published catalog, so it is as
+    // "auto" as a local cache hit: if a later answer changes which image the
+    // profile matches (the Android group's GApps toggle), re-resolution runs
+    // and warns instead of leaving a GAPPS profile on a VANILLA image without
+    // saying anything.
     Ok(Choice {
         path: installed,
-        auto_resolved: false,
+        auto_resolved: true,
     })
 }
