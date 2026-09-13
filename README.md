@@ -744,12 +744,12 @@ Before any change lands: `cargo build --workspace` → `cargo test --workspace` 
 <div align="center">
 
 <a href="https://github.com/hateoff0/andler">
-  <img height="180" align="center" alt="ANDLER repository card" src="https://github-readme-stats.vercel.app/api/pin/?username=hateoff0&repo=andler&bg_color=0d1117&title_color=6366f1&icon_color=6366f1&text_color=c9d1d9&border_color=30363d#gh-dark-mode-only"/>
-  <img height="180" align="center" alt="ANDLER repository card" src="https://github-readme-stats.vercel.app/api/pin/?username=hateoff0&repo=andler&theme=default#gh-light-mode-only"/>
+  <img height="180" align="center" alt="ANDLER repository card" src="https://github-stats-extended.vercel.app/api/pin/?username=hateoff0&repo=andler&bg_color=0d1117&title_color=6366f1&icon_color=6366f1&text_color=c9d1d9&border_color=30363d#gh-dark-mode-only"/>
+  <img height="180" align="center" alt="ANDLER repository card" src="https://github-stats-extended.vercel.app/api/pin/?username=hateoff0&repo=andler&theme=default#gh-light-mode-only"/>
 </a>
 <a href="https://github.com/hateoff0/andler">
-  <img height="180" align="center" alt="Most used languages" src="https://github-readme-stats.vercel.app/api/top-langs/?username=hateoff0&layout=compact&langs_count=8&bg_color=0d1117&title_color=6366f1&text_color=c9d1d9&border_color=30363d#gh-dark-mode-only"/>
-  <img height="180" align="center" alt="Most used languages" src="https://github-readme-stats.vercel.app/api/top-langs/?username=hateoff0&layout=compact&langs_count=8&theme=default#gh-light-mode-only"/>
+  <img height="180" align="center" alt="Most used languages" src="https://github-stats-extended.vercel.app/api/top-langs/?username=hateoff0&layout=compact&langs_count=8&bg_color=0d1117&title_color=6366f1&text_color=c9d1d9&border_color=30363d#gh-dark-mode-only"/>
+  <img height="180" align="center" alt="Most used languages" src="https://github-stats-extended.vercel.app/api/top-langs/?username=hateoff0&layout=compact&langs_count=8&theme=default#gh-light-mode-only"/>
 </a>
 
 <br/><br/>
