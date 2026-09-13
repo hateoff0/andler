@@ -776,7 +776,7 @@ impl Daemon {
                 // Wait: the work is in flight and its result belongs to the
                 // caller that started it, so returning here reports success
                 // for a package that has not been installed yet.
-                wait_for_joined_operation(&mut events, &joined).await
+                wait_for_joined_operation(&handle, &mut events, &joined).await
             }
         }
     }
@@ -973,7 +973,7 @@ impl Daemon {
                 // Wait: the work is in flight and its result belongs to the
                 // caller that started it, so returning here reports success
                 // for a package that has not been installed yet.
-                wait_for_joined_operation(&mut events, &joined).await
+                wait_for_joined_operation(&handle, &mut events, &joined).await
             }
         }
     }
@@ -1007,7 +1007,7 @@ impl Daemon {
                 // Same rule as the translator: a join means somebody else owns
                 // the work and its result, so this caller waits for it instead
                 // of claiming it finished.
-                wait_for_joined_operation(&mut events, &joined).await
+                wait_for_joined_operation(handle, &mut events, &joined).await
             }
             None => Err(DaemonError::GuestAgentUnavailable {
                 instance_id: id,
@@ -1628,7 +1628,7 @@ impl Daemon {
                     translator = %translator,
                     "joining the translator switch already in flight"
                 );
-                wait_for_joined_operation(&mut events, &joined).await?;
+                wait_for_joined_operation(&handle, &mut events, &joined).await?;
                 Some(andler_disk::arm_translator::TranslatorSwitch::Installed)
             }
         };
@@ -2107,43 +2107,72 @@ fn guest_agent_wait_secs() -> u64 {
 /// from Failed), which is why the caller subscribes to the daemon event bus
 /// *before* joining and waits for that operation's terminal event.
 pub(crate) async fn wait_for_joined_operation(
+    handle: &SupervisorHandle,
     events: &mut tokio::sync::broadcast::Receiver<andler_core::DaemonEvent>,
     joined: &str,
 ) -> Result<(), DaemonError> {
+    let mut ticker = tokio::time::interval(std::time::Duration::from_millis(250));
     loop {
-        match events.recv().await {
-            Ok(event) => {
-                let andler_core::EventKind::Operation { op } = &event.kind else {
-                    continue;
-                };
-                if op.op_id != joined {
-                    continue;
-                }
-                match op.state {
-                    OperationState::Done => return Ok(()),
-                    OperationState::Failed => {
-                        return Err(DaemonError::OperationFailed {
-                            op_id: joined.to_string(),
-                            reason: op
-                                .error
-                                .clone()
-                                .unwrap_or_else(|| "the daemon reported no reason".to_string()),
-                        })
+        tokio::select! {
+            event = events.recv() => match event {
+                Ok(event) => {
+                    if let Some(outcome) = joined_outcome(&event, joined) {
+                        return outcome;
                     }
-                    OperationState::Cancelled => {
-                        return Err(DaemonError::OperationCancelled(joined.to_string()))
-                    }
-                    OperationState::Queued | OperationState::Running => continue,
                 }
-            }
-            // The receiver fell behind; keep waiting for the terminal event.
-            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-            Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                return Err(DaemonError::OperationFailed {
-                    op_id: joined.to_string(),
-                    reason: "the daemon stopped before the operation reported a result".to_string(),
-                })
+                // The receiver fell behind; keep waiting for the terminal event.
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                // The daemon and its bus are gone, so this RPC is going with
+                // it; there is nothing left to wait for.
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => return Ok(()),
+            },
+            _ = ticker.tick() => {
+                // Drain what is already queued first, so a terminal event that
+                // landed before this tick is never mistaken for a missing one.
+                while let Ok(event) = events.try_recv() {
+                    if let Some(outcome) = joined_outcome(&event, joined) {
+                        return outcome;
+                    }
+                }
+                // Liveness: a runner that returns without publishing a final
+                // state must not hang its caller — that is exactly how this
+                // wait first deadlocked a cancelled install.
+                let active = handle.active_operation().await?.map(|op| op.op_id);
+                if active.as_deref() != Some(joined) {
+                    return Err(DaemonError::OperationFailed {
+                        op_id: joined.to_string(),
+                        reason: "the operation is no longer running but reported no result; \
+                                 retry the command"
+                            .to_string(),
+                    });
+                }
             }
         }
+    }
+}
+
+/// The joined operation's terminal event, if this is it.
+fn joined_outcome(
+    event: &andler_core::DaemonEvent,
+    joined: &str,
+) -> Option<Result<(), DaemonError>> {
+    let andler_core::EventKind::Operation { op } = &event.kind else {
+        return None;
+    };
+    if op.op_id != joined {
+        return None;
+    }
+
+    match op.state {
+        OperationState::Done => Some(Ok(())),
+        OperationState::Failed => Some(Err(DaemonError::OperationFailed {
+            op_id: joined.to_string(),
+            reason: op
+                .error
+                .clone()
+                .unwrap_or_else(|| "the daemon reported no reason".to_string()),
+        })),
+        OperationState::Cancelled => Some(Err(DaemonError::OperationCancelled(joined.to_string()))),
+        OperationState::Queued | OperationState::Running => None,
     }
 }

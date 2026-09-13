@@ -445,8 +445,10 @@ async fn a_join_waits_for_the_operation_and_surfaces_its_outcome() {
         .expect("first operation must be accepted");
     assert!(matches!(first, OpAccept::Started { .. }));
 
-    let waiter =
-        tokio::spawn(async move { wait_for_joined_operation(&mut waiter_events, "op-test").await });
+    let waiter_handle = handle.clone();
+    let waiter = tokio::spawn(async move {
+        wait_for_joined_operation(&waiter_handle, &mut waiter_events, "op-test").await
+    });
 
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert!(

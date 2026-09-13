@@ -701,12 +701,18 @@ async fn retry_during_maintenance_boot_follows_the_accept_rule() {
     wait_for_active_operation(&daemon, id).await;
     wait_for_state(&daemon, id, InstanceState::Starting).await;
 
-    let joined = daemon
-        .install_guest_agent(id, "htop".to_string(), false, Some("tok-A".to_string()))
-        .await;
+    let joined = tokio::spawn({
+        let daemon = Arc::clone(&daemon);
+        async move {
+            daemon
+                .install_guest_agent(id, "htop".to_string(), false, Some("tok-A".to_string()))
+                .await
+        }
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     assert!(
-        joined.is_ok(),
-        "a same-key retry during the maintenance boot must join, got: {joined:?}"
+        !joined.is_finished(),
+        "a same-key retry during the maintenance boot must wait for the install it joined"
     );
 
     let busy = daemon
@@ -720,6 +726,14 @@ async fn retry_during_maintenance_boot_follows_the_accept_rule() {
     // Let the boot finish, the install run, and the VM stop again.
     let _ = spawn_release.send(());
     let _ = release.send(());
+    let joined_result = tokio::time::timeout(std::time::Duration::from_secs(5), joined)
+        .await
+        .expect("the joined retry returns once the install finishes")
+        .expect("the joined task must not panic");
+    assert!(
+        joined_result.is_ok(),
+        "the joined retry must report the install's outcome, got: {joined_result:?}"
+    );
     let first_result = first
         .await
         .expect("the maintenance install task runs to completion");
@@ -761,16 +775,32 @@ async fn install_with_same_idempotency_token_joins_in_flight_operation() {
     });
     wait_for_active_operation(&daemon, id).await;
 
-    // A retry with the same token must join, not start a second install.
-    let retry = daemon
-        .install_guest_agent(id, "htop".to_string(), false, Some("tok-A".to_string()))
-        .await;
+    // A retry with the same token joins the in-flight install — and a join
+    // waits for the work it joined, so it cannot return while the gate holds
+    // the install.
+    let retry = tokio::spawn({
+        let daemon = Arc::clone(&daemon);
+        async move {
+            daemon
+                .install_guest_agent(id, "htop".to_string(), false, Some("tok-A".to_string()))
+                .await
+        }
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     assert!(
-        retry.is_ok(),
-        "same-token retry must join the in-flight install, got: {retry:?}"
+        !retry.is_finished(),
+        "a joined retry must wait for the install it joined"
     );
 
     let _ = release.send(());
+    let retry_result = tokio::time::timeout(std::time::Duration::from_secs(5), retry)
+        .await
+        .expect("the joined retry returns once the install finishes")
+        .expect("the retry task must not panic");
+    assert!(
+        retry_result.is_ok(),
+        "same-token retry must join the in-flight install, got: {retry_result:?}"
+    );
     first
         .await
         .expect("the first install must complete once the gate is released");
@@ -877,15 +907,29 @@ async fn two_concurrent_online_installs_run_once() {
     });
     wait_for_active_operation(&daemon, id).await;
 
-    let second = daemon
-        .install_guest_agent(id, "htop".to_string(), false, None)
-        .await;
+    let second = tokio::spawn({
+        let daemon = Arc::clone(&daemon);
+        async move {
+            daemon
+                .install_guest_agent(id, "htop".to_string(), false, None)
+                .await
+        }
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     assert!(
-        second.is_ok(),
-        "the second concurrent install must join the first, got: {second:?}"
+        !second.is_finished(),
+        "the second concurrent install joins the first and waits for it"
     );
 
     let _ = release.send(());
+    let second_result = tokio::time::timeout(std::time::Duration::from_secs(5), second)
+        .await
+        .expect("the joined install returns once the first finishes")
+        .expect("the second task must not panic");
+    assert!(
+        second_result.is_ok(),
+        "the second concurrent install must join the first, got: {second_result:?}"
+    );
     let first_result = first
         .await
         .expect("the first install task runs to completion");
@@ -956,7 +1000,7 @@ async fn cancelled_online_install_retry_runs_fresh() {
     // next request: without the per-start generation token that is exactly
     // where the fresh install gets mistaken for a finished one.
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    let third = tokio::spawn({
+    let joined = tokio::spawn({
         let daemon = Arc::clone(&daemon);
         async move {
             daemon
@@ -964,16 +1008,31 @@ async fn cancelled_online_install_retry_runs_fresh() {
                 .await
         }
     });
-    let joined = tokio::time::timeout(std::time::Duration::from_secs(5), third)
-        .await
-        .expect("a same-key request must join the running install, never start a third");
+
+    // A join waits for the work it joined, so the third request must still be
+    // pending while the fresh install is held on the gate — and it must not
+    // have started an install of its own.
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     assert!(
-        joined.is_ok(),
-        "the third same-key request must join, got: {joined:?}"
+        !joined.is_finished(),
+        "a joined request must wait for the install it joined"
+    );
+    assert_eq!(
+        mock.installs.load(Ordering::SeqCst),
+        2,
+        "the third same-key request must join the running install, never start a third"
     );
 
-    // Release the fresh install.
+    // Release the fresh install: the owner and the joined request both finish.
     let _ = release.send(());
+    let joined_result = tokio::time::timeout(std::time::Duration::from_secs(5), joined)
+        .await
+        .expect("the joined request returns once the install finishes");
+    assert!(
+        joined_result.is_ok(),
+        "the third same-key request must join, got: {joined_result:?}"
+    );
+
     let retry_result = retry
         .await
         .expect("the fresh install task runs to completion");
