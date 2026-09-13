@@ -1,0 +1,127 @@
+name: Release
+
+# Publishes the project binaries for a version tag:
+#
+#   git tag -a v0.1.0 -m "ANDLER 0.1.0" && git push origin v0.1.0
+#
+# The archive layout matches the README's install instructions: `andler` and
+# `andlerd` sit at the archive root, so `tar -xzf andler-*.tar.gz` drops both
+# binaries next to each other. Automated base-image builds publish their own
+# `base-image-*` releases with `--latest=false`, so `releases/latest` keeps
+# pointing at the project release.
+#
+# Add targets by extending the packaging steps (a musl build needs
+# `rustup target add x86_64-unknown-linux-musl` plus a musl toolchain); the
+# current release ships the glibc x86_64 build only.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Tag to publish (must already be pushed)
+        required: true
+        type: string
+
+permissions:
+  contents: write      # create the release and upload assets
+  id-token: write      # sign the build provenance attestation
+  attestations: write
+
+concurrency:
+  group: release-${{ github.event.inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Resolve the tag and version
+        id: version
+        run: |
+          set -euo pipefail
+          tag="${{ github.event.inputs.tag || github.ref_name }}"
+          case "$tag" in
+            v*) ;;
+            *) echo "::error::tag '$tag' must start with 'v'"; exit 1 ;;
+          esac
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Build release binaries
+        run: cargo build --release --locked -p daemon -p cli
+
+      - name: Assemble the archive
+        id: package
+        run: |
+          set -euo pipefail
+          tag="${{ steps.version.outputs.tag }}"
+          dir="andler-${tag}-linux-x86_64"
+          mkdir -p "dist/$dir"
+          cp target/release/andler target/release/andlerd "dist/$dir/"
+          cp LICENSE README.md "dist/$dir/"
+          tar -C dist -czf "dist/${dir}.tar.gz" "$dir"
+          (cd dist && sha256sum "${dir}.tar.gz" > "${dir}.tar.gz.sha256")
+          echo "dir=$dir" >> "$GITHUB_OUTPUT"
+          ls -lh dist
+
+      - name: Smoke-check the packaged binaries
+        run: |
+          set -euo pipefail
+          tar -xzf dist/andler-*.tar.gz -C /tmp
+          "/tmp/${{ steps.package.outputs.dir }}/andler" --version
+          "/tmp/${{ steps.package.outputs.dir }}/andlerd" --version
+
+      - name: Attest the build provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: dist/andler-*.tar.gz
+
+      - name: Extract the changelog section
+        id: notes
+        run: |
+          set -euo pipefail
+          version="${{ steps.version.outputs.version }}"
+          awk -v ver="$version" '
+            $0 ~ "^## \\[" ver "\\]" { found = 1; next }
+            found && /^## \[/ { exit }
+            found { print }
+          ' docs/CHANGELOG.md > notes.md
+          if [ -s notes.md ]; then
+            echo "have_notes=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "have_notes=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::docs/CHANGELOG.md has no section for $version - falling back to generated notes"
+          fi
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          tag="${{ steps.version.outputs.tag }}"
+          repo="${{ github.repository }}"
+          if gh release view "$tag" --repo "$repo" >/dev/null 2>&1; then
+            gh release upload "$tag" --repo "$repo" --clobber dist/andler-*.tar.gz dist/andler-*.sha256
+          else
+            if [ "${{ steps.notes.outputs.have_notes }}" = "true" ]; then
+              gh release create "$tag" --repo "$repo" --title "ANDLER $tag" --latest \
+                --notes-file notes.md dist/andler-*.tar.gz dist/andler-*.sha256
+            else
+              gh release create "$tag" --repo "$repo" --title "ANDLER $tag" --latest \
+                --generate-notes dist/andler-*.tar.gz dist/andler-*.sha256
+            fi
+          fi
