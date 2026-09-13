@@ -98,6 +98,18 @@ fn verbosity_from_args() -> u8 {
     verbosity_from(std::env::args().skip(1))
 }
 
+/// `--version` / `-V`: print the build version and exit without starting the
+/// daemon, so an operator can identify a binary before it touches
+/// `ANDLER_HOME` (and so a published release can be smoke-checked).
+fn version_requested<I, S>(args: I) -> bool
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    args.into_iter()
+        .any(|arg| matches!(arg.as_ref(), "--version" | "-V"))
+}
+
 fn verbosity_from<I, S>(args: I) -> u8
 where
     I: IntoIterator<Item = S>,
@@ -116,7 +128,16 @@ where
 
 #[cfg(test)]
 mod verbosity_tests {
-    use super::verbosity_from;
+    use super::{verbosity_from, version_requested};
+
+    #[test]
+    fn version_flags_are_recognized() {
+        assert!(version_requested(["--version"]));
+        assert!(version_requested(["-V"]));
+        assert!(version_requested(["-v", "--version"]));
+        assert!(!version_requested(["-v", "--verbose"]));
+        assert!(!version_requested(Vec::<&str>::new()));
+    }
 
     #[test]
     fn no_flags_is_zero() {
@@ -200,6 +221,11 @@ fn default_store_path() -> String {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    if version_requested(std::env::args().skip(1)) {
+        println!("andlerd {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
+
     let ring = init_tracing();
 
     // One daemon per ANDLER_HOME: the lock file lives next to the database

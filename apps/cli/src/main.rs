@@ -40,6 +40,7 @@ fn default_instances_root() -> String {
 #[derive(Parser)]
 #[command(
     name = "andler",
+    version,
     about = "Thin CLI client to andlerd",
     long_about = "ANDLER CLI — create, manage and monitor Android/Linux VMs.\n\n\
                    Communicates with andlerd over gRPC (default: http://127.0.0.1:50051).\n\
