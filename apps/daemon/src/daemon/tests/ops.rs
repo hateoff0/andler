@@ -387,3 +387,80 @@ async fn operation_events_reach_the_bus() {
     }
     assert!(saw_done, "expected a Done operation event on the bus");
 }
+
+/// Like [`sample_supervisor`], but handing back the event sender so a test can
+/// subscribe to the bus the way a joining caller does.
+async fn sample_supervisor_with_events() -> (
+    TestTempDir,
+    SupervisorHandle,
+    InstanceId,
+    tokio::sync::broadcast::Sender<DaemonEvent>,
+) {
+    let dir = TestTempDir::new();
+    let id = InstanceId::new();
+    let cfg = super::common::sample_config();
+    let (events, _) = tokio::sync::broadcast::channel(16);
+    let handle = spawn_supervisor(
+        id,
+        dir.path().join(id.to_string()),
+        cfg,
+        InstanceState::Created,
+        None,
+        events.clone(),
+    );
+    (dir, handle, id, events)
+}
+
+/// A join must wait for the operation it joined. Returning as soon as the join
+/// succeeded is how `guest install libndk` reported "installed" while the
+/// staging batch was still running, and how a failed switch looked like a
+/// successful one.
+#[tokio::test]
+async fn a_join_waits_for_the_operation_and_surfaces_its_outcome() {
+    use crate::daemon::instance_ops::wait_for_joined_operation;
+
+    let (_dir, handle, id, events) = sample_supervisor_with_events().await;
+    let mut waiter_events = events.subscribe();
+
+    // A failing operation: the joined caller must see the failure, not success.
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+    let run: OpRunner = Box::new(move |mut progress| {
+        Box::pin(async move {
+            progress.enter_phase("phase-a");
+            let _ = release_rx.await;
+            progress.finish(Err("the appliance never answered".to_string()));
+            Err(DaemonError::OperationFailed {
+                op_id: "op-test".to_string(),
+                reason: "the appliance never answered".to_string(),
+            })
+        })
+    });
+    let first = handle
+        .run_operation(
+            test_op(id, OperationKind::GuestInstall),
+            Some("key".to_string()),
+            run,
+        )
+        .await
+        .expect("first operation must be accepted");
+    assert!(matches!(first, OpAccept::Started { .. }));
+
+    let waiter =
+        tokio::spawn(async move { wait_for_joined_operation(&mut waiter_events, "op-test").await });
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(
+        !waiter.is_finished(),
+        "a join must not report a result while the work is still running"
+    );
+
+    let _ = release_tx.send(());
+    let result = tokio::time::timeout(Duration::from_secs(5), waiter)
+        .await
+        .expect("the waiter returns once the operation finishes")
+        .expect("the waiting task must not panic");
+    assert!(
+        matches!(result, Err(DaemonError::OperationFailed { .. })),
+        "a failed joined operation must surface as an error, got {result:?}"
+    );
+}
