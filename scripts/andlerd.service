@@ -17,8 +17,8 @@
 #
 # A system-wide unit running as root or a fresh "andler" system user
 # would have none of this — audio would always detect as unavailable,
-# and QEMU's window would have nowhere to display. See PLAN.md, item 9,
-# "Daemon systemd integration".
+# and QEMU's window would have nowhere to display. See
+# docs/ARCHITECTURE.md for the daemon's session requirements.
 #
 # Install with scripts/install.sh, or manually:
 #   mkdir -p ~/.config/systemd/user

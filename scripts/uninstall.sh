@@ -2,32 +2,40 @@
 # Removes the per-user andlerd systemd service installed by scripts/install.sh.
 #
 # Usage:
-#   scripts/uninstall.sh              # stop + disable + remove the unit
-#   scripts/uninstall.sh --purge      # also delete ~/.andler data and the
-#                                     # /etc/sudoers.d/andler rules (asks on TTY)
+#   scripts/uninstall.sh                    # stop + disable + remove the unit
+#   scripts/uninstall.sh --binaries         # also remove ~/.local/bin/{andler,andlerd}
+#   scripts/uninstall.sh --purge            # also delete ~/.andler data (asks on TTY)
 #
 # Deliberately scoped like install.sh: only touches the *current user's*
-# systemd user directory (~/.config/systemd/user/). It does NOT delete the
-# andlerd binary — install.sh never copies it, the unit points at an existing
-# path — and it never touches instance data unless --purge is given. Run it
-# as yourself, not with sudo.
+# systemd user directory (~/.config/systemd/user/) and the binaries install.sh
+# placed in --bin-dir (default ~/.local/bin, only when --binaries is given).
+# Instance data is untouched unless --purge is passed. Run it as yourself, not
+# with sudo.
 
 set -euo pipefail
 
 PURGE=0
-if [[ $# -ge 1 ]]; then
+BINARIES=0
+BIN_DIR="$HOME/.local/bin"
+while [[ $# -gt 0 ]]; do
     case "$1" in
-        --purge) PURGE=1 ;;
+        --purge) PURGE=1; shift ;;
+        --binaries) BINARIES=1; shift ;;
+        --bin-dir)
+            BIN_DIR="${2:?--bin-dir needs a directory}"
+            BINARIES=1
+            shift 2
+            ;;
         -h|--help)
-            echo "usage: $0 [--purge]" >&2
+            echo "usage: $0 [--purge] [--binaries] [--bin-dir DIR]" >&2
             exit 0
             ;;
         *)
-            echo "error: unknown argument: $1 (only --purge is supported)" >&2
+            echo "error: unknown argument: $1 (see --help)" >&2
             exit 1
             ;;
     esac
-fi
+done
 
 if [[ "${EUID:-$(id -u)}" -eq 0 ]]; then
     echo "error: run this as your normal user, not root/sudo — the service is per-user." >&2
@@ -58,15 +66,26 @@ fi
 systemctl --user daemon-reload
 
 echo "Uninstalled andlerd user service."
+
+if [[ "$BINARIES" -eq 1 ]]; then
+    for bin in andlerd andler; do
+        if [[ -f "$BIN_DIR/$bin" ]]; then
+            rm -f "$BIN_DIR/$bin"
+            echo "Removed $BIN_DIR/$bin"
+        fi
+    done
+else
+    echo "Binaries in $BIN_DIR (and anywhere else on PATH) were left in place —"
+    echo "run with --binaries to remove the ones install.sh put in $BIN_DIR."
+fi
+
 echo "Data (instances, database) left in place under ~/.andler —"
 echo "run with --purge to delete it too."
 
 if [[ "$PURGE" -eq 1 ]]; then
     echo
-    echo "Purging data and system-wide privileged setup:"
-    echo "  1. ~/.andler/  — all instances, disks, snapshots, cache"
-    echo "  2. /etc/sudoers.d/andler  — passwordless-sudo rule added by 'andler doctor --fix'"
-    echo "  3. /usr/local/sbin/andler-helper  — the privileged helper binary"
+    echo "Purging data:"
+    echo "  ~/.andler/  — all instances, disks, snapshots, cache"
     echo
 
     # Deleting instance disks is irreversible; require an explicit
@@ -86,30 +105,6 @@ if [[ "$PURGE" -eq 1 ]]; then
         rm -rf "$HOME/.andler"
     else
         echo "No $HOME/.andler — nothing to remove"
-    fi
-
-    if [[ -f /etc/sudoers.d/andler ]]; then
-        echo "Removing /etc/sudoers.d/andler (interactive sudo)"
-        if sudo rm -f /etc/sudoers.d/andler; then
-            echo "Removed /etc/sudoers.d/andler"
-        else
-            echo "Warning: could not remove /etc/sudoers.d/andler — remove it manually:" >&2
-            echo "  sudo rm /etc/sudoers.d/andler" >&2
-        fi
-    else
-        echo "No /etc/sudoers.d/andler — nothing to remove"
-    fi
-
-    if [[ -f /usr/local/sbin/andler-helper ]]; then
-        echo "Removing /usr/local/sbin/andler-helper (interactive sudo)"
-        if sudo rm -f /usr/local/sbin/andler-helper; then
-            echo "Removed /usr/local/sbin/andler-helper"
-        else
-            echo "Warning: could not remove /usr/local/sbin/andler-helper — remove it manually:" >&2
-            echo "  sudo rm /usr/local/sbin/andler-helper" >&2
-        fi
-    else
-        echo "No /usr/local/sbin/andler-helper — nothing to remove"
     fi
 
     echo
