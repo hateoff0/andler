@@ -1462,13 +1462,117 @@ impl Daemon {
             _ => "13".to_string(),
         };
 
-        let switch = andler_disk::arm_translator::switch_translator_with(
-            &andler_guestfs::GuestfsMutator::new(overlay_path.clone()),
-            translator,
-            translator_dir,
-            &android_version,
-        )
-        .await?;
+        // A switch opens a libguestfs session, downloads the payload on a cold
+        // cache (~18 MiB) and runs three appliance batches, so it takes
+        // minutes. It runs as a supervisor operation with named stages: as an
+        // inline call the CLI could only show a spinner that said nothing for
+        // the whole duration.
+        use andler_disk::arm_translator::TranslatorStage;
+        let op_id = format!("op-{}", uuid::Uuid::new_v4());
+        let phases: Vec<(String, f32)> = vec![
+            (TranslatorStage::Downloading.label().to_string(), 0.35),
+            (TranslatorStage::OpeningDisk.label().to_string(), 0.30),
+            (TranslatorStage::Staging.label().to_string(), 0.25),
+            (TranslatorStage::Cleanup.label().to_string(), 0.05),
+            (TranslatorStage::Properties.label().to_string(), 0.05),
+        ];
+        // Same translator + same source dir is the same work, so a retry joins
+        // the running operation instead of starting a second appliance session
+        // on the same disk.
+        let key = Some(match &translator_dir {
+            Some(dir) => format!("arm-translator:{translator}:{}", dir.display()),
+            None => format!("arm-translator:{translator}"),
+        });
+
+        let outcome: Arc<std::sync::Mutex<Option<andler_disk::arm_translator::TranslatorSwitch>>> =
+            Arc::new(std::sync::Mutex::new(None));
+        let outcome_for_run = outcome.clone();
+        let op_id_for_cancel = op_id.clone();
+
+        let run: OpRunner = Box::new(move |mut progress| {
+            Box::pin(async move {
+                let (stage_tx, mut stage_rx) =
+                    tokio::sync::watch::channel(TranslatorStage::Downloading);
+                let mutator = andler_guestfs::GuestfsMutator::new(overlay_path.clone());
+                let switch = andler_disk::arm_translator::switch_translator_with(
+                    &mutator,
+                    translator,
+                    translator_dir,
+                    &android_version,
+                    Some(&stage_tx),
+                );
+                tokio::pin!(switch);
+
+                let result = loop {
+                    tokio::select! {
+                        result = &mut switch => break result,
+                        changed = stage_rx.changed() => {
+                            if changed.is_err() {
+                                continue;
+                            }
+                            let stage = *stage_rx.borrow();
+                            progress.enter_phase(stage.label());
+                            if progress.is_cancelled() {
+                                let err = DaemonError::OperationCancelled(op_id_for_cancel.clone());
+                                progress.finish(Err(err.to_string()));
+                                return Err(err);
+                            }
+                        }
+                    }
+                };
+
+                match result {
+                    Ok(switch) => {
+                        *outcome_for_run.lock().unwrap_or_else(|e| e.into_inner()) = Some(switch);
+                        progress.set_progress(1.0);
+                        progress.finish(Ok(()));
+                        Ok(())
+                    }
+                    Err(err) => {
+                        let err = DaemonError::Disk(err);
+                        progress.finish(Err(err.to_string()));
+                        Err(err)
+                    }
+                }
+            })
+        });
+
+        match handle
+            .run_operation(
+                Operation {
+                    op_id: op_id.clone(),
+                    instance_id: id,
+                    kind: OperationKind::GuestInstall,
+                    phases: phases.clone(),
+                    progress: 0.0,
+                    state: OperationState::Queued,
+                    error: None,
+                },
+                key,
+                run,
+            )
+            .await?
+        {
+            OpAccept::Started { done } => {
+                // Two layers: the supervisor channel's own error, then the
+                // operation's result.
+                done.await
+                    .map_err(|_| DaemonError::InstanceSupervisorGone(id))??;
+            }
+            OpAccept::Joined { op_id: joined } => {
+                tracing::warn!(
+                    instance_id = %id,
+                    joined = %joined,
+                    translator = ?translator,
+                    "translator switch joined an already-running operation"
+                );
+            }
+        }
+
+        let switch = outcome
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or(andler_disk::arm_translator::TranslatorSwitch::AlreadyInstalled);
 
         tracing::info!(
             instance_id = %id,
