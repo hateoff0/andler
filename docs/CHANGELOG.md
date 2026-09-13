@@ -34,18 +34,7 @@
 
 ## [Unreleased]
 
-### Added
-
-- **One archive per component.** A release now publishes `andlerd-<tag>-linux-x86_64.tar.gz` (daemon), `andler-cli-<tag>-linux-x86_64.tar.gz` (client) and `andler-<tag>-linux-x86_64.tar.gz` (both, plus `LICENSE` and `README.md`), each with its own `.sha256`. A host that only serves VMs no longer downloads the CLI, and a client machine can install just the client.
-- **`scripts/install.sh` installs from a release.** `--component daemon|cli|both`, `--from-release [TAG]`, `--bin-dir DIR`, `--no-service`: it downloads the archive matching the component, verifies the published checksum, installs into `~/.local/bin`, and points the systemd user unit at exactly the binary it installed. `scripts/uninstall.sh` gained `--binaries` for the reverse.
-
-### Changed
-
-- Release titles no longer repeat the project name — GitHub titles the release with the tag, which is the version a reader needs — and the release notes open with the same navigation row as the README.
-
-### Removed
-
-- Dangling `PLAN.md` references in `scripts/install.sh` and `scripts/andlerd.service`, and the dead `andler-helper` / `/etc/sudoers.d/andler` cleanup in `uninstall.sh --purge` — both belonged to the privileged-helper era that the zero-root migration removed.
+_Nothing yet._
 
 ---
 
@@ -107,6 +96,8 @@ Linux with KVM (`/dev/kvm`, user in the `kvm` group), QEMU with OVMF/UEFI suppor
 
 ### Added
 
+- **One archive per component.** A release publishes `andlerd-<tag>-linux-x86_64.tar.gz` (daemon), `andler-cli-<tag>-linux-x86_64.tar.gz` (client) and `andler-<tag>-linux-x86_64.tar.gz` (both, plus `LICENSE` and `README.md`), each with its own `.sha256`. A host that only serves VMs does not download the CLI, and a client machine can install just the client.
+- **`scripts/install.sh` installs from a release.** `--component daemon|cli|both`, `--from-release [TAG]`, `--bin-dir DIR`, `--no-service`: it downloads the archive for the component, verifies the published checksum, installs into `~/.local/bin`, and points the systemd user unit at exactly the binary it installed. `scripts/uninstall.sh` gained `--binaries` for the reverse.
 - **Zero-root offline guest operations** — `guestmount` (libguestfs FUSE) + `unshare --user --map-root-user --mount` + chroot replace the qemu-nbd / host-mount / privileged-helper pipeline. The `andler-helper` crate, its `/usr/local/sbin` binary, `doctor --fix`, and every sudoers rule are gone.
 - **`ApplyGuestProfile` RPC + `andler guest apply <id>`** — the instance's own config decides the guest-side work (`kind.android_profile.arm_translator` → the translator, `input.clipboard_enabled` → `spice-vdagent`), applied through the state-appropriate path with one classified outcome per selection (`applied` / `already_present` / `skipped` / `failed`). The wizard runs it right after creating a VM.
 - **`andler guest provision <manifest> <id>`** — declarative TOML batch (`write`/`upload`/`mkdir`/`cp`/`mv`/`rm-rf`/`chmod`/`symlink`, optional octal modes) through the shared `MutatorOp` batch, online or offline.
@@ -125,6 +116,7 @@ Linux with KVM (`/dev/kvm`, user in the `kvm` group), QEMU with OVMF/UEFI suppor
 
 ### Changed
 
+- Release titles no longer repeat the project name — GitHub titles the release with the tag, which is the version a reader needs — and the release notes open with the same navigation row as the README.
 - **Snapshots are external overlay chains** — live create switches the QEMU block graph over QMP to a fresh overlay; restore is offline (discard, or `--branch` archives the chain); delete commits a layer into its parent. Legacy internal snapshots stay listable and deletable.
 - **Instance registry is file-based** — `instance.toml` + `events.jsonl` per instance; SQLite keeps snapshot metadata only; legacy databases migrate on first start, and a broken entry is listed (never fatal).
 - **Base-image cache layout** — `cache/base-images/<androidN>-<variant>/` subdirectories (the flat root is still read); Android overlay default raised to 128 GiB, disk default 256 GiB.
@@ -133,6 +125,10 @@ Linux with KVM (`/dev/kvm`, user in the `kvm` group), QEMU with OVMF/UEFI suppor
 
 ### Fixed
 
+- **`guest install` / `guest apply` inside a running guest timed out after 60 s.** One package-manager step (index refresh, install, remove) now gets a real budget — `ANDLERD_GUEST_PACKAGE_TIMEOUT_SECS`, default 600 s, minimum 30 — and a timeout reports which step it was and how to raise it. A first sync plus a download on a fresh image routinely takes minutes, so the old cap turned a working install into a failure.
+- **The online package path never refreshed the package index.** A guest that had never synced (a fresh Android image) failed the install with "target not found", which reads like a missing package. Both paths now run the manager's refresh command from `PackageManager::refresh_args()` — the same single source they already shared for install and remove.
+- **`guest list` on an Android VM hid the clipboard agent.** The Android list was the ARM translators only, so `spice-vdagent` — the package `guest apply` installs from `input.clipboard_enabled` — never appeared. The shared packages (clipboard, guest agent, webdav) now apply to both platforms, with the translators layered on top for Android.
+- **Image downloads were silent without a terminal.** `andler image download` now prints one progress line per 10 % of the payload when stdout is not a TTY, and the wizard's spinner shows bytes against the total instead of only the asset name.
 - Online guest install ran GNU coreutils' `install` instead of the package manager — the guest argv now carries the manager binary.
 - A retry during a maintenance auto-start was refused by the lifecycle gate instead of joining the operation already doing the work.
 - `create --dry-run --json` printed the preview and then created the instance anyway.
@@ -146,6 +142,7 @@ Linux with KVM (`/dev/kvm`, user in the `kvm` group), QEMU with OVMF/UEFI suppor
 
 ### Removed
 
+- Dangling `PLAN.md` references in `scripts/install.sh` and `scripts/andlerd.service`, and the dead `andler-helper` / `/etc/sudoers.d/andler` cleanup in `uninstall.sh --purge` — both belonged to the privileged-helper era that the zero-root migration removed.
 - `andler-helper` crate, its binary, `doctor --fix`, and all passwordless-sudo rules.
 - Dead stub crates (`frontend/`, `guest-image/`, `packaging/`, `presets/`), the dead `--instance-kind` flag, the `create-android` command (merged into `create`), and the `--libndk` boolean (replaced by `--arm-translator`).
 

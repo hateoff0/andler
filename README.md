@@ -566,6 +566,7 @@ andler cache list|clean [--dry-run|--json]        &&   andler completions <bash|
 | `ANDLERD_LOG_FORMAT=json` | daemon | Structured JSON logging (tee'd into the daemon log ring) |
 | `ANDLERD_HEALTH_CHECK_INTERVAL_SECS` | daemon | Health-check interval (default `30`, `0` disables) |
 | `ANDLERD_GUEST_AGENT_WAIT_SECS` | daemon | How long a maintenance auto-start waits for QGA (default `120`) |
+| `ANDLERD_GUEST_PACKAGE_TIMEOUT_SECS` | daemon | How long one in-guest package-manager step (index refresh, install, remove) may run (default `600`, minimum `30`) — raise it when a guest's mirrors are slow |
 | `ANDLERD_DEV_RESTART=1` | daemon | SIGTERM/Ctrl+C leaves VMs running; the next start adopts them |
 | `ANDLERD_IMAGE_REPO` | daemon | `owner/repo` whose releases hold the base images (default `hateoff0/andler`) |
 | `ANDLERD_IMAGE_API_BASE` | daemon | API base for the release catalog (default `https://api.github.com`) |

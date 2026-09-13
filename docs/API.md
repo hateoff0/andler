@@ -545,6 +545,10 @@ is visible on `andler events` and cancellable. If the guest agent does not
 appear within `ANDLERD_GUEST_AGENT_WAIT_SECS` (default 120 s) the
 operation fails with a hint to retry with `--offline` — that path uses
 the offline guestmount + userns path — zero root, no sudoers rules.
+Each package-manager step in the guest (index refresh, install, remove) is
+bounded by `ANDLERD_GUEST_PACKAGE_TIMEOUT_SECS` (default 600 s, minimum 30):
+a fresh guest's first index sync plus a download takes minutes, and a timeout
+names the step that ran out and the variable that raises the budget.
 Both `guest install` and `guest remove` accept `--idempotency-token <key>`, a
 client-chosen key that makes a network retry idempotent: a second call with the
 same token while the first is still in-flight joins the running operation
