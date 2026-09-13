@@ -1,4 +1,5 @@
 use andler_rpc::proto::{BackendKind, InstanceStateKind};
+use std::future::Future;
 use std::io::IsTerminal;
 
 /// Searches $PATH, then common sbin directories that are often missing from a
@@ -176,11 +177,6 @@ pub fn short_id(full: &str) -> &str {
     full.get(..12).unwrap_or(full)
 }
 
-/// Emit a value as compact JSON on stdout: the single source of truth for
-/// `--json` output so every subcommand formats identically. Streaming outputs
-/// (metrics, events) call this per sample to stay line-based.
-/// Indeterminate progress for one blocking step (create, snapshot, …).
-/// Hidden when stderr is not a terminal, so piped output stays line-oriented.
 pub fn spinner(message: &str) -> indicatif::ProgressBar {
     use indicatif::{ProgressBar, ProgressStyle};
     use std::time::Duration;
@@ -200,6 +196,119 @@ pub fn spinner(message: &str) -> indicatif::ProgressBar {
 pub fn emit_json<T: serde::Serialize>(value: &T) -> std::result::Result<(), serde_json::Error> {
     println!("{}", serde_json::to_string(value)?);
     Ok(())
+}
+
+/// Emit a value as compact JSON on stdout: the single source of truth for
+/// `--json` output so every subcommand formats identically. Streaming outputs
+/// (metrics, events) call this per sample to stay line-based.
+/// Indeterminate progress for one blocking step (create, snapshot, …).
+/// Hidden when stderr is not a terminal, so piped output stays line-oriented.
+/// Runs a daemon call that can spend minutes inside a daemon-side operation
+/// (translator switch, package install, profile apply) while reporting that
+/// operation's phase.
+///
+/// The RPC is unary — it answers only when the work is done — so progress is
+/// polled on a second client. `report` fires whenever the phase or the
+/// percentage moves, with the elapsed time appended: `guest install libndk`
+/// used to print one line and then sit silent while a libguestfs session
+/// started, ~18 MiB came down and three appliance batches ran.
+pub async fn call_with_operation_progress<T, F>(
+    client: &crate::TracedClient,
+    instance_ref: &str,
+    label: &str,
+    mut report: impl FnMut(&str),
+    call: F,
+) -> Result<T, tonic::Status>
+where
+    F: Future<Output = Result<T, tonic::Status>>,
+{
+    let mut poll = client.clone();
+    tokio::pin!(call);
+    let mut ticker = tokio::time::interval(std::time::Duration::from_millis(500));
+    let started = std::time::Instant::now();
+    let mut last = String::new();
+    let mut last_idle_report = 0u64;
+
+    loop {
+        tokio::select! {
+            result = &mut call => return result,
+            _ = ticker.tick() => {
+                let elapsed = started.elapsed().as_secs();
+                match active_operation(&mut poll, instance_ref).await {
+                    Ok(Some(line)) => {
+                        if line != last {
+                            last = line.clone();
+                            report(&format!("{line} — {elapsed}s"));
+                        }
+                    }
+                    // Not every slow step is a daemon-side operation (an
+                    // offline `guest list` mounts the disk inline, for
+                    // example): say what is running and how long it has been,
+                    // because silence is what made these commands look hung.
+                    _ => {
+                        if elapsed >= last_idle_report + 5 {
+                            last_idle_report = elapsed;
+                            last.clear();
+                            report(&format!("{label} — {elapsed}s"));
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// The instance's running operation, rendered as one line, or `None`.
+async fn active_operation(
+    client: &mut crate::TracedClient,
+    instance_ref: &str,
+) -> Result<Option<String>, tonic::Status> {
+    use andler_rpc::proto::Empty;
+
+    let operations = client
+        .list_operations(Empty {})
+        .await?
+        .into_inner()
+        .operations;
+    // The caller may hold a prefix of the id (`andler guest install libndk 7a`),
+    // so match either direction.
+    let op = operations.iter().find(|op| {
+        op.instance_id.starts_with(instance_ref)
+            || (!op.instance_id.is_empty() && instance_ref.starts_with(&op.instance_id))
+    });
+
+    Ok(op.map(|op| {
+        format!(
+            "{} — {} ({}%)",
+            op.kind,
+            operation_phase(op),
+            (op.progress * 100.0).round() as u32
+        )
+    }))
+}
+
+/// The daemon publishes the phase list and the overall progress; the active
+/// phase is the first one whose cumulative weight covers that progress, so the
+/// CLI can name it without another field on the wire.
+fn operation_phase(op: &andler_rpc::proto::OperationInfo) -> String {
+    let total: f64 = op.phases.iter().map(|phase| phase.weight).sum();
+    if op.phases.is_empty() || total <= 0.0 {
+        return "working".to_string();
+    }
+
+    let target = op.progress * total;
+    let mut accumulated = 0.0;
+    for phase in &op.phases {
+        accumulated += phase.weight;
+        if target <= accumulated {
+            return phase.name.clone();
+        }
+    }
+
+    op.phases
+        .last()
+        .map(|phase| phase.name.clone())
+        .unwrap_or_else(|| "working".to_string())
 }
 
 #[cfg(test)]

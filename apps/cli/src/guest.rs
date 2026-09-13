@@ -123,9 +123,17 @@ pub async fn handle(
         } => {
             let (resolved_id, _name) = lifecycle::resolve_echo(client, &id).await;
             let request = InstanceIdRequest {
-                instance_id: resolved_id,
+                instance_id: resolved_id.clone(),
             };
-            let response = client.list_guest_packages(request).await?;
+            let mut call_client = client.clone();
+            let response = crate::helpers::call_with_operation_progress(
+                client,
+                &resolved_id,
+                "reading the guest disk (a stopped instance starts a libguestfs appliance)",
+                |line| println!("  {line}"),
+                async move { call_client.list_guest_packages(request).await },
+            )
+            .await?;
             let packages = response.into_inner().packages;
             let rows: Vec<serde_json::Value> = packages.iter().map(package_json).collect();
             if json {
@@ -183,11 +191,19 @@ pub async fn handle(
                     ),
                 }
                 let request = SwitchArmTranslatorRequest {
-                    instance_ref: resolved_id,
+                    instance_ref: resolved_id.clone(),
                     translator: translator.into(),
                     translator_dir: dir_str,
                 };
-                client.switch_arm_translator(request).await?;
+                let mut call_client = client.clone();
+                crate::helpers::call_with_operation_progress(
+                    client,
+                    &resolved_id,
+                    "installing the ARM translator",
+                    |line| println!("  {line}"),
+                    async move { call_client.switch_arm_translator(request).await },
+                )
+                .await?;
                 match &translator_dir {
                     Some(dir) => {
                         println!("Translator `{package}` installed from {}", dir.display())
@@ -196,12 +212,20 @@ pub async fn handle(
                 }
             } else {
                 let request = InstallGuestAgentRequest {
-                    instance_id: resolved_id,
+                    instance_id: resolved_id.clone(),
                     package: package.clone(),
                     offline,
                     idempotency_token,
                 };
-                client.install_guest_agent(request).await?;
+                let mut call_client = client.clone();
+                crate::helpers::call_with_operation_progress(
+                    client,
+                    &resolved_id,
+                    "installing the package inside the guest",
+                    |line| println!("  {line}"),
+                    async move { call_client.install_guest_agent(request).await },
+                )
+                .await?;
                 println!("Package `{package}` installed successfully");
             }
         }
@@ -215,20 +239,36 @@ pub async fn handle(
             let is_arm_translator = matches!(package.as_str(), "libndk" | "libhoudini");
             if is_arm_translator {
                 let request = SwitchArmTranslatorRequest {
-                    instance_ref: resolved_id,
+                    instance_ref: resolved_id.clone(),
                     translator: andler_rpc::proto::ArmTranslator::None.into(),
                     translator_dir: String::new(),
                 };
-                client.switch_arm_translator(request).await?;
+                let mut call_client = client.clone();
+                crate::helpers::call_with_operation_progress(
+                    client,
+                    &resolved_id,
+                    "removing the ARM translator",
+                    |line| println!("  {line}"),
+                    async move { call_client.switch_arm_translator(request).await },
+                )
+                .await?;
                 println!("Translator `{package}` removed");
             } else {
                 let request = RemoveGuestAgentRequest {
-                    instance_id: resolved_id,
+                    instance_id: resolved_id.clone(),
                     package: package.clone(),
                     offline,
                     idempotency_token,
                 };
-                client.remove_guest_agent(request).await?;
+                let mut call_client = client.clone();
+                crate::helpers::call_with_operation_progress(
+                    client,
+                    &resolved_id,
+                    "removing the package from the guest",
+                    |line| println!("  {line}"),
+                    async move { call_client.remove_guest_agent(request).await },
+                )
+                .await?;
                 println!("Package `{package}` removed successfully");
             }
         }
@@ -253,10 +293,18 @@ pub async fn handle(
             }
             let (resolved_id, _name) = lifecycle::resolve_echo(client, &instance_id).await;
             let request = GuestProvisionRequest {
-                instance_id: resolved_id,
+                instance_id: resolved_id.clone(),
                 ops: andler_rpc::provision_convert::provision_ops_to_proto(&ops),
             };
-            client.guest_provision(request).await?;
+            let mut call_client = client.clone();
+            crate::helpers::call_with_operation_progress(
+                client,
+                &resolved_id,
+                "applying the provision manifest",
+                |line| println!("  {line}"),
+                async move { call_client.guest_provision(request).await },
+            )
+            .await?;
             println!(
                 "Provisioned `{}` ({} ops) successfully",
                 parsed.name,
@@ -284,12 +332,19 @@ pub async fn handle(
             mode: Some(mode),
         } => {
             let (resolved_id, _name) = lifecycle::resolve_echo(client, &instance_id).await;
-            client
-                .switch_android_boot_mode(SwitchAndroidBootModeRequest {
-                    instance_ref: resolved_id,
-                    mode: ProtoAndroidBootMode::from(mode).into(),
-                })
-                .await?;
+            let request = SwitchAndroidBootModeRequest {
+                instance_ref: resolved_id.clone(),
+                mode: ProtoAndroidBootMode::from(mode).into(),
+            };
+            let mut call_client = client.clone();
+            crate::helpers::call_with_operation_progress(
+                client,
+                &resolved_id,
+                "switching the boot mode on the guest disk",
+                |line| println!("  {line}"),
+                async move { call_client.switch_android_boot_mode(request).await },
+            )
+            .await?;
             let mode_str = match mode {
                 CliBootMode::Android => "android",
                 CliBootMode::Linux => "linux",
@@ -298,12 +353,19 @@ pub async fn handle(
         }
         GuestAction::Apply { instance_id } => {
             let (resolved_id, _name) = lifecycle::resolve_echo(client, &instance_id).await;
-            let response = client
-                .apply_guest_profile(InstanceIdRequest {
-                    instance_id: resolved_id,
-                })
-                .await?
-                .into_inner();
+            let request = InstanceIdRequest {
+                instance_id: resolved_id.clone(),
+            };
+            let mut call_client = client.clone();
+            let response = crate::helpers::call_with_operation_progress(
+                client,
+                &resolved_id,
+                "applying the guest selections",
+                |line| println!("  {line}"),
+                async move { call_client.apply_guest_profile(request).await },
+            )
+            .await?
+            .into_inner();
             print_apply_results(&response, json)?;
         }
     }

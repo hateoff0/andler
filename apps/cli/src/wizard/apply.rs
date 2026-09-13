@@ -35,11 +35,21 @@ pub async fn apply_guest_selections(
     id: &str,
 ) -> Result<Vec<GuestProfileEntry>, WizardError> {
     let progress = spinner("Applying your selections inside the VM…");
-    let result = client
-        .apply_guest_profile(InstanceIdRequest {
-            instance_id: id.to_string(),
-        })
-        .await;
+    let mut call_client = client.clone();
+    let result = crate::helpers::call_with_operation_progress(
+        client,
+        id,
+        "applying the guest selections",
+        |line| progress.set_message(line.to_string()),
+        async move {
+            call_client
+                .apply_guest_profile(InstanceIdRequest {
+                    instance_id: id.to_string(),
+                })
+                .await
+        },
+    )
+    .await;
     progress.finish_and_clear();
 
     match result {
