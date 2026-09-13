@@ -1,6 +1,6 @@
 # andler-disk
 
-Disk operations for virtual machines: creation, cloning, resizing, compaction — a wrapper around `qemu-img`, plus domain-specific overlay disk logic for Android instances, and offline guest tools provisioning via `qemu-nbd`.
+Disk operations for virtual machines: creation, cloning, resizing, compaction — a wrapper around `qemu-img`, plus domain-specific overlay disk logic for Android instances, and zero-root offline guest provisioning via `guestmount` (libguestfs FUSE) inside unprivileged user namespaces.
 
 ## Modules
 
@@ -55,25 +55,25 @@ Three modes for cloning an existing instance's disk into a new disk (not from a 
 
 ### `guest_tools` — Offline Guest Package Management
 
-Checks and manages packages in guest OS filesystems via `qemu-nbd` + mount + chroot.
+Checks and manages packages in guest OS filesystems via `guestmount` (libguestfs FUSE) + an unprivileged-user-namespace chroot.
 
 | Function | Signature | Description |
 |----------|-----------|-------------|
 | `detect_package_manager` | `(mount_point: &Path) -> Option<PackageManager>` | Detect package manager from binary presence (`usr/bin/apt-get` → Apt, `usr/bin/dnf` or `usr/bin/yum` → Dnf, `usr/bin/pacman` → Pacman) |
-| `is_agent_installed` | `(mount_point: &Path, pm: PackageManager, package: &str) -> Result<bool, DiskError>` | Check installation via the manager's query (`dpkg -l` / `rpm -q` / `pacman -Q`), run inside the chroot through the helper (`chroot-run`) |
-| `install_agent_offline` | `(disk_path: &Path, package: &str) -> Result<(), DiskError>` | Install package offline (NBD connect → mount → index refresh → chroot install). Wrapped in `spawn_blocking`. |
-| `remove_agent_offline` | `(disk_path: &Path, package: &str) -> Result<(), DiskError>` | Remove package offline (NBD connect → mount → chroot remove). Wrapped in `spawn_blocking`. |
+| `is_agent_installed` | `(mount_point: &Path, pm: PackageManager, package: &str) -> Result<bool, DiskError>` | Check installation via the manager's query (`dpkg -l` / `rpm -q` / `pacman -Q`), run chrooted inside an unprivileged user namespace |
+| `install_agent_offline` | `(disk_path: &Path, package: &str) -> Result<(), DiskError>` | Install package offline (guestmount → index refresh → chroot install). Wrapped in `spawn_blocking`. |
+| `remove_agent_offline` | `(disk_path: &Path, package: &str) -> Result<(), DiskError>` | Remove package offline (guestmount → chroot remove). Wrapped in `spawn_blocking`. |
 | `check_package_status_offline` | `(mount_point: &Path, binary_checks: &[&str]) -> PackageStatus` | Check binary presence in mounted filesystem — any candidate path (`/usr/bin/...` and `/usr/sbin/...`) marks the package installed |
 | `check_all_packages_offline` | `(mount_point: &Path) -> Vec<(&GuestPackage, PackageStatus)>` | Check all KNOWN_PACKAGES in mounted filesystem |
-| `check_all_packages_offline_with_disk` | `(disk_path: &Path) -> Result<Vec<(&GuestPackage, PackageStatus)>, DiskError>` | Full offline check: NBD connect + mount + check + unmount |
-| `check_android_packages_offline_with_disk` | `(disk_path: &Path) -> Result<Vec<(&GuestPackage, PackageStatus)>, DiskError>` | Full offline check for Android packages: NBD connect + mount + check + unmount |
+| `check_all_packages_offline_with_disk` | `(disk_path: &Path) -> Result<Vec<(&GuestPackage, PackageStatus)>, DiskError>` | Full offline check: guestmount + check + unmount |
+| `check_android_packages_offline_with_disk` | `(disk_path: &Path) -> Result<Vec<(&GuestPackage, PackageStatus)>, DiskError>` | Full offline check for Android packages: guestmount + check + unmount |
 | `available_packages` | `(kind: &InstanceKind) -> &'static [GuestPackage]` | Return package list for instance kind: `ANDROID_PACKAGES` for Android, `KNOWN_PACKAGES` for Linux |
 
 **`PackageManager`**: `Apt` | `Dnf` | `Pacman`, with `binary_name()`, `install_args(pkg)`, `remove_args(pkg)`, `check_installed_command(pkg)` helpers.
 
 **`PackageStatus`**: `Installed` | `NotInstalled` | `Unknown` (the check scripts can exit non-zero for reasons other than "not installed").
 
-**Offline install flow**: connect NBD → wait for partitions → mount root partition → detect package manager → refuse if already installed (`AgentAlreadyInstalled`) → refresh indexes first (`apt-get update` / `dnf makecache` / `pacman -Sy`) so installs succeed on fresh images → chroot install. An index-refresh failure is a hard error (reported with exit status + stderr via `describe_helper_failure`), and the guest's `/etc/resolv.conf` content (or its absence / dangling-symlink metadata) is logged at `info` for DNS diagnosis. All privileged steps run via NOPASSWD `sudo -n chroot <mount> ...`.
+**Offline install flow**: `guestmount` (libguestfs FUSE) → detect package manager → refuse if already installed (`AgentAlreadyInstalled`) → refresh indexes first (`apt-get update` / `dnf makecache` / `pacman -Sy`) so installs succeed on fresh images → chroot install inside an unprivileged user namespace (`unshare --user --map-root-user --mount`). An index-refresh failure is a hard error (reported with exit status + stderr), and the guest's `/etc/resolv.conf` content is logged at `info` for DNS diagnosis. Nothing is privileged: `guestmount` needs only `/dev/fuse`, and `unshare --user` needs unprivileged user namespaces allowed by the kernel.
 
 **Known Packages** (`KNOWN_PACKAGES`): `spice-vdagent` (`/usr/bin/spice-vdagentd`), `qemu-guest-agent` (`/usr/bin/qemu-ga`), `spice-webdavd` (`/usr/bin/spice-webdavd`).
 
@@ -85,10 +85,10 @@ Repoints the guest's `etc/systemd/system/default.target` symlink between the And
 
 | Function | Signature | Description |
 |----------|-----------|-------------|
-| `switch_boot_mode` | `(overlay_path: &Path, mode: AndroidBootMode) -> Result<(), DiskError>` | NBD connect → mount → verify target unit exists → `sudo -n chroot ln -sfn` the `default.target` link. Fails with `BackingFileNotFound` if the disk doesn't exist. |
+| `switch_boot_mode` | `(overlay_path: &Path, mode: AndroidBootMode) -> Result<(), DiskError>` | guestmount → verify target unit exists → `ln -sfn` the `default.target` link inside an unprivileged-user-namespace chroot. Fails with `BackingFileNotFound` if the disk doesn't exist. |
 | `current_boot_mode` | `(overlay_path: &Path) -> Result<AndroidBootMode, DiskError>` | Read the current target from the mounted disk (`default.target` → Android target ⇒ Android, anything else ⇒ Linux; error if the link is missing). |
 
-The guest's `/etc/systemd/system` is root-owned 755, so the mutation itself must go through `sudo -n chroot` (a direct `std::fs` write fails with EPERM even though the mount is rw); `ln -sfn` both removes the old symlink and creates the new one in one step.
+The guest's `/etc/systemd/system` is root-owned 755, so the mutation runs through the user-namespace chroot (a direct `std::fs` write fails with EPERM even though the mount is rw); `ln -sfn` both removes the old symlink and creates the new one in one step.
 
 ### `diskspace` — Free Disk Space Pre-check
 
@@ -102,30 +102,12 @@ Uses `f_bavail` (blocks available to an unprivileged user), not `f_bfree` (which
 
 **Rationale:** QCOW2 snapshots grow the same disk file — a nearly-full filesystem can fail mid-write. `required_bytes` is a conservative estimate that accounts for worst-case qcow2 internal fragmentation during snapshot creation.
 
-### `nbd` — NBD Device Management
+### `nbd` — removed
 
-Manages QEMU NBD (Network Block Device) connections for mounting disk images without writing to them.
-
-| Function | Signature | Description |
-|----------|-----------|-------------|
-| `nbd_status` | `() -> Result<NbdStatus, DiskError>` | Report whether the NBD module is loaded and how many `/dev/nbd*` devices are free/total. Never loads the module itself. |
-| `find_free_nbd_device` | `() -> Result<PathBuf, DiskError>` | Find a free `/dev/nbd*` device. Best-effort `modprobe nbd max_part=8` first (`try_autoload_nbd_module`); fails with `NbdSetupFailed` if no NBD kernel module loaded or no free device. |
-| `connect_nbd` | `(overlay_path: &Path) -> Result<NbdGuard, DiskError>` | Connect an overlay disk to an NBD device via `qemu-nbd --connect`. Takes an exclusive `flock` on a per-disk lock file **before** picking a device (otherwise two processes could each grab a different free `/dev/nbd*` and both connect to the same disk); the lock is held for the guard's whole lifetime. Returns `NbdGuard` (RAII: disconnects + releases the lock on drop). |
-| `helper_command` | `(subcommand: &str) -> Command` | Build a `sudo -n /usr/local/sbin/andler-helper <subcommand> ...` command. Used by `connect_nbd` (`nbd-connect`), the guards (`nbd-disconnect`, `umount`), `try_autoload_nbd_module` (`modprobe-nbd`), `mount_partition` (`mount-partition`), the chroot environment (`mount-bind`/`mount-tmpfs`/`guest-write`), and the ARM-translator file ops (`file`) — a single NOPASSWD rule authorizes exactly this one binary, and the helper re-validates every argument itself. Non-interactive: fails immediately instead of hanging on a password prompt. |
-| `describe_helper_failure` | `(stderr: &str) -> String` | Rewrite stderr from a failed `sudo -n andler-helper` invocation into an actionable error message pointing at `andler doctor --fix` / the single sudoers rule (see `docs/DEVELOPMENT.md`, "Passwordless sudo for privileged operations"). |
-| `wait_for_partitions` | `(nbd_dev: &Path) -> Result<Vec<PathBuf>, DiskError>` | Wait for partition devices to appear after NBD connect (polls `/sys/block/<dev>/` for up to 5s). |
-| `find_root_partition` | `(partitions: &[PathBuf]) -> Result<PathBuf, DiskError>` | Identify the root partition as the **last** entry (partition ordering follows the partition table, so the last partition is the last logical one — not "largest by sector count"; on UKI images the ESP holds boot files, not the OS). |
-| `unique_mount_name` | `() -> String` | Generate a unique mount point name under the runtime dir. |
-| `mount_partition` | `(partition: &Path) -> Result<MountGuard, DiskError>` | Mount a partition (mode 0755 under `$XDG_RUNTIME_DIR`) and return `MountGuard` (RAII: unmounts + detaches on drop). After mounting, prepares the chroot with `bind_host_mounts`. |
-| `bind_host_mounts` | `(mount_point: &Path)` | Make the chroot usable for real package-manager runs (called inside `mount_partition`): writes the host's nameservers into the guest `/etc/resolv.conf` (a regular file — a bind-mount fails with ENOENT when the guest file is a dangling `stub-resolv.conf` symlink), bind-mounts `/dev`, `/proc`, `/sys`, and mounts a fresh tmpfs on the guest `/run` (gpg-agent's sockets are otherwise unwritable on disk → pacman fails with "GPGME error: Invalid crypto engine"). Failures degrade to `tracing::warn!`. |
-| `host_nameservers` | `() -> Option<String>` | Collect deduplicated `nameserver <ip>` lines from `/etc/resolv.conf`, falling back to `/run/systemd/resolve/stub-resolv.conf`. |
-| `write_guest_resolv` | `(mount_point: &Path, contents: &str) -> io::Result<()>` | Replace the guest's `/etc/resolv.conf` through the `guest-write` helper subcommand (stdin pipe) — the guest fs is root-owned and the daemon runs unprivileged, so direct writes get EPERM. |
-
-**`NbdGuard`**: RAII guard — holds the per-disk `flock` for its entire lifetime and disconnects the NBD device (`qemu-nbd --disconnect`) on drop; releasing the lock on drop is what lets another process's NBD operation on the same disk proceed.
-**`MountGuard`**: RAII guard — unmounts and detaches when dropped.
-**`NbdStatus`**: `loaded: bool`, `free_devices: usize`, `total_devices: usize`.
-
-**Security:** `unique_mount_name()` generates mount points under `$XDG_RUNTIME_DIR` (typically `/run/user/{uid}/`), NOT `/tmp`. This avoids symlink attacks — `/tmp` is world-writable, allowing an unprivileged attacker to create a symlink to a sensitive host path (e.g., `/home/user`) and trick the daemon into mounting over it during NBD operations.
+NBD-based mounting was replaced by `guestmount` (libguestfs FUSE) plus an
+unprivileged-user-namespace chroot; `nbd.rs` is no longer part of the
+crate's build, and the offline mounting path now lives in
+`guest_offline.rs`.
 
 ### `arm_translator` — ARM Translation Layer Management
 
@@ -196,8 +178,8 @@ waydroid-helper and waydroid_script on 2026-08-07.
    into `~/.andler/cache/arm-translators/<dir_name>/`; extraction flattens
    the `<repo>-<commit>/prebuilts/` wrapper so the payload sits directly
    under the cache root.
-3. The instance disk is attached via `qemu-nbd`, the root partition is
-   mounted, and the target becomes `/var/lib/waydroid/overlay/system/`
+3. The instance disk is mounted via `guestmount` (libguestfs FUSE) and the
+   target becomes `/var/lib/waydroid/overlay/system/`
    (created if missing — waydroid merges this overlay over `/system` at
    container start, so a never-booted instance is supported).
 4. If the target's `DETECT_FILE` already exists, the install is a no-op
@@ -288,7 +270,7 @@ instance before the fixes; the defects found and how they were fixed:
 | 6 | Old payloads survived a switch (archive `ndk_translation.rc`, `bin/arm`, `bin/arm64` leftovers) | removal now uses the same expansion; stale rc (`<dir_name>.rc`) is always removed |
 | 7 | Props leaked between translators (`ro.ndk_translation.version`, `ro.vendor.*` stayed after switching to houdini) | `MANAGED_PROP_KEYS` remove-then-set on every switch, incl. `None` |
 | 8 | Fresh install hard-errored when `build.prop` was absent (never-booted instance) | the upper `build.prop` is always regenerated from the base below the overlay: plain `system/build.prop`, or `/system/build.prop` extracted with `debugfs` from `etc/waydroid-extra/images/system.img`; no base source is a hard error, never a silent partial upper |
-| 9 | Privilege surface: the install needed NOPASSWD `cp/mkdir/mv/rm/chmod` beyond the documented NBD set | all guest-fs mutations go through the `file`/`guest-write` subcommands of the single privileged **`andler-helper`** binary (sole NOPASSWD rule, `apps/helper`); `andler doctor --fix` installs the binary and migrates the old per-binary rules away |
+| 9 | Privilege surface: the install needed NOPASSWD `cp/mkdir/mv/rm/chmod` beyond the documented NBD set | all guest-fs mutations go through the `file`/`guest-write` subcommands of a single privileged **`andler-helper`** binary (sole NOPASSWD rule, `apps/helper`); `andler doctor --fix` installs the binary and migrates the old per-binary rules away. **Superseded:** the helper, `doctor --fix` and every sudoers rule were later removed — offline mutations are zero-root now (`guestmount` + unprivileged user namespaces) |
 | 10 | **Live boot failure: Android stuck at boot after a translator install.** The upper overlay `build.prop` contained only the 10 translator props and shadowed the base's full build.prop wholesale — waydroid could not parse the Android version from the merged rootfs (`Failed to parse android version from system.img: invalid literal for int() with base 10: ''`) and ART's `derive_classpath` aborted, so the container never finished booting | `base_build_prop()` extracts the base's `/system/build.prop` from `system.img` via `debugfs` and merges translator props into the full file; the upper is regenerated on every install (never read back), so already-broken installs are repaired by re-running `guest install` (or `config set arm_translator none`); E2E 07 crafts a `system.img` fixture and asserts the merged upper; regression tests `base_build_prop_reads_plain_layout_and_errors_without_source`, `base_build_prop_prefers_plain_layout_over_system_image`, `parse_build_prop_skips_blank_and_comment_lines` |
 
 #### Reference comparison (waydroid-helper / waydroid_script)
@@ -314,9 +296,8 @@ instance before the fixes; the defects found and how they were fixed:
 
 Sandbox recipe used for the audit (all temp, removed afterwards): build a
 2 GiB qcow2 with an ext4 root partition, run `andlerd` on a scratch port with
-`ANDLER_HOME` pointed at a temp dir (as root, via the single
-`/usr/local/sbin/andler-helper` NOPASSWD rule that `andler doctor --fix`
-installs — or sidestepping the helper entirely by running as root),
+`ANDLER_HOME` pointed at a temp dir (offline guest work needs only
+`guestmount` and unprivileged user namespaces — no root, no helper),
 create an Android 13 instance with
 that disk as base, then `andler guest install libndk`/`libhoudini` and mount
 the overlay to inspect `bin/`, `etc/`, `lib/`, `lib64/`, `build.prop` and

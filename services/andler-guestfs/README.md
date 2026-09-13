@@ -28,8 +28,9 @@ of the script.
   sessions) and a different dependency set than qcow2/DiskChain code.
 - Package-manager operations (installroot) do **not** work in the
   appliance — the phase-0 spike confirmed the suspended variant; guest
-  package install/remove still runs on the chroot kitchen in
-  `andler-disk` through `andler-helper`.
+  package install/remove still runs on the zero-root chroot kitchen in
+  `andler-disk` (`guestmount` + unprivileged user namespaces), with no
+  privileged helper involved.
 
 ## Integration notes
 

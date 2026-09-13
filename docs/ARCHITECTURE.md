@@ -69,7 +69,7 @@ Wrapper around `qemu-img` for disk creation/cloning/resizing, plus guest tools o
 - `qcow2.rs`: 7 async functions wrapping `qemu-img` CLI
 - `overlay.rs`: Android-specific overlay disk creation + factory reset
 - `clone.rs`: 3 clone modes (linked, full-standalone, shared-base)
-- `nbd.rs`: nbd device management with flock-based locking, `nbd_status()`, and the chroot environment setup (`bind_host_mounts`): the guest's `/etc/resolv.conf` is *written* with the host's nameservers (via the `guest-write` helper subcommand — a dangling symlink would make a bind-mount fail with ENOENT), `/dev`, `/proc`, `/sys` are bind-mounted, and a fresh tmpfs is mounted on the guest's `/run` (gpg-agent, used by pacman, needs a writable `/run`)
+- `guest_offline.rs`: the chroot environment for offline package work — `prepare_resolv` writes the guest's `/etc/resolv.conf` from the host's nameservers (a dangling `stub-resolv.conf` symlink would make a bind-mount fail with ENOENT), and the `chroot_exec` preamble bind-mounts `/dev/*`, `/proc`, `/sys` and mounts a fresh tmpfs on the guest's `/run` (gpg-agent, used by pacman, needs a writable `/run`). The former NBD mount path and its privileged helper are gone.
 - `guest_offline.rs` + `guest_tools.rs`: zero-root offline guest provisioning — the disk is mounted via `guestmount` (libguestfs FUSE) and package-manager commands run chrooted inside an unprivileged user namespace (`unshare --user --map-root-user --mount`); detects the package manager (apt-get/dnf/pacman), refreshes package indexes and installs/removes packages. No `/dev/nbd*`, no root, no sudoers rules
 - `arm_translator.rs`: ARM translator package staging in guest images (atomic staging + rename)
 - `boot_mode.rs`: Android/Linux boot-mode switching by re-pointing the guest's `default.target` symlink through a `GuestMutator` (`switch_boot_mode_with`) — offline via the `GuestfsMutator` appliance, online via QGA; reading the mode is config-backed, no disk access
@@ -121,7 +121,7 @@ SQLite store for snapshot metadata only.
 
 Protobuf definitions and generated code via `tonic`/`prost`.
 
-**30 RPCs** covering instance lifecycle, monitoring, snapshots, clone/export, hotplug.
+**RPC surface** covering instance lifecycle, monitoring, snapshots, clone/export, hotplug, guest provisioning and observability — count from `proto/andler.proto`.
 **~45 conversion tests** for bidirectional proto↔domain type mapping.
 
 ### `apps/daemon/` — Background Service
@@ -159,7 +159,7 @@ Thin gRPC client. Each subcommand = one gRPC request + print response.
 - Disk management (create, info, resize with shrink protection, compact)
 - Shell completions (bash, zsh, fish)
 - Colored status output with `IsTerminal` gating
-- `doctor` command for environment diagnostics and auto-fix (KVM/QEMU/OVMF/nbd/sudoers/daemon/base images + `CAP_NET_ADMIN` for bridge networking)
+- `doctor` command for environment diagnostics (KVM/QEMU/OVMF, `CAP_NET_ADMIN` for bridge networking, the zero-root offline prerequisites, daemon reachability, base images)
 - `op list`/`op cancel` — long-operation progress and cancellation
 - `connect` (console/ssh/adb/exec) — guest access levels: console attaches straight to the serial chardev socket (raw termios via libc, piped-stdin safe); ssh/adb spawn the external client against `network.port_forwards`; `exec` runs through the guest agent and relays the exit code. `auto` picks by the effective `(kind, boot_mode)` profile
 - `create --template` — VM templates (built-ins + `~/.andler/templates/`), merged defaults < template < flags
@@ -193,7 +193,7 @@ Package management and resolution changes inside a guest use a two-tier strategy
 **Offline path (VM stopped)** — the disk is mounted via `guestmount` (libguestfs FUSE, zero root) and operations run chrooted inside an unprivileged user namespace (`unshare --user --map-root-user --mount`):
 
 - package manager detected by binary (`apt-get`/`dnf`/`pacman`); package index is refreshed first (`apt-get update` / `dnf makecache` / `pacman -Sy`) so installs work on fresh images
-- the chroot is made network- and signature-capable by `bind_host_mounts`: host nameservers are written into the guest's `/etc/resolv.conf` (via `guest-write`, replacing the dangling `stub-resolv.conf` symlink), `/dev`, `/proc`, `/sys` are bind-mounted, and a tmpfs is mounted on the guest's `/run` (gpg-agent needs it for pacman signatures)
+- the chroot is made network- and signature-capable by the `chroot_exec` preamble: host nameservers are written into the guest's `/etc/resolv.conf` (via `prepare_resolv`, replacing the dangling `stub-resolv.conf` symlink), `/dev/*`, `/proc`, `/sys` are bind-mounted, and a tmpfs is mounted on the guest's `/run` (gpg-agent needs it for pacman signatures)
 - nothing is privileged: `guestmount` needs only `/dev/fuse` access, `unshare --user` needs unprivileged user namespaces allowed by the kernel (Debian/Ubuntu: `sysctl kernel.unprivileged_userns_clone=1`); the old qemu-nbd + `andler-helper` sudoers surface is gone entirely
 
 ARM translators (`libndk`/`libhoudini`) use the same offline mount machinery via `switch_arm_translator`: version-keyed download (MD5-verified, cached under `~/.andler/cache/arm-translators/`), staged into `var/lib/waydroid/overlay/system`, `build.prop` updated, old translator removed only after the new one is fully staged.
@@ -483,16 +483,15 @@ recovery summary.
 
 ## Security / Threat Model
 
-Honest model, written down because the helper doc referenced it (see ROADMAP)
-and it was absent. Scope: single-user Linux desktop running QEMU/KVM.
+Honest model, written down because it was absent. Scope: single-user Linux
+desktop running QEMU/KVM.
 
 - **Boundary**: the VM is the isolation boundary — guests are untrusted. The
-  daemon runs as the user, not root; after the guestfs migration (see ROADMAP)
-  the daemon performs no privileged operations at all. The
-  `andler-helper` entry point narrows and structure-hardens the remaining
-  privileged surface (argument injection, path traversal, symlink confusion),
-  but a compromised daemon remains root — it is **not** a sandbox; the
-  boundary is against bugs and other users.
+  daemon runs as the user, not root, and performs no privileged operations at
+  all: offline guest work goes through `guestmount` (FUSE) plus an unprivileged
+  user namespace, and the former privileged helper and its sudoers rules were
+  removed. There is no root-capable surface left for a compromised daemon to
+  abuse — it is **not** a sandbox; the boundary is against bugs and other users.
 - **IPC boundary**: `andlerd` listens on TCP loopback (`ANDLERD_LISTEN_ADDR`,
   default `127.0.0.1:50051`). Loopback bounds the network, not the user; the
   rework explicitly chose the documented assumption **one host user per

@@ -17,7 +17,7 @@ daemon/
 ├── types.rs        →  InstanceRecord, SnapshotRecord, InstanceDirGuard, InstanceSummary
 ├── instance_ops.rs →  create, create_linux_instance, start, stop, pause, resume, remove, resolve_instance_id
 ├── clone_ops.rs    →  clone_instance, export_instance_disk, find_live_clones
-├── snapshot_ops.rs →  create/restore/delete/list snapshots (requires Running/Paused for QMP commands)
+├── snapshot_ops.rs →  create/restore/delete/list snapshots (create is live over QMP on a Running/Paused VM; restore/delete are offline)
 ├── health_ops.rs   →  periodic crash detection for Running instances (Error transition, no auto-restart)
 ├── tests/          →  unit test modules (11 files, no network)
 └── query_ops.rs    →  status, list_instances, get_instance_config, update_instance_config, stream logs/metrics
@@ -98,15 +98,16 @@ Overridable via:
 
 | Method | Signature | Requirement |
 |--------|-----------|-------------|
-| `create_snapshot` | `async fn(InstanceId, String, Option<String>, Option<u64>) -> Result<SnapshotRecord, DaemonError>` | Running/Paused |
-| `restore_snapshot` | `async fn(InstanceId, String, Option<u64>) -> Result<(), DaemonError>` | Running/Paused |
-| `delete_snapshot` | `async fn(InstanceId, String, Option<u64>) -> Result<(), DaemonError>` | Running/Paused |
+| `create_snapshot` | `async fn(InstanceId, String, Option<String>, Option<u64>) -> Result<SnapshotRecord, DaemonError>` | Running/Paused (live) |
+| `restore_snapshot` | `async fn(InstanceId, String, bool, Option<String>) -> Result<(), DaemonError>` | Created/Stopped (offline) |
+| `delete_snapshot` | `async fn(InstanceId, String, Option<u64>) -> Result<(), DaemonError>` | Created/Stopped (offline) |
 | `list_snapshots` | `async fn(InstanceId) -> Result<Vec<SnapshotRecord>, DaemonError>` | Any |
 
-**Snapshot Merge Semantics**: When restoring or deleting a snapshot, the system performs a merge operation that reconciles the snapshot's state with the current disk state:
-- **Restore**: The current state is discarded and replaced with the snapshot's state. The previous state is automatically saved as a new snapshot with an auto-generated tag (`pre-restore-<timestamp>`) to prevent data loss.
-- **Delete**: When deleting a snapshot that has children (subsequent snapshots depend on it), the merge recursively applies all descendant snapshots to the base, collapsing the chain into a single state. This is equivalent to repeatedly restoring the youngest descendant.
-- **Chain Optimization**: After a merge operation, the daemon attempts to optimize the snapshot chain by coalescing adjacent snapshots where possible, reducing storage overhead.
+**Snapshot Semantics**: snapshots are **external QCOW2 overlay layers** under `disk.snapshots/`, not internal qcow2 snapshots:
+- **Create** switches the live block graph over QMP to a fresh overlay, turning the previous `disk.qcow2` into a layer (free space is pre-checked with `statvfs`).
+- **Restore** is offline: the default discards every layer newer than the target and rebuilds the active disk on top of it; `--branch` archives the whole current chain as a branch (`pre-branch-<ts>` head) and rebuilds on the target without deleting anything, with switch-back supported.
+- **Delete** commits the layer into its parent and re-points its children; a base layer cannot be deleted while children exist.
+- Linked clones protect their source chain: a restore or delete that would break one is refused (`RestoreWouldBreakClones` / `DeleteWouldBreakClones`). The chain is reconciled against the store on daemon startup, so an interrupted restore or delete recovers.
 
 **Guest Agent Methods**:
 
@@ -118,7 +119,7 @@ Overridable via:
 
 **Guest Agent Dual-Path**: The guest agent methods use a two-tier fallback strategy:
 - **Online path (QGA)**: If the instance is `Running` and the guest agent responds, commands run inside the guest via the QEMU guest agent — `guest-exec`/`guest-exec-status` for package install/remove, `guest-file-*` for config writes (e.g. the resolution change flow). The agent is reached on the dedicated chardev socket `*.qga.sock` (`virtserialport name=org.qemu.guest_agent.0`), *not* the QMP monitor — QEMU ≥ 9 no longer registers `guest-*` commands on QMP. Requires `qemu-guest-agent` running inside the guest (base image ships it enabled).
-- **Offline path (qemu-nbd)**: If the instance is not running (or QGA is unavailable), the operation falls back to mounting the instance's disk image via `qemu-nbd` and running the package manager inside a `sudo -n chroot`. The chroot is prepared by `bind_host_mounts` (guest `/etc/resolv.conf` written with host nameservers, `/dev`/`/proc`/`/sys` bind-mounted, tmpfs on guest `/run`) and package indexes are refreshed before install.
+- **Offline path (zero-root)**: If the instance is not running (or QGA is unavailable), the disk is mounted via `guestmount` (libguestfs FUSE) and package commands run chrooted inside an unprivileged user namespace (`unshare --user --map-root-user --mount`). The chroot preamble writes the guest `/etc/resolv.conf` from the host nameservers and bind-mounts `/dev`/`/proc`/`/sys` with a tmpfs on guest `/run`; package indexes are refreshed before install. No root and no sudoers rules — the former NBD/chroot helper surface is gone.
 
 
 **Clone/Export Methods**:
@@ -176,8 +177,8 @@ Overridable via:
 | `InstanceHasLiveClones` | `FAILED_PRECONDITION` | `remove_instance(purge: true)` called while live `Linked` clones exist — purge would delete the backing file those clones depend on |
 | `SnapshotNotFound` | `NOT_FOUND` | Snapshot with given tag not found for instance |
 | `SnapshotAlreadyExists` | `ALREADY_EXISTS` | Snapshot with given tag already exists for instance |
-| `SnapshotOperationRequiresRunningInstance` | `FAILED_PRECONDITION` | Create/restore/delete requires `Running`/`Paused` (performed via QMP) |
-| `SnapshotLimitExceeded` | `FAILED_PRECONDITION` | Instance already has `MAX_SNAPSHOTS_PER_INSTANCE` — prevents unbounded internal snapshot growth |
+| `SnapshotOperationRequiresRunningInstance` | `FAILED_PRECONDITION` | `snapshot create` requires `Running`/`Paused` (switched live over QMP) |
+| `SnapshotLimitExceeded` | `FAILED_PRECONDITION` | Instance already has `MAX_SNAPSHOTS_PER_INSTANCE` (20) — prevents unbounded snapshot-layer growth |
 | `EmptyInstanceRef` | `INVALID_ARGUMENT` | Empty string passed as instance reference (distinct from `InstanceRefNotFound`) |
 | `MalformedInstanceRef` | `INVALID_ARGUMENT` | Reference string is neither a valid 64-hex ID nor a hex prefix |
 | `InstanceRefNotFound` | `NOT_FOUND` | Prefix matched zero instances |

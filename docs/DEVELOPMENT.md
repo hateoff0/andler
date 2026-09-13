@@ -64,11 +64,11 @@ Default: `~/.andler/andlerd.db`. Override with:
 ANDLERD_STORE_PATH=/path/to/andlerd.db ./target/release/andlerd
 ```
 
-### Passwordless sudo for privileged operations
+### Zero-root guest operations
 
-The daemon runs unprivileged; offline guest operations (offline `guest install`/`remove`, ARM translator switching, boot-mode switching) need root only for a fixed set of operations (nbd connect/disconnect, `mount`/`umount`, chrooted package-manager runs, guest-filesystem writes, `modprobe` for the nbd module). All of them go through **one** privileged binary:
+The daemon runs unprivileged and performs no privileged operations: offline guest work (`guest install`/`remove`, ARM-translator switching, boot-mode switching) runs through `guestmount` (libguestfs FUSE) plus an unprivileged user namespace. There is no privileged helper binary and no sudoers rule.
 
-Offline guest operations are zero-root: `guestmount` (libguestfs FUSE) mounts the guest disk, `unshare --user --map-root-user --mount` + chroot run the package manager inside an unprivileged user namespace. Prerequisites (`andler doctor`): libguestfs-tools, `/dev/fuse`, and unprivileged user namespaces (Debian/Ubuntu may need `sysctl kernel.unprivileged_userns_clone=1`). No helper binary, no sudoers rules.
+Prerequisites (`andler doctor`): libguestfs-tools (`guestmount`), `/dev/fuse`, and unprivileged user namespaces (Debian/Ubuntu may need `sysctl kernel.unprivileged_userns_clone=1`).
 
 ### Default Paths
 
@@ -89,7 +89,7 @@ All instance data lives under `~/.andler/`:
     └── arm-translators/        # Downloaded ARM translators (libndk/libhoudini)
 ```
 
-Runtime sockets live under `$XDG_RUNTIME_DIR` (default `/run/user/<uid>/`, 0700): the per-instance QMP socket (`<instance>/qmp.sock`) and the guest-agent chardev socket (`<instance>/qmp.qga.sock`).
+Runtime sockets live under `$XDG_RUNTIME_DIR/andler/qmp/` (0700): the per-instance QMP socket (`<id>.sock`), its dedicated event monitor (`<id>.sock.events.sock`) and the guest-agent chardev socket (`<id>.qga.sock`).
 
 ## Testing
 
@@ -204,7 +204,6 @@ andler/
 │   │       ├── qcow2.rs          # qemu-img wrapper (7 functions)
 │   │       ├── overlay.rs        # Android overlay disks
 │   │       ├── clone.rs          # 3 clone modes
-│   │       ├── nbd.rs            # nbd device management (flock), nbd_status()
 │   │       ├── guest_offline.rs # zero-root guestmount + userns chroot
 │   │       ├── guest_tools.rs    # offline guest provisioning (guestmount + userns)
 │   │       ├── arm_translator.rs # ARM translator package staging

@@ -43,10 +43,10 @@ The following flags define how instance configuration is provided — they are *
 | Command | Description |
 |---------|-------------|
 | `andler list [--full-id] [--state <state>] [--name <regex>] [--sort <key>] [--json]` | List instances. `--full-id`/`-q`: full UUID. `--state`: filter by state. `--name`: regex filter. `--sort`: `name`/`state`/`none` (default: `none`). `--json`: machine-readable. |
-Default: UUIDs truncated to 8 characters (matching `docker ps`). Use `--full-id` / `-q` for full UUID.
+Default: UUIDs truncated to 12 characters (matching `docker ps`). Use `--full-id` / `-q` for full UUID.
 | `andler config view <instance-id>` | Print full instance configuration (all 9 sections) |
 | `andler config edit <instance-id>` | Open the real `instance.toml` in `$VISUAL`/`$EDITOR` (fallback `vi`/`vim`/`nano`), apply edits via gRPC |
-| `andler config set <instance-id> <key> <value>` | Update a single config key. Whitelist: `display.resolution` (`WxH`, any state — applied live to a running guest and persisted via fw_cfg), `name` and `arm_translator` (stopped instance only) |
+| `andler config set <instance-id> <key> <value>` | Update a single config key. The full `InstanceConfig` key schema is walked: every key is either settable or rejected with the reason it is not (`cpu.affinity` → edit `instance.toml` directly). `display.resolution` applies live to a running guest and persists via fw_cfg |
 
 ### Lifecycle Management
 
@@ -68,9 +68,9 @@ Default: UUIDs truncated to 8 characters (matching `docker ps`). Use `--full-id`
 
 | Command | Description |
 |---------|-------------|
-| `andler snapshot create <id> --tag <name> [--description <text>] [--timeout <secs>]` | Create snapshot (requires Running/Paused). `--timeout` overrides instance default. |
-| `andler snapshot restore <id> --tag <name> [--timeout <secs>]` | Restore from snapshot (requires Running/Paused). `--timeout` overrides instance default. |
-| `andler snapshot delete <id> --tag <name> [--timeout <secs>]` | Delete snapshot (requires Running/Paused; confirms on TTY). `--timeout` overrides instance default. |
+| `andler snapshot create <id> --tag <name> [--description <text>] [--timeout <secs>]` | Create an **external overlay** snapshot, live: the QEMU block graph is switched to a fresh overlay and the previous disk becomes a layer under `disk.snapshots/` (requires Running/Paused). Free space is pre-checked. `--timeout` overrides the instance default. |
+| `andler snapshot restore <id> --tag <name> [--branch] [--timeout <secs>] [--idempotency-token <k>]` | Restore **offline** (instance must be Created/Stopped). Default discards layers newer than the target; `--branch` archives the current chain as a branch you can switch back to. |
+| `andler snapshot delete <id> --tag <name> [--timeout <secs>]` | Delete a layer **offline** (Created/Stopped): commits it into its parent and re-points its children. |
 | `andler snapshot list <id>` | List all snapshots (human-readable timestamps) |
 | `andler snapshot --json list <id>` | List all snapshots as a JSON array |
 
@@ -80,7 +80,7 @@ Default: UUIDs truncated to 8 characters (matching `docker ps`). Use `--full-id`
 |---------|-------------|
 | `andler config edit <instance-id>` | Open the real `instance.toml` in `$VISUAL`/`$EDITOR` (fallback `vi`/`vim`/`nano`) and apply edits via gRPC |
 | `andler wizard` | Launch interactive wizard (default when no subcommand given) |
-| `andler doctor` | Check the local environment (KVM, QEMU, OVMF, nbd, sudoers, andlerd reachability, base images) — read-only, works even if andlerd isn't running |
+| `andler doctor` | Check the local environment (KVM, QEMU, OVMF, `CAP_NET_ADMIN`, the zero-root offline prerequisites — `guestmount`, `/dev/fuse`, unprivileged user namespaces — andlerd reachability, base images) — read-only, works even if andlerd isn't running |
 | `andler completions <shell>` | Generate shell completion script (bash/zsh/fish) |
 
 ### Disk Management
@@ -98,7 +98,7 @@ Size format: `64GB`, `128000MB`, `1T`, `512000` (bytes). Case-insensitive.
 
 | Command | Description |
 |---------|-------------|
-| `andler guest install <package> <instance-id>` | Install a package in the guest OS (auto-fallback: online via the QGA guest-agent socket if running, offline via qemu-nbd if stopped). Special case: `libndk`/`libhoudini` route to the ARM-translator switcher (`--translator-dir <path>` points at a local extracted cache) |
+| `andler guest install <package> <instance-id>` | Install a package in the guest OS. Online via the QGA guest-agent socket when the VM runs; a stopped VM is auto-started headless for maintenance and stopped again. `--offline` forces the zero-root `guestmount` + user-namespace path. Special case: `libndk`/`libhoudini` route to the ARM-translator switcher (`--translator-dir <path>` points at a local extracted cache) |
 | `andler guest remove <package> <instance-id>` | Remove a package from the guest OS (auto-fallback) |
 | `andler guest list <instance-id>` | List known packages and their status in the guest OS |
 | `andler guest boot-mode <instance-id> [android\|linux]` | Get (no argument) or switch the guest's boot target on an Android VM's unified base image. Requires a restart to apply. |
