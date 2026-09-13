@@ -27,6 +27,19 @@ impl PackageManager {
         }
     }
 
+    /// Refreshes the package index. Both install paths run this first: a guest
+    /// that has never synced (a fresh Android image, a cloud image whose mirror
+    /// list has moved) otherwise fails the install with "target not found" or a
+    /// stale-database error, which reads like a missing package rather than an
+    /// outdated index.
+    pub fn refresh_args(&self) -> Vec<&'static str> {
+        match self {
+            PackageManager::Apt => vec!["update"],
+            PackageManager::Dnf => vec!["makecache"],
+            PackageManager::Pacman => vec!["-Sy"],
+        }
+    }
+
     pub fn remove_args<'a>(&self, package: &'a str) -> Vec<&'a str> {
         match self {
             PackageManager::Apt => vec!["remove", "-y", package],
@@ -84,5 +97,12 @@ mod tests {
             pm.check_installed_command("vim"),
             ("pacman", vec!["-Qi", "vim"])
         );
+    }
+
+    #[test]
+    fn refresh_shapes_match_each_manager() {
+        assert_eq!(PackageManager::Apt.refresh_args(), vec!["update"]);
+        assert_eq!(PackageManager::Dnf.refresh_args(), vec!["makecache"]);
+        assert_eq!(PackageManager::Pacman.refresh_args(), vec!["-Sy"]);
     }
 }

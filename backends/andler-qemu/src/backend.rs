@@ -270,33 +270,61 @@ exit 30";
             "pacman" => andler_core::package_manager::PackageManager::Pacman,
             _ => andler_core::package_manager::PackageManager::Apt,
         };
+
+        // Refresh the index first, exactly like the offline path: a guest that
+        // has never synced (a fresh Android image) otherwise fails the install
+        // with "target not found", which reads like a missing package rather
+        // than a stale index.
+        if install {
+            let mut refresh_argv = vec![pm.binary_name().to_string()];
+            refresh_argv.extend(pm.refresh_args().into_iter().map(str::to_string));
+            Self::run_package_step(&mut qga, &refresh_argv, "refreshing the package index").await?;
+        }
+
         // install_args/remove_args carry the subcommand only ("install -y
         // <pkg>"); the manager binary itself must head the argv — without
         // it the guest runs GNU coreutils' `install` instead of apt-get.
         let argv = Self::package_argv(pm, install, package);
-        let argv_refs: Vec<&str> = argv.iter().map(String::as_str).collect();
+        let step = if install {
+            "installing the package"
+        } else {
+            "removing the package"
+        };
+        Self::run_package_step(&mut qga, &argv, step).await?;
 
+        tracing::info!(package = %package, install = %install, "guest package step completed");
+
+        Ok(())
+    }
+
+    /// Runs one package-manager command in the guest and turns a failure into
+    /// an error that names the step and says how to give it more room. Guest
+    /// stdout/stderr is never logged (redaction policy); failures surface
+    /// through the returned error instead.
+    async fn run_package_step(
+        qga: &mut QmpClient,
+        argv: &[String],
+        step: &str,
+    ) -> Result<(), BackendError> {
+        let argv_refs: Vec<&str> = argv.iter().map(String::as_str).collect();
         let pid = qga
             .guest_exec(argv_refs[0], &argv_refs[1..])
             .await
             .map_err(qmp_error_to_backend_error)?;
 
-        let result = wait_for_guest_exec(&mut qga, pid, std::time::Duration::from_secs(60))
-            .await
-            .map_err(qmp_error_to_backend_error)?;
-
-        if let Some(_output) = result {
-            // Guest-exec stdout/stderr is never logged: it can
-            // carry passwords or tokens the guest printed; failures surface
-            // through the returned error instead.
-            tracing::info!(
-                package = %package,
-                install = %install,
-                "guest-exec completed"
-            );
+        let timeout = guest_package_timeout();
+        match wait_for_guest_exec(qga, pid, timeout).await {
+            Ok(_) => Ok(()),
+            Err(QmpError::CommandFailed { class, desc, .. }) if class == "Timeout" => {
+                Err(BackendError::Io(format!(
+                    "{step} did not finish within {}s: {desc}. A first index sync plus a \
+                     download on a fresh guest routinely takes minutes — raise \
+                     ANDLERD_GUEST_PACKAGE_TIMEOUT_SECS if this guest's mirrors are slow.",
+                    timeout.as_secs()
+                )))
+            }
+            Err(error) => Err(BackendError::Io(format!("{step} failed: {error}"))),
         }
-
-        Ok(())
     }
 
     fn instance_id_from_handle(handle: &BackendHandle) -> Result<&str, BackendError> {
@@ -423,6 +451,57 @@ fn process_error_to_backend_error(err: ProcessError) -> BackendError {
 
 fn qmp_error_to_backend_error(err: QmpError) -> BackendError {
     BackendError::Io(err.to_string())
+}
+
+/// How long one package-manager step (index refresh, install, remove) may run
+/// inside the guest. A first sync plus a download on a fresh image takes
+/// minutes; the previous hard 60 s cap turned a working install into a
+/// timeout, which is why "the settings never got installed" on a new Android
+/// VM.
+const DEFAULT_GUEST_PACKAGE_TIMEOUT_SECS: u64 = 600;
+const MIN_GUEST_PACKAGE_TIMEOUT_SECS: u64 = 30;
+
+fn guest_package_timeout() -> std::time::Duration {
+    let secs = std::env::var("ANDLERD_GUEST_PACKAGE_TIMEOUT_SECS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(DEFAULT_GUEST_PACKAGE_TIMEOUT_SECS)
+        .max(MIN_GUEST_PACKAGE_TIMEOUT_SECS);
+    std::time::Duration::from_secs(secs)
+}
+
+#[cfg(test)]
+mod package_timeout_tests {
+    use super::{
+        guest_package_timeout, DEFAULT_GUEST_PACKAGE_TIMEOUT_SECS, MIN_GUEST_PACKAGE_TIMEOUT_SECS,
+    };
+
+    /// One test drives the process-wide variable so the assertions cannot race
+    /// each other; nothing else in this crate reads it.
+    #[test]
+    fn timeout_is_configurable_and_never_silly() {
+        std::env::remove_var("ANDLERD_GUEST_PACKAGE_TIMEOUT_SECS");
+        assert_eq!(
+            guest_package_timeout().as_secs(),
+            DEFAULT_GUEST_PACKAGE_TIMEOUT_SECS
+        );
+
+        std::env::set_var("ANDLERD_GUEST_PACKAGE_TIMEOUT_SECS", "1200");
+        assert_eq!(guest_package_timeout().as_secs(), 1200);
+
+        std::env::set_var("ANDLERD_GUEST_PACKAGE_TIMEOUT_SECS", "1");
+        assert_eq!(
+            guest_package_timeout().as_secs(),
+            MIN_GUEST_PACKAGE_TIMEOUT_SECS
+        );
+
+        std::env::set_var("ANDLERD_GUEST_PACKAGE_TIMEOUT_SECS", "not-a-number");
+        assert_eq!(
+            guest_package_timeout().as_secs(),
+            DEFAULT_GUEST_PACKAGE_TIMEOUT_SECS
+        );
+        std::env::remove_var("ANDLERD_GUEST_PACKAGE_TIMEOUT_SECS");
+    }
 }
 
 async fn wait_for_guest_exec(
