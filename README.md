@@ -226,6 +226,7 @@ sudo install -m 0755 andlerd /usr/local/bin/andlerd
 ### 2 · Verify the host
 
 ```bash
+andler --version      # andler 0.1.0 — the CLI and the daemon report the same build
 andler doctor
 ```
 

@@ -340,12 +340,42 @@ andler/
 - Enable QEMU QMP logging with `-qmp unix:/tmp/qmp.sock,server,nowait`
 - Use `tcpdump` or `Wireshark` for gRPC traffic analysis
 
-### Release Process
+## Releasing
 
-1. Update `CHANGELOG.md`
-2. Bump version in `Cargo.toml`
-3. Build release artifacts
-4. Tag and push
+Releases are driven by a `v*` tag: `.github/workflows/release.yml` builds the
+binaries, packages them, and publishes the GitHub release.
+
+1. **Green `main`.** The full gate must pass on the commit you are about to tag
+   (`cargo build/test/clippy/fmt`) plus the E2E suite
+   (`docker compose -f docker/e2e/compose.yaml run --rm e2e`).
+2. **Promote the changelog.** In `docs/CHANGELOG.md`, turn the `[Unreleased]`
+   section into `## [<version>] - <YYYY-MM-DD>` and leave a fresh, empty
+   `[Unreleased]` above it. The release notes are extracted from that section,
+   so write it for users, not for the diff.
+3. **Bump the version.** `version` under `[workspace.package]` in the root
+   `Cargo.toml` — every crate inherits it.
+4. **Tag and push.**
+
+   ```bash
+   git tag -a v0.1.0 -m "ANDLER 0.1.0"
+   git push origin v0.1.0
+   ```
+
+   The workflow publishes `andler-<tag>-linux-x86_64.tar.gz` (both binaries at
+   the archive root, plus `LICENSE` and `README.md`) with a `.sha256` sidecar
+   and a build-provenance attestation, and marks it the latest release. The
+   automated base-image builds use `base-image-*` tags with `--latest=false`,
+   so they never shadow a project release.
+5. **Verify the published artifacts.** Download the archive, check
+   `sha256sum -c`, run `andler --version` and `andlerd --version` (the workflow
+   runs the same smoke check before publishing), and confirm `releases/latest`
+   resolves to the new tag.
+6. **Afterwards.** Move the released items to *Shipped* in `docs/ROADMAP.md`
+   and update the README if the install instructions changed.
+
+Re-running the workflow for an existing tag re-uploads the assets with
+`--clobber` rather than failing, so a publish that died partway is recoverable
+without burning a new tag.
 
 ## Contributing
 

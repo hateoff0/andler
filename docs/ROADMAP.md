@@ -65,7 +65,6 @@
 - **Wizard host-capacity tiering** — scale default RAM and cores to the host (and hard-fail with the exact config key when a guest OS floor is not met), instead of a single fixed default.
 - **MicroG as a real path** — today `--microg` is recorded in the config and nothing installs it. Either a `MICROG` base-image variant in `docker/images/` or a first-boot guest step that installs and registers the MicroG APKs; the wizard stays quiet about it until one half exists.
 - **Multi-disk snapshot parameterization** — external snapshots currently cover the primary disk only; extra disks attached at runtime are outside the chain.
-- **Publish release binaries** — attach `andler` + `andlerd` archives to tagged releases so installation is a download rather than a build.
 
 ---
 
@@ -119,6 +118,7 @@
 - ✅ Start-time gates: host-port conflict, disk already in use, overlapping CPU pins, memory overcommit — each with an actionable message.
 - ✅ Unified `create` + interactive wizard, VM templates, `config view|edit|set|status`, `--dry-run`/`--verify`, `--json`, partial instance IDs, shell completions, `doctor`.
 - ✅ Unit, integration, gRPC round-trip, and containerized E2E tiers; the four-step pre-merge gate plus per-commit gating on `main`.
+- ✅ Release pipeline: a `v*` tag publishes `andler` + `andlerd` archives with `SHA256SUMS` and a build-provenance attestation, so installation is a download rather than a build.
 - ✅ OVMF discovery across distro packaging layouts via a prioritized candidate list (Arch, Debian/Ubuntu, Fedora, openSUSE, `qemu` layouts).
 - ✅ `ANDLERD_DEV_RESTART=1` — dev restart leaves VMs running and the next daemon start adopts them.
 

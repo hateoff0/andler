@@ -9,7 +9,7 @@
 [![Keep a Changelog][badge-kac]][kac]
 [![Semantic Versioning][badge-semver]][semver]
 [![Unreleased][badge-unreleased]](#unreleased)
-[![Pre-release 0.1.0][badge-v010]](#010--pre-release)
+[![0.1.0][badge-v010]](#010---2026-09-13)
 [![GPL-3.0][badge-license]](../LICENSE)
 
 <br/>
@@ -33,6 +33,14 @@
 ---
 
 ## [Unreleased]
+
+_Nothing yet._
+
+---
+
+## [0.1.0] - 2026-09-13
+
+First release: a QEMU/KVM control plane for Linux and Android guests, with paravirtualized 3D over `virtio-gpu`, external overlay snapshots, and zero-root guest provisioning.
 
 ### Added
 
@@ -80,9 +88,7 @@
 
 ---
 
-## [0.1.0] — Pre-Release
-
-### Added
+### Initial scaffolding
 
 - `andler-core`: domain model — `InstanceConfig`, `HypervisorBackend` trait, FSM, `CloneMode`, `AndroidProfile`, path resolution.
 - `andler-qemu`: QEMU backend — process management, QMP client, command-line builder.
@@ -110,5 +116,5 @@
 [badge-kac]: https://img.shields.io/badge/Keep%20a%20Changelog-1.1.0-6366f1?style=for-the-badge
 [badge-semver]: https://img.shields.io/badge/SemVer-2.0.0-0284c7?style=for-the-badge
 [badge-unreleased]: https://img.shields.io/badge/status-unreleased-ea580c?style=for-the-badge
-[badge-v010]: https://img.shields.io/badge/0.1.0-pre--release-22c55e?style=for-the-badge
+[badge-v010]: https://img.shields.io/badge/0.1.0-22c55e?style=for-the-badge
 [badge-license]: https://img.shields.io/badge/GPL--3.0-a855f7?style=for-the-badge
