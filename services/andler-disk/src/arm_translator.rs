@@ -90,9 +90,41 @@ impl TranslatorStage {
     }
 }
 
-/// Where a stage change is reported. `watch` rather than a callback so the
-/// switch can run concurrently with the reporter that renders it.
-pub type TranslatorProgress = tokio::sync::watch::Sender<TranslatorStage>;
+/// Where a switch reports progress: the stage it just entered, and the bytes of
+/// the download while that stage runs.
+///
+/// `watch` rather than a callback so the switch and whatever renders the
+/// progress run concurrently; two channels because a stage transition and a
+/// byte counter have different cadences (the download reports per chunk).
+pub struct TranslatorProgress {
+    pub stage: tokio::sync::watch::Sender<TranslatorStage>,
+    pub download: crate::translator_download::TranslatorDownloadProgress,
+}
+
+/// The receiving half of a [`TranslatorProgress`].
+pub struct TranslatorProgressWatch {
+    pub stage: tokio::sync::watch::Receiver<TranslatorStage>,
+    pub download: tokio::sync::watch::Receiver<(u64, u64)>,
+}
+
+impl TranslatorProgress {
+    /// A sender plus the receivers to render from, in one call so the two
+    /// channels cannot be paired up wrongly.
+    pub fn channel() -> (Self, TranslatorProgressWatch) {
+        let (stage_tx, stage_rx) = tokio::sync::watch::channel(TranslatorStage::Downloading);
+        let (download_tx, download_rx) = tokio::sync::watch::channel((0u64, 0u64));
+        (
+            TranslatorProgress {
+                stage: stage_tx,
+                download: download_tx,
+            },
+            TranslatorProgressWatch {
+                stage: stage_rx,
+                download: download_rx,
+            },
+        )
+    }
+}
 
 pub async fn switch_translator_with(
     mutator: &dyn GuestMutator,
@@ -103,7 +135,7 @@ pub async fn switch_translator_with(
 ) -> Result<TranslatorSwitch, DiskError> {
     let report = |stage: TranslatorStage| {
         if let Some(progress) = progress {
-            let _ = progress.send(stage);
+            let _ = progress.stage.send(stage);
         }
     };
     let info = resolve(translator);
@@ -116,7 +148,14 @@ pub async fn switch_translator_with(
         None if translator == ArmTranslator::None => None,
         None => {
             report(TranslatorStage::Downloading);
-            Some(translator_download::ensure_translator(translator, android_version).await?)
+            Some(
+                translator_download::ensure_translator_with_progress(
+                    translator,
+                    android_version,
+                    progress.map(|progress| &progress.download),
+                )
+                .await?,
+            )
         }
     };
 

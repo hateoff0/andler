@@ -9,6 +9,14 @@ pub async fn ensure_translator(
     translator: ArmTranslator,
     android_version: &str,
 ) -> Result<PathBuf, DiskError> {
+    ensure_translator_with_progress(translator, android_version, None).await
+}
+
+pub async fn ensure_translator_with_progress(
+    translator: ArmTranslator,
+    android_version: &str,
+    progress: Option<&TranslatorDownloadProgress>,
+) -> Result<PathBuf, DiskError> {
     let info = resolve(translator);
     let cache_path = andler_core::paths::arm_translators_dir().join(dir_name(translator));
 
@@ -34,7 +42,7 @@ pub async fn ensure_translator(
         "downloading ARM translator into {}",
         cache_path.display()
     );
-    let bytes = download_file(url).await?;
+    let bytes = download_file_streaming(url, CONNECT_TIMEOUT, TOTAL_TIMEOUT, progress).await?;
     tracing::info!(translator = ?translator, bytes = bytes.len(), "translator download complete, verifying md5");
     verify_md5(&bytes, expected_md5)?;
     tracing::info!(translator = ?translator, "translator md5 verified, extracting");
@@ -46,14 +54,28 @@ pub async fn ensure_translator(
 const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 const TOTAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
 
-async fn download_file(url: &str) -> Result<Vec<u8>, DiskError> {
-    download_file_with_timeouts(url, CONNECT_TIMEOUT, TOTAL_TIMEOUT).await
-}
+/// Byte progress of a translator download: bytes fetched so far and the total
+/// the server announced, or `0` when it announced none. A download is the one
+/// phase with a natural denominator, and without it a progress line sits at
+/// "downloading the translator (0%)" for the whole transfer.
+pub type TranslatorDownloadProgress = tokio::sync::watch::Sender<(u64, u64)>;
 
+/// Test entry point that pins both timeouts, so a test can prove the bound
+/// holds without waiting out the production values.
+#[cfg(test)]
 async fn download_file_with_timeouts(
     url: &str,
     connect_timeout: std::time::Duration,
     total_timeout: std::time::Duration,
+) -> Result<Vec<u8>, DiskError> {
+    download_file_streaming(url, connect_timeout, total_timeout, None).await
+}
+
+async fn download_file_streaming(
+    url: &str,
+    connect_timeout: std::time::Duration,
+    total_timeout: std::time::Duration,
+    progress: Option<&TranslatorDownloadProgress>,
 ) -> Result<Vec<u8>, DiskError> {
     let client = reqwest::Client::builder()
         .connect_timeout(connect_timeout)
@@ -61,7 +83,7 @@ async fn download_file_with_timeouts(
         .build()
         .map_err(|e| DiskError::NbdSetupFailed(format!("failed to build http client: {e}")))?;
 
-    let response = client.get(url).send().await.map_err(|e| {
+    let mut response = client.get(url).send().await.map_err(|e| {
         DiskError::NbdSetupFailed(format!(
             "failed to download {url}: {e}; check your network connection or \
                  pass --translator-dir <path> with a local copy of the translator"
@@ -75,11 +97,29 @@ async fn download_file_with_timeouts(
         )));
     }
 
-    response
-        .bytes()
+    // Report every chunk: the download is the one phase with a natural
+    // denominator, and a progress line that never moves is what made a
+    // two-minute wait look like a hang.
+    let total = response.content_length().unwrap_or(0);
+    if let Some(progress) = progress {
+        let _ = progress.send((0, total));
+    }
+
+    // The server's content-length is a hint; do not preallocate a hostile
+    // amount on its word alone.
+    let mut bytes = Vec::with_capacity(total.min(64 * 1024 * 1024) as usize);
+    while let Some(chunk) = response
+        .chunk()
         .await
-        .map_err(|e| DiskError::NbdSetupFailed(format!("failed to read download: {e}")))
-        .map(|b| b.to_vec())
+        .map_err(|e| DiskError::NbdSetupFailed(format!("failed to read download: {e}")))?
+    {
+        bytes.extend_from_slice(&chunk);
+        if let Some(progress) = progress {
+            let _ = progress.send((bytes.len() as u64, total));
+        }
+    }
+
+    Ok(bytes)
 }
 
 #[cfg(test)]
@@ -118,6 +158,57 @@ mod tests {
         assert!(
             err.to_string().contains("--translator-dir"),
             "error must point at the --translator-dir workaround: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn download_reports_byte_progress() {
+        use std::io::Write;
+
+        let payload = vec![b'x'; 64 * 1024];
+        let body = payload.clone();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+        let addr = listener.local_addr().expect("bound addr");
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        tokio::task::spawn_blocking(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let mut request = [0u8; 1024];
+            let _ = std::io::Read::read(&mut stream, &mut request);
+            let head = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", body.len());
+            let _ = stream.write_all(head.as_bytes());
+            // Two halves, so the reader really sees the transfer in flight.
+            let (first, second) = body.split_at(body.len() / 2);
+            let _ = stream.write_all(first);
+            let _ = stream.flush();
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            let _ = stream.write_all(second);
+            let _ = stream.flush();
+            let _ = rx.blocking_recv();
+        });
+
+        let (progress_tx, mut progress_rx) = tokio::sync::watch::channel((0u64, 0u64));
+        let url = format!("http://{addr}/translator.zip");
+        let bytes = download_file_streaming(
+            &url,
+            std::time::Duration::from_secs(1),
+            std::time::Duration::from_secs(10),
+            Some(&progress_tx),
+        )
+        .await
+        .expect("download succeeds");
+        let _ = tx.send(());
+
+        assert_eq!(bytes.len(), payload.len());
+        let (fetched, total) = *progress_rx.borrow_and_update();
+        assert_eq!(
+            total as usize,
+            payload.len(),
+            "the total must come from the response's content-length"
+        );
+        assert_eq!(
+            fetched as usize,
+            payload.len(),
+            "progress must reach the full payload, not stall at the first chunk"
         );
     }
 
