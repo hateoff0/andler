@@ -46,7 +46,10 @@ pub fn detect_all() -> HardwareDefaults {
         "GPU detected"
     );
     tracing::debug!(audio_server = ?audio_server, "audio server detected");
-    tracing::debug!(arm_translator = ?arm_translator, "ARM translator detected");
+    tracing::debug!(
+        arm_translator = %arm_translator.map_or_else(|| "none".to_string(), |translator| translator.to_string()),
+        "ARM translator detected"
+    );
     tracing::debug!(passt_available, "passt availability detected");
     match &ovmf {
         Ok(found) => {

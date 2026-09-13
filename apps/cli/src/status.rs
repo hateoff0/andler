@@ -466,7 +466,19 @@ fn print_instance_config(config: GetInstanceConfigResponse) {
                 println!("  android_version: {:?}", profile.android_version());
                 println!("  gapps: {}", profile.gapps);
                 println!("  microg: {}", profile.microg);
-                println!("  arm_translator: {:?}", profile.arm_translator());
+                fn translator_label(translator: andler_rpc::proto::ArmTranslator) -> &'static str {
+                    use andler_rpc::proto::ArmTranslator as Proto;
+                    match translator {
+                        Proto::Unspecified => "unspecified",
+                        Proto::None => "none",
+                        Proto::Libndk => "libndk",
+                        Proto::Libhoudini => "libhoudini",
+                    }
+                }
+                println!(
+                    "  arm_translator: {}",
+                    translator_label(profile.arm_translator())
+                );
                 println!(
                     "  boot_mode: {}",
                     match boot_mode {

@@ -908,6 +908,19 @@ enum CliArmTranslator {
     Libhoudini,
 }
 
+impl std::fmt::Display for CliArmTranslator {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Lowercase everywhere this value is shown: the CLI, the wizard
+        // summary and the daemon logs all name the same translator, and they
+        // must not disagree about its spelling.
+        match self {
+            CliArmTranslator::None => write!(f, "none"),
+            CliArmTranslator::Libndk => write!(f, "libndk"),
+            CliArmTranslator::Libhoudini => write!(f, "libhoudini"),
+        }
+    }
+}
+
 impl From<CliArmTranslator> for ProtoArmTranslator {
     fn from(value: CliArmTranslator) -> Self {
         match value {

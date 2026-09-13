@@ -113,7 +113,7 @@ fn summary_text(
             panel.field(
                 "ARM translator",
                 format!(
-                    "{arm:?}{}",
+                    "{arm}{}",
                     if is_basic && detected.arm_translator.is_some() {
                         " (auto-detected)".to_string()
                     } else {

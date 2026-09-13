@@ -36,16 +36,16 @@ pub async fn ensure_translator_with_progress(
         })?;
 
     tracing::info!(
-        translator = ?translator,
+        translator = %translator,
         android_version,
         url,
         "downloading ARM translator into {}",
         cache_path.display()
     );
     let bytes = download_file_streaming(url, CONNECT_TIMEOUT, TOTAL_TIMEOUT, progress).await?;
-    tracing::info!(translator = ?translator, bytes = bytes.len(), "translator download complete, verifying md5");
+    tracing::info!(translator = %translator, bytes = bytes.len(), "translator download complete, verifying md5");
     verify_md5(&bytes, expected_md5)?;
-    tracing::info!(translator = ?translator, "translator md5 verified, extracting");
+    tracing::info!(translator = %translator, "translator md5 verified, extracting");
     extract_zip(&bytes, &cache_path)?;
 
     Ok(cache_path)

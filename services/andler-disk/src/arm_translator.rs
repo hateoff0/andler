@@ -182,7 +182,7 @@ pub async fn switch_translator_with(
 
     let current = detect_current_translator_with(mutator, &system_dir).await?;
     if current == Some(translator) {
-        tracing::info!(translator = ?translator, "translator already installed, skipping");
+        tracing::info!(translator = %translator, "translator already installed, skipping");
         return Ok(TranslatorSwitch::AlreadyInstalled);
     }
 
@@ -215,7 +215,7 @@ pub async fn switch_translator_with(
         };
         if !src.exists() {
             tracing::warn!(
-                translator = ?translator,
+                translator = %translator,
                 file = %rel.display(),
                 "translator file missing from source, skipping"
             );

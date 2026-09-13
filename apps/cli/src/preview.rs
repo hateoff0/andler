@@ -157,7 +157,7 @@ fn print_preview(resolved: &Resolved) -> Result<(), Box<dyn std::error::Error>> 
             );
             println!("GApps:           {}", android_profile.gapps);
             println!("MicroG:          {}", android_profile.microg);
-            println!("ARM translator:  {:?}", android_profile.arm_translator);
+            println!("ARM translator:  {}", android_profile.arm_translator);
         }
     }
 

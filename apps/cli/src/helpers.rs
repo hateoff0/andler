@@ -228,12 +228,18 @@ where
     let started = std::time::Instant::now();
     let mut last_line = String::new();
     let mut last_report = std::time::Instant::now();
+    // Snapshot what is already running *before* the call is polled (a future
+    // does nothing until it is awaited, so the request has not been sent yet):
+    // the operation this command starts must be recognisable as new, while one
+    // another caller started must not be mistaken for ours.
+    let mut watch = OperationWatch::default();
+    let _ = running_operation(&mut poll, instance_ref, &mut watch).await;
 
     loop {
         tokio::select! {
             result = &mut call => return result,
             _ = ticker.tick() => {
-                let line = match active_operation(&mut poll, instance_ref).await {
+                let line = match running_operation(&mut poll, instance_ref, &mut watch).await {
                     Ok(Some(line)) => line,
                     // Not every slow step is a daemon-side operation (an
                     // offline `guest list` mounts the disk inline, for
@@ -257,10 +263,23 @@ where
     }
 }
 
-/// The instance's running operation, rendered as one line, or `None`.
-async fn active_operation(
+/// What this command is reporting on.
+///
+/// An operation that was already running when the command started belongs to
+/// somebody else — a fast `guest list` used to display the progress of a
+/// translator switch another caller had started — so the first poll records
+/// what was already there and only a later appearance counts as ours.
+#[derive(Default)]
+struct OperationWatch {
+    primed: bool,
+    preexisting: Vec<String>,
+    ours: Option<String>,
+}
+
+async fn running_operation(
     client: &mut crate::TracedClient,
     instance_ref: &str,
+    watch: &mut OperationWatch,
 ) -> Result<Option<String>, tonic::Status> {
     use andler_rpc::proto::Empty;
 
@@ -271,19 +290,44 @@ async fn active_operation(
         .operations;
     // The caller may hold a prefix of the id (`andler guest install libndk 7a`),
     // so match either direction.
-    let op = operations.iter().find(|op| {
-        op.instance_id.starts_with(instance_ref)
-            || (!op.instance_id.is_empty() && instance_ref.starts_with(&op.instance_id))
-    });
+    let belongs = |operation: &andler_rpc::proto::OperationInfo| {
+        operation.instance_id.starts_with(instance_ref)
+            || (!operation.instance_id.is_empty()
+                && instance_ref.starts_with(&operation.instance_id))
+    };
 
-    Ok(op.map(|op| {
-        format!(
-            "{} — {} ({}%)",
-            op.kind,
-            operation_phase(op),
-            (op.progress * 100.0).round() as u32
-        )
-    }))
+    if !watch.primed {
+        watch.preexisting = operations
+            .iter()
+            .map(|operation| operation.op_id.clone())
+            .collect();
+        watch.primed = true;
+    }
+
+    if watch.ours.is_none() {
+        watch.ours = operations
+            .iter()
+            .find(|operation| belongs(operation) && !watch.preexisting.contains(&operation.op_id))
+            .map(|operation| operation.op_id.clone());
+    }
+
+    let Some(ours) = watch.ours.as_deref() else {
+        return Ok(None);
+    };
+
+    Ok(operations
+        .iter()
+        .find(|operation| operation.op_id == ours && belongs(operation))
+        .map(render_operation))
+}
+
+fn render_operation(operation: &andler_rpc::proto::OperationInfo) -> String {
+    format!(
+        "{} — {} ({}%)",
+        operation.kind,
+        operation_phase(operation),
+        (operation.progress * 100.0).round() as u32
+    )
 }
 
 /// The daemon publishes the phase list and the overall progress; the active
