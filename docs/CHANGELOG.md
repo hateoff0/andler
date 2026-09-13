@@ -40,18 +40,59 @@ _Nothing yet._
 
 ## [0.1.0] - 2026-09-13
 
-First release: a QEMU/KVM control plane for Linux and Android guests, with paravirtualized 3D over `virtio-gpu`, external overlay snapshots, and zero-root guest provisioning.
+**The first release of ANDLER** — a QEMU/KVM control plane that runs Linux and Android virtual machines as managed systems: one daemon, one CLI, one declarative `instance.toml`.
+
+| | |
+| :--- | :--- |
+| **Guests** | Linux (ISO install) · Android 11 & 13 (Waydroid, VANILLA / GAPPS) |
+| **Host** | Linux x86_64 with KVM — everything under `~/.andler/` |
+| **Binaries** | `andlerd` (daemon, one supervisor per instance) · `andler` (thin gRPC client) |
+| **3D graphics** | Venus (Vulkan) · VirGL (OpenGL) · Virtio-GPU · CPU — no second GPU, no passthrough |
+| **Snapshots** | External QCOW2 overlay chains: live create, offline restore, branching |
+| **Guest access** | QEMU guest agent online · `guestmount` + unprivileged user namespace offline (zero root) |
+| **Telemetry** | CPU/RAM/disk/net from `/proc` · AMD, NVIDIA and Intel GPU metrics, 1 s cadence |
+| **License** | GPL-3.0 |
 
 ### Highlights
 
-- **One daemon, one CLI** — `andlerd` supervises a VM per instance and owns its FSM; `andler` is a thin gRPC client. `instance.toml` is the source of truth and is re-read on every transition, so hand edits are honored.
-- **Paravirtualized 3D** — Venus (Vulkan) and VirGL (OpenGL) share the host GPU over `virtio-gpu`; no second card, no VFIO passthrough. The configured resolution is applied inside the guest and can be changed live on a running VM.
-- **Android guests** — Android 11 and 13 from published base images (VANILLA/GAPPS), a Weston/GL compositor that presents on any host GPU, `libndk`/`libhoudini` ARM translation, and boot-mode switching on the unified image.
-- **Snapshot trees** — external QCOW2 overlay chains: create live over QMP, restore offline (discard or `--branch`), delete commits a layer into its parent, with linked-clone protection and crash-safe chain reconciliation.
-- **Zero-root guest provisioning** — online through the guest agent, offline through `guestmount` inside an unprivileged user namespace. No privileged helper, no sudoers rule.
-- **Telemetry and diagnostics** — CPU/RAM/disk/net from `/proc` plus AMD/NVIDIA/Intel GPU metrics, an event stream, the daemon's own log ring, and `doctor` (with `--metrics`).
-- **Refused before they hurt** — start-time gates for host-port conflicts, disks in use by another instance, overlapping CPU pins, and guest RAM exceeding host memory; idempotency tokens make retries join the running operation.
-- **Install** — `andler-<tag>-linux-x86_64.tar.gz` with both binaries, `SHA256SUMS`, and a build-provenance attestation; `andler --version` and `andlerd --version` report the same build.
+- **🎮 Paravirtualized 3D, not passthrough.** Venus and VirGL share the host GPU over `virtio-gpu` with shared-memory (`blob` + `hostmem`) buffers, so graphics-heavy guests run without dedicating a card. The configured resolution is applied *inside* the guest and can be changed live on a running VM.
+- **🤖 Android that actually boots.** Android 11 and 13 base images published as release assets (`andler image list` / `image download`, every part checksum-verified against the release manifest), a Weston/GL compositor that presents on any host GPU, `libndk`/`libhoudini` ARM translation with managed `build.prop` keys, boot-mode switching, and a `base_image_pin` that refuses a swapped backing image.
+- **📸 Snapshot trees.** Snapshots are external QCOW2 overlay layers switched over QMP **while the guest runs**; restore is offline and either discards newer layers or archives the whole chain as a branch (`--branch`) you can switch back to; delete commits a layer into its parent. Linked clones protect their chain, and the chain is reconciled on daemon startup so an interrupted operation recovers.
+- **🔒 Zero-root guest provisioning.** Online work goes through the guest agent on a private chardev socket; offline work mounts the disk with `guestmount` (libguestfs FUSE) and runs the package manager inside an unprivileged user namespace. There is no privileged helper binary and no sudoers rule anywhere.
+- **🛡️ Refused before they hurt.** Starting an instance is gated on host-port conflicts, a disk already in use by another running instance, overlapping CPU pins, and guest RAM that would exceed host physical memory — each with an actionable message instead of an opaque QEMU failure. Long operations are cancellable, and `--idempotency-token` makes a network retry join the operation already running.
+- **📊 Observable by default.** CPU, resident RAM, disk and network throughput from `/proc`; VRAM and GPU load from AMD sysfs, NVIDIA NVML or Intel `i915`/`xe`; a QMP event stream (`andler events`), the daemon's own log ring (`andler logs daemon`), and `andler doctor --metrics` for RPC latency and error counts.
+- **🖥️ One control plane.** `andler` covers the whole lifecycle — create (wizard, flags or TOML), start/stop/pause/resume, live device hot-plug, clone, export, OCI image export, snapshots, guest packages, diagnostics — with `--json` on every reader for scripting.
+
+### Install
+
+```bash
+tar -xzf andler-v0.1.0-linux-x86_64.tar.gz
+sudo install -m 0755 andler-v0.1.0-linux-x86_64/andler \
+                  andler-v0.1.0-linux-x86_64/andlerd /usr/local/bin/
+
+andler --version          # andler 0.1.0
+andlerd --version         # andlerd 0.1.0
+andler doctor             # KVM, QEMU, OVMF, zero-root prerequisites, daemon
+andlerd                   # or: scripts/install.sh  → systemd user unit
+```
+
+The archive ships both binaries, `LICENSE` and `README.md`, with a `.sha256` sidecar and a build-provenance attestation.
+
+### Requirements
+
+Linux with KVM (`/dev/kvm`, user in the `kvm` group), QEMU with OVMF/UEFI support. Offline guest operations additionally want `guestmount`, `/dev/fuse` and unprivileged user namespaces — `andler doctor` names whatever is missing and the command that fixes it. Bridge networking wants `CAP_NET_ADMIN`; `Nat` mode needs nothing extra.
+
+### Known limitations
+
+- **Isolated network mode** is accepted by the config but `andler-net`'s setup is not implemented: it fails with an explicit error rather than pretending to isolate.
+- **VFIO passthrough** is reserved in the domain model (`RenderBackend::Passthrough`) but **not implemented** — a start is rejected before QEMU is touched. Paravirtualized Venus/VirGL is the supported 3D path.
+- **MicroG** is recorded in the config and nothing installs it yet (no base-image variant ships it).
+- **Hot-plugged extra disks** are outside the snapshot chain, which covers the primary disk.
+- **Live migration** is not supported; snapshots are per-host.
+- **Release artifacts are x86_64 glibc**, built from the tagged commit.
+
+<details>
+<summary><strong>Full change list</strong></summary>
 
 ### Added
 
@@ -109,6 +150,8 @@ First release: a QEMU/KVM control plane for Linux and Android guests, with parav
 - `andler-daemon`: instance lifecycle, supervision, log and metrics streaming.
 - `andler-cli`: thin gRPC client covering every instance operation, plus the interactive wizard.
 - Docker build/test infrastructure and the guest base-image pipelines.
+
+</details>
 
 ---
 
