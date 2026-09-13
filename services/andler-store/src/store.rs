@@ -2,9 +2,32 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use andler_core::{InstanceConfig, InstanceId};
-use rusqlite::Connection;
+use rusqlite::{named_params, Connection};
 
 use crate::error::StoreError;
+
+/// The columns every snapshot read selects, in one place. The row mapper
+/// (`StoredSnapshot::try_from`) reads by *name*, so this list, the mapper and
+/// the struct cannot drift silently: a column missing here fails the read
+/// with "no such column" instead of shifting every value one position left,
+/// and reordering this list changes nothing at all.
+const SNAPSHOT_COLUMNS: &str =
+    "id, instance_id, tag, description, created_at, layer_path, parent_id, branch";
+
+/// Writes name their columns explicitly; the bindings use named parameters so
+/// a value can never land in the wrong column when the statement is edited.
+const INSERT_SNAPSHOT: &str = "INSERT OR REPLACE INTO snapshots \
+     (id, instance_id, tag, description, created_at, layer_path, parent_id, branch) \
+     VALUES (:id, :instance_id, :tag, :description, :created_at, :layer_path, :parent_id, :branch)";
+
+const UPDATE_SNAPSHOT_BRANCH: &str =
+    "UPDATE snapshots SET branch = :branch WHERE instance_id = :instance_id AND id = :id";
+
+const DELETE_SNAPSHOT_BY_TAG: &str =
+    "DELETE FROM snapshots WHERE instance_id = :instance_id AND tag = :tag";
+
+const DELETE_SNAPSHOT_BY_ID: &str =
+    "DELETE FROM snapshots WHERE instance_id = :instance_id AND id = :id";
 
 /// SQLite store for snapshot metadata only. Instance configuration lives in
 /// `instance.toml` files (daemon registry), never here.
@@ -107,7 +130,7 @@ impl Store {
                 return Ok(Vec::new());
             }
             let mut stmt = conn.prepare("SELECT config_json FROM instances")?;
-            let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+            let rows = stmt.query_map([], |row| row.get::<_, String>("config_json"))?;
             let mut result = Vec::new();
             for row in rows {
                 let config_json = row?;
@@ -144,19 +167,17 @@ impl Store {
 
         self.run_blocking(move |conn| {
             conn.execute(
-                "INSERT OR REPLACE INTO snapshots \
-                 (id, instance_id, tag, description, created_at, layer_path, parent_id, branch) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                (
-                    id,
-                    instance_id,
-                    tag,
-                    description,
-                    created_at,
-                    layer_path,
-                    parent_id,
-                    branch,
-                ),
+                INSERT_SNAPSHOT,
+                named_params! {
+                    ":id": id,
+                    ":instance_id": instance_id,
+                    ":tag": tag,
+                    ":description": description,
+                    ":created_at": created_at,
+                    ":layer_path": layer_path,
+                    ":parent_id": parent_id,
+                    ":branch": branch,
+                },
             )?;
             Ok(())
         })
@@ -170,13 +191,17 @@ impl Store {
         snapshot_id: uuid::Uuid,
         branch: Option<String>,
     ) -> Result<(), StoreError> {
-        let instance_id_str = instance_id.to_string();
+        let instance_id = instance_id.to_string();
         let snapshot_id = snapshot_id.to_string();
 
         self.run_blocking(move |conn| {
             conn.execute(
-                "UPDATE snapshots SET branch = ?1 WHERE instance_id = ?2 AND id = ?3",
-                (branch, instance_id_str, snapshot_id),
+                UPDATE_SNAPSHOT_BRANCH,
+                named_params! {
+                    ":branch": branch,
+                    ":instance_id": instance_id,
+                    ":id": snapshot_id,
+                },
             )?;
             Ok(())
         })
@@ -187,14 +212,17 @@ impl Store {
         &self,
         instance_id: InstanceId,
     ) -> Result<Vec<StoredSnapshot>, StoreError> {
-        let instance_id_str = instance_id.to_string();
+        let sql = format!(
+            "SELECT {SNAPSHOT_COLUMNS} FROM snapshots \
+             WHERE instance_id = :instance_id ORDER BY created_at"
+        );
+        let instance_id = instance_id.to_string();
 
         self.run_blocking(move |conn| {
-            let mut stmt = conn.prepare(
-                "SELECT id, instance_id, tag, description, created_at, layer_path, parent_id, branch \
-                 FROM snapshots WHERE instance_id = ?1 ORDER BY created_at",
-            )?;
-            let rows = stmt.query_map([instance_id_str], row_to_stored_snapshot)?;
+            let mut stmt = conn.prepare(&sql)?;
+            let rows = stmt.query_map(named_params! { ":instance_id": instance_id }, |row| {
+                StoredSnapshot::try_from(row)
+            })?;
 
             let mut result = Vec::new();
             for row in rows {
@@ -210,15 +238,18 @@ impl Store {
         instance_id: InstanceId,
         tag: &str,
     ) -> Result<Option<StoredSnapshot>, StoreError> {
-        let instance_id_str = instance_id.to_string();
+        let sql = format!(
+            "SELECT {SNAPSHOT_COLUMNS} FROM snapshots \
+             WHERE instance_id = :instance_id AND tag = :tag"
+        );
+        let instance_id = instance_id.to_string();
         let tag = tag.to_string();
 
         self.run_blocking(move |conn| {
             let result = conn.query_row(
-                "SELECT id, instance_id, tag, description, created_at, layer_path, parent_id, branch \
-                 FROM snapshots WHERE instance_id = ?1 AND tag = ?2",
-                (instance_id_str, tag),
-                row_to_stored_snapshot,
+                &sql,
+                named_params! { ":instance_id": instance_id, ":tag": tag },
+                |row| StoredSnapshot::try_from(row),
             );
 
             match result {
@@ -235,13 +266,13 @@ impl Store {
         instance_id: InstanceId,
         tag: &str,
     ) -> Result<(), StoreError> {
-        let instance_id_str = instance_id.to_string();
+        let instance_id = instance_id.to_string();
         let tag = tag.to_string();
 
         self.run_blocking(move |conn| {
             conn.execute(
-                "DELETE FROM snapshots WHERE instance_id = ?1 AND tag = ?2",
-                (instance_id_str, tag),
+                DELETE_SNAPSHOT_BY_TAG,
+                named_params! { ":instance_id": instance_id, ":tag": tag },
             )?;
             Ok(())
         })
@@ -253,13 +284,13 @@ impl Store {
         instance_id: InstanceId,
         snapshot_id: uuid::Uuid,
     ) -> Result<(), StoreError> {
-        let instance_id_str = instance_id.to_string();
+        let instance_id = instance_id.to_string();
         let snapshot_id = snapshot_id.to_string();
 
         self.run_blocking(move |conn| {
             conn.execute(
-                "DELETE FROM snapshots WHERE instance_id = ?1 AND id = ?2",
-                (instance_id_str, snapshot_id),
+                DELETE_SNAPSHOT_BY_ID,
+                named_params! { ":instance_id": instance_id, ":id": snapshot_id },
             )?;
             Ok(())
         })
@@ -267,27 +298,40 @@ impl Store {
     }
 }
 
-fn row_to_stored_snapshot(row: &rusqlite::Row<'_>) -> Result<StoredSnapshot, rusqlite::Error> {
-    Ok(StoredSnapshot {
-        id: uuid::Uuid::parse_str(row.get::<_, String>(0)?.as_str())
-            .map_err(|e| rusqlite::Error::InvalidParameterName(e.to_string()))?,
-        instance_id: row
-            .get::<_, String>(1)?
-            .parse::<InstanceId>()
-            .map_err(|_| rusqlite::Error::InvalidParameterName("instance_id".into()))?,
-        tag: row.get(2)?,
-        description: row.get(3)?,
-        created_at: row.get(4)?,
-        layer_path: row.get(5)?,
-        parent_id: row
-            .get::<_, Option<String>>(6)?
-            .map(|s| {
-                uuid::Uuid::parse_str(&s)
-                    .map_err(|e| rusqlite::Error::InvalidParameterName(e.to_string()))
-            })
-            .transpose()?,
-        branch: row.get(7)?,
-    })
+impl TryFrom<&rusqlite::Row<'_>> for StoredSnapshot {
+    type Error = rusqlite::Error;
+
+    /// Reads by column name, never by index: the position of a column in the
+    /// `SELECT` list is then irrelevant, and a column that goes missing fails
+    /// this read instead of silently shifting the fields that follow it.
+    fn try_from(row: &rusqlite::Row<'_>) -> Result<Self, Self::Error> {
+        Ok(StoredSnapshot {
+            id: uuid::Uuid::parse_str(&row.get::<_, String>("id")?)
+                .map_err(|e| column_error("id", e.to_string()))?,
+            instance_id: row
+                .get::<_, String>("instance_id")?
+                .parse::<InstanceId>()
+                .map_err(|_| column_error("instance_id", "not a 64-hex instance id".to_string()))?,
+            tag: row.get("tag")?,
+            description: row.get("description")?,
+            created_at: row.get("created_at")?,
+            layer_path: row.get("layer_path")?,
+            parent_id: row
+                .get::<_, Option<String>>("parent_id")?
+                .map(|s| {
+                    uuid::Uuid::parse_str(&s).map_err(|e| column_error("parent_id", e.to_string()))
+                })
+                .transpose()?,
+            branch: row.get("branch")?,
+        })
+    }
+}
+
+/// A stored value that cannot be turned back into its domain type. Carries the
+/// column name, because the failure is always "this column holds something
+/// else" rather than a problem with the statement itself.
+fn column_error(column: &str, detail: String) -> rusqlite::Error {
+    rusqlite::Error::InvalidParameterName(format!("{column}: {detail}"))
 }
 
 fn apply_schema(conn: &Connection) -> Result<(), StoreError> {
@@ -655,6 +699,42 @@ mod tests {
         assert_eq!(loaded[0].layer_path, None, "legacy rows stay internal");
         assert_eq!(loaded[0].parent_id, None);
         assert_eq!(loaded[0].branch, None);
+    }
+
+    #[tokio::test]
+    async fn snapshot_mapping_reads_columns_by_name_not_position() {
+        let store = Store::open_in_memory().await.unwrap();
+        let id = InstanceId::new();
+        let parent = uuid::Uuid::new_v4();
+        let snapshot = StoredSnapshot {
+            id: uuid::Uuid::new_v4(),
+            instance_id: id,
+            tag: "branch-base".to_string(),
+            description: Some("every column populated".to_string()),
+            created_at: "2026-02-03T04:05:06+00:00".to_string(),
+            layer_path: Some("disk.snapshots/layer.qcow2".to_string()),
+            parent_id: Some(parent),
+            branch: Some("experiment".to_string()),
+        };
+        store.save_snapshot(&snapshot).await.unwrap();
+
+        // Same columns, deliberately reversed. An index-based mapper would
+        // hand back swapped values (or a type error) here; reading by name
+        // makes the SELECT column order irrelevant.
+        let reordered = store
+            .run_blocking(|conn| {
+                let mut stmt = conn.prepare(
+                    "SELECT branch, parent_id, layer_path, created_at, \
+                            description, tag, instance_id, id \
+                     FROM snapshots",
+                )?;
+                let row = stmt.query_row([], |row| StoredSnapshot::try_from(row))?;
+                Ok(row)
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(reordered, snapshot);
     }
 
     #[tokio::test]
