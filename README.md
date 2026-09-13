@@ -762,7 +762,7 @@ Before any change lands: `cargo build --workspace` → `cargo test --workspace` 
 
 <br/>
 
-<sub>Cards by <a href="https://github.com/anuraghazra/github-readme-stats">github-readme-stats</a> · badges by <a href="https://shields.io/">Shields.io</a></sub>
+<sub>Cards by <a href="https://github.com/stats-organization/github-stats-extended">github-stats-extended</a> · badges by <a href="https://shields.io/">Shields.io</a></sub>
 
 </div>
 
