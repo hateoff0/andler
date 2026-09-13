@@ -3,6 +3,21 @@ use std::path::{Path, PathBuf};
 use andler_core::{GuestMutator, MutatorError, MutatorOp};
 use async_trait::async_trait;
 
+/// How long one appliance session may run. Starting the appliance on a busy
+/// host takes seconds; a batch that stages hundreds of files takes a while
+/// longer. The bound exists so a stuck appliance becomes an error instead of a
+/// hang.
+const DEFAULT_GUESTFS_TIMEOUT_SECS: u64 = 300;
+const MIN_GUESTFS_TIMEOUT_SECS: u64 = 30;
+
+fn guestfish_timeout() -> std::time::Duration {
+    std::time::Duration::from_secs(andler_core::timeout::env_secs(
+        "ANDLERD_GUESTFS_TIMEOUT_SECS",
+        DEFAULT_GUESTFS_TIMEOUT_SECS,
+        MIN_GUESTFS_TIMEOUT_SECS,
+    ))
+}
+
 /// Offline `GuestMutator` over the libguestfs appliance (guestfish).
 /// The appliance boots its own unprivileged QEMU, mounts the guest image
 /// with exclusive locking (qemu image lock — the same guarantee the old
@@ -35,6 +50,9 @@ impl GuestfsMutator {
         capture_stdout: bool,
     ) -> Result<Vec<u8>, MutatorError> {
         let mut cmd = tokio::process::Command::new("guestfish");
+        // The waiter's timeout is the only thing that ends this process, so it
+        // must not outlive the future watching it.
+        cmd.kill_on_drop(true);
         cmd.arg("-a").arg(&self.disk);
         match &self.mount {
             Some(spec) => {
@@ -69,10 +87,22 @@ impl GuestfsMutator {
                 .map_err(|e| MutatorError::Io(format!("cannot write guestfish script: {e}")))?;
         }
 
-        let output = child
-            .wait_with_output()
-            .await
-            .map_err(|e| MutatorError::Io(format!("guestfish failed: {e}")))?;
+        // Wall-clock bound: a stuck appliance used to hang the operation that
+        // started it, with nothing in the log and no way for the caller to
+        // tell "slow" from "never". `kill_on_drop` makes the appliance die
+        // with the future that is waiting for it.
+        let timeout = guestfish_timeout();
+        let output = match tokio::time::timeout(timeout, child.wait_with_output()).await {
+            Ok(result) => result.map_err(|e| MutatorError::Io(format!("guestfish failed: {e}")))?,
+            Err(_) => {
+                return Err(MutatorError::Io(format!(
+                    "the libguestfs appliance did not finish within {}s — it is stuck starting \
+                     (or cannot start on this host); `andler doctor` verifies guestfish and \
+                     /dev/kvm, and ANDLERD_GUESTFS_TIMEOUT_SECS raises this bound",
+                    timeout.as_secs()
+                )))
+            }
+        };
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -197,6 +227,27 @@ fn uuid4() -> String {
         .map(|d| d.as_nanos())
         .unwrap_or(0);
     format!("{nanos:x}-{}", std::process::id())
+}
+
+#[cfg(test)]
+mod timeout_tests {
+    use super::{guestfish_timeout, DEFAULT_GUESTFS_TIMEOUT_SECS, MIN_GUESTFS_TIMEOUT_SECS};
+
+    #[test]
+    fn the_appliance_bound_is_configurable_and_never_silly() {
+        std::env::remove_var("ANDLERD_GUESTFS_TIMEOUT_SECS");
+        assert_eq!(guestfish_timeout().as_secs(), DEFAULT_GUESTFS_TIMEOUT_SECS);
+
+        std::env::set_var("ANDLERD_GUESTFS_TIMEOUT_SECS", "900");
+        assert_eq!(guestfish_timeout().as_secs(), 900);
+
+        std::env::set_var("ANDLERD_GUESTFS_TIMEOUT_SECS", "1");
+        assert_eq!(guestfish_timeout().as_secs(), MIN_GUESTFS_TIMEOUT_SECS);
+
+        std::env::set_var("ANDLERD_GUESTFS_TIMEOUT_SECS", "whenever");
+        assert_eq!(guestfish_timeout().as_secs(), DEFAULT_GUESTFS_TIMEOUT_SECS);
+        std::env::remove_var("ANDLERD_GUESTFS_TIMEOUT_SECS");
+    }
 }
 
 #[cfg(test)]

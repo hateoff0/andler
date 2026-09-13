@@ -12,6 +12,7 @@ pub mod oci_export;
 pub mod package_manager;
 pub mod paths;
 pub mod provision;
+pub mod timeout;
 
 // Tests that mutate ANDLER_HOME must serialize on this single lock — a
 // per-module lock does not protect against a parallel module's test reading

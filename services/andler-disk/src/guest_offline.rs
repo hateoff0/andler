@@ -18,6 +18,40 @@ pub struct GuestMount {
     mount: PathBuf,
 }
 
+/// How long `guestmount` may take to bring its FUSE mount up. A wedged
+/// `/dev/fuse` or an appliance that cannot start otherwise hangs the caller
+/// forever, with nothing in the log.
+fn mount_timeout_secs() -> u64 {
+    andler_core::timeout::env_secs("ANDLERD_GUEST_MOUNT_TIMEOUT_SECS", 120, 15)
+}
+
+/// How long one chroot batch (an index refresh, a package install) may run.
+/// Generous, because a fresh Android guest really does sync and download for
+/// minutes; bounded, because "forever" is not a progress state.
+fn chroot_timeout_secs() -> u64 {
+    andler_core::timeout::env_secs("ANDLERD_GUEST_COMMAND_TIMEOUT_SECS", 900, 30)
+}
+
+/// Wraps a step in coreutils' `timeout`, escalating to SIGKILL after a short
+/// grace period. The caller gets an exit status instead of a hung pipe, and
+/// the child cannot outlive its bound.
+fn timed_argv(secs: u64, program: &str, args: &[String]) -> Vec<String> {
+    let mut argv = vec![
+        "-k".to_string(),
+        "5s".to_string(),
+        format!("{secs}s"),
+        program.to_string(),
+    ];
+    argv.extend(args.iter().cloned());
+    argv
+}
+
+/// `timeout` exits 124 when it killed the command, 137 when the SIGKILL
+/// escalation was needed.
+fn killed_by_timeout(status: &std::process::ExitStatus) -> bool {
+    matches!(status.code(), Some(124) | Some(137))
+}
+
 impl GuestMount {
     /// Mounts the guest disk read-write via guestfish inspection (finds
     /// the root filesystem automatically, like the appliance paths do).
@@ -67,17 +101,21 @@ impl GuestMount {
         let euid = unsafe { libc::geteuid() };
         // SAFETY: see above.
         let egid = unsafe { libc::getegid() };
-        let status = Command::new("guestmount")
-            .arg("-a")
-            .arg(disk_path)
-            .arg("-i")
-            .arg("-o")
-            .arg(format!("uid={euid}"))
-            .arg("-o")
-            .arg(format!("gid={egid}"))
-            .arg("-o")
-            .arg("default_permissions")
-            .arg(&mount)
+        let args = vec![
+            "-a".to_string(),
+            disk_path.display().to_string(),
+            "-i".to_string(),
+            "-o".to_string(),
+            format!("uid={euid}"),
+            "-o".to_string(),
+            format!("gid={egid}"),
+            "-o".to_string(),
+            "default_permissions".to_string(),
+            mount.display().to_string(),
+        ];
+        let timeout_secs = mount_timeout_secs();
+        let status = Command::new("timeout")
+            .args(timed_argv(timeout_secs, "guestmount", &args))
             .stdin(std::process::Stdio::null())
             .output()
             .map_err(|e| {
@@ -86,6 +124,15 @@ impl GuestMount {
                     "guestmount is not available (is libguestfs-tools installed?): {e}"
                 ))
             })?;
+
+        if killed_by_timeout(&status.status) {
+            let _ = std::fs::remove_dir_all(&mount);
+            return Err(DiskError::NbdSetupFailed(format!(
+                "guestmount did not come up within {timeout_secs}s — libguestfs could not start \
+                 its appliance (check `andler doctor`: guestfish, /dev/fuse) or the image is \
+                 wedged; ANDLERD_GUEST_MOUNT_TIMEOUT_SECS raises the bound"
+            )));
+        }
 
         if !status.status.success() {
             let stderr = String::from_utf8_lossy(&status.stderr);
@@ -162,27 +209,41 @@ pub fn chroot_exec(mount: &Path, argv: &[&str]) -> Result<std::process::Output, 
                   mount --bind /sys \"$1/sys\" 2>/dev/null; \
                   mount -t tmpfs tmpfs \"$1/run\" 2>/dev/null; \
                   exec chroot \"$1\" \"${@:2}\"";
-    let mut cmd = Command::new("unshare");
-    cmd.args([
-        "--user",
-        "--map-root-user",
-        "--mount",
-        "--",
-        "bash",
-        "-c",
-        script,
-    ]);
-    cmd.arg("bash").arg(&mount_str);
-    cmd.args(argv);
+    let mut args: Vec<String> = vec![
+        "--user".to_string(),
+        "--map-root-user".to_string(),
+        "--mount".to_string(),
+        "--".to_string(),
+        "bash".to_string(),
+        "-c".to_string(),
+        script.to_string(),
+        "bash".to_string(),
+        mount_str,
+    ];
+    args.extend(argv.iter().map(|arg| (*arg).to_string()));
+
+    let timeout_secs = chroot_timeout_secs();
+    let mut cmd = Command::new("timeout");
+    cmd.args(timed_argv(timeout_secs, "unshare", &args));
     cmd.stdin(std::process::Stdio::null());
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::piped());
-    cmd.output().map_err(|e| {
+    let output = cmd.output().map_err(|e| {
         DiskError::NbdSetupFailed(format!(
             "unshare is not available or unprivileged user namespaces are disabled \
              (kernel.unprivileged_userns_clone=0 on Debian/Ubuntu): {e}"
         ))
-    })
+    })?;
+
+    if killed_by_timeout(&output.status) {
+        return Err(DiskError::NbdSetupFailed(format!(
+            "the chroot batch did not finish within {timeout_secs}s — the package manager is \
+             stuck (a mirror that accepts the connection and never answers, or a wedged FUSE \
+             mount); ANDLERD_GUEST_COMMAND_TIMEOUT_SECS raises the bound"
+        )));
+    }
+
+    Ok(output)
 }
 
 /// Ensures the guest has a resolv.conf before package-manager network
