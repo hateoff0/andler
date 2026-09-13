@@ -113,11 +113,11 @@ async fn shared_base_image_is_not_a_disk_conflict() {
 
     // Two Android overlays on the same base image: distinct top-level
     // paths, shared read-only backing — must NOT be treated as a conflict.
-    let mut cfg_a = sample_android_config(PathBuf::from("/tmp/a-overlay.qcow2"), base.clone());
+    let cfg_a = sample_android_config(PathBuf::from("/tmp/a-overlay.qcow2"), base.clone());
     let _id_a = cfg_a.id;
     register_with_state(&daemon, cfg_a, InstanceState::Running, None).await;
 
-    let mut cfg_b = sample_android_config(PathBuf::from("/tmp/b-overlay.qcow2"), base);
+    let cfg_b = sample_android_config(PathBuf::from("/tmp/b-overlay.qcow2"), base);
     let id_b = cfg_b.id;
     daemon.create_instance(cfg_b).await.unwrap();
 

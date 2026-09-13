@@ -388,7 +388,7 @@ async fn running_provision_applies_ops_through_online_mutator() {
 #[tokio::test]
 async fn provision_with_no_ops_is_refused() {
     let dir = TestTempDir::new();
-    let mut daemon = Daemon::new();
+    let daemon = Daemon::new();
     let mut cfg = sample_config();
     cfg.disk.path = dir.path().join("disk.qcow2");
     std::fs::write(&cfg.disk.path, b"x").unwrap();
@@ -819,6 +819,7 @@ async fn install_with_different_idempotency_token_is_refused() {
     let _ = release.send(());
     first
         .await
+        .expect("the install task must not panic")
         .expect("the first install must complete once the gate is released");
 
     assert_eq!(
