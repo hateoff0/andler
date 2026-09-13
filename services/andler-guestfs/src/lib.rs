@@ -167,6 +167,9 @@ fn build_script(ops: &[MutatorOp], content_dir: &Path) -> String {
             MutatorOp::Symlink { target, link } => {
                 lines.push(format!("ln-s {} {}", quote(target), quote(link)));
             }
+            MutatorOp::RunShell { command } => {
+                lines.push(format!("sh {}", quote(command)));
+            }
         }
     }
     lines.join("\n")

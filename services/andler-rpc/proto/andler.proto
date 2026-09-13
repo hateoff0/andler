@@ -602,7 +602,15 @@ message ProvisionOp {
         ProvisionRmRf rm_rf = 6;
         ProvisionChmod chmod = 7;
         ProvisionSymlink symlink = 8;
+        // Not accepted from a client: the daemon rejects it on request
+        // conversion. Internal batches (staging a translator payload) use it
+        // to collapse hundreds of per-file operations into one.
+        ProvisionRunShell run_shell = 9;
     }
+}
+
+message ProvisionRunShell {
+    string command = 1;
 }
 
 message ProvisionWriteFile {

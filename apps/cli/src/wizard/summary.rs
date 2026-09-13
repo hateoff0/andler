@@ -275,30 +275,39 @@ fn applied_selection_text(
     detected: &HardwareDefaults,
     clipboard: bool,
 ) -> String {
-    let mut applied: Vec<String> = Vec::new();
+    let mut applied: Vec<(String, String)> = Vec::new();
     if clipboard {
-        applied.push("spice-vdagent (clipboard sharing in the guest)".to_string());
+        applied.push((
+            "clipboard agent".to_string(),
+            "spice-vdagent — copy/paste between host and guest".to_string(),
+        ));
     }
     if let BasicResult::Android(_) = basic {
         let arm = resolve_arm_translator(advanced, detected);
         if arm != CliArmTranslator::None {
-            applied.push(format!("{arm:?} (ARM translation for ARM apps)"));
+            applied.push((
+                "arm translation".to_string(),
+                format!("{arm} — runs ARM apps on this x86_64 host"),
+            ));
         }
     }
 
     let mut out = String::new();
     out.push('\n');
     if applied.is_empty() {
-        out.push_str("Nothing to install inside the VM after creation.\n");
+        out.push_str("  nothing is installed inside the guest after creation.\n");
     } else {
-        out.push_str("Installed inside the VM right after creation:\n");
-        for item in &applied {
-            out.push_str(&format!("  · {item}\n"));
+        out.push_str("  installed in the guest right after creation:\n");
+        let width = applied
+            .iter()
+            .map(|(label, _)| label.len())
+            .max()
+            .unwrap_or(0);
+        for (label, detail) in &applied {
+            out.push_str(&format!("    {label:<width$}  {detail}\n"));
         }
     }
-    out.push_str(
-        "The disk is thin-provisioned: it starts out small and grows with use, up to the size above.\n",
-    );
+    out.push_str("  the disk is thin-provisioned: it starts small and grows with use.\n");
     out
 }
 
@@ -362,7 +371,7 @@ mod tests {
         );
 
         assert!(
-            rendered.contains("Nothing to install inside the VM after creation."),
+            rendered.contains("nothing is installed inside the guest after creation."),
             "{rendered}"
         );
     }
@@ -398,8 +407,14 @@ mod tests {
             rendered.contains("spice-vdagent"),
             "clipboard sharing must announce the guest-side agent: {rendered}"
         );
+        // The translator is named the one way it is named everywhere else:
+        // lowercase, like the CLI flag and the log field.
         assert!(
-            rendered.contains("ARM translation for ARM apps"),
+            rendered.contains("libndk") && !rendered.contains("Libndk"),
+            "the ARM translator must be spelled lowercase: {rendered}"
+        );
+        assert!(
+            rendered.contains("runs ARM apps on this x86_64 host"),
             "{rendered}"
         );
     }

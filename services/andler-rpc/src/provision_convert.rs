@@ -43,6 +43,11 @@ pub fn provision_ops_to_proto(ops: &[MutatorOp]) -> Vec<proto::ProvisionOp> {
                         link: link.clone(),
                     })
                 }
+                MutatorOp::RunShell { command } => {
+                    proto::provision_op::Op::RunShell(proto::ProvisionRunShell {
+                        command: command.clone(),
+                    })
+                }
             }),
         })
         .collect()
@@ -87,6 +92,12 @@ pub fn provision_ops_from_proto(
                     target: s.target.clone(),
                     link: s.link.clone(),
                 },
+                // Internal only: a shell command from a client would be an
+                // arbitrary-execution surface the manifest format does not
+                // promise, so the request path refuses it.
+                proto::provision_op::Op::RunShell(_) => {
+                    return Err(crate::ConvertError::ClientSuppliedShell("run_shell"))
+                }
             };
             Ok(mutator_op)
         })

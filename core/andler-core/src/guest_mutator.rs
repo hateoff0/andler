@@ -36,6 +36,14 @@ pub enum MutatorOp {
         target: String,
         link: String,
     },
+    /// Runs a command through the guest's shell.
+    ///
+    /// Exists for batches that would otherwise be hundreds of round trips —
+    /// unpacking a staged archive, for instance. The caller owns the command's
+    /// safety: nothing here quotes it for you.
+    RunShell {
+        command: String,
+    },
 }
 
 #[derive(Debug, Error)]

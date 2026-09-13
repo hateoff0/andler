@@ -98,6 +98,10 @@ impl QgaMutator {
                 self.exec_ok(qga, "ln", &["-s", target, link]).await?;
                 Ok(())
             }
+            MutatorOp::RunShell { command } => {
+                self.exec_ok(qga, "sh", &["-c", command]).await?;
+                Ok(())
+            }
         }
     }
 }

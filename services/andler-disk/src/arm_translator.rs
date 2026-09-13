@@ -126,6 +126,66 @@ impl TranslatorProgress {
     }
 }
 
+/// Packs the resolved payload into one gzipped tar, relative to the payload
+/// root, so the guest can unpack the whole tree in a single step.
+///
+/// Uses the system `tar` rather than a crate: this crate already drives
+/// `qemu-img`, `guestmount`, `guestfish` and `unshare`, and a tar writer would
+/// be a new dependency added only to avoid a binary that is present wherever
+/// those are.
+fn build_staging_archive(
+    translator_files: &Option<PathBuf>,
+    rel_paths: &[PathBuf],
+) -> Result<Option<PathBuf>, DiskError> {
+    let Some(root) = translator_files else {
+        return Ok(None);
+    };
+    if rel_paths.is_empty() {
+        return Ok(None);
+    }
+
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis())
+        .unwrap_or(0);
+    let archive = std::env::temp_dir().join(format!(
+        "andler-translator-{}-{stamp}.tar.gz",
+        std::process::id()
+    ));
+
+    let mut args: Vec<String> = vec![
+        "-czf".to_string(),
+        archive.display().to_string(),
+        "-C".to_string(),
+        root.display().to_string(),
+    ];
+    args.extend(rel_paths.iter().map(|rel| rel.display().to_string()));
+
+    let output = std::process::Command::new("tar")
+        .args(&args)
+        .output()
+        .map_err(|e| {
+            DiskError::FileSystem(format!(
+                "cannot run tar to pack the translator payload (is tar installed?): {e}"
+            ))
+        })?;
+    if !output.status.success() {
+        let _ = std::fs::remove_file(&archive);
+        return Err(DiskError::FileSystem(format!(
+            "tar could not pack the translator payload: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+
+    Ok(Some(archive))
+}
+
+/// Quotes a value for the guest's shell: single quotes, with any embedded
+/// single quote escaped the way POSIX shell expects.
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', r"'\''"))
+}
+
 pub async fn switch_translator_with(
     mutator: &dyn GuestMutator,
     translator: ArmTranslator,
@@ -198,6 +258,15 @@ pub async fn switch_translator_with(
         None => Vec::new(),
     };
 
+    // One archive upload plus one in-guest extraction, instead of three
+    // guestfish round trips per file: the libndk payload is ~180 files, and
+    // per-file operations made a switch take minutes — every operation is a
+    // message to the appliance. The archive carries the file modes, so only
+    // the `bin/` paths need an explicit chmod, which is exactly what the old
+    // per-file `Chmod` encoded.
+    let host_archive = build_staging_archive(&translator_files, &rel_paths)?;
+    let guest_archive = format!("{staging}.tar.gz");
+
     let mut staging_ops = vec![
         MutatorOp::RmRf {
             path: staging.clone(),
@@ -206,58 +275,42 @@ pub async fn switch_translator_with(
             path: staging.clone(),
         },
     ];
-    for rel in &rel_paths {
-        // None has no payload, so rel_paths is empty — the source never
-        // resolves to a real directory in that case.
-        let src = match &translator_files {
-            Some(files) => files.join(rel),
-            None => continue,
-        };
-        if !src.exists() {
+    if let Some(host_archive) = &host_archive {
+        tracing::debug!(
+            translator = %translator,
+            entries = rel_paths.len(),
+            "staging the translator payload as one archive"
+        );
+        staging_ops.push(MutatorOp::UploadFile {
+            path: guest_archive.clone(),
+            host_path: host_archive.clone(),
+        });
+        staging_ops.push(MutatorOp::RunShell {
+            command: format!(
+                "tar -xzf {archive} -C {staging} && \
+                 find {staging} -type f -path '*/bin/*' -exec chmod 755 {{}} + && \
+                 rm -f {archive}",
+                archive = shell_quote(&guest_archive),
+                staging = shell_quote(&staging),
+            ),
+        });
+    }
+
+    report(TranslatorStage::Staging);
+    let staged = mutator.apply(&staging_ops).await;
+
+    // The archive has served its purpose whether or not the batch worked, and
+    // a stale copy in the host temp directory outlives the process.
+    if let Some(archive) = &host_archive {
+        if let Err(error) = std::fs::remove_file(archive) {
             tracing::warn!(
-                translator = %translator,
-                file = %rel.display(),
-                "translator file missing from source, skipping"
+                path = %archive.display(),
+                error = %error,
+                "failed to remove the staging archive"
             );
-            continue;
-        }
-        // A resolved entry may be a single file or a directory tree —
-        // directories are walked recursively and every file uploaded.
-        let mut stack = vec![(src.clone(), Path::new(&staging).join(rel))];
-        while let Some((host_path, guest_path)) = stack.pop() {
-            if host_path.is_dir() {
-                for entry in std::fs::read_dir(&host_path).map_err(|e| {
-                    DiskError::FileSystem(format!("failed to read {}: {e}", host_path.display()))
-                })? {
-                    let entry = entry.map_err(|e| {
-                        DiskError::FileSystem(format!("failed to read dir entry: {e}"))
-                    })?;
-                    stack.push((entry.path(), guest_path.join(entry.file_name())));
-                }
-                continue;
-            }
-            if let Some(parent) = guest_path.parent() {
-                staging_ops.push(MutatorOp::MkdirP {
-                    path: parent.to_string_lossy().into_owned(),
-                });
-            }
-            staging_ops.push(MutatorOp::UploadFile {
-                path: guest_path.to_string_lossy().into_owned(),
-                host_path: host_path.clone(),
-            });
-            if guest_path.components().any(|c| c.as_os_str() == "bin") {
-                staging_ops.push(MutatorOp::Chmod {
-                    path: guest_path.to_string_lossy().into_owned(),
-                    mode: 0o755,
-                });
-            }
         }
     }
-    report(TranslatorStage::Staging);
-    mutator
-        .apply(&staging_ops)
-        .await
-        .map_err(|e| DiskError::FileSystem(format!("failed to stage translator: {e}")))?;
+    staged.map_err(|e| DiskError::FileSystem(format!("failed to stage translator: {e}")))?;
 
     // Staging succeeded in full — now it's safe to remove the old translator.
     let mut cleanup_ops = Vec::new();
@@ -477,6 +530,45 @@ fn build_prop_content(props: &HashMap<String, String>) -> String {
 mod tests {
     use super::*;
 
+    #[test]
+    fn staging_archive_contains_the_payload_with_relative_paths() {
+        let root = std::env::temp_dir().join(format!("andler-stage-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("lib")).expect("create lib");
+        std::fs::create_dir_all(root.join("bin")).expect("create bin");
+        std::fs::write(root.join("lib/libndk_translation.so"), b"payload").expect("write lib");
+        std::fs::write(root.join("bin/tool"), b"#!/bin/sh").expect("write tool");
+
+        let archive = build_staging_archive(
+            &Some(root.clone()),
+            &[PathBuf::from("lib"), PathBuf::from("bin")],
+        )
+        .expect("tar runs")
+        .expect("an archive is produced");
+
+        let listing = std::process::Command::new("tar")
+            .args(["-tzf", &archive.display().to_string()])
+            .output()
+            .expect("tar lists the archive");
+        let names = String::from_utf8_lossy(&listing.stdout);
+
+        assert!(names.contains("lib/libndk_translation.so"), "{names}");
+        assert!(names.contains("bin/tool"), "{names}");
+        assert!(
+            !names.contains(&root.display().to_string()),
+            "entries must be relative to the payload root, not absolute: {names}"
+        );
+
+        let _ = std::fs::remove_file(&archive);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn shell_quoting_survives_single_quotes() {
+        assert_eq!(shell_quote("/a b/c"), "'/a b/c'");
+        assert_eq!(shell_quote("/it's"), r"'/it'\''s'");
+    }
+
     /// GuestMutator over a local directory — lets the guest-path logic be
     /// unit-tested without an appliance or a guest agent.
     struct TestMutator {
@@ -568,6 +660,14 @@ mod tests {
                         let _ = std::fs::remove_file(self.guest(link));
                         std::os::unix::fs::symlink(target, self.guest(link))
                             .map_err(|e| andler_core::MutatorError::Io(e.to_string()))?;
+                    }
+                    // The test mutator maps guest paths onto a temp directory,
+                    // so there is no guest shell for a command to run in; the
+                    // archive staging path is covered by the E2E suite.
+                    MutatorOp::RunShell { command } => {
+                        return Err(andler_core::MutatorError::Unsupported(format!(
+                            "run-shell in the test mutator: {command}"
+                        )));
                     }
                 }
             }

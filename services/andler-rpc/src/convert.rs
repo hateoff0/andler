@@ -37,6 +37,8 @@ pub enum ConvertError {
     MissingPortForwardProtocol,
     #[error("missing field `{0}` in request")]
     MissingField(&'static str),
+    #[error("`{0}` is not accepted from a client")]
+    ClientSuppliedShell(&'static str),
 }
 
 impl TryFrom<proto::AndroidVersion> for AndroidVersion {
