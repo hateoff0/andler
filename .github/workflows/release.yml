@@ -86,6 +86,11 @@ jobs:
           "/tmp/${{ steps.package.outputs.dir }}/andlerd" --version
 
       - name: Attest the build provenance
+        # Artifact attestations are available for public repositories (and for
+        # private ones on GitHub Enterprise Cloud). Skipping on a private repo
+        # keeps the release publishable before the repository is opened; the
+        # assets and their .sha256 sidecars are published either way.
+        if: github.event.repository.visibility == 'public'
         uses: actions/attest-build-provenance@v2
         with:
           subject-path: dist/andler-*.tar.gz
