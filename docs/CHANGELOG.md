@@ -34,7 +34,18 @@
 
 ## [Unreleased]
 
-_Nothing yet._
+### Added
+
+- **One archive per component.** A release now publishes `andlerd-<tag>-linux-x86_64.tar.gz` (daemon), `andler-cli-<tag>-linux-x86_64.tar.gz` (client) and `andler-<tag>-linux-x86_64.tar.gz` (both, plus `LICENSE` and `README.md`), each with its own `.sha256`. A host that only serves VMs no longer downloads the CLI, and a client machine can install just the client.
+- **`scripts/install.sh` installs from a release.** `--component daemon|cli|both`, `--from-release [TAG]`, `--bin-dir DIR`, `--no-service`: it downloads the archive matching the component, verifies the published checksum, installs into `~/.local/bin`, and points the systemd user unit at exactly the binary it installed. `scripts/uninstall.sh` gained `--binaries` for the reverse.
+
+### Changed
+
+- Release titles no longer repeat the project name — GitHub titles the release with the tag, which is the version a reader needs — and the release notes open with the same navigation row as the README.
+
+### Removed
+
+- Dangling `PLAN.md` references in `scripts/install.sh` and `scripts/andlerd.service`, and the dead `andler-helper` / `/etc/sudoers.d/andler` cleanup in `uninstall.sh --purge` — both belonged to the privileged-helper era that the zero-root migration removed.
 
 ---
 

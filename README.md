@@ -213,30 +213,57 @@ Three boundaries hold the design together: `andler-core` is the bottom layer and
 > [!IMPORTANT]
 > **Prebuilt release archives are the recommended path.** Building from source is only needed to work on ANDLER itself.
 
-### 1 · Download the release
+Each release publishes three archives, so you install what you need and nothing else:
 
-Open [Releases][rel], take the archive for your architecture, and install the two binaries:
+| Archive | Contains | For |
+| :--- | :--- | :--- |
+| `andler-<tag>-linux-x86_64.tar.gz` | both binaries, `LICENSE`, `README.md` | the default: a host that serves VMs and drives them |
+| `andlerd-<tag>-linux-x86_64.tar.gz` | `andlerd` | a host that only serves VMs |
+| `andler-cli-<tag>-linux-x86_64.tar.gz` | `andler` | a client machine, talking to a daemon elsewhere |
+
+Every archive ships a `.sha256` sidecar, and public releases carry a build-provenance attestation.
+
+### 1 · Install
 
 ```bash
-tar -xzf andler-*.tar.gz                       # ships ./andler and ./andlerd
-sudo install -m 0755 andler  /usr/local/bin/andler
-sudo install -m 0755 andlerd /usr/local/bin/andlerd
+scripts/install.sh --component both   --from-release            # latest: CLI + daemon + user service
+scripts/install.sh --component daemon --from-release v0.1.0     # a pinned daemon
+scripts/install.sh --component cli    --from-release v0.1.0 --no-service   # client only
 ```
+
+The script verifies the published checksum, installs into `~/.local/bin` (`--bin-dir` to change it) and — for the daemon — writes and enables the per-user systemd unit. Without `--from-release` it installs a binary you already have: an explicit path, one on `PATH`, or `target/release` after `cargo build --release`.
+
+<details>
+<summary><strong>Download and install by hand</strong></summary>
+
+```bash
+tar -xzf andler-v0.1.0-linux-x86_64.tar.gz        # or andlerd-… / andler-cli-…
+sudo install -m 0755 andler-v0.1.0-linux-x86_64/andler  /usr/local/bin/andler
+sudo install -m 0755 andler-v0.1.0-linux-x86_64/andlerd /usr/local/bin/andlerd
+```
+
+</details>
+
+> [!IMPORTANT]
+> Install both sides from the **same release**. `andler` verifies the daemon's version before every command and refuses a daemon built from a different one — a mismatched pair fails at the first command instead of misbehaving quietly.
 
 ### 2 · Verify the host
 
 ```bash
-andler --version      # andler 0.1.0 — the CLI and the daemon report the same build
+andler --version      # andler 0.1.0
+andlerd --version     # andlerd 0.1.0 — both sides must agree
 andler doctor
 ```
 
 `doctor` checks KVM access, QEMU binaries, OVMF firmware, `CAP_NET_ADMIN`, the zero-root offline prerequisites, daemon reachability, and the base-image cache — every failing line prints the command that fixes it.
 
-### 3 · Run the daemon as a user service
+### 3 · The daemon as a user service
+
+`scripts/install.sh` already wrote and enabled the unit; to check or re-point it:
 
 ```bash
-scripts/install.sh                             # systemd *user* unit, no root
 systemctl --user status andlerd
+scripts/install.sh --component daemon --bin-dir ~/.local/bin    # (re)install the unit for that binary
 ```
 
 One daemon per `ANDLER_HOME` (flock on `~/.andler/andlerd.lock`); default listen address `127.0.0.1:50051`, overridable with `ANDLERD_LISTEN_ADDR`.

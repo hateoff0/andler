@@ -361,9 +361,11 @@ binaries, packages them, and publishes the GitHub release.
    git push origin v0.1.0
    ```
 
-   The workflow publishes `andler-<tag>-linux-x86_64.tar.gz` (both binaries at
-   the archive root, plus `LICENSE` and `README.md`) with a `.sha256` sidecar
-   and a build-provenance attestation, and marks it the latest release. The
+   The workflow publishes three archives — `andler-<tag>-linux-x86_64.tar.gz`
+   (both binaries plus `LICENSE` and `README.md`), `andlerd-<tag>-linux-x86_64.tar.gz`
+   (daemon only) and `andler-cli-<tag>-linux-x86_64.tar.gz` (CLI only) — each
+   with a `.sha256` sidecar and covered by a build-provenance attestation. The
+   release is titled with the tag itself and marked the latest release. The
    automated base-image builds use `base-image-*` tags with `--latest=false`,
    so they never shadow a project release.
 5. **Verify the published artifacts.** Download the archive, check
