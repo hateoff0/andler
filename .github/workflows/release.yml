@@ -38,7 +38,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           ref: ${{ github.event.inputs.tag || github.ref }}
 
@@ -64,26 +64,61 @@ jobs:
       - name: Build release binaries
         run: cargo build --release --locked -p daemon -p cli
 
-      - name: Assemble the archive
+      - name: Package the artifacts
         id: package
         run: |
           set -euo pipefail
           tag="${{ steps.version.outputs.tag }}"
-          dir="andler-${tag}-linux-x86_64"
-          mkdir -p "dist/$dir"
-          cp target/release/andler target/release/andlerd "dist/$dir/"
-          cp LICENSE README.md "dist/$dir/"
-          tar -C dist -czf "dist/${dir}.tar.gz" "$dir"
-          (cd dist && sha256sum "${dir}.tar.gz" > "${dir}.tar.gz.sha256")
-          echo "dir=$dir" >> "$GITHUB_OUTPUT"
+          base="linux-x86_64"
+          bundle="andler-${tag}-${base}"
+          daemon="andlerd-${tag}-${base}"
+          cli="andler-cli-${tag}-${base}"
+
+          # Three archives from one build: the pair (the default -- the CLI
+          # refuses a daemon built from a different version, so installing both
+          # together is the path that cannot drift), and one per component for
+          # the two cases that are real: a host that only runs the daemon, and a
+          # client that only talks to a daemon elsewhere.
+          mkdir -p "dist/$bundle" "dist/$daemon" "dist/$cli"
+          cp target/release/andler target/release/andlerd LICENSE README.md "dist/$bundle/"
+          cp target/release/andlerd LICENSE "dist/$daemon/"
+          cp target/release/andler LICENSE "dist/$cli/"
+
+          for dir in "$bundle" "$daemon" "$cli"; do
+            tar -C dist -czf "dist/${dir}.tar.gz" "$dir"
+            (cd dist && sha256sum "${dir}.tar.gz" > "${dir}.tar.gz.sha256")
+          done
+
+          echo "bundle=$bundle" >> "$GITHUB_OUTPUT"
+          echo "daemon=$daemon" >> "$GITHUB_OUTPUT"
+          echo "cli=$cli" >> "$GITHUB_OUTPUT"
           ls -lh dist
 
       - name: Smoke-check the packaged binaries
         run: |
           set -euo pipefail
-          tar -xzf dist/andler-*.tar.gz -C /tmp
-          "/tmp/${{ steps.package.outputs.dir }}/andler" --version
-          "/tmp/${{ steps.package.outputs.dir }}/andlerd" --version
+          bundle="${{ steps.package.outputs.bundle }}"
+          daemon="${{ steps.package.outputs.daemon }}"
+          cli="${{ steps.package.outputs.cli }}"
+
+          for archive in "$bundle" "$daemon" "$cli"; do
+            (cd dist && sha256sum -c "${archive}.tar.gz.sha256" --status) \
+              || { echo "::error::$archive failed its checksum"; exit 1; }
+          done
+
+          # The artifacts must carry exactly what their names promise.
+          test "$(tar -tzf "dist/${daemon}.tar.gz" | grep -c '/andlerd$')" = 1
+          test "$(tar -tzf "dist/${daemon}.tar.gz" | grep -c '/andler$')" = 0
+          test "$(tar -tzf "dist/${cli}.tar.gz" | grep -c '/andler$')" = 1
+          test "$(tar -tzf "dist/${cli}.tar.gz" | grep -c '/andlerd$')" = 0
+
+          tar -xzf "dist/${bundle}.tar.gz" -C /tmp
+          "/tmp/${bundle}/andler" --version
+          "/tmp/${bundle}/andlerd" --version
+          tar -xzf "dist/${daemon}.tar.gz" -C /tmp
+          "/tmp/${daemon}/andlerd" --version
+          tar -xzf "dist/${cli}.tar.gz" -C /tmp
+          "/tmp/${cli}/andler" --version
 
       - name: Attest the build provenance
         # Artifact attestations are available for public repositories (and for
@@ -91,21 +126,29 @@ jobs:
         # keeps the release publishable before the repository is opened; the
         # assets and their .sha256 sidecars are published either way.
         if: github.event.repository.visibility == 'public'
-        uses: actions/attest-build-provenance@v2
+        uses: actions/attest-build-provenance@v4
         with:
-          subject-path: dist/andler-*.tar.gz
+          subject-path: dist/*.tar.gz
 
       - name: Extract the changelog section
         id: notes
         run: |
           set -euo pipefail
           version="${{ steps.version.outputs.version }}"
+          repo="${{ github.repository }}"
           awk -v ver="$version" '
             $0 ~ "^## \\[" ver "\\]" { found = 1; next }
             found && /^## \[/ { exit }
             found { print }
-          ' docs/CHANGELOG.md > notes.md
-          if [ -s notes.md ]; then
+          ' docs/CHANGELOG.md > section.md
+          if [ -s section.md ]; then
+            # Same navigation row the README opens with, so the release reads as
+            # part of the project rather than a detached changelog dump.
+            {
+              echo "**<a href=\"https://github.com/${repo}#readme\">README</a>** &nbsp;•&nbsp; **<a href=\"https://github.com/${repo}#-quick-start\">Quick start</a>** &nbsp;•&nbsp; **<a href=\"https://github.com/${repo}/blob/main/docs/CHANGELOG.md\">Changelog</a>** &nbsp;•&nbsp; **<a href=\"https://github.com/${repo}/blob/main/docs/ROADMAP.md\">Roadmap</a>**"
+              echo
+              sed '/./,$!d' section.md
+            } > notes.md
             echo "have_notes=true" >> "$GITHUB_OUTPUT"
           else
             echo "have_notes=false" >> "$GITHUB_OUTPUT"
@@ -120,13 +163,23 @@ jobs:
           tag="${{ steps.version.outputs.tag }}"
           repo="${{ github.repository }}"
           if gh release view "$tag" --repo "$repo" >/dev/null 2>&1; then
-            gh release upload "$tag" --repo "$repo" --clobber dist/andler-*.tar.gz dist/andler-*.sha256
-          else
+            # Re-running for an existing tag rewrites the assets (--clobber) and
+            # refreshes the body, so a release published with an older template
+            # picks up the current one without burning a new tag.
+            gh release upload "$tag" --repo "$repo" --clobber dist/*.tar.gz dist/*.sha256
             if [ "${{ steps.notes.outputs.have_notes }}" = "true" ]; then
-              gh release create "$tag" --repo "$repo" --title "ANDLER $tag" --latest \
-                --notes-file notes.md dist/andler-*.tar.gz dist/andler-*.sha256
+              gh release edit "$tag" --repo "$repo" --title "$tag" --notes-file notes.md
             else
-              gh release create "$tag" --repo "$repo" --title "ANDLER $tag" --latest \
-                --generate-notes dist/andler-*.tar.gz dist/andler-*.sha256
+              gh release edit "$tag" --repo "$repo" --title "$tag"
+            fi
+          else
+            # No --title: GitHub titles the release with the tag itself, which is
+            # the version a reader needs; the project name is already the repo.
+            if [ "${{ steps.notes.outputs.have_notes }}" = "true" ]; then
+              gh release create "$tag" --repo "$repo" --latest \
+                --notes-file notes.md dist/*.tar.gz dist/*.sha256
+            else
+              gh release create "$tag" --repo "$repo" --latest \
+                --generate-notes dist/*.tar.gz dist/*.sha256
             fi
           fi

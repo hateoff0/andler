@@ -26,7 +26,7 @@ jobs:
     timeout-minutes: 15   # generous vs. the worst case in check_waydroid_updates.py's own retry math,
                            # just a safety net against an unexpected hang eating Actions minutes forever
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Check SourceForge and trigger builds for anything new
         env:
