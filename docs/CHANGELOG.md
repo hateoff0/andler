@@ -42,6 +42,17 @@ _Nothing yet._
 
 First release: a QEMU/KVM control plane for Linux and Android guests, with paravirtualized 3D over `virtio-gpu`, external overlay snapshots, and zero-root guest provisioning.
 
+### Highlights
+
+- **One daemon, one CLI** — `andlerd` supervises a VM per instance and owns its FSM; `andler` is a thin gRPC client. `instance.toml` is the source of truth and is re-read on every transition, so hand edits are honored.
+- **Paravirtualized 3D** — Venus (Vulkan) and VirGL (OpenGL) share the host GPU over `virtio-gpu`; no second card, no VFIO passthrough. The configured resolution is applied inside the guest and can be changed live on a running VM.
+- **Android guests** — Android 11 and 13 from published base images (VANILLA/GAPPS), a Weston/GL compositor that presents on any host GPU, `libndk`/`libhoudini` ARM translation, and boot-mode switching on the unified image.
+- **Snapshot trees** — external QCOW2 overlay chains: create live over QMP, restore offline (discard or `--branch`), delete commits a layer into its parent, with linked-clone protection and crash-safe chain reconciliation.
+- **Zero-root guest provisioning** — online through the guest agent, offline through `guestmount` inside an unprivileged user namespace. No privileged helper, no sudoers rule.
+- **Telemetry and diagnostics** — CPU/RAM/disk/net from `/proc` plus AMD/NVIDIA/Intel GPU metrics, an event stream, the daemon's own log ring, and `doctor` (with `--metrics`).
+- **Refused before they hurt** — start-time gates for host-port conflicts, disks in use by another instance, overlapping CPU pins, and guest RAM exceeding host memory; idempotency tokens make retries join the running operation.
+- **Install** — `andler-<tag>-linux-x86_64.tar.gz` with both binaries, `SHA256SUMS`, and a build-provenance attestation; `andler --version` and `andlerd --version` report the same build.
+
 ### Added
 
 - **Zero-root offline guest operations** — `guestmount` (libguestfs FUSE) + `unshare --user --map-root-user --mount` + chroot replace the qemu-nbd / host-mount / privileged-helper pipeline. The `andler-helper` crate, its `/usr/local/sbin` binary, `doctor --fix`, and every sudoers rule are gone.
