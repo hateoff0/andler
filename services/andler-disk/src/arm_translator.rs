@@ -180,10 +180,44 @@ fn build_staging_archive(
     Ok(Some(archive))
 }
 
-/// Quotes a value for the guest's shell: single quotes, with any embedded
-/// single quote escaped the way POSIX shell expects.
-fn shell_quote(value: &str) -> String {
-    format!("'{}'", value.replace('\'', r"'\''"))
+/// The one command that unpacks the staged archive into the guest, fixes the
+/// payload's executable bits and removes the archive.
+///
+/// Escaped, not quoted: guestfish's script parser delimits an argument with
+/// single quotes and rejects a quote that immediately follows a closing one, so
+/// a command carrying quotes cannot be expressed at all (the first version of
+/// this used single quotes and guestfish answered "command arguments not
+/// separated by whitespace"). Backslash escapes are passed through to the
+/// guest's shell untouched, so they are the safe way to spell a path.
+fn staging_extract_command(guest_archive: &str, staging: &str) -> Result<String, DiskError> {
+    for value in [guest_archive, staging] {
+        if value.contains('\'') || value.contains('"') {
+            return Err(DiskError::FileSystem(format!(
+                "cannot stage the translator: the guest path {value:?} contains a quote, which \
+                 the appliance's script parser cannot carry"
+            )));
+        }
+    }
+
+    let archive = shell_escape(guest_archive);
+    let staging = shell_escape(staging);
+    Ok(format!(
+        "tar -xzf {archive} -C {staging} && (chmod -R 755 {staging}/bin || true) ; rm -f {archive}"
+    ))
+}
+
+/// Backslash-escapes everything the guest's shell would otherwise interpret.
+/// Spaces are the case that matters (a payload path can contain one); the rest
+/// is here so the shape stays safe if a caller ever passes something richer.
+fn shell_escape(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for character in value.chars() {
+        if " \t\\$&;|<>()*?[]{}!~`#\n".contains(character) {
+            escaped.push('\\');
+        }
+        escaped.push(character);
+    }
+    escaped
 }
 
 pub async fn switch_translator_with(
@@ -281,19 +315,12 @@ pub async fn switch_translator_with(
             entries = rel_paths.len(),
             "staging the translator payload as one archive"
         );
+        let command = staging_extract_command(&guest_archive, &staging)?;
         staging_ops.push(MutatorOp::UploadFile {
             path: guest_archive.clone(),
             host_path: host_archive.clone(),
         });
-        staging_ops.push(MutatorOp::RunShell {
-            command: format!(
-                "tar -xzf {archive} -C {staging} && \
-                 find {staging} -type f -path '*/bin/*' -exec chmod 755 {{}} + && \
-                 rm -f {archive}",
-                archive = shell_quote(&guest_archive),
-                staging = shell_quote(&staging),
-            ),
-        });
+        staging_ops.push(MutatorOp::RunShell { command });
     }
 
     report(TranslatorStage::Staging);
@@ -564,9 +591,34 @@ mod tests {
     }
 
     #[test]
-    fn shell_quoting_survives_single_quotes() {
-        assert_eq!(shell_quote("/a b/c"), "'/a b/c'");
-        assert_eq!(shell_quote("/it's"), r"'/it'\''s'");
+    fn staging_command_survives_the_guestfish_parser() {
+        let command =
+            staging_extract_command("/staging/x.tar.gz", "/var/lib/waydroid/overlay/system")
+                .expect("plain paths are expressible");
+
+        // guestfish cannot carry a quote inside a quoted argument, so the
+        // command must not contain one — this is the regression.
+        assert!(!command.contains('\''), "{command}");
+        assert!(!command.contains('"'), "{command}");
+        assert!(command.contains("tar -xzf /staging/x.tar.gz"), "{command}");
+        assert!(
+            command.contains("chmod -R 755 /var/lib/waydroid/overlay/system/bin"),
+            "{command}"
+        );
+        assert!(command.contains("rm -f /staging/x.tar.gz"), "{command}");
+    }
+
+    #[test]
+    fn staging_command_escapes_spaces_and_refuses_quotes() {
+        let command =
+            staging_extract_command("/a b/x.tar.gz", "/c d").expect("spaces are escapable");
+        assert!(command.contains(r"tar -xzf /a\ b/x.tar.gz"), "{command}");
+        assert!(command.contains(r"-C /c\ d"), "{command}");
+        assert!(!command.contains('\''), "{command}");
+
+        // A quote has no safe spelling here, so it is refused rather than
+        // silently mangled.
+        assert!(staging_extract_command("/it's/x.tar.gz", "/c").is_err());
     }
 
     /// GuestMutator over a local directory — lets the guest-path logic be
