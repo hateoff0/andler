@@ -170,7 +170,11 @@ jobs:
           # of the manifest rather than re-deriving it, so the title can never disagree
           # with what render_release_notes.py already put in the notes body.
           git_rev=$(jq -r '.git_rev' "${{ steps.locate.outputs.manifest }}")
-          title="Base image: Android ${{ inputs.android_major }} (${{ inputs.android_variant }}) — $(date -u +%Y-%m-%d) ($git_rev)"
+          # Lowercase and separated by `·`, so the releases list scans as
+          # `base image · android 13 vanilla · 2026-09-13 · d3afb19` instead of
+          # the old "Base image: Android 13 (VANILLA) — …" with three different
+          # separators in one line.
+          title="base image · android ${{ inputs.android_major }} ${variant_lower} · $(date -u +%Y-%m-%d) · $git_rev"
 
           # --prerelease: this is unreviewed, automated CI output -- a base image for
           # Waydroid, not a reviewed release of andler itself. Marking it this way gives

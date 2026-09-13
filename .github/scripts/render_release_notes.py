@@ -67,7 +67,7 @@ def main() -> int:
     rough_needed_gib = math.ceil((original + (compressed or original)) / GIB)
 
     lines = [
-        f"## 📦 Base image — Android {major} ({variant})",
+        f"## 📦 base image · android {major} {variant_lower}",
         "",
         f"Bootable Waydroid base image for guests on **Android {major}**, built and "
         "checksummed by CI — no rootfs build, no image assembly on your side.",
