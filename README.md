@@ -713,13 +713,16 @@ Before any change lands: `cargo build --workspace` → `cargo test --workspace` 
 
 ## 📈 Project Metrics
 
-Repository health is rendered into `assets/metrics.svg` by the `metrics` workflow in this repo and committed back on a nightly schedule — the block below reads that file, so the README carries no external image dependency.
-
 <div align="center">
 
-<!-- The workflow below writes ./assets/metrics.svg. Run it once
-     (Actions → Metrics → Run workflow) and this block fills in. -->
-<a href="https://github.com/hateoff0/andler"><img src="./assets/metrics.svg" alt="ANDLER repository metrics" width="92%"/></a>
+<a href="https://github.com/hateoff0/andler">
+  <img height="180" align="center" alt="ANDLER repository card" src="https://github-readme-stats.vercel.app/api/pin/?username=hateoff0&repo=andler&bg_color=0d1117&title_color=6366f1&icon_color=6366f1&text_color=c9d1d9&border_color=30363d#gh-dark-mode-only"/>
+  <img height="180" align="center" alt="ANDLER repository card" src="https://github-readme-stats.vercel.app/api/pin/?username=hateoff0&repo=andler&theme=default#gh-light-mode-only"/>
+</a>
+<a href="https://github.com/hateoff0/andler">
+  <img height="180" align="center" alt="Most used languages" src="https://github-readme-stats.vercel.app/api/top-langs/?username=hateoff0&layout=compact&langs_count=8&bg_color=0d1117&title_color=6366f1&text_color=c9d1d9&border_color=30363d#gh-dark-mode-only"/>
+  <img height="180" align="center" alt="Most used languages" src="https://github-readme-stats.vercel.app/api/top-langs/?username=hateoff0&layout=compact&langs_count=8&theme=default#gh-light-mode-only"/>
+</a>
 
 <br/><br/>
 
@@ -729,30 +732,14 @@ Repository health is rendered into `assets/metrics.svg` by the `metrics` workflo
 <img src="https://img.shields.io/github/repo-size/hateoff0/andler?style=flat-square&color=0284c7" alt="Repo size"/>
 <img src="https://img.shields.io/github/languages/code-size/hateoff0/andler?style=flat-square&color=ea580c" alt="Code size"/>
 
+<br/>
+
+<sub>Cards by <a href="https://github.com/anuraghazra/github-readme-stats">github-readme-stats</a> · badges by <a href="https://shields.io/">Shields.io</a></sub>
+
 </div>
 
 > [!NOTE]
-> `assets/metrics.svg` appears after the workflow's first run — trigger it once from **Actions → Metrics → Run workflow** (it also runs nightly at 03:00 UTC). The job reads a `METRICS_TOKEN` repository secret and skips itself when it is absent, so forks and fresh clones stay green.
-
-<details>
-<summary><strong>Alternative badge and stats sources</strong></summary>
-
-| Tool | Renders | Setup |
-| :--- | :--- | :--- |
-| [`lowlighter/metrics`][metrics] | Full SVG infographic: header, activity, languages, isometric calendar, community, repositories | GitHub Action, self-hosted — see `.github/workflows/metrics.yml` |
-| [`github-readme-stats`][ghrs] | Repo pin card, top-language cards, commit stats | Public Vercel instance, or self-host for stability |
-| [Repobeats][repobeats] | Contributor activity / issue-close graph | Onboard the repo on their site; embed the per-repo SVG hash they hand you |
-| [Star History][starhistory] | Star growth chart over time | Image API URL, public repos |
-| [contrib.rocks][contribrocks] | Contributors avatar wall | Single image URL, public repos |
-| [OpenSSF Scorecard][scorecard] | Supply-chain security score badge | Scorecard Action or public API |
-| [Shields.io][shields] | Static and GitHub-derived badges | URL only — used throughout this README |
-
-Two rules of thumb: prefer a **self-hosted action** over a shared instance for anything you want stable, and never embed an image whose URL you cannot reproduce from a committed config.
-
-</details>
-
-> [!NOTE]
-> The GitHub-derived badges and the metrics SVG resolve once the repository is public; nothing in the layout depends on them.
+> The cards and badges resolve once this repository is public; each card follows the reader's colour scheme (dark/light).
 
 ---
 
@@ -850,13 +837,6 @@ ANDLER is licensed under the **GNU General Public License v3.0** — see [`LICEN
 </div>
 
 [rel]: https://github.com/hateoff0/andler/releases/latest
-[metrics]: https://github.com/lowlighter/metrics
-[ghrs]: https://github.com/anuraghazra/github-readme-stats
-[repobeats]: https://repobeats.axiom.co/
-[starhistory]: https://star-history.com/
-[contribrocks]: https://contrib.rocks/
-[scorecard]: https://github.com/ossf/scorecard
-[shields]: https://shields.io/
 [doc-arch]: docs/ARCHITECTURE.md
 [doc-api]: docs/API.md
 [doc-grpc]: docs/GRPC_API.md
