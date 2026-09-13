@@ -226,32 +226,31 @@ where
     tokio::pin!(call);
     let mut ticker = tokio::time::interval(std::time::Duration::from_millis(500));
     let started = std::time::Instant::now();
-    let mut last = String::new();
-    let mut last_idle_report = 0u64;
+    let mut last_line = String::new();
+    let mut last_report = std::time::Instant::now();
 
     loop {
         tokio::select! {
             result = &mut call => return result,
             _ = ticker.tick() => {
-                let elapsed = started.elapsed().as_secs();
-                match active_operation(&mut poll, instance_ref).await {
-                    Ok(Some(line)) => {
-                        if line != last {
-                            last = line.clone();
-                            report(&format!("{line} — {elapsed}s"));
-                        }
-                    }
+                let line = match active_operation(&mut poll, instance_ref).await {
+                    Ok(Some(line)) => line,
                     // Not every slow step is a daemon-side operation (an
                     // offline `guest list` mounts the disk inline, for
-                    // example): say what is running and how long it has been,
-                    // because silence is what made these commands look hung.
-                    _ => {
-                        if elapsed >= last_idle_report + 5 {
-                            last_idle_report = elapsed;
-                            last.clear();
-                            report(&format!("{label} — {elapsed}s"));
-                        }
-                    }
+                    // example): name it, because silence is what made these
+                    // commands look hung.
+                    _ => label.to_string(),
+                };
+
+                // Report on every change, and otherwise every two seconds:
+                // the line carries the elapsed time, so the heartbeat is what
+                // tells the reader the operation is still moving. Without it a
+                // phase the daemon has not subdivided (a slow download, a
+                // libguestfs session) shows one frozen line for minutes.
+                if line != last_line || last_report.elapsed() >= std::time::Duration::from_secs(2) {
+                    last_line = line.clone();
+                    last_report = std::time::Instant::now();
+                    report(&format!("{line} — {}s", started.elapsed().as_secs()));
                 }
             }
         }

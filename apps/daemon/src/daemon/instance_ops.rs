@@ -1467,10 +1467,18 @@ impl Daemon {
         // minutes. It runs as a supervisor operation with named stages: as an
         // inline call the CLI could only show a spinner that said nothing for
         // the whole duration.
-        use andler_disk::arm_translator::TranslatorStage;
+        use andler_disk::arm_translator::{TranslatorProgress, TranslatorStage};
+
+        /// Share of the operation the download occupies; the byte reporter
+        /// maps its fraction onto exactly this slice.
+        const DOWNLOAD_PHASE_WEIGHT: f32 = 0.35;
+
         let op_id = format!("op-{}", uuid::Uuid::new_v4());
         let phases: Vec<(String, f32)> = vec![
-            (TranslatorStage::Downloading.label().to_string(), 0.35),
+            (
+                TranslatorStage::Downloading.label().to_string(),
+                DOWNLOAD_PHASE_WEIGHT,
+            ),
             (TranslatorStage::OpeningDisk.label().to_string(), 0.30),
             (TranslatorStage::Staging.label().to_string(), 0.25),
             (TranslatorStage::Cleanup.label().to_string(), 0.05),
@@ -1491,31 +1499,53 @@ impl Daemon {
 
         let run: OpRunner = Box::new(move |mut progress| {
             Box::pin(async move {
-                let (stage_tx, mut stage_rx) =
-                    tokio::sync::watch::channel(TranslatorStage::Downloading);
+                let (progress_tx, mut watch) = TranslatorProgress::channel();
                 let mutator = andler_guestfs::GuestfsMutator::new(overlay_path.clone());
                 let switch = andler_disk::arm_translator::switch_translator_with(
                     &mutator,
                     translator,
                     translator_dir,
                     &android_version,
-                    Some(&stage_tx),
+                    Some(&progress_tx),
                 );
                 tokio::pin!(switch);
 
                 let result = loop {
                     tokio::select! {
                         result = &mut switch => break result,
-                        changed = stage_rx.changed() => {
+                        changed = watch.stage.changed() => {
                             if changed.is_err() {
                                 continue;
                             }
-                            let stage = *stage_rx.borrow();
+                            let stage = *watch.stage.borrow();
+                            // One log line per stage: the daemon log is the
+                            // other place an operator looks while a guest
+                            // operation runs.
+                            tracing::info!(
+                                instance_id = %id,
+                                stage = stage.label(),
+                                "translator switch"
+                            );
                             progress.enter_phase(stage.label());
                             if progress.is_cancelled() {
                                 let err = DaemonError::OperationCancelled(op_id_for_cancel.clone());
                                 progress.finish(Err(err.to_string()));
                                 return Err(err);
+                            }
+                        }
+                        changed = watch.download.changed() => {
+                            if changed.is_err() {
+                                continue;
+                            }
+                            let (fetched, total) = *watch.download.borrow();
+                            if total > 0 {
+                                // The download is the first phase, so its
+                                // share of the bar is the phase weight: a
+                                // percentage that moves during the transfer
+                                // is what the reader needs to tell a slow
+                                // mirror from a stuck appliance.
+                                let share = fetched as f32 / total as f32;
+                                progress.set_progress(DOWNLOAD_PHASE_WEIGHT * share);
                             }
                         }
                     }
