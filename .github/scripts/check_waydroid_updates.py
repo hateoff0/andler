@@ -124,8 +124,13 @@ def latest_for(android_major: str) -> dict:
 
 
 def published_manifest_text(repo: str, android_major: str, variant: str) -> str | None:
-    """Raw manifest.json text of the most recent already-published release
-    for this (android_major, variant), or None if never published."""
+    """Raw manifest text of the most recent already-published release for
+    this (android_major, variant), or None if never published.
+
+    The pipeline publishes the manifest as `<stem>.manifest.json` (the stem
+    every payload asset shares -- see base_image_download.rs and
+    docs/ARCHITECTURE.md), not as a literal `manifest.json`, so the download
+    globs for the suffix and reads whatever stem it finds."""
     prefix = f"base-image-android{android_major}-{variant.lower()}-"
     listing = subprocess.run(
         ["gh", "release", "list", "--repo", repo, "--limit", "100",
@@ -140,10 +145,16 @@ def published_manifest_text(repo: str, android_major: str, variant: str) -> str 
     with tempfile.TemporaryDirectory() as tmp:
         subprocess.run(
             ["gh", "release", "download", latest_tag, "--repo", repo,
-             "--pattern", "manifest.json", "--dir", tmp],
+             "--pattern", "*.manifest.json", "--dir", tmp],
             check=True,
         )
-        return (pathlib.Path(tmp) / "manifest.json").read_text()
+        manifests = sorted(pathlib.Path(tmp).glob("*.manifest.json"))
+        if len(manifests) != 1:
+            raise RuntimeError(
+                f"release {latest_tag} should carry exactly one "
+                f"*.manifest.json asset, found {len(manifests)}"
+            )
+        return manifests[0].read_text()
 
 
 def needs_build(wanted_filenames: list[str], published_text: str | None) -> bool:
