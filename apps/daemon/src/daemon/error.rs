@@ -209,6 +209,12 @@ pub enum DaemonError {
     #[error("operation {0:?} was cancelled")]
     OperationCancelled(String),
 
+    #[error(
+        "the operation you joined ({op_id:?}) failed: {reason} — `andler op list` shows the \
+         running ones; retry the command once the cause is fixed"
+    )]
+    OperationFailed { op_id: String, reason: String },
+
     #[error("no active operation with id {0:?}; `andler op list` shows the running ones")]
     OperationNotFound(String),
 
@@ -405,6 +411,7 @@ impl DaemonError {
             DaemonError::CannotDeleteBaseLayer { .. } => ErrorKind::FailedPrecondition,
             DaemonError::OperationAlreadyRunning { .. } => ErrorKind::FailedPrecondition,
             DaemonError::OperationCancelled(_) => ErrorKind::FailedPrecondition,
+            DaemonError::OperationFailed { .. } => ErrorKind::FailedPrecondition,
             DaemonError::OperationNotFound(_) => ErrorKind::NotFound,
             DaemonError::PortForwardConflict { .. } => ErrorKind::FailedPrecondition,
             DaemonError::MemoryOvercommit { .. } => ErrorKind::FailedPrecondition,

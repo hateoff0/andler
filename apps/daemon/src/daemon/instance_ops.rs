@@ -744,6 +744,10 @@ impl Daemon {
             })
         };
 
+        // Subscribed before the operation starts: it may finish while this
+        // caller is on its way to the wait, and a missed terminal event
+        // would look like success.
+        let mut events = self.subscribe_events();
         match handle
             .run_operation(
                 Operation {
@@ -764,12 +768,15 @@ impl Daemon {
                 .await
                 .map_err(|_| DaemonError::InstanceSupervisorGone(id))?,
             OpAccept::Joined { op_id: joined } => {
-                tracing::warn!(
+                tracing::info!(
                     instance_id = %id,
                     joined = %joined,
-                    "package operation joined an already-running one for the same package"
+                    "joining the package operation already in flight"
                 );
-                Ok(())
+                // Wait: the work is in flight and its result belongs to the
+                // caller that started it, so returning here reports success
+                // for a package that has not been installed yet.
+                wait_for_joined_operation(&mut events, &joined).await
             }
         }
     }
@@ -934,6 +941,10 @@ impl Daemon {
             })
         };
 
+        // Subscribed before the operation starts: it may finish while this
+        // caller is on its way to the wait, and a missed terminal event
+        // would look like success.
+        let mut events = self.subscribe_events();
         match handle
             .run_operation(
                 Operation {
@@ -954,12 +965,15 @@ impl Daemon {
                 .await
                 .map_err(|_| DaemonError::InstanceSupervisorGone(id))?,
             OpAccept::Joined { op_id: joined } => {
-                tracing::warn!(
+                tracing::info!(
                     instance_id = %id,
                     joined = %joined,
-                    "package operation joined an already-running one for the same package"
+                    "joining the package operation already in flight"
                 );
-                Ok(())
+                // Wait: the work is in flight and its result belongs to the
+                // caller that started it, so returning here reports success
+                // for a package that has not been installed yet.
+                wait_for_joined_operation(&mut events, &joined).await
             }
         }
     }
@@ -979,15 +993,21 @@ impl Daemon {
         idempotency_token: Option<String>,
         state: &InstanceState,
     ) -> Result<(), DaemonError> {
+        // Subscribed before the join: the operation may finish while this
+        // caller is on its way to the wait.
+        let mut events = self.subscribe_events();
         let key = Self::guest_package_key(package, install, idempotency_token);
         match handle.join_active(key).await? {
             Some(joined) => {
-                tracing::warn!(
+                tracing::info!(
                     instance_id = %id,
                     joined = %joined,
-                    "package operation joined an in-flight one"
+                    "joining the package operation already in flight"
                 );
-                Ok(())
+                // Same rule as the translator: a join means somebody else owns
+                // the work and its result, so this caller waits for it instead
+                // of claiming it finished.
+                wait_for_joined_operation(&mut events, &joined).await
             }
             None => Err(DaemonError::GuestAgentUnavailable {
                 instance_id: id,
@@ -1567,7 +1587,11 @@ impl Daemon {
             })
         });
 
-        match handle
+        // Subscribed before the operation starts: it may finish while this
+        // caller is on its way to the wait, and a missed terminal event
+        // would look like success.
+        let mut events = self.subscribe_events();
+        let switch = match handle
             .run_operation(
                 Operation {
                     op_id: op_id.clone(),
@@ -1585,31 +1609,39 @@ impl Daemon {
         {
             OpAccept::Started { done } => {
                 // Two layers: the supervisor channel's own error, then the
-                // operation's result.
+                // operation's result. The runner stores the switch it produced
+                // in `outcome`, because `OpRunner` can only return `()`.
                 done.await
                     .map_err(|_| DaemonError::InstanceSupervisorGone(id))??;
+                outcome.lock().unwrap_or_else(|e| e.into_inner()).take()
             }
             OpAccept::Joined { op_id: joined } => {
-                tracing::warn!(
+                // The joined operation is already doing this work; its result
+                // belongs to the caller that started it. The only truthful
+                // thing to do is wait for it to leave the running state and
+                // report what actually happened — returning the moment the
+                // join succeeds is how `guest install libndk` claimed success
+                // while its staging batch was still running.
+                tracing::info!(
                     instance_id = %id,
                     joined = %joined,
-                    translator = ?translator,
-                    "translator switch joined an already-running operation"
+                    translator = %translator,
+                    "joining the translator switch already in flight"
                 );
+                wait_for_joined_operation(&mut events, &joined).await?;
+                Some(andler_disk::arm_translator::TranslatorSwitch::Installed)
             }
+        };
+
+        if switch.is_some() {
+            tracing::info!(
+                instance_id = %id,
+                translator = %translator,
+                "ARM translator switched successfully"
+            );
         }
 
-        let switch = outcome
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .unwrap_or(andler_disk::arm_translator::TranslatorSwitch::AlreadyInstalled);
-
-        tracing::info!(
-            instance_id = %id,
-            translator = ?translator,
-            "ARM translator switched successfully"
-        );
-        Ok(switch)
+        Ok(switch.unwrap_or(andler_disk::arm_translator::TranslatorSwitch::AlreadyInstalled))
     }
 
     /// `config set`: read-modify-write one key on instance.toml (the source
@@ -2062,5 +2094,56 @@ fn guest_agent_wait_secs() -> u64 {
     match std::env::var("ANDLERD_GUEST_AGENT_WAIT_SECS") {
         Ok(v) => v.parse::<u64>().unwrap_or(120).max(5),
         Err(_) => 120,
+    }
+}
+
+/// Waits for an operation this call joined to finish, and turns its failure
+/// into the caller's error.
+///
+/// A join means the work is already in flight and its result belongs to the
+/// caller that started it, so waiting is the only honest option: the joined
+/// operation may still have minutes of work left. The supervisor drops a
+/// finished operation from its active slot (so polling it cannot tell Done
+/// from Failed), which is why the caller subscribes to the daemon event bus
+/// *before* joining and waits for that operation's terminal event.
+pub(crate) async fn wait_for_joined_operation(
+    events: &mut tokio::sync::broadcast::Receiver<andler_core::DaemonEvent>,
+    joined: &str,
+) -> Result<(), DaemonError> {
+    loop {
+        match events.recv().await {
+            Ok(event) => {
+                let andler_core::EventKind::Operation { op } = &event.kind else {
+                    continue;
+                };
+                if op.op_id != joined {
+                    continue;
+                }
+                match op.state {
+                    OperationState::Done => return Ok(()),
+                    OperationState::Failed => {
+                        return Err(DaemonError::OperationFailed {
+                            op_id: joined.to_string(),
+                            reason: op
+                                .error
+                                .clone()
+                                .unwrap_or_else(|| "the daemon reported no reason".to_string()),
+                        })
+                    }
+                    OperationState::Cancelled => {
+                        return Err(DaemonError::OperationCancelled(joined.to_string()))
+                    }
+                    OperationState::Queued | OperationState::Running => continue,
+                }
+            }
+            // The receiver fell behind; keep waiting for the terminal event.
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                return Err(DaemonError::OperationFailed {
+                    op_id: joined.to_string(),
+                    reason: "the daemon stopped before the operation reported a result".to_string(),
+                })
+            }
+        }
     }
 }
