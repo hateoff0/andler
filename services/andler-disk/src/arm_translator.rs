@@ -66,12 +66,46 @@ fn resolve_entry_paths(root: &Path, files: &[&str]) -> Vec<PathBuf> {
     out
 }
 
+/// Stage of a translator switch. The download and the appliance sessions
+/// dominate the wall clock (a switch on a cold cache takes minutes), and both
+/// used to be invisible to the caller — this is what a progress line needs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TranslatorStage {
+    Downloading,
+    OpeningDisk,
+    Staging,
+    Cleanup,
+    Properties,
+}
+
+impl TranslatorStage {
+    pub fn label(self) -> &'static str {
+        match self {
+            TranslatorStage::Downloading => "downloading the translator",
+            TranslatorStage::OpeningDisk => "opening the guest disk",
+            TranslatorStage::Staging => "staging the translator files",
+            TranslatorStage::Cleanup => "removing the old translator",
+            TranslatorStage::Properties => "updating the translator properties",
+        }
+    }
+}
+
+/// Where a stage change is reported. `watch` rather than a callback so the
+/// switch can run concurrently with the reporter that renders it.
+pub type TranslatorProgress = tokio::sync::watch::Sender<TranslatorStage>;
+
 pub async fn switch_translator_with(
     mutator: &dyn GuestMutator,
     translator: ArmTranslator,
     translator_dir: Option<PathBuf>,
     android_version: &str,
+    progress: Option<&TranslatorProgress>,
 ) -> Result<TranslatorSwitch, DiskError> {
+    let report = |stage: TranslatorStage| {
+        if let Some(progress) = progress {
+            let _ = progress.send(stage);
+        }
+    };
     let info = resolve(translator);
 
     // None has no payload and no download link — the removal path only. The
@@ -80,9 +114,13 @@ pub async fn switch_translator_with(
     let translator_files: Option<PathBuf> = match translator_dir {
         Some(dir) => Some(dir),
         None if translator == ArmTranslator::None => None,
-        None => Some(translator_download::ensure_translator(translator, android_version).await?),
+        None => {
+            report(TranslatorStage::Downloading);
+            Some(translator_download::ensure_translator(translator, android_version).await?)
+        }
     };
 
+    report(TranslatorStage::OpeningDisk);
     let waydroid_dir = match detect_waydroid_system_dir_with(mutator).await? {
         Some(dir) => dir,
         None => {
@@ -176,6 +214,7 @@ pub async fn switch_translator_with(
             }
         }
     }
+    report(TranslatorStage::Staging);
     mutator
         .apply(&staging_ops)
         .await
@@ -184,6 +223,7 @@ pub async fn switch_translator_with(
     // Staging succeeded in full — now it's safe to remove the old translator.
     let mut cleanup_ops = Vec::new();
     if let Some(old) = current {
+        report(TranslatorStage::Cleanup);
         let old_info = resolve(old);
         for rel in resolve_entry_paths(Path::new(&system_dir), old_info.files) {
             cleanup_ops.push(MutatorOp::RmRf {
@@ -241,6 +281,7 @@ pub async fn switch_translator_with(
         .await
         .map_err(|e| DiskError::FileSystem(format!("failed to install translator: {e}")))?;
 
+    report(TranslatorStage::Properties);
     let build_prop_path = format!("{system_dir}/build.prop");
     // The upper build.prop shadows the base image's /system/build.prop
     // wholesale, so a partial upper must start from the base's props.
