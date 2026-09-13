@@ -1310,12 +1310,7 @@ impl Daemon {
 
                 let backend = self.backend_for(backend_kind)?;
 
-                let is_android = matches!(&config_kind, InstanceKind::AndroidVm { .. });
-                let packages = if is_android {
-                    andler_disk::guest_tools::ANDROID_PACKAGES
-                } else {
-                    andler_disk::guest_tools::KNOWN_PACKAGES
-                };
+                let packages = andler_disk::guest_tools::packages_for(&config_kind);
                 for pkg in packages {
                     let mut installed = false;
                     for binary in pkg.binary_checks {
@@ -1345,12 +1340,10 @@ impl Daemon {
                     return Err(DaemonError::InstanceNotFound(id));
                 }
 
-                let is_android = matches!(&config_kind, InstanceKind::AndroidVm { .. });
-                let package_status = if is_android {
-                    andler_disk::guest_tools::check_android_packages_offline_with_disk(&disk_path)?
-                } else {
-                    andler_disk::guest_tools::check_all_packages_offline_with_disk(&disk_path)?
-                };
+                let package_status = andler_disk::guest_tools::check_packages_offline_with_disk(
+                    &disk_path,
+                    &config_kind,
+                )?;
                 for (pkg, status) in package_status {
                     results.push((
                         pkg.name.to_string(),

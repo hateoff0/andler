@@ -33,6 +33,23 @@ pub fn is_agent_installed(
     Ok(output.status.success())
 }
 
+/// Extra flags for apt inside the unprivileged user namespace: its setuid
+/// sandbox is unavailable there, and IPv6-less hosts resolve best over IPv4.
+/// These belong to *this* chroot, not to the manager — the in-guest QGA path
+/// runs as root with a working sandbox and needs neither, so they must not
+/// move into `PackageManager`.
+fn userns_apt_flags(manager: PackageManager) -> Vec<&'static str> {
+    match manager {
+        PackageManager::Apt => vec![
+            "-o",
+            "APT::Sandbox::User=root",
+            "-o",
+            "Acquire::ForceIPv4=true",
+        ],
+        PackageManager::Dnf | PackageManager::Pacman => Vec::new(),
+    }
+}
+
 pub async fn install_agent_offline(disk_path: &Path, package: &str) -> Result<(), DiskError> {
     let disk_path = disk_path.to_path_buf();
     let package = package.to_string();
@@ -62,20 +79,9 @@ fn install_agent_offline_blocking(disk_path: &Path, package: &str) -> Result<(),
         });
     }
 
-    let update_args = match pkg_manager {
-        PackageManager::Apt => vec![
-            "-o",
-            "APT::Sandbox::User=root",
-            "-o",
-            "Acquire::ForceIPv4=true",
-            "update",
-        ],
-        PackageManager::Dnf => vec!["makecache"],
-        PackageManager::Pacman => vec!["-Sy"],
-    };
-
     let mut update_argv: Vec<&str> = vec![pkg_manager.binary_name()];
-    update_argv.extend(update_args.iter().copied());
+    update_argv.extend(userns_apt_flags(pkg_manager));
+    update_argv.extend(pkg_manager.refresh_args());
     let update_output = chroot_exec(mount_guard.path(), &update_argv)?;
 
     if !update_output.status.success() {
@@ -101,14 +107,7 @@ fn install_agent_offline_blocking(disk_path: &Path, package: &str) -> Result<(),
 
     let cmd_args = pkg_manager.install_args(package);
     let mut install_argv: Vec<&str> = vec![pkg_manager.binary_name()];
-    if pkg_manager == PackageManager::Apt {
-        install_argv.extend([
-            "-o",
-            "APT::Sandbox::User=root",
-            "-o",
-            "Acquire::ForceIPv4=true",
-        ]);
-    }
+    install_argv.extend(userns_apt_flags(pkg_manager));
     install_argv.extend(cmd_args.iter().copied());
 
     let output = chroot_exec(mount_guard.path(), &install_argv)?;
@@ -255,7 +254,12 @@ pub struct GuestPackage {
     pub systemd_unit: Option<&'static str>,
 }
 
-pub const KNOWN_PACKAGES: &[GuestPackage] = &[
+/// Packages every guest can take, whatever the platform: the Android base image
+/// is an Arch userland running Waydroid, so the same package manager and the
+/// same clipboard/agent packages are there too. Keeping one shared list is what
+/// makes `guest list` on an Android VM stop hiding `spice-vdagent` — which
+/// `guest apply` installs from `input.clipboard_enabled`.
+pub const SHARED_PACKAGES: &[GuestPackage] = &[
     GuestPackage {
         name: "spice-vdagent",
         description: "Shared clipboard & copy/paste between host and guest",
@@ -276,6 +280,12 @@ pub const KNOWN_PACKAGES: &[GuestPackage] = &[
     },
 ];
 
+/// Linux guests take exactly the shared set.
+pub const KNOWN_PACKAGES: &[GuestPackage] = SHARED_PACKAGES;
+
+/// Android-only additions. These are not distribution packages: the translator
+/// lands in the Waydroid overlay, so it is staged as files rather than
+/// installed, and its "installed" check looks for the staged library.
 pub const ANDROID_PACKAGES: &[GuestPackage] = &[
     GuestPackage {
         name: "libndk",
@@ -291,10 +301,13 @@ pub const ANDROID_PACKAGES: &[GuestPackage] = &[
     },
 ];
 
-pub fn available_packages(kind: &InstanceKind) -> &'static [GuestPackage] {
+/// Everything `guest list` (and the offline check) reports for an instance:
+/// the shared packages, then the platform's own.
+pub fn packages_for(kind: &InstanceKind) -> Vec<&'static GuestPackage> {
+    let shared = SHARED_PACKAGES.iter();
     match kind {
-        InstanceKind::AndroidVm { .. } => ANDROID_PACKAGES,
-        InstanceKind::LinuxVm { .. } => KNOWN_PACKAGES,
+        InstanceKind::LinuxVm { .. } => shared.collect(),
+        InstanceKind::AndroidVm { .. } => shared.chain(ANDROID_PACKAGES.iter()).collect(),
     }
 }
 
@@ -316,11 +329,12 @@ pub fn check_package_status_offline(mount_point: &Path, binary_checks: &[&str]) 
     }
 }
 
-pub fn check_all_packages_offline(
+pub fn check_packages_offline(
     mount_point: &Path,
+    kind: &InstanceKind,
 ) -> Vec<(&'static GuestPackage, PackageStatus)> {
-    KNOWN_PACKAGES
-        .iter()
+    packages_for(kind)
+        .into_iter()
         .map(|pkg| {
             let status = check_package_status_offline(mount_point, pkg.binary_checks);
             (pkg, status)
@@ -328,31 +342,81 @@ pub fn check_all_packages_offline(
         .collect()
 }
 
-pub fn check_all_packages_offline_with_disk(
+pub fn check_packages_offline_with_disk(
     disk_path: &Path,
+    kind: &InstanceKind,
 ) -> Result<Vec<(&'static GuestPackage, PackageStatus)>, DiskError> {
     let mount_guard = GuestMount::mount(disk_path)?;
-    let results = check_all_packages_offline(mount_guard.path());
-    Ok(results)
-}
-
-pub fn check_android_packages_offline_with_disk(
-    disk_path: &Path,
-) -> Result<Vec<(&'static GuestPackage, PackageStatus)>, DiskError> {
-    let mount_guard = GuestMount::mount(disk_path)?;
-    let results = ANDROID_PACKAGES
-        .iter()
-        .map(|pkg| {
-            let status = check_package_status_offline(mount_guard.path(), pkg.binary_checks);
-            (pkg, status)
-        })
-        .collect();
-    Ok(results)
+    Ok(check_packages_offline(mount_guard.path(), kind))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn android_kind() -> InstanceKind {
+        InstanceKind::AndroidVm {
+            android_profile: andler_core::AndroidProfile {
+                android_version: andler_core::AndroidVersion::Android13,
+                gapps: false,
+                microg: false,
+                arm_translator: andler_core::ArmTranslator::Libndk,
+                boot_mode: andler_core::AndroidBootMode::Android,
+                base_image_pin: None,
+            },
+        }
+    }
+
+    fn linux_kind() -> InstanceKind {
+        InstanceKind::LinuxVm {
+            iso_path: "/tmp/test.iso".into(),
+            cdrom_bus: andler_core::CdromBus::Ide,
+        }
+    }
+
+    #[test]
+    fn android_packages_include_the_shared_clipboard_agent() {
+        // Regression: `guest list` on an Android VM listed only the ARM
+        // translators, so the clipboard agent that `guest apply` installs from
+        // `input.clipboard_enabled` looked like it did not exist.
+        let names: Vec<&str> = packages_for(&android_kind())
+            .iter()
+            .map(|p| p.name)
+            .collect();
+        assert!(names.contains(&"spice-vdagent"), "{names:?}");
+        assert!(names.contains(&"qemu-guest-agent"), "{names:?}");
+        assert!(names.contains(&"libndk"), "{names:?}");
+        assert!(names.contains(&"libhoudini"), "{names:?}");
+    }
+
+    #[test]
+    fn linux_packages_are_the_shared_set_without_translators() {
+        let names: Vec<&str> = packages_for(&linux_kind()).iter().map(|p| p.name).collect();
+        assert!(names.contains(&"spice-vdagent"), "{names:?}");
+        assert!(!names.contains(&"libndk"), "{names:?}");
+    }
+
+    #[test]
+    fn offline_check_reports_present_and_missing_packages() {
+        let dir = std::env::temp_dir().join(format!("andler-test-pkgs-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(dir.join("usr/bin"));
+        let _ = std::fs::write(dir.join("usr/bin/spice-vdagentd"), b"");
+
+        let statuses = check_packages_offline(&dir, &linux_kind());
+        let status = |name: &str| {
+            statuses
+                .iter()
+                .find(|(pkg, _)| pkg.name == name)
+                .map(|(_, status)| *status)
+        };
+        assert_eq!(status("spice-vdagent"), Some(PackageStatus::Installed));
+        assert_eq!(
+            status("qemu-guest-agent"),
+            Some(PackageStatus::NotInstalled)
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn detect_package_manager_returns_apt() {
