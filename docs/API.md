@@ -549,6 +549,10 @@ Each package-manager step in the guest (index refresh, install, remove) is
 bounded by `ANDLERD_GUEST_PACKAGE_TIMEOUT_SECS` (default 600 s, minimum 30):
 a fresh guest's first index sync plus a download takes minutes, and a timeout
 names the step that ran out and the variable that raises the budget.
+While any guest operation runs — install, remove, apply, provision, list,
+boot-mode, translator switch — the CLI prints the daemon's operation phase, its
+percentage and the elapsed seconds, and the translator switch is a tracked
+operation (see `op list`, cancellable) with named stages.
 Both `guest install` and `guest remove` accept `--idempotency-token <key>`, a
 client-chosen key that makes a network retry idempotent: a second call with the
 same token while the first is still in-flight joins the running operation

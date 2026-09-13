@@ -512,6 +512,8 @@ andler logs daemon --follow           # the daemon's own log from an in-memory r
 andler doctor --metrics               # RPC latency p50/p99, errors by status, running guest RAM
 ```
 
+Guest operations report where they are while they run: `guest install`, `guest remove`, `guest apply`, `guest provision`, `guest list` and `guest boot-mode` print the daemon's operation phase, its percentage and the elapsed seconds, and the ARM-translator switch is a tracked operation (`op list`, cancellable) with named stages. Only running instances are touched; installing into a stopped one goes through the appliance, which is why a cold translator switch takes minutes — and now says so.
+
 Every CLI request carries a `request_id` metadata header, so a daemon log line reconstructs the path CLI → RPC → operation. Guest output is never logged at INFO/WARN — see the redaction policy in [`docs/ARCHITECTURE.md`][doc-arch].
 
 ---
