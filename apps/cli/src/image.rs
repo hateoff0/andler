@@ -151,6 +151,7 @@ pub async fn handle(
             };
             let mut stream = client.download_base_image(request).await?.into_inner();
             let progress = if json { ProgressBar::hidden() } else { bar() };
+            let mut last_reported_step = 0u64;
 
             while let Some(message) = stream.message().await? {
                 if json {
@@ -168,7 +169,7 @@ pub async fn handle(
                         message.installed_path,
                     );
                 } else {
-                    render_progress(&progress, &message);
+                    render_progress(&progress, &message, &mut last_reported_step);
                 }
             }
 
@@ -218,14 +219,37 @@ fn bar() -> ProgressBar {
     progress
 }
 
-fn render_progress(progress: &ProgressBar, message: &BaseImageDownloadProgress) {
+fn render_progress(
+    progress: &ProgressBar,
+    message: &BaseImageDownloadProgress,
+    last_reported_step: &mut u64,
+) {
     if progress.is_hidden() {
         // Non-interactive output stays line-oriented: phase transitions and
-        // the outcome, not the byte-level redraw a TTY gets. The DONE message
+        // the outcome, plus one line per 10% of the payload so a log or a
+        // redirected terminal shows the download is alive instead of sitting
+        // silent for the minutes a multi-GB image takes. The DONE message
         // carries runtime context ("already cached", "downloaded and
         // verified") that a script needs, so it is printed here too.
         match message.phase() {
-            BaseImageDownloadPhase::Downloading | BaseImageDownloadPhase::Extracting => {}
+            BaseImageDownloadPhase::Downloading | BaseImageDownloadPhase::Extracting => {
+                let percent = message
+                    .downloaded_bytes
+                    .saturating_mul(100)
+                    .checked_div(message.total_bytes)
+                    .unwrap_or(0);
+                let step = percent / 10;
+                if step > *last_reported_step {
+                    *last_reported_step = step;
+                    println!(
+                        "{} {} — {} / {} ({percent}%)",
+                        phase_name(message.phase()),
+                        message.asset,
+                        format_bytes(message.downloaded_bytes),
+                        format_bytes(message.total_bytes),
+                    );
+                }
+            }
             BaseImageDownloadPhase::Done => {
                 println!("done: {}", message.message);
                 println!("installed {}", message.installed_path);

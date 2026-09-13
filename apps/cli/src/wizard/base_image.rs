@@ -177,8 +177,12 @@ async fn download(
             Ok(Some(message)) => {
                 progress.set_message(match message.phase() {
                     BaseImageDownloadPhase::Downloading => format!(
-                        "Downloading {} ({}/{})",
-                        message.asset, message.asset_index, message.asset_count
+                        "Downloading {} ({}/{}) — {} / {}",
+                        message.asset,
+                        message.asset_index,
+                        message.asset_count,
+                        crate::helpers::format_bytes(message.downloaded_bytes),
+                        crate::helpers::format_bytes(message.total_bytes),
                     ),
                     BaseImageDownloadPhase::Verifying => {
                         format!("Verifying {}", message.asset)
