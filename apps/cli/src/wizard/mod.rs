@@ -71,7 +71,7 @@ pub async fn run(
         ));
     }
 
-    ui::hardware_panel(&detected, partial.kind);
+    ui::hardware_screen(&detected, partial.kind);
 
     let mode = ask_wizard_mode()?;
     let kind = basic::ask_kind(partial.kind)?;
@@ -130,7 +130,8 @@ pub async fn run(
     match &basic_result {
         BasicResult::Linux(l) => {
             if detected.ovmf.is_err() {
-                ui::warn(
+                ui::result(
+                    ui::Status::Warn,
                     "OVMF not found. Legacy BIOS will be used. \
                      Install edk2-ovmf for UEFI support.",
                 );
@@ -181,7 +182,8 @@ fn build_quick(
                 .unwrap_or_else(default_instances_root);
 
             let enable_uefi = if detected.ovmf.is_err() {
-                ui::warn(
+                ui::result(
+                    ui::Status::Warn,
                     "OVMF not found. Legacy BIOS will be used. \
                      Install edk2-ovmf for UEFI support.",
                 );
@@ -357,6 +359,11 @@ fn default_instances_root() -> String {
         .into_owned()
 }
 
+// The guard both test modules take: ANDLER_HOME is process-wide, so a test
+// that points it at a scratch cache must not run beside another one.
+#[cfg(test)]
+static ANDLER_HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -509,10 +516,14 @@ mod tests {
 
     struct EmptyCacheGuard {
         base: PathBuf,
+        _lock: std::sync::MutexGuard<'static, ()>,
     }
 
     impl EmptyCacheGuard {
         fn new() -> Self {
+            let lock = super::ANDLER_HOME_LOCK
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             let base = std::env::temp_dir().join(format!(
                 "andler-wizard-empty-cache-{}-{}",
                 std::process::id(),
@@ -523,7 +534,7 @@ mod tests {
             ));
             std::fs::create_dir_all(base.join("cache/base-images")).unwrap();
             std::env::set_var(andler_core::paths::ANDLER_HOME_ENV, &base);
-            Self { base }
+            Self { base, _lock: lock }
         }
     }
 

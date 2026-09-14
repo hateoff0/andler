@@ -4,12 +4,11 @@ use andler_rpc::proto::{
 };
 use inquire::{Confirm, Select, Text};
 
-use crate::helpers::spinner;
 use crate::{CliAndroidVersion, TracedClient};
 
 use super::basic::validate_base_image_path;
 use super::map_inquire_err;
-use super::ui;
+use super::ui::{self, Progress, Status};
 use super::WizardError;
 
 /// Where the Android base image comes from: an existing file, or a build the
@@ -119,22 +118,25 @@ async fn fetch_catalog(
     version: CliAndroidVersion,
     gapps: bool,
 ) -> Option<RemoteBaseImageEntry> {
-    let progress = spinner("Checking published base images…");
+    let mut progress = Progress::start("checking published base images");
     let result = client
         .list_remote_base_images(ListRemoteBaseImagesRequest {
             android_version: ProtoAndroidVersion::from(version) as i32,
             android_variant: if gapps { "GAPPS" } else { "VANILLA" }.to_string(),
         })
         .await;
-    progress.finish_and_clear();
+    progress.finish();
 
     match result {
         Ok(response) => response.into_inner().images.into_iter().next(),
         Err(e) => {
-            ui::warn(&format!(
-                "Could not read the published base-image catalog: {}",
-                crate::format_grpc_error(&e)
-            ));
+            ui::result(
+                Status::Warn,
+                &format!(
+                    "Could not read the published base-image catalog: {}",
+                    crate::format_grpc_error(&e)
+                ),
+            );
             None
         }
     }
@@ -159,7 +161,7 @@ async fn download(
         return Err(WizardError::Cancelled);
     }
 
-    let progress = spinner(&format!("Downloading {}…", image.id));
+    let mut progress = Progress::start(&format!("downloading {}", image.id));
     let mut stream = client
         .download_base_image(DownloadBaseImageRequest {
             android_version: ProtoAndroidVersion::Unspecified as i32,
@@ -175,9 +177,9 @@ async fn download(
     loop {
         match stream.message().await {
             Ok(Some(message)) => {
-                progress.set_message(match message.phase() {
+                let line = match message.phase() {
                     BaseImageDownloadPhase::Downloading => format!(
-                        "Downloading {} ({}/{}) — {} / {}",
+                        "downloading {} ({}/{}) — {} / {}",
                         message.asset,
                         message.asset_index,
                         message.asset_count,
@@ -185,26 +187,27 @@ async fn download(
                         crate::helpers::format_bytes(message.total_bytes),
                     ),
                     BaseImageDownloadPhase::Verifying => {
-                        format!("Verifying {}", message.asset)
+                        format!("verifying {}", message.asset)
                     }
-                    BaseImageDownloadPhase::Extracting => "Unpacking the image…".to_string(),
-                    BaseImageDownloadPhase::Installing => "Installing into the cache…".to_string(),
-                    BaseImageDownloadPhase::Resolving => "Resolving the build…".to_string(),
-                    BaseImageDownloadPhase::Done => "Done".to_string(),
+                    BaseImageDownloadPhase::Extracting => "unpacking the image".to_string(),
+                    BaseImageDownloadPhase::Installing => "installing into the cache".to_string(),
+                    BaseImageDownloadPhase::Resolving => "resolving the build".to_string(),
+                    BaseImageDownloadPhase::Done => "done".to_string(),
                     BaseImageDownloadPhase::Unspecified => String::new(),
-                });
+                };
+                progress.update(&line);
                 if message.phase() == BaseImageDownloadPhase::Done {
                     installed = message.installed_path;
                 }
             }
             Ok(None) => break,
             Err(e) => {
-                progress.finish_and_clear();
+                progress.finish();
                 return Err(WizardError::Inquire(crate::format_grpc_error(&e)));
             }
         }
     }
-    progress.finish_and_clear();
+    progress.finish();
 
     if installed.is_empty() {
         return Err(WizardError::Inquire(
@@ -213,7 +216,7 @@ async fn download(
                 .to_string(),
         ));
     }
-    ui::success(&format!("Base image ready: {installed}"));
+    ui::result(Status::Ok, &format!("Base image ready: {installed}"));
     // The wizard picked this build out of the published catalog, so it is as
     // "auto" as a local cache hit: if a later answer changes which image the
     // profile matches (the Android group's GApps toggle), re-resolution runs

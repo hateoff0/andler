@@ -1,4 +1,4 @@
-use andler_core::{DisplayEngine, NatBackend, NetworkMode, PointerMode, RenderBackend, Resolution};
+use andler_core::{DisplayEngine, NatBackend, NetworkMode, RenderBackend, Resolution};
 use andler_firmware::HardwareDefaults;
 use inquire::Select;
 
@@ -7,7 +7,7 @@ use crate::CliArmTranslator;
 use super::advanced::AdvancedConfig;
 use super::basic::BasicResult;
 use super::build::resolve_arm_translator;
-use super::ui::Panel;
+use super::ui::Screen;
 use super::{map_inquire_err, ui, WizardError};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -22,6 +22,7 @@ pub fn run(
     advanced: Option<&AdvancedConfig>,
     detected: &HardwareDefaults,
 ) -> Result<SummaryAction, WizardError> {
+    ui::header("review");
     print!("{}", summary_text(basic, advanced, detected));
     println!();
 
@@ -44,8 +45,6 @@ pub fn run(
     })
 }
 
-/// The whole summary screen as text: rendered through `Panel` so its layout
-/// is testable, and printed as one block by `run`.
 fn summary_text(
     basic: &BasicResult,
     advanced: Option<&AdvancedConfig>,
@@ -61,6 +60,7 @@ fn summary_text(
             " (auto-detected)".to_string()
         }
     };
+    let on_off = |enabled: bool| if enabled { "enabled" } else { "disabled" };
 
     let gpu_render = advanced
         .map(|a| a.gpu_render.clone())
@@ -71,16 +71,16 @@ fn summary_text(
         detected.display_engine
     };
 
-    let mut panel = Panel::new("Summary before creation");
-    panel.section(match basic {
-        BasicResult::Linux(_) => "Linux VM",
-        BasicResult::Android(_) => "Android VM",
+    let mut screen = Screen::new();
+    screen.section(match basic {
+        BasicResult::Linux(_) => "linux vm",
+        BasicResult::Android(_) => "android vm",
     });
-    panel.field("Name", basic.name());
+    screen.field("name", basic.name());
     match basic {
         BasicResult::Linux(l) => {
-            panel.field(
-                "ISO",
+            screen.field(
+                "iso",
                 if l.iso_path.is_empty() {
                     "(none — boot from the disk)".to_string()
                 } else {
@@ -93,16 +93,16 @@ fn summary_text(
                         &l.iso_path,
                     ))
                 });
-                panel.field(
-                    "CD-ROM bus",
-                    format!("{bus:?}{}", origin(advanced.is_some())),
+                screen.field(
+                    "cd-rom bus",
+                    format!("{}{}", ui::cdrom_bus_label(bus), origin(advanced.is_some())),
                 );
             }
         }
         BasicResult::Android(a) => {
-            panel.field("Base image", a.base_image.clone());
-            panel.field(
-                "Android version",
+            screen.field("base image", a.base_image.clone());
+            screen.field(
+                "android version",
                 format!(
                     "Android {}{}",
                     a.android_version.number(),
@@ -110,8 +110,8 @@ fn summary_text(
                 ),
             );
             let arm = resolve_arm_translator(advanced, detected);
-            panel.field(
-                "ARM translator",
+            screen.field(
+                "arm translator",
                 format!(
                     "{arm}{}",
                     if is_basic && detected.arm_translator.is_some() {
@@ -122,10 +122,10 @@ fn summary_text(
                 ),
             );
             let gapps = advanced.map(|adv| adv.gapps).unwrap_or(a.gapps);
-            panel.field("GApps", format!("{gapps}"));
+            screen.field("gapps", on_off(gapps));
             let linked_overlay = advanced.map(|adv| adv.linked_overlay).unwrap_or(false);
-            panel.field(
-                "Disk mode",
+            screen.field(
+                "disk mode",
                 format!(
                     "{}{}",
                     if linked_overlay {
@@ -138,16 +138,16 @@ fn summary_text(
             );
         }
     }
-    panel.field(
-        "Disk",
+    screen.field(
+        "disk",
         format!(
             "{}/<id>/disk.qcow2 ({} GiB, thin-provisioned)",
             basic.instances_root(),
             basic.disk_size_gib()
         ),
     );
-    panel.field(
-        "Firmware",
+    screen.field(
+        "firmware",
         match basic {
             BasicResult::Linux(l) if !l.enable_uefi => "Legacy BIOS".to_string(),
             _ => match &detected.ovmf {
@@ -161,9 +161,9 @@ fn summary_text(
         },
     );
 
-    panel.section("Display & devices");
-    panel.field(
-        "GPU",
+    screen.section("display & devices");
+    screen.field(
+        "gpu",
         format!(
             "{}, {} MiB{}",
             ui::render_label(&gpu_render),
@@ -174,8 +174,8 @@ fn summary_text(
     let resolution = advanced
         .map(|a| a.display_resolution)
         .unwrap_or_else(|| Resolution::new(1920, 1080));
-    panel.field(
-        "Display",
+    screen.field(
+        "display",
         format!(
             "{}x{}, {}{}",
             resolution.width,
@@ -192,8 +192,8 @@ fn summary_text(
             }
         ),
     );
-    panel.field(
-        "Audio",
+    screen.field(
+        "audio",
         format!(
             "{}{}",
             ui::audio_label(
@@ -205,44 +205,42 @@ fn summary_text(
         ),
     );
     let clipboard = advanced.map(|a| a.clipboard_enabled).unwrap_or(true);
-    panel.field(
-        "Clipboard",
+    screen.field(
+        "clipboard",
+        format!("{}{}", on_off(clipboard), origin(advanced.is_some())),
+    );
+    screen.field(
+        "input pointer",
         format!(
             "{}{}",
-            if clipboard { "enabled" } else { "disabled" },
-            origin(advanced.is_some())
-        ),
-    );
-    panel.field(
-        "Input pointer",
-        format!(
-            "{:?}{}",
-            advanced
-                .map(|a| a.input_pointer)
-                .unwrap_or(PointerMode::Tablet),
+            ui::pointer_label(
+                advanced
+                    .map(|a| a.input_pointer)
+                    .unwrap_or(andler_core::PointerMode::Tablet)
+            ),
             origin(advanced.is_some())
         ),
     );
 
-    panel.section("CPU & network");
-    panel.field(
-        "CPU",
+    screen.section("cpu & network");
+    screen.field(
+        "cpu",
         format!(
             "{} cores{}",
             advanced.map(|a| a.cpu_cores).unwrap_or(4),
             origin(advanced.is_some())
         ),
     );
-    panel.field(
-        "Memory",
+    screen.field(
+        "memory",
         format!(
             "{} GiB{}",
             advanced.map(|a| a.memory_gib).unwrap_or(8),
             origin(advanced.is_some())
         ),
     );
-    panel.field(
-        "Network",
+    screen.field(
+        "network",
         format!(
             "{}{}",
             match advanced.map(|a| a.network_mode.clone()) {
@@ -259,56 +257,32 @@ fn summary_text(
             if is_basic { " (default)" } else { "" }
         ),
     );
-    let mut out = panel.render_to_string();
-    out.push_str(&applied_selection_text(
-        basic, advanced, detected, clipboard,
-    ));
-    out
-}
 
-/// The half of the wizard's answers that are *installed* rather than
-/// configured: worth spelling out, because they are what the wizard does
-/// after creation on its own.
-fn applied_selection_text(
-    basic: &BasicResult,
-    advanced: Option<&AdvancedConfig>,
-    detected: &HardwareDefaults,
-    clipboard: bool,
-) -> String {
-    let mut applied: Vec<(String, String)> = Vec::new();
+    screen.section("installed in the guest right after creation");
+    let mut installed = 0;
     if clipboard {
-        applied.push((
-            "clipboard agent".to_string(),
-            "spice-vdagent — copy/paste between host and guest".to_string(),
-        ));
+        screen.field(
+            "clipboard agent",
+            "spice-vdagent — copy/paste between host and guest",
+        );
+        installed += 1;
     }
     if let BasicResult::Android(_) = basic {
         let arm = resolve_arm_translator(advanced, detected);
         if arm != CliArmTranslator::None {
-            applied.push((
-                "arm translation".to_string(),
+            screen.field(
+                "arm translation",
                 format!("{arm} — runs ARM apps on this x86_64 host"),
-            ));
+            );
+            installed += 1;
         }
     }
+    if installed == 0 {
+        screen.note("nothing is installed inside the guest after creation.");
+    }
+    screen.note("the disk is thin-provisioned: it starts small and grows with use.");
 
-    let mut out = String::new();
-    out.push('\n');
-    if applied.is_empty() {
-        out.push_str("  nothing is installed inside the guest after creation.\n");
-    } else {
-        out.push_str("  installed in the guest right after creation:\n");
-        let width = applied
-            .iter()
-            .map(|(label, _)| label.len())
-            .max()
-            .unwrap_or(0);
-        for (label, detail) in &applied {
-            out.push_str(&format!("    {label:<width$}  {detail}\n"));
-        }
-    }
-    out.push_str("  the disk is thin-provisioned: it starts small and grows with use.\n");
-    out
+    screen.render_to_string()
 }
 
 pub(crate) fn format_nat_backend(passt_available: bool) -> NatBackend {
@@ -322,6 +296,14 @@ pub(crate) fn format_nat_backend(passt_available: bool) -> NatBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn row(rendered: &str, label: &str) -> String {
+        rendered
+            .lines()
+            .find(|line| line.trim_start().starts_with(&format!("{label} ")))
+            .unwrap_or_else(|| panic!("no {label:?} row in:\n{rendered}"))
+            .to_string()
+    }
 
     #[test]
     fn nat_backend_tracks_passt_availability() {
@@ -340,13 +322,46 @@ mod tests {
         });
         let rendered = summary_text(&basic, None, &super::super::build::sample_detected());
 
+        assert!(rendered.contains("linux vm"), "{rendered}");
         assert!(rendered.contains("my-linux"), "{rendered}");
-        assert!(rendered.contains("Linux VM"), "{rendered}");
         assert!(rendered.contains("/isos/cachyos.iso"), "{rendered}");
         assert!(rendered.contains("128 GiB"), "{rendered}");
         assert!(
             rendered.contains("spice-vdagent"),
             "clipboard sharing is on by default, so the guest agent is announced: {rendered}"
+        );
+    }
+
+    #[test]
+    fn summary_labels_share_one_column() {
+        let basic = BasicResult::Linux(super::super::basic::LinuxBasicResult {
+            name: "my-linux".into(),
+            iso_path: String::new(),
+            disk_size_gib: 64,
+            instances_root: "/tmp/instances".into(),
+            enable_uefi: true,
+        });
+        let rendered = summary_text(&basic, None, &super::super::build::sample_detected());
+
+        let column = |needle: &str| {
+            rendered
+                .lines()
+                .find(|line| line.contains(needle))
+                .and_then(|line| line.find(needle))
+                .unwrap_or_else(|| panic!("{needle:?} is missing from:\n{rendered}"))
+        };
+        let details = [
+            "my-linux",
+            "/tmp/instances/<id>/disk.qcow2",
+            "UEFI/OVMF",
+            "Venus",
+            "4 cores",
+            "spice-vdagent",
+        ];
+        let columns: Vec<usize> = details.iter().copied().map(column).collect();
+        assert!(
+            columns.windows(2).all(|pair| pair[0] == pair[1]),
+            "every label must start its detail in the same column: {columns:?}\n{rendered}"
         );
     }
 
@@ -400,9 +415,12 @@ mod tests {
             &super::super::build::sample_detected(),
         );
 
-        assert!(rendered.contains("Android VM"), "{rendered}");
+        assert!(rendered.contains("android vm"), "{rendered}");
         assert!(rendered.contains("my-android"), "{rendered}");
-        assert!(rendered.contains("GApps"), "{rendered}");
+        assert!(
+            row(&rendered, "gapps").contains("enabled"),
+            "the GApps answer is a switch like every other switch: {rendered}"
+        );
         assert!(
             rendered.contains("spice-vdagent"),
             "clipboard sharing must announce the guest-side agent: {rendered}"
@@ -415,6 +433,39 @@ mod tests {
         );
         assert!(
             rendered.contains("runs ARM apps on this x86_64 host"),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn summary_does_not_leak_rust_variant_names() {
+        let basic = BasicResult::Android(super::super::basic::AndroidBasicResult {
+            name: "my-android".into(),
+            base_image: "/cache/base.qcow2".into(),
+            base_image_auto_resolved: true,
+            android_version: crate::CliAndroidVersion::Android13,
+            gapps: false,
+            disk_size_gib: 256,
+            instances_root: "/tmp/instances".into(),
+            linked: false,
+        });
+        let rendered = summary_text(&basic, None, &super::super::build::sample_detected());
+
+        for variant in [
+            "VirtioScsi",
+            "VirtioGpu",
+            "PointerMode",
+            "Tablet",
+            "Some(",
+            "None(",
+        ] {
+            assert!(
+                !rendered.contains(variant),
+                "{variant} is a Rust variant name, not something to show a user: {rendered}"
+            );
+        }
+        assert!(
+            row(&rendered, "input pointer").contains("tablet"),
             "{rendered}"
         );
     }

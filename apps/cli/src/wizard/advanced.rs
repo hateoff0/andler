@@ -88,6 +88,17 @@ impl Group {
             Group::Android => "Android (GApps, ARM translator, disk overlay)",
         }
     }
+
+    fn title(&self) -> &'static str {
+        match self {
+            Group::BootDisks => "boot & disks",
+            Group::DisplayGpu => "display & gpu",
+            Group::Devices => "devices",
+            Group::CpuMemory => "cpu & memory",
+            Group::Network => "network",
+            Group::Android => "android",
+        }
+    }
 }
 
 fn ask_groups(groups: &[Group]) -> Result<Vec<Group>, WizardError> {
@@ -115,6 +126,8 @@ pub fn run_linux(
     detected: &HardwareDefaults,
     prefilled: Option<&AdvancedConfig>,
 ) -> Result<AdvancedConfig, WizardError> {
+    ui::header("advanced settings");
+
     let mut config = prefilled.cloned().unwrap_or_default();
     let wanted = wanted_groups(
         &[
@@ -141,6 +154,8 @@ pub fn run_android(
     detected: &HardwareDefaults,
     prefilled: Option<&AdvancedConfig>,
 ) -> Result<AdvancedConfig, WizardError> {
+    ui::header("advanced settings");
+
     let mut config = prefilled.cloned().unwrap_or_default();
     let wanted = wanted_groups(
         &[
@@ -187,7 +202,7 @@ fn ask_android(
     if !ask_group(wanted, Group::Android) {
         return Ok(());
     }
-    ui::group(Group::Android.label());
+    ui::section(Group::Android.title());
 
     config.gapps = ask_gapps(prefilled.map(|p| p.gapps).or(Some(result.gapps)))?;
     config.arm_translator = Some(ask_arm_translator(
@@ -208,7 +223,7 @@ fn ask_boot_disks(
     if !ask_group(wanted, Group::BootDisks) {
         return Ok(());
     }
-    ui::group(Group::BootDisks.label());
+    ui::section(Group::BootDisks.title());
 
     let recommended =
         CdromBus::recommended_for_iso_filename(std::path::Path::new(&result.iso_path));
@@ -230,7 +245,7 @@ fn ask_display_gpu(
     if !ask_group(wanted, Group::DisplayGpu) {
         return Ok(());
     }
-    ui::group(Group::DisplayGpu.label());
+    ui::section(Group::DisplayGpu.title());
 
     config.gpu_render = ask_gpu_render(detected, prefilled.map(|p| p.gpu_render.clone()))?;
     config.gpu_memory_mib = ask_gpu_memory(prefilled.map(|p| p.gpu_memory_mib))?;
@@ -248,7 +263,7 @@ fn ask_devices(
     if !ask_group(wanted, Group::Devices) {
         return Ok(());
     }
-    ui::group(Group::Devices.label());
+    ui::section(Group::Devices.title());
 
     config.audio_backend = ask_audio_backend(detected, prefilled.map(|p| p.audio_backend))?;
     config.clipboard_enabled = ask_clipboard_enabled(prefilled.map(|p| p.clipboard_enabled))?;
@@ -264,7 +279,7 @@ fn ask_cpu_memory(
     if !ask_group(wanted, Group::CpuMemory) {
         return Ok(());
     }
-    ui::group(Group::CpuMemory.label());
+    ui::section(Group::CpuMemory.title());
 
     config.cpu_cores = ask_cpu_cores(prefilled.map(|p| p.cpu_cores))?;
     config.memory_gib = ask_memory_gib(prefilled.map(|p| p.memory_gib))?;
@@ -279,7 +294,7 @@ fn ask_network(
     if !ask_group(wanted, Group::Network) {
         return Ok(());
     }
-    ui::group(Group::Network.label());
+    ui::section(Group::Network.title());
 
     config.network_mode = ask_network_mode(prefilled.map(|p| p.network_mode.clone()))?;
     config.bridge_interface = if let NetworkMode::Bridge { .. } = config.network_mode {
@@ -299,11 +314,6 @@ fn ask_cdrom_bus(
         return Ok(bus);
     }
 
-    let rec_str = match recommended {
-        CdromBus::VirtioScsi => "virtio-scsi",
-        CdromBus::Ide => "ide",
-    };
-
     let virtio = "virtio-scsi (faster, modern distro initrds support it)";
     let ide = "ide (compatible with Windows and any unknown ISO)";
     let options = if recommended == CdromBus::VirtioScsi {
@@ -312,13 +322,16 @@ fn ask_cdrom_bus(
         vec![ide, virtio]
     };
 
-    let choice = Select::new(&format!("CD-ROM bus (auto: {rec_str}):"), options)
-        .with_help_message(
-            "virtio-scsi — faster, modern distro initrds support it; \
+    let choice = Select::new(
+        &format!("CD-ROM bus (auto: {}):", ui::cdrom_bus_label(recommended)),
+        options,
+    )
+    .with_help_message(
+        "virtio-scsi — faster, modern distro initrds support it; \
          ide — compatible with Windows and any unknown ISO",
-        )
-        .prompt()
-        .map_err(map_inquire_err)?;
+    )
+    .prompt()
+    .map_err(map_inquire_err)?;
 
     Ok(if choice.starts_with("virtio") {
         CdromBus::VirtioScsi

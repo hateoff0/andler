@@ -10,7 +10,7 @@ use crate::{CliAndroidVersion, CliArmTranslator};
 use super::advanced::AdvancedConfig;
 use super::basic::{AndroidBasicResult, BasicResult, LinuxBasicResult};
 use super::summary::format_nat_backend;
-use super::WizardError;
+use super::{ui, WizardError};
 
 pub(crate) fn build_linux_request(
     basic: &LinuxBasicResult,
@@ -260,13 +260,16 @@ pub(crate) fn reresolve_android_base_image(
     };
     match andler_core::base_image::resolve(&profile) {
         Ok(path) => a.base_image = path.to_string_lossy().into_owned(),
-        Err(e) => crate::wizard::ui::warn(&format!(
-            "No base image matches the current Android settings ({e}). Keeping the previous \
+        Err(e) => ui::result(
+            ui::Status::Warn,
+            &format!(
+                "No base image matches the current Android settings ({e}). Keeping the previous \
              one — download a matching build with `andler image download --android-version \
              {} --variant {}` and pick it, or choose a different one manually.",
-            a.android_version as u8,
-            if adv.gapps { "GAPPS" } else { "VANILLA" },
-        )),
+                a.android_version as u8,
+                if adv.gapps { "GAPPS" } else { "VANILLA" },
+            ),
+        ),
     }
 }
 
@@ -448,11 +451,6 @@ mod tests {
     }
 
     // --- base-image re-resolution ------------------------------------------
-    //
-    // These mutate ANDLER_HOME (the base-image cache lives under it), so they
-    // serialize on one lock across the module's tests.
-
-    static ANDLER_HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     struct AndlerHomeGuard {
         _lock: std::sync::MutexGuard<'static, ()>,
@@ -462,7 +460,9 @@ mod tests {
     impl AndlerHomeGuard {
         fn new() -> (Self, PathBuf) {
             static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-            let lock = ANDLER_HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let lock = super::super::ANDLER_HOME_LOCK
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let base = std::env::temp_dir().join(format!(
                 "andler-wizard-build-test-home-{}-{n}",

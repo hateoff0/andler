@@ -75,7 +75,7 @@ pub fn run_linux(
     iso_path: Option<String>,
     instances_root: Option<String>,
 ) -> Result<LinuxBasicResult, WizardError> {
-    ui::step("Linux image & storage");
+    ui::header("linux image & storage");
     let iso = ask_iso_path(iso_path)?;
     let disk_size_gib = ask_disk_size(DEFAULT_DISK_GIB)?;
     let instances_root = instances_root.unwrap_or_else(default_instances_root);
@@ -95,7 +95,7 @@ pub async fn run_android(
     base_image_path: Option<String>,
     instances_root: Option<String>,
 ) -> Result<AndroidBasicResult, WizardError> {
-    ui::step("Android image & storage");
+    ui::header("android image & storage");
     let android_version = ask_android_version()?;
     let gapps = ask_gapps(None)?;
     let choice = super::base_image::ask(client, base_image_path, android_version, gapps).await?;
@@ -118,7 +118,7 @@ pub fn ask_kind(prefilled: Option<WizardKind>) -> Result<WizardKind, WizardError
     if let Some(k) = prefilled {
         return Ok(k);
     }
-    ui::step("VM type");
+    ui::header("vm type");
     let choice = Select::new("VM type:", vec!["Linux", "Android"])
         .with_help_message(
             "Linux — any distro from an ISO; Android — Waydroid on the base image, \
@@ -138,7 +138,7 @@ pub fn ask_name(prefilled: Option<String>, kind: WizardKind) -> Result<String, W
     if let Some(n) = prefilled {
         return Ok(n);
     }
-    ui::step("Name");
+    ui::header("name");
     let placeholder = match kind {
         WizardKind::Linux => "my-linux-vm",
         WizardKind::Android => "my-android-vm",

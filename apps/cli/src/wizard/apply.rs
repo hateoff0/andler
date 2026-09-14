@@ -1,17 +1,15 @@
 use andler_rpc::proto::{GuestProfileEntry, GuestProfileStatus, InstanceIdRequest};
 
-use crate::helpers::spinner;
 use crate::TracedClient;
 
-use super::ui;
+use super::ui::{self, Progress, Screen, Status};
 use super::{WizardError, WizardKind, WizardResult};
 
-/// Creates the instance the wizard resolved and returns its full id.
 pub async fn create(
     client: &mut TracedClient,
     result: &WizardResult,
 ) -> Result<String, WizardError> {
-    let progress = spinner("Creating the VM…");
+    let mut progress = Progress::start("creating the vm");
     let created = match result {
         WizardResult::Linux(req) => client
             .create_instance(req.clone())
@@ -22,25 +20,22 @@ pub async fn create(
             .await
             .map(|response| response.into_inner().instance_id),
     };
-    progress.finish_and_clear();
+    progress.finish();
 
     created.map_err(|e| WizardError::Inquire(crate::format_grpc_error(&e)))
 }
 
-/// Applies the guest-side selections the instance's own config asks for
-/// (ARM translator, clipboard agent). Creation already succeeded, so a
-/// failure here is reported per selection instead of unwinding the create.
 pub async fn apply_guest_selections(
     client: &mut TracedClient,
     id: &str,
 ) -> Result<Vec<GuestProfileEntry>, WizardError> {
-    let progress = spinner("Applying your selections inside the VM…");
+    let mut progress = Progress::start("applying your selections inside the vm");
     let mut call_client = client.clone();
     let result = crate::helpers::call_with_operation_progress(
         client,
         id,
         "applying the guest selections",
-        |line| progress.set_message(line.to_string()),
+        |line| progress.update(line),
         async move {
             call_client
                 .apply_guest_profile(InstanceIdRequest {
@@ -50,7 +45,7 @@ pub async fn apply_guest_selections(
         },
     )
     .await;
-    progress.finish_and_clear();
+    progress.finish();
 
     match result {
         Ok(response) => Ok(response.into_inner().entries),
@@ -58,67 +53,71 @@ pub async fn apply_guest_selections(
     }
 }
 
-/// What the user is told after the wizard's work is done: the instance, the
-/// selections that were applied (with a retry command for the ones that were
-/// not), and the commands that come next. `None` means the caller chose not to
-/// apply anything (`--quick`), which is reported with the command that does.
 pub fn report(
     id: &str,
     kind: WizardKind,
     applied: Option<&Result<Vec<GuestProfileEntry>, WizardError>>,
 ) {
     let short = crate::helpers::short_id(id);
-    println!();
-    ui::success(&format!(
-        "{} VM created: {short}",
+    ui::header(&format!(
+        "{} vm created {short}",
         match kind {
-            WizardKind::Linux => "Linux",
-            WizardKind::Android => "Android",
+            WizardKind::Linux => "linux",
+            WizardKind::Android => "android",
         }
     ));
 
+    let mut screen = Screen::new();
+    screen.section("installed in the guest");
     match applied {
         None => {
-            ui::note(
+            screen.note(
                 "Selections were not installed (--quick): run `andler guest apply <id>` to \
                  install them now.",
             );
         }
         Some(Ok(entries)) if entries.is_empty() => {
-            ui::note("No guest-side selections to apply.");
+            screen.note("No guest-side selections to apply.");
         }
         Some(Ok(entries)) => {
             for entry in entries {
-                match entry.status() {
-                    GuestProfileStatus::Applied => {
-                        ui::success(&format!("{}: applied — {}", entry.name, entry.message))
-                    }
-                    GuestProfileStatus::AlreadyPresent => ui::note(&format!(
-                        "{}: already present — {}",
-                        entry.name, entry.message
-                    )),
-                    GuestProfileStatus::Skipped => {
-                        ui::warn(&format!("{}: skipped — {}", entry.name, entry.message))
-                    }
-                    GuestProfileStatus::Failed => {
-                        ui::failure(&format!("{}: failed — {}", entry.name, entry.message))
-                    }
-                    GuestProfileStatus::Unspecified => ui::warn(&format!(
-                        "{}: unknown status — {}",
-                        entry.name, entry.message
-                    )),
-                }
+                screen.entry(
+                    &entry.name,
+                    selection_status(entry.status()),
+                    entry.message.clone(),
+                );
             }
         }
-        Some(Err(e)) => ui::failure(&format!(
-            "Could not apply the guest-side selections: {e}\n  \
-             The VM itself was created; re-run `andler guest apply {short}` to retry."
-        )),
+        Some(Err(e)) => {
+            screen.outcome(
+                Status::Failed,
+                format!("Could not apply the guest-side selections: {e}"),
+            );
+            screen.note(&format!(
+                "The VM itself was created; re-run `andler guest apply {short}` to retry."
+            ));
+        }
     }
 
-    println!();
-    println!("Next steps:");
-    println!("  andler start {short}       — boot it");
-    println!("  andler connect {short}     — open the console/graphics session");
-    println!("  andler config view {short} — inspect the resolved configuration");
+    screen.section("next steps");
+    screen.field("start", format!("andler start {short} — boot it"));
+    screen.field(
+        "connect",
+        format!("andler connect {short} — open the console/graphics session"),
+    );
+    screen.field(
+        "config view",
+        format!("andler config view {short} — inspect the resolved configuration"),
+    );
+    screen.print();
+}
+
+fn selection_status(status: GuestProfileStatus) -> Status {
+    match status {
+        GuestProfileStatus::Applied => Status::Ok,
+        GuestProfileStatus::AlreadyPresent => Status::Present,
+        GuestProfileStatus::Skipped => Status::Skipped,
+        GuestProfileStatus::Failed => Status::Failed,
+        GuestProfileStatus::Unspecified => Status::Unknown,
+    }
 }
