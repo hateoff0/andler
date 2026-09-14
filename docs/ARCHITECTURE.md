@@ -81,9 +81,11 @@ Wrapper around `qemu-img` for disk creation/cloning/resizing, plus guest tools o
 `GuestfsMutator`, one of the two real implementations of
 `andler_core::GuestMutator` (the other is `QgaMutator` in
 `backends/andler-qemu`). Drives the libguestfs appliance (`guestfish`)
-against a guest image: the appliance boots its own unprivileged QEMU,
-mounts the filesystem under an exclusive qemu image lock and applies a
-batch of `MutatorOp` mutations in one session. Zero root, and the same
+against a guest image: the appliance boots its own unprivileged QEMU once,
+mounts the filesystem under an exclusive qemu image lock, and then **stays
+listening** — every `MutatorOp` batch, probe and read is a cheap client of that
+one booted session (measured: a nine-question install went from 20.8s to 7.7s
+with two boots instead of nine), and the session is stopped with the mutator. Zero root, and the same
 mechanism serves every offline operation, package install/remove
 included — a `RunShell` command runs via the *guest's* `/bin/sh` with the
 guest root as `/` and the appliance's `/dev`, `/dev/pts`, `/proc` and
