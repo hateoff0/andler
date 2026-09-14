@@ -71,6 +71,7 @@ impl GuestfsMutator {
         }
         cmd.stderr(std::process::Stdio::piped());
 
+        let started = std::time::Instant::now();
         let mut child = cmd
             .spawn()
             .map_err(|e| MutatorError::Io(format!("cannot spawn guestfish: {e}")))?;
@@ -103,6 +104,11 @@ impl GuestfsMutator {
                 )))
             }
         };
+
+        tracing::debug!(
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            "guestfish session finished"
+        );
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
