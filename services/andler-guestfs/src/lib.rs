@@ -226,6 +226,39 @@ impl GuestMutator for GuestfsMutator {
         let out = self.run_guestfish(&[], &script, true).await?;
         Ok(String::from_utf8_lossy(&out).trim() == "true")
     }
+
+    async fn probe_paths(&self, paths: &[&str]) -> Result<Vec<bool>, MutatorError> {
+        if paths.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut script = String::with_capacity(paths.len() * 32);
+        for path in paths {
+            script.push_str(&format!("exists {}\n", quote(path)));
+        }
+        let out = self.run_guestfish(&[], &script, true).await?;
+        parse_probe_answers(&out, paths.len())
+    }
+}
+
+/// Turns one `exists` answer per line into one answer per path.
+///
+/// The caller matches answers to paths by position, so a short answer is an
+/// error rather than a silently shifted result.
+fn parse_probe_answers(stdout: &[u8], expected: usize) -> Result<Vec<bool>, MutatorError> {
+    let text = String::from_utf8_lossy(stdout);
+    let answers: Vec<bool> = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(|line| line == "true")
+        .collect();
+    if answers.len() != expected {
+        return Err(MutatorError::Io(format!(
+            "the appliance answered {} of {expected} path probes",
+            answers.len()
+        )));
+    }
+    Ok(answers)
 }
 
 /// Short random hex for staging dir uniqueness (no uuid dependency).
@@ -262,6 +295,18 @@ mod timeout_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn probe_answers_must_match_the_paths_asked() {
+        assert_eq!(
+            parse_probe_answers(b"true\nfalse\n", 2).unwrap(),
+            vec![true, false]
+        );
+        assert_eq!(parse_probe_answers(b"false\n", 1).unwrap(), vec![false]);
+        // One answer for two paths would shift every later path onto the wrong
+        // result, so it is refused.
+        assert!(parse_probe_answers(b"true\n", 2).is_err());
+    }
 
     #[test]
     fn script_maps_every_op_to_a_guestfish_command() {

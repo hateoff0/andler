@@ -347,6 +347,15 @@ pub async fn switch_translator_with(
             host_path: host_archive.clone(),
         });
         staging_ops.push(MutatorOp::RunShell { command });
+        // The move rides in the same batch — the archive is the only writer
+        // into the staging directory, and guestfish runs script lines in
+        // order, so nothing can move before the extract above. It used to be a
+        // host-side loop asking the appliance `exists()` twice per file: one
+        // guestfish session per question, ~177 files for libndk, and that
+        // alone was minutes.
+        staging_ops.push(MutatorOp::RunShell {
+            command: move_staged_command(&staging, &system_dir)?,
+        });
     }
 
     report(TranslatorStage::Staging);
@@ -387,19 +396,6 @@ pub async fn switch_translator_with(
             .map_err(|e| DiskError::FileSystem(format!("failed to remove old translator: {e}")))?;
     }
 
-    // One in-guest copy instead of a host-side loop. That loop asked the
-    // appliance `exists()` twice per file, and each `exists()` is its own
-    // guestfish run — its own appliance session, seconds apiece — so ~177
-    // files meant ~354 sessions, which is where a switch really spent its
-    // minutes. The re-checks were redundant anyway: the payload was packed
-    // from these very paths (tar would have failed on a missing one), and
-    // `cp -a` overwrites whatever is already at the destination.
-    let command = move_staged_command(&staging, &system_dir)?;
-    mutator
-        .apply(&[MutatorOp::RunShell { command }])
-        .await
-        .map_err(|e| DiskError::FileSystem(format!("failed to install translator: {e}")))?;
-
     report(TranslatorStage::Properties);
     let build_prop_path = format!("{system_dir}/build.prop");
     // The upper build.prop shadows the base image's /system/build.prop
@@ -434,43 +430,46 @@ async fn detect_current_translator_with(
     mutator: &dyn GuestMutator,
     system_dir: &str,
 ) -> Result<Option<ArmTranslator>, DiskError> {
-    for (translator, detect_path) in &[
+    let candidates = [
         (ArmTranslator::Libndk, crate::translator::ndk::DETECT_FILE),
         (
             ArmTranslator::Libhoudini,
             crate::translator::houdini::DETECT_FILE,
         ),
-    ] {
-        let path = format!("{system_dir}/{detect_path}");
-        if mutator
-            .exists(&path)
-            .await
-            .map_err(|e| DiskError::FileSystem(format!("failed to inspect {path}: {e}")))?
-        {
-            return Ok(Some(*translator));
-        }
-    }
-    Ok(None)
+    ];
+    let paths: Vec<String> = candidates
+        .iter()
+        .map(|(_, detect_path)| format!("{system_dir}/{detect_path}"))
+        .collect();
+    let refs: Vec<&str> = paths.iter().map(String::as_str).collect();
+    let found = mutator
+        .probe_paths(&refs)
+        .await
+        .map_err(|e| DiskError::FileSystem(format!("failed to inspect the guest: {e}")))?;
+    Ok(candidates
+        .iter()
+        .zip(found)
+        .find(|(_, present)| *present)
+        .map(|((translator, _), _)| *translator))
 }
 
 async fn detect_waydroid_system_dir_with(
     mutator: &dyn GuestMutator,
 ) -> Result<Option<String>, DiskError> {
-    if mutator
-        .exists("/var/lib/waydroid/overlay")
+    let candidates = [
+        ("/var/lib/waydroid/overlay", "/var/lib/waydroid/overlay"),
+        ("/overlay/system", "/overlay"),
+    ];
+    let paths: Vec<&str> = candidates.iter().map(|(probe, _)| *probe).collect();
+    let found = mutator
+        .probe_paths(&paths)
         .await
-        .map_err(|e| DiskError::FileSystem(format!("failed to inspect guest: {e}")))?
-    {
-        return Ok(Some("/var/lib/waydroid/overlay".to_string()));
-    }
-    if mutator
-        .exists("/overlay/system")
-        .await
-        .map_err(|e| DiskError::FileSystem(format!("failed to inspect guest: {e}")))?
-    {
-        return Ok(Some("/overlay".to_string()));
-    }
-    Ok(None)
+        .map_err(|e| DiskError::FileSystem(format!("failed to inspect the guest: {e}")))?;
+    Ok(candidates
+        .iter()
+        .zip(found)
+        .find(|(_, present)| *present)
+        .map(|((_, dir), _)| (*dir).to_string()))
 }
 
 fn parse_build_prop(content: &str) -> HashMap<String, String> {

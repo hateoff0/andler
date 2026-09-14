@@ -75,6 +75,20 @@ pub trait GuestMutator: Send + Sync {
 
     /// Whether the path exists in the guest (file or directory).
     async fn exists(&self, path: &str) -> Result<bool, MutatorError>;
+
+    /// Whether each path exists, in order, answering all of them in one
+    /// session where the backend can.
+    ///
+    /// The default is one `exists` call per path, which is correct but pays
+    /// the backend's per-session cost once per path — an appliance session is
+    /// seconds, so a caller probing several paths overrides this.
+    async fn probe_paths(&self, paths: &[&str]) -> Result<Vec<bool>, MutatorError> {
+        let mut answers = Vec::with_capacity(paths.len());
+        for path in paths {
+            answers.push(self.exists(path).await?);
+        }
+        Ok(answers)
+    }
 }
 
 /// Conformance suite shared by both real implementations. Each backend's
@@ -164,6 +178,19 @@ pub mod conformance {
             !m.exists(&format!("{dir}/copy.txt")).await.unwrap(),
             "source must be gone after mv"
         );
+
+        // A batch probe answers in the caller's order and includes the paths
+        // that are absent — that ordering is the whole contract, and it is what
+        // lets one session replace a probe per path.
+        let probed = m
+            .probe_paths(&[
+                &format!("{dir}/moved.txt"),
+                &format!("{dir}/absent.txt"),
+                &format!("{dir}/nested"),
+            ])
+            .await
+            .expect("probe must succeed");
+        assert_eq!(probed, vec![true, false, true]);
 
         m.apply(&[MutatorOp::RmRf {
             path: dir.to_string(),
