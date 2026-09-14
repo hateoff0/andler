@@ -222,3 +222,86 @@ async fn update_instance_config_rejected_while_running() {
     let fetched = daemon.get_instance_config(id).await.unwrap();
     assert_ne!(fetched.name, "should-not-apply");
 }
+
+/// An Android fixture whose overlay and base image are real files, so a test
+/// can tell whether a command touched them.
+fn android_instance_on_disk(dir: &std::path::Path) -> andler_core::InstanceConfig {
+    let disk = dir.join("disk.qcow2");
+    let base = dir.join("base.qcow2");
+    std::fs::write(&disk, b"placeholder overlay").unwrap();
+    std::fs::write(&base, b"placeholder base image").unwrap();
+    let mut cfg = sample_android_config(disk, base);
+    let andler_core::InstanceKind::AndroidVm { android_profile } = &mut cfg.kind else {
+        panic!("sample_android_config must build an AndroidVm");
+    };
+    android_profile.arm_translator = andler_core::ArmTranslator::Libndk;
+    cfg
+}
+
+#[tokio::test]
+async fn config_set_of_the_arm_translator_changes_neither_disk_nor_config() {
+    // The ARM translator lives on the disk image, so this key is immutable
+    // through `config set`. It used to switch the translator first and only
+    // then let `set_key` reject the key: the command failed with the disk
+    // already rewritten — the translator files gone while `instance.toml`
+    // still named one.
+    let dir = TestTempDir::new();
+    let daemon = Daemon::new();
+    let cfg = android_instance_on_disk(dir.path());
+    let id = cfg.id;
+    super::types::write_instance_toml(dir.path(), &cfg).await;
+    daemon.create_instance(cfg.clone()).await.unwrap();
+
+    let toml_path = dir.path().join("instance.toml");
+    let toml_before = tokio::fs::read(&toml_path).await.unwrap();
+    let disk_before = tokio::fs::read(&cfg.disk.path).await.unwrap();
+
+    let err = daemon
+        .set_instance_config(id, "kind.android_profile.arm_translator", "none")
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(&err, DaemonError::InvalidConfigKey(message) if message.contains("arm-translator")),
+        "the refusal must name the command that does this instead: {err}"
+    );
+    assert_eq!(
+        tokio::fs::read(&cfg.disk.path).await.unwrap(),
+        disk_before,
+        "a refused `config set` must not touch the disk"
+    );
+    assert_eq!(
+        tokio::fs::read(&toml_path).await.unwrap(),
+        toml_before,
+        "a refused `config set` must not rewrite instance.toml"
+    );
+    let fetched = daemon.get_instance_config(id).await.unwrap();
+    assert_eq!(
+        andler_core::config::get_key(&fetched, "kind.android_profile.arm_translator").as_deref(),
+        Some("libndk"),
+        "the config still records the translator the disk has"
+    );
+}
+
+#[tokio::test]
+async fn config_set_of_the_arm_translator_is_refused_whatever_the_state() {
+    // The refusal comes from the key registry, not from a disk gate: a running
+    // VM reports the immutable key instead of "must be stopped", because the
+    // state is only relevant to a key that could be written at all.
+    let dir = TestTempDir::new();
+    let daemon = Daemon::new();
+    let cfg = android_instance_on_disk(dir.path());
+    let id = cfg.id;
+    super::types::write_instance_toml(dir.path(), &cfg).await;
+    register_with_state(&daemon, cfg, InstanceState::Running, None).await;
+
+    let err = daemon
+        .set_instance_config(id, "kind.android_profile.arm_translator", "libndk")
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(err, DaemonError::InvalidConfigKey(_)),
+        "an immutable key is refused for what it is, in any state: {err}"
+    );
+}

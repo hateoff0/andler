@@ -85,7 +85,7 @@ Overridable via:
 | `apply_guest_profile` | `async fn(InstanceId) -> Result<Vec<GuestSelectionOutcome>, DaemonError>` | Apply the guest-side work the instance's config selects (ARM translator, clipboard agent), classified per selection |
 | `list_remote_base_images` | `async fn(&ImageSelector) -> Result<(Vec<RemoteImageEntry>, String), DaemonError>` | Published base images (release catalog) with local cache state |
 | `download_base_image` | `async fn(&ImageSelector, bool, &ProgressSink) -> Result<FetchOutcome, DaemonError>` | Download, verify and install one published build into the local cache |
-| `set_instance_config` | `async fn(InstanceId, key: &str, value: &str) -> Result<(), DaemonError>` | Partial config update by key with persistence. Whitelist: `display.resolution` (any state — applied live to a running guest via QGA and persisted for next boot via fw_cfg), `name`, `arm_translator` (both require `is_disk_idle`) |
+| `set_instance_config` | `async fn(InstanceId, key: &str, value: &str) -> Result<(), DaemonError>` | Partial config update by key with persistence. Whitelist: `display.resolution` (any state — applied live to a running guest via QGA and persisted for next boot via fw_cfg), `name`. Every other key is refused with the reason it is not settable, before the disk is touched — the ARM translator and the boot mode are written to the disk image (`guest install` / `guest boot-mode` switch them) |
 | `set_display_resolution` | `async fn(InstanceId, value: &str) -> Result<(), DaemonError>` | `display.resolution` path: parses `WxH`, pushes to a `Running`/`Paused` guest via `backend.set_guest_display_resolution`, persists the config |
 
 **Instance Configuration**:

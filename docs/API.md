@@ -191,7 +191,6 @@ andler config --instance <instance-id> [--edit]
 | `display.resolution` | `WxH`, e.g. `1920x1080` | Works in any state; on a `Running`/`Paused` instance the new resolution is pushed into the guest over the QEMU guest agent immediately (applied by the guest compositor/session), and persisted for the next boot (delivered via fw_cfg) |
 | `name` | any valid instance name | Instance must be stopped (`disk_idle`) |
 | `autostart` | `true`\|`false` | Works in any state; takes effect at the next daemon restart |
-| `arm_translator` (`kind.android_profile.arm_translator`) | `none` \| `libndk` \| `libhoudini` | Android instances only, instance must be stopped; performs the same offline switch as `SwitchArmTranslator` |
 | `cpu.affinity` | read-only | Immutable via `config set`: pin the VM's threads to host CPUs by editing `affinity = [0, 2, 4, 6]` in `instance.toml` — the QEMU process is `taskset`-pinned to that set, and starting an instance whose pin overlaps a running pinned instance is refused (`host CPU N is pinned by running instance …`) |
 | `memory.size_bytes` / `memory.ballooning` / `memory.zram` / `memory.ksm` / `memory.mem_lock` / `memory.hugepages` | size string / `true`\|`false` | Instance must be stopped |
 | `disk.thin_provisioning` / `disk.trim_on_shutdown` / `disk.compact_on_shutdown` / `disk.snapshot_timeout_secs` | boolean / seconds | Instance must be stopped |
@@ -199,7 +198,7 @@ andler config --instance <instance-id> [--edit]
 | `gpu.render_backend` / `gpu.hostmem_bytes` / `gpu.blob` / `gpu.gl` | backend name / bytes / boolean | Instance must be stopped |
 | `network.mode` / `network.device_model` / `network.nat_backend` | mode / model / backend name | Instance must be stopped |
 | `network.port_forwards` | read-only | Immutable: fixed at create time (QEMU netdev `hostfwd=`) |
-| `kind.android_profile.boot_mode` / `kind.android_profile.arm_translator` / `kind.android_profile.android_version` | read-only | Immutable: use the dedicated `guest boot-mode` / `guest install <translator>` commands |
+| `kind.android_profile.boot_mode` / `kind.android_profile.arm_translator` / `kind.android_profile.android_version` | read-only | Immutable: use the dedicated `guest boot-mode` / `guest install <translator>` commands. A refused `set` leaves the disk and `instance.toml` untouched |
 | `audio.backend` / `audio.device` | backend / device name | Instance must be stopped |
 | `input.pointer_mode` / `input.hide_host_cursor` / `input.clipboard_enabled` | mode / boolean | Instance must be stopped |
 | `firmware.enable_uefi` | `true`\|`false` | Instance must be stopped |
@@ -526,6 +525,12 @@ andler guest install spice-vdagent <instance-id> --offline
 # Remove a package
 andler guest remove spice-vdagent <instance-id>
 
+# Switch the ARM translator of an Android instance: `install none` disables ARM
+# translation (no download) and is the same switch `guest remove libndk` makes
+andler guest install libndk <instance-id>
+andler guest remove libndk <instance-id>
+andler guest install none <instance-id>
+
 # List known packages and their status
 andler guest list <instance-id>
 
@@ -632,7 +637,7 @@ would cost seconds per boot for no protection.
 
 Known packages: `spice-vdagent` (shared folders), `qemu-guest-agent` (host-guest communication), `spice-webdavd` (webdav shared folders).
 
-**ARM translators**: `install libndk <id>` / `install libhoudini <id>` are special-cased — they go through `SwitchArmTranslator` (offline disk staging) instead of the package-manager path. There is **no online path**: the translator is written into the stopped VM's disk overlay, so `Running`/`Paused` instances are rejected with "must be stopped … stop it first". Works before the guest's first boot — the `var/lib/waydroid/overlay` upper dir is created on the disk if `waydroid init` hasn't run yet. Optional `--translator-dir <path>` points at a local cache directory with the extracted translator instead of downloading it. Without it, the daemon downloads the translator zip (~18 MiB) from GitHub on first use, caches it in `~/.andler/cache/arm-translators/`, and verifies its MD5; the download has a 15 s connect timeout and a 5 min total timeout — a broken/slow connection fails with a clear error pointing at `--translator-dir` instead of hanging forever. Daemon logs (`andler logs` / `RUST_LOG=info`) report each stage (download → md5 → extract).
+**ARM translators**: `install libndk <id>` / `install libhoudini <id>` / `install none <id>` are special-cased — they go through `SwitchArmTranslator` (offline disk staging) instead of the package-manager path. `none` is the removal path: it clears the installed translator's files and the managed `build.prop` keys and downloads nothing — it is the same switch `guest remove libndk` / `guest remove libhoudini` / `guest remove none` makes, so a translator name means the same thing to both commands. There is **no online path**: the translator is written into the stopped VM's disk overlay, so `Running`/`Paused` instances are rejected with "must be stopped … stop it first". Works before the guest's first boot — the `var/lib/waydroid/overlay` upper dir is created on the disk if `waydroid init` hasn't run yet. Optional `--translator-dir <path>` points at a local cache directory with the extracted translator instead of downloading it. Without it, the daemon downloads the translator zip (~18 MiB) from GitHub on first use, caches it in `~/.andler/cache/arm-translators/`, and verifies its MD5; the download has a 15 s connect timeout and a 5 min total timeout — a broken/slow connection fails with a clear error pointing at `--translator-dir` instead of hanging forever. Daemon logs (`andler logs` / `RUST_LOG=info`) report each stage (download → md5 → extract).
 
 | Command | Description |
 |---------|-------------|

@@ -98,8 +98,8 @@ Size format: `64GB`, `128000MB`, `1T`, `512000` (bytes). Case-insensitive.
 
 | Command | Description |
 |---------|-------------|
-| `andler guest install <package> <instance-id>` | Install a package in the guest OS. Online via the QGA guest-agent socket when the VM runs; a stopped VM is auto-started headless for maintenance and stopped again. `--offline` forces the zero-root `guestmount` + user-namespace path. Special case: `libndk`/`libhoudini` route to the ARM-translator switcher (`--translator-dir <path>` points at a local extracted cache) |
-| `andler guest remove <package> <instance-id>` | Remove a package from the guest OS (auto-fallback) |
+| `andler guest install <package> <instance-id>` | Install a package in the guest OS. Online via the QGA guest-agent socket when the VM runs; a stopped VM is auto-started headless for maintenance and stopped again. `--offline` forces the zero-root `guestmount` + user-namespace path. Special case: `libndk`/`libhoudini`/`none` route to the ARM-translator switcher instead (`none` disables ARM translation — no download; `--translator-dir <path>` points at a local extracted cache) |
+| `andler guest remove <package> <instance-id>` | Remove a package from the guest OS (auto-fallback). A translator name (`libndk`/`libhoudini`/`none`) switches the ARM translator to `none` instead |
 | `andler guest list <instance-id>` | List known packages and their status in the guest OS |
 | `andler guest boot-mode <instance-id> [android\|linux]` | Get (no argument) or switch the guest's boot target on an Android VM's unified base image. Requires a restart to apply. |
 | `andler guest apply <instance-id> [--json]` | Apply the guest-side work the instance's own config selects: the ARM translator when `kind.android_profile.arm_translator` is not `none`, `spice-vdagent` when `input.clipboard_enabled`. Offline through the libguestfs appliance while the disk is idle, online through the guest agent on a running VM; one classified outcome per selection (`applied`/`already present`/`skipped`/`failed`) with the retry command in the message. This is what the wizard runs right after creating a VM. |

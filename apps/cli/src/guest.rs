@@ -1,10 +1,10 @@
 use crate::helpers::emit_json;
 use crate::TracedClient;
 use andler_rpc::proto::{
-    AndroidBootMode as ProtoAndroidBootMode, ApplyGuestProfileResponse, GuestPackageEntry,
-    GuestProfileEntry, GuestProfileStatus, GuestProvisionRequest, InstallGuestAgentRequest,
-    InstanceIdRequest, RemoveGuestAgentRequest, SwitchAndroidBootModeRequest,
-    SwitchArmTranslatorRequest,
+    AndroidBootMode as ProtoAndroidBootMode, ApplyGuestProfileResponse,
+    ArmTranslator as ProtoArmTranslator, GuestPackageEntry, GuestProfileEntry, GuestProfileStatus,
+    GuestProvisionRequest, InstallGuestAgentRequest, InstanceIdRequest, RemoveGuestAgentRequest,
+    SwitchAndroidBootModeRequest, SwitchArmTranslatorRequest,
 };
 
 use std::io::IsTerminal;
@@ -105,6 +105,43 @@ fn packages_json(packages: &[serde_json::Value]) -> serde_json::Value {
     serde_json::json!({ "packages": packages })
 }
 
+// The translator names the guest commands switch on: `none` disables ARM
+// translation (the removal path) instead of naming a guest package.
+fn translator_named(name: &str) -> Option<ProtoArmTranslator> {
+    match name {
+        "none" => Some(ProtoArmTranslator::None),
+        "libndk" => Some(ProtoArmTranslator::Libndk),
+        "libhoudini" => Some(ProtoArmTranslator::Libhoudini),
+        _ => None,
+    }
+}
+
+async fn switch_arm_translator(
+    client: &mut TracedClient,
+    instance_ref: String,
+    translator: ProtoArmTranslator,
+    translator_dir: Option<&std::path::Path>,
+    progress: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let request = SwitchArmTranslatorRequest {
+        instance_ref: instance_ref.clone(),
+        translator: translator.into(),
+        translator_dir: translator_dir
+            .map(|dir| dir.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+    };
+    let mut call_client = client.clone();
+    crate::helpers::call_with_operation_progress(
+        client,
+        &instance_ref,
+        progress,
+        |line| println!("  {line}"),
+        async move { call_client.switch_arm_translator(request).await },
+    )
+    .await?;
+    Ok(())
+}
+
 pub async fn handle(
     client: &mut TracedClient,
     action: GuestAction,
@@ -171,44 +208,42 @@ pub async fn handle(
         } => {
             let (resolved_id, _name) = lifecycle::resolve_echo(client, &instance_id).await;
 
-            let is_arm_translator = matches!(package.as_str(), "libndk" | "libhoudini");
-            if is_arm_translator {
-                let translator = match package.as_str() {
-                    "libndk" => andler_rpc::proto::ArmTranslator::Libndk,
-                    "libhoudini" => andler_rpc::proto::ArmTranslator::Libhoudini,
-                    _ => unreachable!(),
-                };
-                let dir_str = translator_dir
-                    .as_ref()
-                    .map(|p| p.to_string_lossy().into_owned())
-                    .unwrap_or_default();
-                match &translator_dir {
-                    Some(dir) => {
-                        println!("Installing ARM translator `{package}` from {} …", dir.display())
+            if let Some(translator) = translator_named(&package) {
+                let disables = translator == ProtoArmTranslator::None;
+                if disables {
+                    println!("Setting the ARM translator to `none` (no payload to download) …");
+                } else {
+                    match &translator_dir {
+                        Some(dir) => println!(
+                            "Installing ARM translator `{package}` from {} …",
+                            dir.display()
+                        ),
+                        None => println!(
+                            "Installing ARM translator `{package}` (downloads ~18 MiB on first run; this can take a while) …"
+                        ),
                     }
-                    None => println!(
-                        "Installing ARM translator `{package}` (downloads ~18 MiB on first run; this can take a while) …"
-                    ),
                 }
-                let request = SwitchArmTranslatorRequest {
-                    instance_ref: resolved_id.clone(),
-                    translator: translator.into(),
-                    translator_dir: dir_str,
-                };
-                let mut call_client = client.clone();
-                crate::helpers::call_with_operation_progress(
+                switch_arm_translator(
                     client,
-                    &resolved_id,
-                    "installing the ARM translator",
-                    |line| println!("  {line}"),
-                    async move { call_client.switch_arm_translator(request).await },
+                    resolved_id,
+                    translator,
+                    translator_dir.as_deref(),
+                    if disables {
+                        "disabling the ARM translator"
+                    } else {
+                        "installing the ARM translator"
+                    },
                 )
                 .await?;
-                match &translator_dir {
-                    Some(dir) => {
-                        println!("Translator `{package}` installed from {}", dir.display())
+                if disables {
+                    println!("Translator `none` set — ARM translation is off");
+                } else {
+                    match &translator_dir {
+                        Some(dir) => {
+                            println!("Translator `{package}` installed from {}", dir.display())
+                        }
+                        None => println!("Translator `{package}` installed (auto-download)"),
                     }
-                    None => println!("Translator `{package}` installed (auto-download)"),
                 }
             } else {
                 let request = InstallGuestAgentRequest {
@@ -236,20 +271,13 @@ pub async fn handle(
             idempotency_token,
         } => {
             let (resolved_id, _name) = lifecycle::resolve_echo(client, &instance_id).await;
-            let is_arm_translator = matches!(package.as_str(), "libndk" | "libhoudini");
-            if is_arm_translator {
-                let request = SwitchArmTranslatorRequest {
-                    instance_ref: resolved_id.clone(),
-                    translator: andler_rpc::proto::ArmTranslator::None.into(),
-                    translator_dir: String::new(),
-                };
-                let mut call_client = client.clone();
-                crate::helpers::call_with_operation_progress(
+            if translator_named(&package).is_some() {
+                switch_arm_translator(
                     client,
-                    &resolved_id,
+                    resolved_id,
+                    ProtoArmTranslator::None,
+                    None,
                     "removing the ARM translator",
-                    |line| println!("  {line}"),
-                    async move { call_client.switch_arm_translator(request).await },
                 )
                 .await?;
                 println!("Translator `{package}` removed");
@@ -430,8 +458,29 @@ fn print_apply_results(
 
 #[cfg(test)]
 mod tests {
-    use super::{package_json, packages_json};
-    use andler_rpc::proto::GuestPackageEntry;
+    use super::{package_json, packages_json, translator_named};
+    use andler_rpc::proto::{ArmTranslator, GuestPackageEntry};
+
+    #[test]
+    fn translator_names_switch_the_translator_instead_of_being_installed() {
+        // `none` is a translator to switch to (the removal path), not a
+        // package: routing it through the package path made `guest install
+        // none` boot a maintenance VM to install a Debian package called
+        // `none` and fail with "target not found: none".
+        assert_eq!(translator_named("none"), Some(ArmTranslator::None));
+        assert_eq!(translator_named("libndk"), Some(ArmTranslator::Libndk));
+        assert_eq!(
+            translator_named("libhoudini"),
+            Some(ArmTranslator::Libhoudini)
+        );
+    }
+
+    #[test]
+    fn package_names_are_not_translators() {
+        assert_eq!(translator_named("spice-vdagent"), None);
+        assert_eq!(translator_named("qemu-guest-agent"), None);
+        assert_eq!(translator_named("libndk2"), None);
+    }
 
     #[test]
     fn package_json_serializes_all_fields() {

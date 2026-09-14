@@ -756,6 +756,7 @@ impl Daemon {
                     kind,
                     phases: phases.clone(),
                     progress: 0.0,
+                    current_phase: None,
                     state: OperationState::Queued,
                     error: None,
                 },
@@ -953,6 +954,7 @@ impl Daemon {
                     kind,
                     phases: phases.clone(),
                     progress: 0.0,
+                    current_phase: None,
                     state: OperationState::Queued,
                     error: None,
                 },
@@ -1599,6 +1601,7 @@ impl Daemon {
                     kind: OperationKind::GuestInstall,
                     phases: phases.clone(),
                     progress: 0.0,
+                    current_phase: None,
                     state: OperationState::Queued,
                     error: None,
                 },
@@ -1682,18 +1685,9 @@ impl Daemon {
             }
         }
 
-        // The ARM translator is applied to the disk image, which requires a
-        // stopped VM; the config file update then records the new value.
-        if key == "kind.android_profile.arm_translator" {
-            if !state.is_disk_idle() {
-                return Err(DaemonError::InstanceMustBeStopped(id, state));
-            }
-            let translator: andler_core::android_profile::ArmTranslator = value
-                .parse()
-                .map_err(|_| DaemonError::InvalidConfigKey(key.to_string()))?;
-            self.switch_arm_translator(id, translator, None).await?;
-        }
-
+        // Immutable keys (the ARM translator, the boot mode) are refused by
+        // `set_key` below, before anything here touches the disk: a rejected
+        // `config set` must leave the disk and the config as they were.
         andler_core::config::set_key(&mut cfg, key, value)
             .map_err(DaemonError::from_config_key_error)?;
         cfg.validate().map_err(DaemonError::InvalidConfig)?;
