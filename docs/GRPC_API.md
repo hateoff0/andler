@@ -423,6 +423,22 @@ VM lifecycle state.
 | `STOPPED` (6) | Stopped. |
 | `ERROR` (7) | Error state. |
 
+### `GuestReadinessLevel`
+
+How far the guest has climbed the readiness ladder. The ladder is monotonic —
+each level implies the previous one — and is the contract documented in
+[ARCHITECTURE.md](ARCHITECTURE.md): callers derive the terminal level from the
+effective `(kind, boot_mode)` profile, never from `kind` alone.
+
+| Value | Description |
+|-------|-------------|
+| `GUEST_READINESS_LEVEL_UNSPECIFIED` (0) | No level observed yet (instance not running, or nothing reported so far). |
+| `SERIAL_UP` (1) | VM process is up, serial chardev responds. |
+| `QGA_UP` (2) | The QEMU guest agent answers probes. |
+| `DISPLAY_APPLIED` (3) | The configured display resolution was applied inside the guest. |
+| `GUEST_OS_UP` (4) | The guest OS finished booting. |
+| `WAYDROID_READY` (5) | Android session: the Waydroid container is running. |
+
 ### `InstanceStatusResponse`
 
 Status of a single instance.
@@ -432,6 +448,8 @@ Status of a single instance.
 | `state` | `InstanceStateKind` | Current state. |
 | `error_message` | `string` | Error message (if state == ERROR). |
 | `detail` | `string` | Additional diagnostic info. |
+| `readiness` | `GuestReadinessLevel` | Highest level the guest reached in this run; `UNSPECIFIED` while no run is live or no probe has answered. `GetInstanceStatus` runs the readiness probes for the instance before answering, so this field reflects a measurement, not a cached guess. |
+| `terminal_readiness` | `GuestReadinessLevel` | Level this instance's effective `(kind, boot_mode)` profile terminates at — the target `readiness` climbs to. `readiness` short of it means the guest is still climbing, or that the profile cannot observe the missing level (e.g. the guest has no readiness reporter). |
 
 ### `InstanceListEntry`
 
@@ -829,7 +847,7 @@ Request to install a package in the guest OS.
 |-------|------|-------------|
 | `instance_id` | `string` | Instance ID. |
 | `package` | `string` | Package name (e.g., `spice-vdagent`). |
-| `offline` | `bool` | Force the offline path (guestmount FUSE + userns chroot — zero root) instead of the smart path: online via guest agent, auto-starting a stopped VM for maintenance when needed. |
+| `offline` | `bool` | Force the offline path (the zero-root libguestfs appliance) instead of the smart path: online via guest agent, auto-starting a stopped VM for maintenance when needed. |
 | `idempotency_token` | `optional string` | Client-supplied key that makes a network retry idempotent; a retry with the same token joins the in-flight install **and waits for it** — the joined caller reports what actually happened, and a joined operation that fails surfaces as `OperationFailed` — while a retry with a different token is refused with `OperationAlreadyRunning`. A cancelled install is never joined: a same-key retry after `op cancel` starts a fresh install. A retry that arrives while the maintenance auto-start is still booting or stopping the VM follows the same rule instead of the lifecycle-state gate. |
 
 ### `RemoveGuestAgentRequest`
@@ -840,7 +858,7 @@ Request to remove a package from the guest OS.
 |-------|------|-------------|
 | `instance_id` | `string` | Instance ID. |
 | `package` | `string` | Package name. |
-| `offline` | `bool` | Force the offline path (guestmount FUSE + userns chroot — zero root) instead of the smart path: online via guest agent, auto-starting a stopped VM for maintenance when needed. |
+| `offline` | `bool` | Force the offline path (the zero-root libguestfs appliance) instead of the smart path: online via guest agent, auto-starting a stopped VM for maintenance when needed. |
 | `idempotency_token` | `optional string` | Client-supplied key that makes a network retry idempotent; a retry with the same token joins the in-flight remove **and waits for it** — the joined caller reports what actually happened, and a joined operation that fails surfaces as `OperationFailed` — while a retry with a different token is refused with `OperationAlreadyRunning`. A cancelled remove is never joined: a same-key retry after `op cancel` starts a fresh remove. A retry that arrives while the maintenance auto-start is still booting or stopping the VM follows the same rule instead of the lifecycle-state gate. |
 
 ### `GuestProvisionRequest`

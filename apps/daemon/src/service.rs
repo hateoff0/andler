@@ -2,11 +2,12 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use andler_core::EventKind;
-use andler_core::{CloneMode, InstanceConfig};
+use andler_core::{CloneMode, GuestReadinessLevel, InstanceConfig};
 use andler_disk::base_image_download::ProgressSink;
 use andler_rpc::convert;
 use andler_rpc::guest_profile_convert;
 use andler_rpc::proto::andler_service_server::AndlerService;
+use andler_rpc::proto::GuestReadinessLevel as ProtoReadinessLevel;
 use andler_rpc::proto::{
     AndroidVersion, ApplyGuestProfileResponse, AttachDiskRequest, AttachDiskResponse,
     AttachNetworkRequest, AttachNetworkResponse, BaseImageDownloadPhase, BaseImageDownloadProgress,
@@ -54,6 +55,20 @@ impl DaemonService {
             log_ring,
             metrics,
         }
+    }
+}
+
+/// Maps a core readiness level onto the wire enum. `None` — no level reached
+/// yet in this run, or a run that is not live — is the proto's unspecified
+/// value, which is a state of its own and not "not ready".
+fn readiness_level_to_proto(level: Option<GuestReadinessLevel>) -> ProtoReadinessLevel {
+    match level {
+        None => ProtoReadinessLevel::Unspecified,
+        Some(GuestReadinessLevel::SerialUp) => ProtoReadinessLevel::SerialUp,
+        Some(GuestReadinessLevel::QgaUp) => ProtoReadinessLevel::QgaUp,
+        Some(GuestReadinessLevel::DisplayApplied) => ProtoReadinessLevel::DisplayApplied,
+        Some(GuestReadinessLevel::GuestOsUp) => ProtoReadinessLevel::GuestOsUp,
+        Some(GuestReadinessLevel::WaydroidReady) => ProtoReadinessLevel::WaydroidReady,
     }
 }
 
@@ -229,10 +244,13 @@ impl AndlerService for DaemonService {
             .await?;
         let status = self.daemon.status(id).await?;
         let (state, error_message) = convert::instance_state_to_proto(&status.state);
+        let readiness = self.daemon.probe_readiness(id).await?;
         Ok(Response::new(InstanceStatusResponse {
             state: state as i32,
             error_message,
             detail: status.detail.unwrap_or_default(),
+            readiness: readiness_level_to_proto(readiness.current) as i32,
+            terminal_readiness: readiness_level_to_proto(Some(readiness.terminal())) as i32,
         }))
     }
 

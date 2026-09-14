@@ -1,8 +1,8 @@
 use crate::TracedClient;
 use andler_rpc::proto::{
     instance_kind, network_mode, render_backend, AudioBackend, CpuPriority, DiskFormat,
-    DisplayEngine, Empty, GetConfigStatusResponse, GetInstanceConfigResponse, InstanceIdRequest,
-    InstanceStateKind, InstanceStatusResponse, LogStreamSource,
+    DisplayEngine, Empty, GetConfigStatusResponse, GetInstanceConfigResponse, GuestReadinessLevel,
+    InstanceIdRequest, InstanceStateKind, InstanceStatusResponse, LogStreamSource,
 };
 use std::io::IsTerminal;
 
@@ -17,7 +17,34 @@ fn status_json(instance_id: &str, response: &InstanceStatusResponse) -> serde_js
         "state": state_kind_name(response.state()),
         "detail": response.detail,
         "error_message": response.error_message,
+        "readiness": readiness_level_name(response.readiness()),
+        "terminal_readiness": readiness_level_name(response.terminal_readiness()),
     })
+}
+
+/// Wire name of a readiness level, or `None` for "no level reached yet in
+/// this run" (the proto's unspecified value).
+pub(crate) fn readiness_level_name(level: GuestReadinessLevel) -> Option<&'static str> {
+    match level {
+        GuestReadinessLevel::Unspecified => None,
+        GuestReadinessLevel::SerialUp => Some("SerialUp"),
+        GuestReadinessLevel::QgaUp => Some("QgaUp"),
+        GuestReadinessLevel::DisplayApplied => Some("DisplayApplied"),
+        GuestReadinessLevel::GuestOsUp => Some("GuestOsUp"),
+        GuestReadinessLevel::WaydroidReady => Some("WaydroidReady"),
+    }
+}
+
+/// One line describing where the guest is on the readiness ladder: the level
+/// reached and the strongest level the instance's effective `(kind,
+/// boot_mode)` profile can reach at all.
+fn readiness_line(response: &InstanceStatusResponse) -> String {
+    let reached = readiness_level_name(response.readiness()).unwrap_or("none");
+    match readiness_level_name(response.terminal_readiness()) {
+        Some(terminal) if reached == terminal => format!("{reached} (terminal)"),
+        Some(terminal) => format!("{reached} of {terminal}"),
+        None => reached.to_string(),
+    }
 }
 
 pub async fn handle_status(
@@ -40,6 +67,7 @@ pub async fn handle_status(
         "state: {}",
         colorize_status(state, std::io::stdout().is_terminal())
     );
+    println!("readiness: {}", readiness_line(&response));
     if !response.detail.is_empty() {
         println!("detail: {}", response.detail);
     }
@@ -671,16 +699,47 @@ fn print_instance_config(config: GetInstanceConfigResponse) {
         }
     }
 }
+pub async fn handle_daemon_logs(
+    client: &mut TracedClient,
+    follow: bool,
+    json: bool,
+    since: Option<u64>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut stream = client
+        .stream_daemon_logs(andler_rpc::proto::DaemonLogsRequest {
+            follow,
+            since_ms: since,
+        })
+        .await?
+        .into_inner();
+
+    let mut stdout = std::io::stdout();
+    use std::io::Write;
+    while let Some(line) = stream.message().await? {
+        if json {
+            writeln!(
+                stdout,
+                "{{\"ts_ms\":{},\"line\":{}}}",
+                line.ts_ms,
+                serde_json::to_string(&line.line)?
+            )?;
+        } else {
+            writeln!(stdout, "{}", line.line)?;
+        }
+    }
+    Ok(())
+}
 
 #[cfg(test)]
 mod tests {
     use super::{
-        config_status_json, log_line_matches_filters, parse_state_filter, status_json, MetricsJson,
+        config_status_json, log_line_matches_filters, parse_state_filter, readiness_level_name,
+        readiness_line, status_json, MetricsJson,
     };
     use crate::CliLogSource;
     use andler_rpc::proto::{
-        ConfigKeyDiff, GetConfigStatusResponse, InstanceStateKind, InstanceStatusResponse,
-        LogLineResponse, LogStreamSource,
+        ConfigKeyDiff, GetConfigStatusResponse, GuestReadinessLevel, InstanceStateKind,
+        InstanceStatusResponse, LogLineResponse, LogStreamSource,
     };
 
     fn line(source: LogStreamSource, text: &str) -> LogLineResponse {
@@ -797,12 +856,36 @@ mod tests {
             state: InstanceStateKind::Running as i32,
             detail: "running fine".to_string(),
             error_message: String::new(),
+            readiness: GuestReadinessLevel::GuestOsUp as i32,
+            terminal_readiness: GuestReadinessLevel::GuestOsUp as i32,
         };
         let json = status_json("0123456789abcdef0123456789abcdef", &response);
         assert_eq!(json["instance_id"], "0123456789abcdef0123456789abcdef");
         assert_eq!(json["state"], "Running");
         assert_eq!(json["detail"], "running fine");
         assert_eq!(json["error_message"], "");
+        assert_eq!(json["readiness"], "GuestOsUp");
+        assert_eq!(json["terminal_readiness"], "GuestOsUp");
+    }
+
+    #[test]
+    fn readiness_line_names_the_level_and_the_profiles_terminal_level() {
+        let mut response = InstanceStatusResponse {
+            state: InstanceStateKind::Running as i32,
+            detail: String::new(),
+            error_message: String::new(),
+            readiness: GuestReadinessLevel::QgaUp as i32,
+            terminal_readiness: GuestReadinessLevel::WaydroidReady as i32,
+        };
+        assert_eq!(readiness_line(&response), "QgaUp of WaydroidReady");
+
+        response.readiness = GuestReadinessLevel::WaydroidReady as i32;
+        assert_eq!(readiness_line(&response), "WaydroidReady (terminal)");
+
+        // A stopped instance reports no level, not a level named "none".
+        response.readiness = GuestReadinessLevel::Unspecified as i32;
+        assert_eq!(readiness_line(&response), "none of WaydroidReady");
+        assert_eq!(readiness_level_name(response.readiness()), None);
     }
 
     #[test]
@@ -811,10 +894,13 @@ mod tests {
             state: InstanceStateKind::Error as i32,
             detail: String::new(),
             error_message: "boom".to_string(),
+            readiness: GuestReadinessLevel::Unspecified as i32,
+            terminal_readiness: GuestReadinessLevel::GuestOsUp as i32,
         };
         let json = status_json("deadbeef", &response);
         assert_eq!(json["state"], "Error");
         assert_eq!(json["error_message"], "boom");
+        assert_eq!(json["readiness"], serde_json::Value::Null);
     }
 
     #[test]
@@ -854,35 +940,4 @@ mod tests {
         assert_eq!(json["file_error"], "missing field 'cpu'");
         assert!(json["diffs"].is_array());
     }
-}
-
-pub async fn handle_daemon_logs(
-    client: &mut TracedClient,
-    follow: bool,
-    json: bool,
-    since: Option<u64>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let mut stream = client
-        .stream_daemon_logs(andler_rpc::proto::DaemonLogsRequest {
-            follow,
-            since_ms: since,
-        })
-        .await?
-        .into_inner();
-
-    let mut stdout = std::io::stdout();
-    use std::io::Write;
-    while let Some(line) = stream.message().await? {
-        if json {
-            writeln!(
-                stdout,
-                "{{\"ts_ms\":{},\"line\":{}}}",
-                line.ts_ms,
-                serde_json::to_string(&line.line)?
-            )?;
-        } else {
-            writeln!(stdout, "{}", line.line)?;
-        }
-    }
-    Ok(())
 }

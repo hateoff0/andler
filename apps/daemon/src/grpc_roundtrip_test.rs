@@ -9,9 +9,9 @@ use andler_rpc::proto::{
     CpuConfig, CreateInstanceRequest, DetachDiskRequest, DetachNetworkRequest, DiskConfig,
     DisplayConfig, DownloadBaseImageRequest, Empty, EventStreamRequest, ExecCommandRequest,
     ExportInstanceDiskRequest, ExportInstanceOciRequest, FirmwareConfig, GetInstanceConfigResponse,
-    GpuConfig, GuestProvisionRequest, InputConfig, InstallGuestAgentRequest, InstanceIdRequest,
-    InstanceStateKind, ListRemoteBaseImagesRequest, MemoryConfig, NetworkConfig, OpCancelRequest,
-    ProvisionMkdirP, RemoveGuestAgentRequest, RemoveInstanceRequest, Resolution,
+    GpuConfig, GuestProvisionRequest, GuestReadinessLevel, InputConfig, InstallGuestAgentRequest,
+    InstanceIdRequest, InstanceStateKind, ListRemoteBaseImagesRequest, MemoryConfig, NetworkConfig,
+    OpCancelRequest, ProvisionMkdirP, RemoveGuestAgentRequest, RemoveInstanceRequest, Resolution,
     RestoreSnapshotRequest, SetInstanceConfigRequest,
 };
 use tokio::net::TcpListener;
@@ -238,6 +238,16 @@ async fn create_instance_round_trips_over_real_grpc_and_status_reports_created()
         .expect("freshly created instance must be found")
         .into_inner();
     assert_eq!(status.state, InstanceStateKind::Created as i32);
+    assert_eq!(
+        status.readiness,
+        GuestReadinessLevel::Unspecified as i32,
+        "a run that has not started reports no readiness level"
+    );
+    assert_eq!(
+        status.terminal_readiness,
+        GuestReadinessLevel::GuestOsUp as i32,
+        "a Linux VM's terminal readiness level is GuestOsUp, derived from its (kind, boot_mode) profile"
+    );
 
     server.abort();
 }
@@ -1449,7 +1459,6 @@ async fn config_round_trip_preserves_extra_devices_over_real_grpc() {
         trim_on_shutdown: false,
         compact_on_shutdown: false,
         snapshot_timeout_secs: None,
-        ..Default::default()
     });
 
     // UpdateInstanceConfigRequest round-trips through the daemon's update path.
