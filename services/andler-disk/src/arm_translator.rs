@@ -180,6 +180,41 @@ fn build_staging_archive(
     Ok(Some(archive))
 }
 
+/// The one command that installs the staged tree over the guest's Waydroid
+/// system directory and clears the staging directory.
+fn move_staged_command(staging: &str, system_dir: &str) -> Result<String, DiskError> {
+    let staging = escape_guest_path(staging)?;
+    let dest = escape_guest_path(system_dir)?;
+    Ok(format!("cp -a {staging}/. {dest}/ && rm -rf {staging}"))
+}
+
+/// The one command that removes an outgoing translator's entries.
+///
+/// The patterns are this crate's own constants (`lib/libndk*`), expanded by the
+/// guest's shell, so they stay unescaped — that is what makes the glob work,
+/// and it is safe because nothing outside this crate supplies them.
+fn remove_translator_command(system_dir: &str, patterns: &[&str]) -> Result<String, DiskError> {
+    let dest = escape_guest_path(system_dir)?;
+    let mut command = String::new();
+    for pattern in patterns {
+        command.push_str(&format!("rm -rf {dest}/{pattern} ; "));
+    }
+    command.push_str("true");
+    Ok(command)
+}
+
+/// Escapes a guest path for the guest's shell, refusing what the appliance's
+/// script parser cannot carry.
+fn escape_guest_path(value: &str) -> Result<String, DiskError> {
+    if value.contains('\'') || value.contains('"') {
+        return Err(DiskError::FileSystem(format!(
+            "cannot run the command: the guest path {value:?} contains a quote, which the \
+             appliance's script parser cannot carry"
+        )));
+    }
+    Ok(shell_escape(value))
+}
+
 /// The one command that unpacks the staged archive into the guest, fixes the
 /// payload's executable bits and removes the archive.
 ///
@@ -190,17 +225,8 @@ fn build_staging_archive(
 /// separated by whitespace"). Backslash escapes are passed through to the
 /// guest's shell untouched, so they are the safe way to spell a path.
 fn staging_extract_command(guest_archive: &str, staging: &str) -> Result<String, DiskError> {
-    for value in [guest_archive, staging] {
-        if value.contains('\'') || value.contains('"') {
-            return Err(DiskError::FileSystem(format!(
-                "cannot stage the translator: the guest path {value:?} contains a quote, which \
-                 the appliance's script parser cannot carry"
-            )));
-        }
-    }
-
-    let archive = shell_escape(guest_archive);
-    let staging = shell_escape(staging);
+    let archive = escape_guest_path(guest_archive)?;
+    let staging = escape_guest_path(staging)?;
     Ok(format!(
         "tar -xzf {archive} -C {staging} && (chmod -R 755 {staging}/bin || true) ; rm -f {archive}"
     ))
@@ -344,11 +370,14 @@ pub async fn switch_translator_with(
     if let Some(old) = current {
         report(TranslatorStage::Cleanup);
         let old_info = resolve(old);
-        for rel in resolve_entry_paths(Path::new(&system_dir), old_info.files) {
-            cleanup_ops.push(MutatorOp::RmRf {
-                path: format!("{system_dir}/{}", rel.display()),
-            });
-        }
+        // Removed by the guest's own shell. These are guest paths, so
+        // resolving a wildcard from the host — which is what this did — always
+        // failed, the pattern was skipped with a warning, and switching away
+        // from libndk (`lib/libndk*`, `lib64/libndk*`) left its libraries
+        // behind in the guest.
+        cleanup_ops.push(MutatorOp::RunShell {
+            command: remove_translator_command(&system_dir, old_info.files)?,
+        });
         cleanup_ops.push(MutatorOp::RmRf {
             path: format!("{system_dir}/etc/init/{}.rc", dir_name(old)),
         });
@@ -358,45 +387,16 @@ pub async fn switch_translator_with(
             .map_err(|e| DiskError::FileSystem(format!("failed to remove old translator: {e}")))?;
     }
 
-    // Move the already-verified staged files into place (same filesystem
-    // rename — more reliable than a second copy loop).
-    let mut move_ops = Vec::new();
-    for rel in &rel_paths {
-        let staged = Path::new(&staging).join(rel);
-        let dst = Path::new(&system_dir).join(rel);
-        let staged_guest = staged.to_string_lossy().into_owned();
-        let dst_guest = dst.to_string_lossy().into_owned();
-        if !mutator
-            .exists(&staged_guest)
-            .await
-            .map_err(|e| DiskError::FileSystem(format!("failed to stat staged file: {e}")))?
-        {
-            continue;
-        }
-        if let Some(parent) = dst.parent() {
-            move_ops.push(MutatorOp::MkdirP {
-                path: parent.to_string_lossy().into_owned(),
-            });
-        }
-        if mutator
-            .exists(&dst_guest)
-            .await
-            .map_err(|e| DiskError::FileSystem(format!("failed to stat destination: {e}")))?
-        {
-            move_ops.push(MutatorOp::RmRf {
-                path: dst_guest.clone(),
-            });
-        }
-        move_ops.push(MutatorOp::Mv {
-            src: staged_guest,
-            dst: dst_guest,
-        });
-    }
-    move_ops.push(MutatorOp::RmRf {
-        path: staging.clone(),
-    });
+    // One in-guest copy instead of a host-side loop. That loop asked the
+    // appliance `exists()` twice per file, and each `exists()` is its own
+    // guestfish run — its own appliance session, seconds apiece — so ~177
+    // files meant ~354 sessions, which is where a switch really spent its
+    // minutes. The re-checks were redundant anyway: the payload was packed
+    // from these very paths (tar would have failed on a missing one), and
+    // `cp -a` overwrites whatever is already at the destination.
+    let command = move_staged_command(&staging, &system_dir)?;
     mutator
-        .apply(&move_ops)
+        .apply(&[MutatorOp::RunShell { command }])
         .await
         .map_err(|e| DiskError::FileSystem(format!("failed to install translator: {e}")))?;
 
@@ -619,6 +619,30 @@ mod tests {
         // A quote has no safe spelling here, so it is refused rather than
         // silently mangled.
         assert!(staging_extract_command("/it's/x.tar.gz", "/c").is_err());
+    }
+
+    #[test]
+    fn the_move_and_cleanup_commands_are_quote_free() {
+        // The move used to be a host-side loop over every file, asking the
+        // appliance `exists()` twice per file — one guestfish session each.
+        let move_command = move_staged_command("/staging", "/var/lib/waydroid/overlay/system")
+            .expect("plain paths are expressible");
+        assert_eq!(
+            move_command,
+            "cp -a /staging/. /var/lib/waydroid/overlay/system/ && rm -rf /staging"
+        );
+        assert!(!move_command.contains('\''), "{move_command}");
+
+        // The cleanup resolver used to read the *host* filesystem for guest
+        // paths, so libndk's wildcards were skipped and its libraries stayed.
+        let cleanup = remove_translator_command(
+            "/var/lib/waydroid/overlay/system",
+            &["lib/libndk*", "lib64/libndk*"],
+        )
+        .expect("the constants are expressible");
+        assert!(cleanup.contains("rm -rf /var/lib/waydroid/overlay/system/lib/libndk* ;"));
+        assert!(cleanup.contains("rm -rf /var/lib/waydroid/overlay/system/lib64/libndk* ;"));
+        assert!(!cleanup.contains('\''), "{cleanup}");
     }
 
     /// GuestMutator over a local directory — lets the guest-path logic be
