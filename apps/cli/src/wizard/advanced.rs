@@ -682,7 +682,11 @@ pub fn parse_resolution(s: &str) -> Result<Resolution, String> {
 }
 
 fn ask_network_mode(prefilled: Option<NetworkMode>) -> Result<NetworkMode, WizardError> {
-    let options = vec!["NAT (default)", "Bridge", "Isolated (not implemented yet)"];
+    let options = vec![
+        "NAT (default)",
+        "Bridge",
+        "Isolated (off every host network)",
+    ];
     let selection = Select::new("Network mode:", options)
         .with_help_message("NAT needs no host setup; bridge requires an existing bridge interface")
         .with_starting_cursor(match prefilled {
@@ -699,7 +703,7 @@ fn ask_network_mode(prefilled: Option<NetworkMode>) -> Result<NetworkMode, Wizar
         "Bridge" => NetworkMode::Bridge {
             interface: String::new(),
         },
-        "Isolated (not implemented yet)" | "Isolated" => NetworkMode::Isolated,
+        "Isolated (off every host network)" | "Isolated" => NetworkMode::Isolated,
         _ => unreachable!(),
     })
 }

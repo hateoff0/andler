@@ -146,17 +146,25 @@ fn summary_text(
             basic.disk_size_gib()
         ),
     );
+    let answered_uefi = match basic {
+        BasicResult::Linux(l) => l.enable_uefi,
+        BasicResult::Android(_) => None,
+    };
     screen.field(
         "firmware",
-        match basic {
-            BasicResult::Linux(l) if !l.enable_uefi => "Legacy BIOS".to_string(),
-            _ => match &detected.ovmf {
+        match answered_uefi {
+            Some(false) => "Legacy BIOS".to_string(),
+            Some(true) => match &detected.ovmf {
+                Ok(found) => format!("UEFI/OVMF ({})", found.vars_template.display()),
+                Err(_) => "UEFI/OVMF (template not found)".to_string(),
+            },
+            None => match &detected.ovmf {
                 Ok(found) => format!(
                     "UEFI/OVMF ({}){}",
                     found.vars_template.display(),
                     if is_basic { " (auto-detected)" } else { "" }
                 ),
-                Err(_) => "UEFI/OVMF (template not found)".to_string(),
+                Err(_) => "Legacy BIOS (no OVMF found)".to_string(),
             },
         },
     );
@@ -282,7 +290,7 @@ fn summary_text(
     }
     screen.note("the disk is thin-provisioned: it starts small and grows with use.");
 
-    screen.render_to_string()
+    screen.render_plain()
 }
 
 pub(crate) fn format_nat_backend(passt_available: bool) -> NatBackend {
@@ -318,7 +326,7 @@ mod tests {
             iso_path: "/isos/cachyos.iso".into(),
             disk_size_gib: 128,
             instances_root: "/home/user/.andler/instances".into(),
-            enable_uefi: true,
+            enable_uefi: Some(true),
         });
         let rendered = summary_text(&basic, None, &super::super::build::sample_detected());
 
@@ -339,7 +347,7 @@ mod tests {
             iso_path: String::new(),
             disk_size_gib: 64,
             instances_root: "/tmp/instances".into(),
-            enable_uefi: true,
+            enable_uefi: Some(true),
         });
         let rendered = summary_text(&basic, None, &super::super::build::sample_detected());
 
@@ -372,7 +380,7 @@ mod tests {
             iso_path: String::new(),
             disk_size_gib: 64,
             instances_root: "/tmp/instances".into(),
-            enable_uefi: true,
+            enable_uefi: Some(true),
         });
         let advanced = AdvancedConfig {
             clipboard_enabled: false,
@@ -401,7 +409,6 @@ mod tests {
             gapps: true,
             disk_size_gib: 256,
             instances_root: "/home/user/.andler/instances".into(),
-            linked: false,
         });
         let advanced = AdvancedConfig {
             clipboard_enabled: true,
@@ -447,7 +454,6 @@ mod tests {
             gapps: false,
             disk_size_gib: 256,
             instances_root: "/tmp/instances".into(),
-            linked: false,
         });
         let rendered = summary_text(&basic, None, &super::super::build::sample_detected());
 

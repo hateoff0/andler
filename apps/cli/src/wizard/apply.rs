@@ -10,13 +10,13 @@ pub async fn create(
     result: &WizardResult,
 ) -> Result<String, WizardError> {
     let mut progress = Progress::start("creating the vm");
-    let created = match result {
-        WizardResult::Linux(req) => client
-            .create_instance(req.clone())
+    let created = match result.creation.clone().into_request() {
+        crate::create::ProtoRequest::Linux(req) => client
+            .create_instance(*req)
             .await
             .map(|response| response.into_inner().instance_id),
-        WizardResult::Android(req) => client
-            .create_android_instance(req.clone())
+        crate::create::ProtoRequest::Android(req) => client
+            .create_android_instance(*req)
             .await
             .map(|response| response.into_inner().instance_id),
     };

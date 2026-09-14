@@ -18,7 +18,9 @@ pub struct LinuxBasicResult {
     pub iso_path: String,
     pub disk_size_gib: u64,
     pub instances_root: String,
-    pub enable_uefi: bool,
+    /// `Some` when the flow asked (or a flag answered); `None` leaves the
+    /// choice to the resolver's host-firmware default.
+    pub enable_uefi: Option<bool>,
 }
 
 #[derive(Debug, Clone)]
@@ -30,7 +32,6 @@ pub struct AndroidBasicResult {
     pub gapps: bool,
     pub disk_size_gib: u64,
     pub instances_root: String,
-    pub linked: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -74,12 +75,13 @@ pub fn run_linux(
     name: String,
     iso_path: Option<String>,
     instances_root: Option<String>,
+    disk_size_gib: Option<u64>,
 ) -> Result<LinuxBasicResult, WizardError> {
     ui::header("linux image & storage");
     let iso = ask_iso_path(iso_path)?;
-    let disk_size_gib = ask_disk_size(DEFAULT_DISK_GIB)?;
-    let instances_root = instances_root.unwrap_or_else(default_instances_root);
-    let enable_uefi = ask_enable_uefi()?;
+    let disk_size_gib = ask_disk_size(disk_size_gib.unwrap_or(DEFAULT_DISK_GIB))?;
+    let instances_root = instances_root.unwrap_or_else(crate::create::default_instances_root);
+    let enable_uefi = Some(ask_enable_uefi()?);
     Ok(LinuxBasicResult {
         name,
         iso_path: iso,
@@ -94,14 +96,15 @@ pub async fn run_android(
     name: String,
     base_image_path: Option<String>,
     instances_root: Option<String>,
+    disk_size_gib: Option<u64>,
 ) -> Result<AndroidBasicResult, WizardError> {
     ui::header("android image & storage");
     let android_version = ask_android_version()?;
     let gapps = ask_gapps(None)?;
     let choice = super::base_image::ask(client, base_image_path, android_version, gapps).await?;
     let (base_image, base_image_auto_resolved) = (choice.path, choice.auto_resolved);
-    let disk_size_gib = ask_disk_size(DEFAULT_DISK_GIB)?;
-    let instances_root = instances_root.unwrap_or_else(default_instances_root);
+    let disk_size_gib = ask_disk_size(disk_size_gib.unwrap_or(DEFAULT_DISK_GIB))?;
+    let instances_root = instances_root.unwrap_or_else(crate::create::default_instances_root);
     Ok(AndroidBasicResult {
         name,
         base_image,
@@ -110,7 +113,6 @@ pub async fn run_android(
         gapps,
         disk_size_gib,
         instances_root,
-        linked: false,
     })
 }
 
@@ -273,12 +275,6 @@ pub(crate) fn validate_base_image_path(path: &str) -> Result<(), WizardError> {
         )));
     }
     Ok(())
-}
-
-fn default_instances_root() -> String {
-    andler_core::paths::instances_root()
-        .to_string_lossy()
-        .into_owned()
 }
 
 /// Human-readable size for the download confirmation; unknown sizes say so

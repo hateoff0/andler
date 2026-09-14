@@ -45,7 +45,8 @@ pub use disk_chain::{DiskChain, DiskLayer, LayerKind};
 pub use error::{BackendError, FsmError};
 pub use events::{
     DaemonEvent, EventKind, EventLogLevel, GuestReadinessLevel, OpId, Operation, OperationKind,
-    OperationState, QmpEvent, QmpEventRecord,
+    OperationState, ProbeOutcome, QmpEvent, QmpEventRecord, ReadinessLadder, ReadinessProfile,
+    ReadinessSnapshot,
 };
 pub use fsm::{InstanceEvent, InstanceState};
 pub use guest_mutator::{GuestMutator, MutatorError, MutatorOp};

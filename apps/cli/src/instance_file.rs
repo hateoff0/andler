@@ -1,11 +1,9 @@
 use std::path::{Path, PathBuf};
 
+use andler_core::config::{ConfigDraft, DiskDraft, DiskSource, DraftKind, FirmwareDraft};
 use andler_core::{
-    AudioConfig, CdromBus, CpuConfig, DiskConfig, DisplayConfig, GpuConfig, InputConfig,
-    MemoryConfig, NetworkConfig,
-};
-use andler_rpc::proto::{
-    AndroidProfile as ProtoAndroidProfile, CreateAndroidInstanceRequest, CreateInstanceRequest,
+    AndroidBootMode, AndroidProfile, AndroidVersion, ArmTranslator, AudioConfig, CdromBus,
+    CpuConfig, DisplayConfig, GpuConfig, InputConfig, MemoryConfig, NetworkConfig,
 };
 use serde::Deserialize;
 
@@ -42,12 +40,12 @@ pub enum InstanceFileError {
     UnsupportedValue { field: &'static str, value: String },
 }
 
+/// An instance file resolved to the one draft shape every creation path uses,
+/// plus the instances root the daemon places the Android instance directory in.
 #[derive(Debug)]
-#[allow(clippy::large_enum_variant)] // carries full proto requests; boxing would complicate callers
-pub enum InstanceFileResult {
-    Linux(CreateInstanceRequest),
-
-    Android(CreateAndroidInstanceRequest),
+pub struct InstanceFileDraft {
+    pub draft: ConfigDraft,
+    pub instances_root: String,
 }
 
 #[derive(Debug, Clone, Copy, Default, Deserialize)]
@@ -78,10 +76,15 @@ pub struct InstanceFile {
     #[serde(default)]
     pub cdrom_bus: InstanceFileCdromBus,
 
-    pub ovmf_vars_path: PathBuf,
+    /// OVMF_VARS template for this instance. Omitted, the host's discovered
+    /// pair is used, exactly like omitting `--ovmf-vars-template`.
+    #[serde(default)]
+    pub ovmf_vars_path: Option<PathBuf>,
 
-    #[serde(default = "default_true")]
-    pub enable_uefi: bool,
+    /// Omitted, UEFI is used when the host offers an OVMF pair and Legacy
+    /// BIOS is used when it does not.
+    #[serde(default)]
+    pub enable_uefi: Option<bool>,
 
     /// Start this instance automatically when the daemon starts.
     #[serde(default)]
@@ -251,121 +254,102 @@ impl InstanceFile {
             self.base_image_path = Some(canonical.to_string_lossy().into_owned());
         }
 
-        self.ovmf_vars_path = std::fs::canonicalize(&self.ovmf_vars_path).map_err(|source| {
-            InstanceFileError::InvalidPath {
-                field: "ovmf_vars_path",
-                path: self.ovmf_vars_path.clone(),
-                source,
-            }
-        })?;
+        if let Some(ovmf_vars_path) = &self.ovmf_vars_path {
+            self.ovmf_vars_path =
+                Some(std::fs::canonicalize(ovmf_vars_path).map_err(|source| {
+                    InstanceFileError::InvalidPath {
+                        field: "ovmf_vars_path",
+                        path: ovmf_vars_path.clone(),
+                        source,
+                    }
+                })?);
+        }
 
         Ok(())
     }
 
-    pub fn into_result(self) -> Result<InstanceFileResult, InstanceFileError> {
-        if self.android_version.is_some() || self.base_image_path.is_some() {
-            Ok(InstanceFileResult::Android(self.into_android_request()?))
+    /// Builds the draft the one resolver turns into the instance config.
+    /// Paths were canonicalized by `load`; everything else is left to the
+    /// resolver, so an omitted field means the same thing here as it does on
+    /// the CLI-flag and wizard paths.
+    pub fn into_draft(self) -> Result<InstanceFileDraft, InstanceFileError> {
+        let instances_root = self
+            .instances_root
+            .clone()
+            .unwrap_or_else(crate::create::default_instances_root);
+        let android = self.android_version.is_some() || self.base_image_path.is_some();
+        let firmware = FirmwareDraft {
+            enable_uefi: self.enable_uefi,
+            ovmf_vars_template: self.ovmf_vars_path.clone(),
+        };
+        let name = self.name.clone();
+
+        let draft = if android {
+            self.into_android_draft(&name, &instances_root, firmware)?
         } else {
-            Ok(InstanceFileResult::Linux(self.into_request()?))
-        }
+            self.into_linux_draft(name, firmware)?
+        };
+
+        Ok(InstanceFileDraft {
+            draft,
+            instances_root,
+        })
     }
 
-    fn into_request(self) -> Result<CreateInstanceRequest, InstanceFileError> {
+    fn into_linux_draft(
+        self,
+        name: String,
+        firmware: FirmwareDraft,
+    ) -> Result<ConfigDraft, InstanceFileError> {
         let disk_path = self
             .disk_path
             .clone()
             .ok_or(InstanceFileError::MissingField { field: "disk_path" })?;
-        let mut disk = DiskConfig::reference_default(disk_path);
-        if let Some(gib) = self.disk_size_gib {
-            disk.size_bytes =
-                gib.checked_mul(DiskConfig::GIB)
-                    .ok_or(InstanceFileError::UnsupportedValue {
-                        field: "disk_size_gib",
-                        value: gib.to_string(),
-                    })?;
-        }
-        disk.snapshot_timeout_secs = self.snapshot_timeout_secs;
-        disk.compact_on_shutdown = self.compact_on_shutdown;
-
         let iso_path = self
             .iso_path
             .clone()
             .ok_or(InstanceFileError::MissingField { field: "iso_path" })?;
-        let resolved_cdrom_bus = match self.cdrom_bus {
+        let cdrom_bus = match self.cdrom_bus {
             InstanceFileCdromBus::Auto => CdromBus::recommended_for_iso_filename(&iso_path),
             InstanceFileCdromBus::Virtio => CdromBus::VirtioScsi,
             InstanceFileCdromBus::Ide => CdromBus::Ide,
         };
 
-        let mut req = CreateInstanceRequest {
-            name: self.name,
-            iso_path: path_to_string(&iso_path),
-            cpu: Some(self.cpu.unwrap_or_else(CpuConfig::reference_default).into()),
-            memory: Some(
-                self.memory
-                    .unwrap_or_else(MemoryConfig::reference_default)
-                    .into(),
-            ),
-            disk: Some(disk.into()),
-            display: Some(
-                self.display
-                    .unwrap_or_else(DisplayConfig::reference_default)
-                    .into(),
-            ),
-            gpu: Some(self.gpu.unwrap_or_else(GpuConfig::reference_default).into()),
-            network: Some(
-                self.network
-                    .unwrap_or_else(NetworkConfig::reference_default)
-                    .into(),
-            ),
-            firmware: Some(
-                andler_core::FirmwareConfig {
-                    enable_uefi: self.enable_uefi,
-                    ovmf_code_path: std::path::PathBuf::new(),
-                    ovmf_vars_path: self.ovmf_vars_path.clone(),
-                }
-                .into(),
-            ),
-            audio: Some(
-                self.audio
-                    .unwrap_or_else(AudioConfig::reference_default)
-                    .into(),
-            ),
-            input: Some(
-                self.input
-                    .unwrap_or_else(InputConfig::reference_default)
-                    .into(),
-            ),
+        Ok(ConfigDraft {
+            name,
+            kind: DraftKind::Linux {
+                iso_path,
+                cdrom_bus,
+            },
+            disk: DiskDraft {
+                path: disk_path,
+                source: DiskSource::Fresh,
+                size_gib: self.disk_size_gib,
+                compact_on_shutdown: self.compact_on_shutdown,
+                snapshot_timeout_secs: self.snapshot_timeout_secs,
+            },
+            firmware,
             autostart: self.autostart,
-            ..Default::default()
-        };
-        req.set_cdrom_bus(resolved_cdrom_bus.into());
-        Ok(req)
+            cpu: self.cpu,
+            memory: self.memory,
+            display: self.display,
+            gpu: self.gpu,
+            network: self.network,
+            audio: self.audio,
+            input: self.input,
+        })
     }
 
-    fn into_android_request(self) -> Result<CreateAndroidInstanceRequest, InstanceFileError> {
-        let base_image_path = self.base_image_path.unwrap_or_default();
-
-        let overlay_size_bytes = self
-            .overlay_size_gib
-            .unwrap_or(128)
-            .checked_mul(1024 * 1024 * 1024)
-            .ok_or(InstanceFileError::UnsupportedValue {
-                field: "overlay_size_gib",
-                value: self.overlay_size_gib.unwrap_or(128).to_string(),
-            })?;
-
-        let instances_root = self.instances_root.unwrap_or_else(default_instances_root);
-
-        let android_version = self.android_version.unwrap_or(13);
-        let mut profile = ProtoAndroidProfile {
-            gapps: self.gapps,
-            microg: self.microg,
-            ..Default::default()
-        };
-        let android_version = match android_version {
-            11 => andler_rpc::proto::AndroidVersion::Android11,
-            13 => andler_rpc::proto::AndroidVersion::Android13,
+    fn into_android_draft(
+        self,
+        name: &str,
+        instances_root: &str,
+        firmware: FirmwareDraft,
+    ) -> Result<ConfigDraft, InstanceFileError> {
+        let base_image_path = self.base_image_path.clone().unwrap_or_default();
+        let android_version = match self.android_version.unwrap_or(13) {
+            11 => AndroidVersion::Android11,
+            13 => AndroidVersion::Android13,
             other => {
                 return Err(InstanceFileError::UnsupportedValue {
                     field: "android_version",
@@ -373,52 +357,84 @@ impl InstanceFile {
                 })
             }
         };
-        profile.set_android_version(android_version);
 
         let arm_translator = match self.arm_translator.as_deref() {
-            Some("libndk") => andler_rpc::proto::ArmTranslator::Libndk,
-            Some("libhoudini") => andler_rpc::proto::ArmTranslator::Libhoudini,
-            Some(_) => andler_rpc::proto::ArmTranslator::None,
-            None if self.libndk => andler_rpc::proto::ArmTranslator::Libndk,
-            None => andler_rpc::proto::ArmTranslator::None,
+            Some(raw) => raw.parse::<ArmTranslator>().map_err(|reason| {
+                InstanceFileError::UnsupportedValue {
+                    field: "arm_translator",
+                    value: format!("{raw} ({reason})"),
+                }
+            })?,
+            None if self.libndk => ArmTranslator::Libndk,
+            None => ArmTranslator::None,
         };
-        profile.set_arm_translator(arm_translator);
 
-        profile.base_image_pin = self
-            .base_image_pin
-            .map(|pin| andler_rpc::proto::BaseImagePin {
-                id: pin.id,
-                sha256: pin.sha256,
-            });
+        let profile = AndroidProfile {
+            android_version,
+            gapps: self.gapps,
+            microg: self.microg,
+            arm_translator,
+            boot_mode: AndroidBootMode::Android,
+            base_image_pin: self.base_image_pin,
+        };
 
-        Ok(CreateAndroidInstanceRequest {
-            name: self.name,
-            profile: Some(profile),
-            base_image_path,
-            instances_root,
-            overlay_size_bytes,
-            ovmf_vars_template: path_to_string(&self.ovmf_vars_path),
-            linked_overlay: self.linked_overlay,
+        Ok(ConfigDraft {
+            name: name.to_string(),
+            kind: DraftKind::Android { profile },
+            disk: DiskDraft {
+                path: PathBuf::from(instances_root).join("disk.qcow2"),
+                source: DiskSource::BaseImage {
+                    path: PathBuf::from(base_image_path),
+                    linked: self.linked_overlay,
+                },
+                size_gib: self.overlay_size_gib,
+                compact_on_shutdown: false,
+                snapshot_timeout_secs: None,
+            },
+            firmware,
+            autostart: self.autostart,
+            cpu: self.cpu,
+            memory: self.memory,
+            display: self.display,
+            gpu: self.gpu,
+            network: self.network,
+            audio: self.audio,
+            input: self.input,
         })
     }
 }
 
-fn path_to_string(path: &Path) -> String {
-    path.to_string_lossy().into_owned()
-}
-
-fn default_instances_root() -> String {
-    andler_core::paths::instances_root()
-        .to_string_lossy()
-        .into_owned()
-}
-
-fn default_true() -> bool {
-    true
-}
-
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use crate::create::Creation;
+    use andler_core::config::HostFirmware;
+    use andler_core::{InstanceConfig, InstanceKind};
+
+    fn host() -> HostFirmware {
+        HostFirmware {
+            ovmf_code_path: Some(PathBuf::from("/usr/share/OVMF/OVMF_CODE_4M.fd")),
+            ovmf_vars_template: Some(PathBuf::from("/usr/share/OVMF/OVMF_VARS_4M.fd")),
+        }
+    }
+
+    fn draft(toml_text: &str) -> InstanceFileDraft {
+        let file: InstanceFile = toml::from_str(toml_text).expect("TOML must parse");
+        file.into_draft().expect("draft must build")
+    }
+
+    fn resolve(toml_text: &str) -> InstanceConfig {
+        let file = draft(toml_text);
+        Creation::resolve(&file.draft, file.instances_root, &host())
+            .expect("must resolve")
+            .cfg
+    }
+
+    fn resolve_err(toml_text: &str) -> String {
+        let file = draft(toml_text);
+        Creation::resolve(&file.draft, file.instances_root, &host()).expect_err("must be refused")
+    }
+
     #[test]
     fn builtin_headless_template_parses() {
         let template = TemplateFile::load("headless").expect("built-in must parse");
@@ -447,7 +463,6 @@ mod tests {
         assert!(text.contains("not found"), "{text}");
         assert!(text.contains("headless"), "{text}");
     }
-    use super::*;
 
     const MINIMAL_LINUX_TOML: &str = r#"
         name = "test-vm"
@@ -465,129 +480,137 @@ mod tests {
 
     #[test]
     fn minimal_linux_file_parses_and_fills_every_section() {
-        let file: InstanceFile =
-            toml::from_str(MINIMAL_LINUX_TOML).expect("minimal Linux TOML must parse");
-        let result = file.into_result().unwrap();
-        match result {
-            InstanceFileResult::Linux(req) => {
-                assert_eq!(req.name, "test-vm");
-                assert_eq!(req.iso_path, "/tmp/test.iso");
-                assert!(req.cpu.is_some());
-                assert!(req.memory.is_some());
-                assert!(req.disk.is_some());
-                assert!(req.display.is_some());
-                assert!(req.gpu.is_some());
-                assert!(req.network.is_some());
-                assert!(req.firmware.is_some());
-                assert!(req.audio.is_some());
-                assert!(req.input.is_some());
+        let cfg = resolve(MINIMAL_LINUX_TOML);
+        assert_eq!(cfg.name, "test-vm");
+        assert_eq!(
+            cfg.kind,
+            InstanceKind::LinuxVm {
+                iso_path: PathBuf::from("/tmp/test.iso"),
+                cdrom_bus: CdromBus::Ide,
             }
-            other => panic!("expected Linux, got {other:?}"),
-        }
+        );
+        assert_eq!(cfg.cpu, CpuConfig::reference_default());
+        assert_eq!(cfg.memory, MemoryConfig::reference_default());
+        assert_eq!(cfg.display, DisplayConfig::reference_default());
+        assert_eq!(cfg.gpu, GpuConfig::reference_default());
+        assert_eq!(cfg.network, NetworkConfig::reference_default());
+        assert_eq!(cfg.audio, AudioConfig::reference_default());
+        assert_eq!(cfg.input, InputConfig::reference_default());
+        cfg.validate()
+            .expect("a minimal file resolves to a valid config");
+    }
+
+    #[test]
+    fn an_omitted_ovmf_template_resolves_like_an_omitted_flag() {
+        let toml = r#"
+            name = "test-vm"
+            iso_path = "/tmp/test.iso"
+            disk_path = "/tmp/disk.qcow2"
+        "#;
+        let cfg = resolve(toml);
+        assert!(cfg.firmware.enable_uefi);
+        assert!(
+            cfg.firmware.ovmf_vars_path.as_os_str().is_empty(),
+            "an omitted template means the daemon provisions its own, exactly like omitting \
+             --ovmf-vars-template"
+        );
+    }
+
+    #[test]
+    fn an_omitted_uefi_choice_follows_the_host_firmware() {
+        let toml = r#"
+            name = "test-vm"
+            iso_path = "/tmp/test.iso"
+            disk_path = "/tmp/disk.qcow2"
+        "#;
+        let file: InstanceFile = toml::from_str(toml).expect("TOML must parse");
+        let file_draft = file.into_draft().expect("draft");
+        let with_firmware = Creation::resolve(
+            &file_draft.draft,
+            file_draft.instances_root.clone(),
+            &host(),
+        )
+        .expect("resolves");
+        assert!(with_firmware.cfg.firmware.enable_uefi);
+
+        let without_firmware = Creation::resolve(
+            &file_draft.draft,
+            file_draft.instances_root,
+            &HostFirmware::default(),
+        )
+        .expect("resolves");
+        assert!(
+            !without_firmware.cfg.firmware.enable_uefi,
+            "without a host OVMF pair UEFI is off, never an empty pflash path"
+        );
     }
 
     #[test]
     fn linux_disk_size_gib_overrides_default() {
         let toml = format!("{MINIMAL_LINUX_TOML}\ndisk_size_gib = 100\n");
-        let file: InstanceFile = toml::from_str(&toml).expect("TOML must parse");
-        match file.into_result().unwrap() {
-            InstanceFileResult::Linux(req) => {
-                let disk = req.disk.expect("disk must be Some");
-                assert_eq!(disk.size_bytes, 100 * 1024 * 1024 * 1024);
-            }
-            other => panic!("expected Linux, got {other:?}"),
-        }
+        let cfg = resolve(&toml);
+        assert_eq!(cfg.disk.size_bytes, 100 * 1024 * 1024 * 1024);
     }
 
     #[test]
     fn linux_compact_on_shutdown_defaults_to_false() {
-        let file: InstanceFile =
-            toml::from_str(MINIMAL_LINUX_TOML).expect("minimal Linux TOML must parse");
-        match file.into_result().unwrap() {
-            InstanceFileResult::Linux(req) => {
-                let disk = req.disk.expect("disk must be Some");
-                assert!(
-                    !disk.compact_on_shutdown,
-                    "compact_on_shutdown must default to false when absent from TOML"
-                );
-            }
-            other => panic!("expected Linux, got {other:?}"),
-        }
+        let cfg = resolve(MINIMAL_LINUX_TOML);
+        assert!(
+            !cfg.disk.compact_on_shutdown,
+            "compact_on_shutdown must default to false when absent from TOML"
+        );
     }
 
     #[test]
     fn linux_compact_on_shutdown_can_be_enabled() {
         let toml = format!("{MINIMAL_LINUX_TOML}\ncompact_on_shutdown = true\n");
-        let file: InstanceFile = toml::from_str(&toml).expect("TOML must parse");
-        match file.into_result().unwrap() {
-            InstanceFileResult::Linux(req) => {
-                let disk = req.disk.expect("disk must be Some");
-                assert!(disk.compact_on_shutdown);
-            }
-            other => panic!("expected Linux, got {other:?}"),
-        }
+        let cfg = resolve(&toml);
+        assert!(cfg.disk.compact_on_shutdown);
     }
 
     #[test]
     fn linux_cdrom_bus_defaults_to_auto_detect_by_iso_filename() {
-        let file: InstanceFile =
-            toml::from_str(MINIMAL_LINUX_TOML).expect("minimal Linux TOML must parse");
-        match file.into_result().unwrap() {
-            InstanceFileResult::Linux(req) => {
-                assert_eq!(req.cdrom_bus(), andler_rpc::proto::CdromBus::Ide);
-            }
-            other => panic!("expected Linux, got {other:?}"),
-        }
+        let cfg = resolve(MINIMAL_LINUX_TOML);
+        let InstanceKind::LinuxVm { cdrom_bus, .. } = cfg.kind else {
+            panic!("expected a Linux VM");
+        };
+        assert_eq!(cdrom_bus, CdromBus::Ide);
     }
 
     #[test]
     fn linux_cdrom_bus_auto_detects_virtio_for_known_distro_filename() {
         let toml = MINIMAL_LINUX_TOML.replace("/tmp/test.iso", "/tmp/ubuntu-24.04.iso");
-        let file: InstanceFile = toml::from_str(&toml).expect("TOML must parse");
-        match file.into_result().unwrap() {
-            InstanceFileResult::Linux(req) => {
-                assert_eq!(req.cdrom_bus(), andler_rpc::proto::CdromBus::VirtioScsi);
-            }
-            other => panic!("expected Linux, got {other:?}"),
-        }
+        let cfg = resolve(&toml);
+        let InstanceKind::LinuxVm { cdrom_bus, .. } = cfg.kind else {
+            panic!("expected a Linux VM");
+        };
+        assert_eq!(cdrom_bus, CdromBus::VirtioScsi);
     }
 
     #[test]
     fn linux_cdrom_bus_explicit_choice_overrides_auto_detect() {
         let toml = MINIMAL_LINUX_TOML.replace("/tmp/test.iso", "/tmp/ubuntu-24.04.iso")
             + "\ncdrom_bus = \"ide\"\n";
-        let file: InstanceFile = toml::from_str(&toml).expect("TOML must parse");
-        match file.into_result().unwrap() {
-            InstanceFileResult::Linux(req) => {
-                assert_eq!(req.cdrom_bus(), andler_rpc::proto::CdromBus::Ide);
-            }
-            other => panic!("expected Linux, got {other:?}"),
-        }
+        let cfg = resolve(&toml);
+        let InstanceKind::LinuxVm { cdrom_bus, .. } = cfg.kind else {
+            panic!("expected a Linux VM");
+        };
+        assert_eq!(cdrom_bus, CdromBus::Ide);
     }
 
     #[test]
     fn minimal_android_file_parses() {
-        let file: InstanceFile =
-            toml::from_str(MINIMAL_ANDROID_TOML).expect("minimal Android TOML must parse");
-        let result = file.into_result().unwrap();
-        match result {
-            InstanceFileResult::Android(req) => {
-                assert_eq!(req.name, "test-android");
-                assert_eq!(req.base_image_path, "/tmp/base.qcow2");
-                assert_eq!(
-                    req.overlay_size_bytes,
-                    128 * 1024 * 1024 * 1024,
-                    "overlay default must be 128 GiB when overlay_size_gib is omitted"
-                );
-                assert!(req.profile.is_some());
-                let profile = req.profile.unwrap();
-                assert_eq!(
-                    profile.android_version(),
-                    andler_rpc::proto::AndroidVersion::Android13
-                );
-            }
-            other => panic!("expected Android, got {other:?}"),
-        }
+        let cfg = resolve(MINIMAL_ANDROID_TOML);
+        assert_eq!(cfg.name, "test-android");
+        assert_eq!(
+            cfg.disk.size_bytes,
+            128 * 1024 * 1024 * 1024,
+            "overlay default must be 128 GiB when overlay_size_gib is omitted"
+        );
+        let InstanceKind::AndroidVm { android_profile } = cfg.kind else {
+            panic!("expected an Android VM");
+        };
+        assert_eq!(android_profile.android_version, AndroidVersion::Android13);
     }
 
     #[test]
@@ -599,20 +622,14 @@ mod tests {
              microg = true\n\
              libndk = true\n"
         );
-        let file: InstanceFile = toml::from_str(&toml).expect("TOML must parse");
-        match file.into_result().unwrap() {
-            InstanceFileResult::Android(req) => {
-                assert_eq!(req.overlay_size_bytes, 30 * 1024 * 1024 * 1024);
-                let profile = req.profile.unwrap();
-                assert!(profile.gapps);
-                assert!(profile.microg);
-                assert_eq!(
-                    profile.arm_translator(),
-                    andler_rpc::proto::ArmTranslator::Libndk
-                );
-            }
-            other => panic!("expected Android, got {other:?}"),
-        }
+        let cfg = resolve(&toml);
+        assert_eq!(cfg.disk.size_bytes, 30 * 1024 * 1024 * 1024);
+        let InstanceKind::AndroidVm { android_profile } = cfg.kind else {
+            panic!("expected an Android VM");
+        };
+        assert!(android_profile.gapps);
+        assert!(android_profile.microg);
+        assert_eq!(android_profile.arm_translator, ArmTranslator::Libndk);
     }
 
     #[test]
@@ -623,79 +640,95 @@ mod tests {
              sha256 = \"{}\" }}\n",
             "ab".repeat(32)
         );
-        let file: InstanceFile = toml::from_str(&toml).expect("TOML must parse");
-        match file.into_result().unwrap() {
-            InstanceFileResult::Android(req) => {
-                let pin = req.profile.unwrap().base_image_pin.unwrap();
-                assert_eq!(pin.id, "android13-vanilla-2099-01-01T00:00:00Z");
-                assert_eq!(pin.sha256, "ab".repeat(32));
-            }
-            other => panic!("expected Android, got {other:?}"),
-        }
+        let file = draft(&toml);
+        let creation =
+            Creation::resolve(&file.draft, file.instances_root.clone(), &host()).expect("resolves");
+        let InstanceKind::AndroidVm { android_profile } = &creation.cfg.kind else {
+            panic!("expected an Android VM");
+        };
+        assert_eq!(
+            android_profile.base_image_pin,
+            Some(andler_core::BaseImagePin {
+                id: "android13-vanilla-2099-01-01T00:00:00Z".to_string(),
+                sha256: "ab".repeat(32),
+            })
+        );
+
+        let crate::create::ProtoRequest::Android(req) = creation.into_request() else {
+            panic!("expected an Android request");
+        };
+        let pin = req.profile.expect("profile").base_image_pin.expect("pin");
+        assert_eq!(pin.id, "android13-vanilla-2099-01-01T00:00:00Z");
+        assert_eq!(pin.sha256, "ab".repeat(32));
     }
 
     #[test]
     fn android_arm_translator_field_selects_libhoudini() {
         let toml = format!("{MINIMAL_ANDROID_TOML}\narm_translator = \"libhoudini\"\n");
-        let file: InstanceFile = toml::from_str(&toml).expect("TOML must parse");
-        match file.into_result().unwrap() {
-            InstanceFileResult::Android(req) => {
-                let profile = req.profile.unwrap();
-                assert_eq!(
-                    profile.arm_translator(),
-                    andler_rpc::proto::ArmTranslator::Libhoudini
-                );
-            }
-            other => panic!("expected Android, got {other:?}"),
-        }
+        let cfg = resolve(&toml);
+        let InstanceKind::AndroidVm { android_profile } = cfg.kind else {
+            panic!("expected an Android VM");
+        };
+        assert_eq!(android_profile.arm_translator, ArmTranslator::Libhoudini);
     }
 
     #[test]
     fn android_arm_translator_field_wins_over_legacy_libndk() {
         let toml = format!("{MINIMAL_ANDROID_TOML}\nlibndk = true\narm_translator = \"none\"\n");
-        let file: InstanceFile = toml::from_str(&toml).expect("TOML must parse");
-        match file.into_result().unwrap() {
-            InstanceFileResult::Android(req) => {
-                let profile = req.profile.unwrap();
-                assert_eq!(
-                    profile.arm_translator(),
-                    andler_rpc::proto::ArmTranslator::None
-                );
-            }
-            other => panic!("expected Android, got {other:?}"),
-        }
+        let cfg = resolve(&toml);
+        let InstanceKind::AndroidVm { android_profile } = cfg.kind else {
+            panic!("expected an Android VM");
+        };
+        assert_eq!(android_profile.arm_translator, ArmTranslator::None);
+    }
+
+    #[test]
+    fn android_unknown_arm_translator_is_rejected_not_silently_none() {
+        let toml = format!("{MINIMAL_ANDROID_TOML}\narm_translator = \"hibridge\"\n");
+        let err = draft_result(&toml).expect_err("an unknown translator must be rejected");
+        assert!(
+            matches!(
+                err,
+                InstanceFileError::UnsupportedValue {
+                    field: "arm_translator",
+                    ..
+                }
+            ),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn android_linux_only_sections_are_rejected_not_silently_dropped() {
+        let toml = format!("{MINIMAL_ANDROID_TOML}\n[cpu]\ncores = 16\nsockets = 1\nthreads = 1\npriority = \"Normal\"\n");
+        let err = resolve_err(&toml);
+        assert!(err.contains("`cpu` section"), "{err}");
+    }
+
+    #[test]
+    fn android_autostart_is_rejected_not_silently_dropped() {
+        let toml = format!("{MINIMAL_ANDROID_TOML}\nautostart = true\n");
+        let err = resolve_err(&toml);
+        assert!(err.contains("autostart"), "{err}");
     }
 
     #[test]
     fn android_no_translator_fields_defaults_to_none() {
-        let file: InstanceFile =
-            toml::from_str(MINIMAL_ANDROID_TOML).expect("minimal Android TOML must parse");
-        match file.into_result().unwrap() {
-            InstanceFileResult::Android(req) => {
-                let profile = req.profile.unwrap();
-                assert_eq!(
-                    profile.arm_translator(),
-                    andler_rpc::proto::ArmTranslator::None
-                );
-            }
-            other => panic!("expected Android, got {other:?}"),
-        }
+        let cfg = resolve(MINIMAL_ANDROID_TOML);
+        let InstanceKind::AndroidVm { android_profile } = cfg.kind else {
+            panic!("expected an Android VM");
+        };
+        assert_eq!(android_profile.arm_translator, ArmTranslator::None);
     }
 
     #[test]
     fn android_version_11_parses() {
         let toml = MINIMAL_ANDROID_TOML.replace("android_version = 13", "android_version = 11");
-        let file: InstanceFile = toml::from_str(&toml).expect("TOML must parse");
-        match file.into_result().unwrap() {
-            InstanceFileResult::Android(req) => {
-                let profile = req.profile.unwrap();
-                assert_eq!(
-                    profile.android_version(),
-                    andler_rpc::proto::AndroidVersion::Android11
-                );
-            }
-            other => panic!("expected Android, got {other:?}"),
-        }
+        let cfg = resolve(&toml);
+        let InstanceKind::AndroidVm { android_profile } = cfg.kind else {
+            panic!("expected an Android VM");
+        };
+        assert_eq!(android_profile.android_version, AndroidVersion::Android11);
     }
 
     #[test]
@@ -706,11 +739,8 @@ mod tests {
             base_image_path = "/tmp/base.qcow2"
             ovmf_vars_path = "/tmp/VARS.fd"
         "#;
-        let file: InstanceFile = toml::from_str(toml).expect("TOML must parse");
-        assert!(matches!(
-            file.into_result().unwrap(),
-            InstanceFileResult::Android(_)
-        ));
+        let cfg = resolve(toml);
+        assert!(matches!(cfg.kind, InstanceKind::AndroidVm { .. }));
     }
 
     #[test]
@@ -720,85 +750,68 @@ mod tests {
             base_image_path = "/tmp/base.qcow2"
             ovmf_vars_path = "/tmp/VARS.fd"
         "#;
-        let file: InstanceFile = toml::from_str(toml).expect("TOML must parse");
-        assert!(matches!(
-            file.into_result().unwrap(),
-            InstanceFileResult::Android(_)
-        ));
+        let cfg = resolve(toml);
+        assert!(matches!(cfg.kind, InstanceKind::AndroidVm { .. }));
     }
 
     #[test]
     fn no_android_fields_triggers_linux_mode() {
-        let file: InstanceFile = toml::from_str(MINIMAL_LINUX_TOML).expect("TOML must parse");
-        assert!(matches!(
-            file.into_result().unwrap(),
-            InstanceFileResult::Linux(_)
-        ));
+        let cfg = resolve(MINIMAL_LINUX_TOML);
+        assert!(matches!(cfg.kind, InstanceKind::LinuxVm { .. }));
     }
 
     #[test]
-    fn missing_required_linux_field_fails() {
-        let toml = r#"
-            name = "test-vm"
-            iso_path = "/tmp/test.iso"
-        "#;
-        let result: Result<InstanceFile, _> = toml::from_str(toml);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn into_result_reports_missing_disk_path() {
+    fn a_missing_linux_disk_path_is_reported_by_the_draft() {
         let toml = r#"
             name = "test-vm"
             iso_path = "/tmp/test.iso"
             ovmf_vars_path = "/tmp/VARS.fd"
         "#;
-        let file: InstanceFile = toml::from_str(toml).expect("TOML must parse");
-        let err = file
-            .into_result()
-            .expect_err("missing disk_path must be reported, not panic");
-        assert!(matches!(
-            err,
-            InstanceFileError::MissingField { field: "disk_path" }
-        ));
+        let err = draft_result(toml).expect_err("missing disk_path must be reported");
+        assert!(
+            matches!(err, InstanceFileError::MissingField { field: "disk_path" }),
+            "{err}"
+        );
     }
 
     #[test]
-    fn into_result_reports_missing_iso_path() {
+    fn into_draft_reports_missing_iso_path() {
         let toml = r#"
             name = "test-vm"
             disk_path = "/tmp/disk.qcow2"
             ovmf_vars_path = "/tmp/VARS.fd"
         "#;
-        let file: InstanceFile = toml::from_str(toml).expect("TOML must parse");
-        let err = file
-            .into_result()
-            .expect_err("missing iso_path must be reported, not panic");
-        assert!(matches!(
-            err,
-            InstanceFileError::MissingField { field: "iso_path" }
-        ));
+        let err = draft_result(toml).expect_err("missing iso_path must be reported");
+        assert!(
+            matches!(err, InstanceFileError::MissingField { field: "iso_path" }),
+            "{err}"
+        );
     }
 
     #[test]
-    fn into_result_rejects_unsupported_android_version() {
+    fn into_draft_rejects_unsupported_android_version() {
         let toml = r#"
             name = "test-vm"
             android_version = 12
             base_image_path = "/tmp/base.qcow2"
             ovmf_vars_path = "/tmp/VARS.fd"
         "#;
-        let file: InstanceFile = toml::from_str(toml).expect("TOML must parse");
-        let err = file
-            .into_result()
-            .expect_err("unsupported android_version must be rejected");
-        assert!(matches!(
-            err,
-            InstanceFileError::UnsupportedValue {
-                field: "android_version",
-                ..
-            }
-        ));
+        let err = draft_result(toml).expect_err("unsupported android_version must be rejected");
+        assert!(
+            matches!(
+                err,
+                InstanceFileError::UnsupportedValue {
+                    field: "android_version",
+                    ..
+                }
+            ),
+            "{err}"
+        );
+    }
+
+    fn draft_result(toml_text: &str) -> Result<InstanceFileDraft, InstanceFileError> {
+        let file: InstanceFile = toml::from_str(toml_text).expect("TOML must parse");
+        file.into_draft()
     }
 
     #[test]

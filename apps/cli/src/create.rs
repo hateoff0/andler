@@ -1,13 +1,136 @@
-use crate::helpers::emit_json;
-use crate::TracedClient;
-use andler_rpc::proto::{
-    AndroidProfile as ProtoAndroidProfile, CreateAndroidInstanceRequest, CreateInstanceRequest,
-};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use crate::instance_file::{InstanceFile, InstanceFileResult};
+use andler_core::config::{
+    ConfigDraft, DiskDraft, DiskSource, DraftKind, FirmwareDraft, HostFirmware,
+};
+use andler_core::{AndroidBootMode, AndroidProfile, CdromBus, InstanceConfig, InstanceKind};
+use andler_firmware::HardwareDefaults;
+use andler_rpc::proto::{CreateAndroidInstanceRequest, CreateInstanceRequest};
+
+use crate::helpers::emit_json;
+use crate::instance_file::{InstanceFile, TemplateFile};
+use crate::preview::Resolved;
 use crate::wizard::{PartialArgs, WizardKind};
 use crate::{CliAndroidVersion, CliArmTranslator, CliCdromBus, CliKind};
+
+pub(crate) fn default_instances_root() -> String {
+    andler_core::paths::instances_root()
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// The host OVMF pair the resolver falls back to, as `andler-firmware`
+/// discovered it. An absent pair resolves to no firmware, which pins
+/// `enable_uefi` off instead of emitting an empty pflash path.
+pub(crate) fn host_firmware(detected: &HardwareDefaults) -> HostFirmware {
+    match &detected.ovmf {
+        Ok(found) => HostFirmware {
+            ovmf_code_path: Some(found.code.clone()),
+            ovmf_vars_template: Some(found.vars_template.clone()),
+        },
+        Err(_) => HostFirmware::default(),
+    }
+}
+
+/// A creation resolved to one `InstanceConfig` by the one resolver. Every
+/// front-end (CLI flags + template, instance file, wizard answers) builds a
+/// `ConfigDraft` and resolves it here; every consumer (create, `--dry-run`,
+/// `--verify`) reads the result instead of re-deriving defaults or validation.
+#[derive(Debug, Clone)]
+pub(crate) struct Creation {
+    pub cfg: InstanceConfig,
+    pub base_image_path: String,
+    pub instances_root: String,
+}
+
+impl Creation {
+    pub(crate) fn resolve(
+        draft: &ConfigDraft,
+        instances_root: String,
+        host: &HostFirmware,
+    ) -> Result<Self, String> {
+        let base_image_path = match &draft.disk.source {
+            DiskSource::BaseImage { path, .. } => path.to_string_lossy().into_owned(),
+            DiskSource::Fresh => String::new(),
+        };
+        Ok(Self {
+            cfg: draft.resolve(host)?,
+            base_image_path,
+            instances_root,
+        })
+    }
+
+    /// The one validation gate: the same `InstanceConfig::validate` the daemon
+    /// runs on create, so the CLI can never accept what the daemon rejects.
+    pub(crate) fn validation(&self) -> Result<(), String> {
+        self.cfg.validate()
+    }
+
+    pub(crate) fn into_request(self) -> ProtoRequest {
+        match &self.cfg.kind {
+            InstanceKind::LinuxVm {
+                iso_path,
+                cdrom_bus,
+            } => ProtoRequest::Linux(Box::new(linux_request(&self.cfg, iso_path, *cdrom_bus))),
+            InstanceKind::AndroidVm { android_profile } => {
+                ProtoRequest::Android(Box::new(android_request(
+                    &self.cfg,
+                    android_profile,
+                    &self.base_image_path,
+                    &self.instances_root,
+                )))
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(crate) enum ProtoRequest {
+    Linux(Box<CreateInstanceRequest>),
+
+    Android(Box<CreateAndroidInstanceRequest>),
+}
+
+fn linux_request(
+    cfg: &InstanceConfig,
+    iso_path: &Path,
+    cdrom_bus: CdromBus,
+) -> CreateInstanceRequest {
+    let mut req = CreateInstanceRequest {
+        name: cfg.name.clone(),
+        iso_path: iso_path.to_string_lossy().into_owned(),
+        cpu: Some(cfg.cpu.clone().into()),
+        memory: Some(cfg.memory.clone().into()),
+        disk: Some(cfg.disk.clone().into()),
+        display: Some(cfg.display.into()),
+        gpu: Some(cfg.gpu.clone().into()),
+        network: Some(cfg.network.clone().into()),
+        firmware: Some(cfg.firmware.clone().into()),
+        audio: Some(cfg.audio.into()),
+        input: Some(cfg.input.into()),
+        autostart: cfg.autostart,
+        ..Default::default()
+    };
+    req.set_cdrom_bus(cdrom_bus.into());
+    req
+}
+
+fn android_request(
+    cfg: &InstanceConfig,
+    profile: &AndroidProfile,
+    base_image_path: &str,
+    instances_root: &str,
+) -> CreateAndroidInstanceRequest {
+    CreateAndroidInstanceRequest {
+        name: cfg.name.clone(),
+        profile: Some(profile.clone().into()),
+        base_image_path: base_image_path.to_string(),
+        instances_root: instances_root.to_string(),
+        overlay_size_bytes: cfg.disk.size_bytes,
+        ovmf_vars_template: cfg.firmware.ovmf_vars_path.to_string_lossy().into_owned(),
+        linked_overlay: cfg.disk.base_image.is_some(),
+    }
+}
 
 fn created_json(id: &str) -> serde_json::Value {
     serde_json::json!({ "instance_id": id })
@@ -15,7 +138,7 @@ fn created_json(id: &str) -> serde_json::Value {
 
 #[allow(clippy::too_many_arguments)] // mirrors all create CLI flags; splitting adds indirection for no benefit
 pub async fn handle(
-    client: &mut TracedClient,
+    client: &mut crate::TracedClient,
     file: Option<PathBuf>,
     kind: Option<CliKind>,
     name: Option<String>,
@@ -76,192 +199,130 @@ pub async fn handle(
         return Err("--dry-run and --verify are mutually exclusive — pass one or the other".into());
     }
 
-    if has_file {
-        let file = file.unwrap();
-        let instance_file = InstanceFile::load(&file)?;
-        match instance_file.into_result()? {
-            InstanceFileResult::Linux(req) => {
-                if dry_run {
-                    return crate::preview::print_linux_preview(&req);
-                }
-                if verify {
-                    return exit_on_verify_result(crate::verify::verify_linux(&req, json)?);
-                }
-                let created_name = req.name.clone();
-                let response = client.create_instance(req).await?;
-                let id = response.into_inner().instance_id;
-                println!(
-                    "Created instance {created_name} ({})",
-                    crate::helpers::short_id(&id)
-                );
-            }
-            InstanceFileResult::Android(req) => {
-                if dry_run {
-                    return crate::preview::print_android_preview(&req);
-                }
-                if verify {
-                    return exit_on_verify_result(crate::verify::verify_android(&req, json)?);
-                }
-                let created_name = req.name.clone();
-                let response = client.create_android_instance(req).await?;
-                let id = response.into_inner().instance_id;
-                println!(
-                    "Created instance {created_name} ({})",
-                    crate::helpers::short_id(&id)
-                );
-            }
-        }
-        return Ok(());
-    }
-
-    let linux_required = kind == Some(CliKind::Linux)
-        && (name.is_none() || iso_path.is_none() || disk_path.is_none());
-    let android_required = kind == Some(CliKind::Android) && name.is_none();
-    let no_kind = kind.is_none();
-    let needs_wizard = quick || no_kind || linux_required || android_required;
-
-    if needs_wizard {
-        if dry_run {
-            return Err(
-                "--dry-run requires --file or all CLI-mode flags for the chosen --kind \
-                 (the interactive wizard already shows a full summary before creating, so \
-                 --dry-run with a bare `andler create` isn't supported)"
-                    .into(),
-            );
-        }
-        if verify {
-            return Err(
-                "--verify requires --file or all CLI-mode flags for the chosen --kind \
-                 (the interactive wizard already shows a full summary before creating, so \
-                 --verify with a bare `andler create` isn't supported)"
-                    .into(),
-            );
-        }
-
-        let partial = PartialArgs {
-            kind: kind.map(|k| match k {
-                CliKind::Linux => WizardKind::Linux,
-                CliKind::Android => WizardKind::Android,
-            }),
-            name: name.clone(),
-            iso_path: iso_path.clone(),
-            base_image_path: base_image_path.clone(),
-            instances_root: Some(instances_root.clone()),
-            gapps,
-            quick,
-            linked: linked_overlay,
-        };
-
-        // One code path for both the interactive wizard and `--quick`:
-        // resolve the answers, create the VM, then install the guest-side
-        // selections the answers imply (ARM translator, clipboard agent).
-        return crate::wizard::handle_wizard(client, partial).await;
-    }
-
-    let kind = kind.unwrap();
-    let name = name.unwrap();
-    let ovmf = ovmf_vars_template.unwrap_or_default();
-    if template.is_some() && kind == CliKind::Android {
-        return Err(
-            "--template is only supported with --kind linux in this phase (Android requests              carry no config sections yet)"
-                .into(),
-        );
-    }
-    let template = match &template {
-        Some(name) => Some(crate::instance_file::TemplateFile::load(name)?),
-        None => None,
+    // Every flag lives in one layer; the wizard path and the CLI-flag path
+    // read the same layer, so no flag is silently dropped by either.
+    let flags = PartialArgs {
+        kind: kind.map(|k| match k {
+            CliKind::Linux => WizardKind::Linux,
+            CliKind::Android => WizardKind::Android,
+        }),
+        name,
+        iso_path,
+        base_image_path,
+        instances_root: Some(instances_root),
+        disk_path,
+        disk_size_gib,
+        overlay_size_gib: Some(overlay_size_gib),
+        android_version,
+        arm_translator,
+        cdrom_bus: Some(cdrom_bus),
+        compact_on_shutdown: Some(compact_on_shutdown),
+        enable_uefi: if no_uefi { Some(false) } else { None },
+        ovmf_vars_template,
+        gapps,
+        microg,
+        linked: linked_overlay,
+        template,
+        quick,
     };
 
-    match kind {
-        CliKind::Linux => {
-            let iso = iso_path.ok_or("--iso-path is required for --kind linux")?;
-            let disk = disk_path.ok_or("--disk-path is required for --kind linux")?;
+    if !has_file {
+        let linux_required = flags.kind == Some(WizardKind::Linux)
+            && (flags.name.is_none() || flags.iso_path.is_none() || flags.disk_path.is_none());
+        let android_required = flags.kind == Some(WizardKind::Android) && flags.name.is_none();
+        let needs_wizard =
+            flags.quick || flags.kind.is_none() || linux_required || android_required;
 
-            let (iso, disk) = match validate_linux_paths(&iso, &disk) {
-                Ok(paths) => paths,
-                Err(msg) => return Err(msg.into()),
-            };
-
-            let req = build_linux_request(
-                name.clone(),
-                iso,
-                disk,
-                disk_size_gib,
-                compact_on_shutdown,
-                cdrom_bus,
-                ovmf,
-                !no_uefi,
-                template.as_ref(),
-            );
+        if needs_wizard {
             if dry_run {
-                if json {
-                    let resolved = crate::preview::resolve_linux(&req)?;
-                    emit_json(&resolved.cfg)?;
-                } else {
-                    crate::preview::print_linux_preview(&req)?;
-                }
-                return Ok(());
-            }
-            if verify {
-                return exit_on_verify_result(crate::verify::verify_linux(&req, json)?);
-            }
-            let response = client.create_instance(req).await?;
-            let id = response.into_inner().instance_id;
-            if json {
-                emit_json(&created_json(&id))?;
-            } else {
-                println!(
-                    "Created instance {name} ({})",
-                    crate::helpers::short_id(&id)
+                return Err(
+                    "--dry-run requires --file or all CLI-mode flags for the chosen --kind \
+                     (the interactive wizard already shows a full summary before creating, so \
+                     --dry-run with a bare `andler create` isn't supported)"
+                        .into(),
                 );
             }
-        }
-        CliKind::Android => {
-            let av = android_version.ok_or("--android-version is required for --kind android")?;
-            let arm_translator = arm_translator.unwrap_or(CliArmTranslator::None);
-            let bip = match base_image_path {
-                Some(bip) => match validate_base_image_path(&bip) {
-                    Ok(path) => path,
-                    Err(msg) => return Err(msg.into()),
-                },
-                None => String::new(),
-            };
-
-            let req = build_android_request(
-                name.clone(),
-                av,
-                bip,
-                ovmf,
-                gapps,
-                microg,
-                arm_translator,
-                instances_root,
-                overlay_size_gib,
-                linked_overlay,
-            );
-            if dry_run {
-                if json {
-                    let resolved = crate::preview::resolve_android(&req)?;
-                    emit_json(&resolved.cfg)?;
-                } else {
-                    crate::preview::print_android_preview(&req)?;
-                }
-                return Ok(());
-            }
             if verify {
-                return exit_on_verify_result(crate::verify::verify_android(&req, json)?);
-            }
-            let response = client.create_android_instance(req).await?;
-            let id = response.into_inner().instance_id;
-            if json {
-                emit_json(&created_json(&id))?;
-            } else {
-                println!(
-                    "Created instance {name} ({})",
-                    crate::helpers::short_id(&id)
+                return Err(
+                    "--verify requires --file or all CLI-mode flags for the chosen --kind \
+                     (the interactive wizard already shows a full summary before creating, so \
+                     --verify with a bare `andler create` isn't supported)"
+                        .into(),
                 );
             }
+
+            // One code path for both the interactive wizard and `--quick`:
+            // resolve the answers, create the VM, then install the guest-side
+            // selections the answers imply (ARM translator, clipboard agent).
+            return crate::wizard::handle_wizard(client, flags).await;
         }
+    }
+
+    let detected = andler_firmware::detect_all();
+    let host = crate::create::host_firmware(&detected);
+
+    let (draft, instances_root) = if let Some(file) = file {
+        let file_draft = InstanceFile::load(&file)?.into_draft()?;
+        (file_draft.draft, file_draft.instances_root)
+    } else {
+        let kind = flags
+            .kind
+            .ok_or("--kind is required for CLI mode without --file")?;
+        let template = match flags.template.as_deref() {
+            Some(_) if kind == WizardKind::Android => {
+                return Err(
+                    "--template is only supported with --kind linux in this phase (Android requests \
+                     carry no config sections yet)"
+                        .into(),
+                );
+            }
+            Some(name) => Some(TemplateFile::load(name)?),
+            None => None,
+        };
+        let draft = match kind {
+            WizardKind::Linux => linux_draft(&flags, template.as_ref())?,
+            WizardKind::Android => android_draft(&flags)?,
+        };
+        let instances_root = flags
+            .instances_root
+            .clone()
+            .unwrap_or_else(crate::create::default_instances_root);
+        (draft, instances_root)
+    };
+
+    let creation = Creation::resolve(&draft, instances_root, &host)?;
+
+    if dry_run {
+        let resolved = Resolved::from_creation(&creation, &host);
+        return crate::preview::report_dry_run(&resolved, json);
+    }
+    if verify {
+        let resolved = Resolved::from_creation(&creation, &host);
+        return exit_on_verify_result(crate::verify::verify(&resolved, json)?);
+    }
+
+    if let Err(issue) = creation.validation() {
+        return Err(format!("invalid configuration: {issue}").into());
+    }
+
+    let created_name = creation.cfg.name.clone();
+    let id = match creation.into_request() {
+        ProtoRequest::Linux(req) => client.create_instance(*req).await?.into_inner().instance_id,
+        ProtoRequest::Android(req) => {
+            client
+                .create_android_instance(*req)
+                .await?
+                .into_inner()
+                .instance_id
+        }
+    };
+    if json {
+        emit_json(&created_json(&id))?;
+    } else {
+        println!(
+            "Created instance {created_name} ({})",
+            crate::helpers::short_id(&id)
+        );
     }
 
     Ok(())
@@ -273,6 +334,123 @@ fn exit_on_verify_result(all_passed: bool) -> Result<(), Box<dyn std::error::Err
     } else {
         std::process::exit(1);
     }
+}
+
+/// The CLI-flag path's draft: every section the flags carry, the template's
+/// sections under them, and nothing else — the resolver fills the rest.
+pub(crate) fn linux_draft(
+    flags: &PartialArgs,
+    template: Option<&TemplateFile>,
+) -> Result<ConfigDraft, String> {
+    let name = flags
+        .name
+        .clone()
+        .ok_or("--name is required for --kind linux")?;
+    let iso_path = flags
+        .iso_path
+        .clone()
+        .ok_or("--iso-path is required for --kind linux")?;
+    let disk_path = flags
+        .disk_path
+        .clone()
+        .ok_or("--disk-path is required for --kind linux")?;
+    let (iso_path, disk_path) = validate_linux_paths(&iso_path, &disk_path)?;
+
+    let cdrom_bus = match flags.cdrom_bus.unwrap_or(CliCdromBus::Auto) {
+        CliCdromBus::Auto => {
+            CdromBus::recommended_for_iso_filename(std::path::Path::new(&iso_path))
+        }
+        CliCdromBus::Virtio => CdromBus::VirtioScsi,
+        CliCdromBus::Ide => CdromBus::Ide,
+    };
+
+    Ok(ConfigDraft {
+        name,
+        kind: DraftKind::Linux {
+            iso_path: PathBuf::from(iso_path),
+            cdrom_bus,
+        },
+        disk: DiskDraft {
+            path: PathBuf::from(disk_path),
+            source: DiskSource::Fresh,
+            size_gib: flags.disk_size_gib,
+            compact_on_shutdown: flags.compact_on_shutdown.unwrap_or(false),
+            snapshot_timeout_secs: None,
+        },
+        firmware: FirmwareDraft {
+            enable_uefi: flags.enable_uefi,
+            ovmf_vars_template: flags.ovmf_vars_template.clone().map(PathBuf::from),
+        },
+        autostart: false,
+        cpu: template.and_then(|t| t.cpu.clone()),
+        memory: template.and_then(|t| t.memory.clone()),
+        display: template.and_then(|t| t.display),
+        gpu: template.and_then(|t| t.gpu.clone()),
+        network: template.and_then(|t| t.network.clone()),
+        audio: template.and_then(|t| t.audio),
+        input: template.and_then(|t| t.input),
+    })
+}
+
+/// The CLI-flag path's Android draft. Android instances take their config
+/// sections from the profile, so the flags that only reach sections
+/// (`--template`, and a hand-written section in a TOML file) are refused by
+/// the resolver rather than dropped here.
+pub(crate) fn android_draft(flags: &PartialArgs) -> Result<ConfigDraft, String> {
+    let name = flags
+        .name
+        .clone()
+        .ok_or("--name is required for --kind android")?;
+    let android_version = flags
+        .android_version
+        .ok_or("--android-version is required for --kind android")?;
+    let base_image_path = match &flags.base_image_path {
+        Some(path) => validate_base_image_path(path)?,
+        None => String::new(),
+    };
+    let instances_root = flags
+        .instances_root
+        .clone()
+        .unwrap_or_else(crate::create::default_instances_root);
+
+    let profile = AndroidProfile {
+        android_version: android_version.into(),
+        gapps: flags.gapps,
+        microg: flags.microg,
+        arm_translator: flags
+            .arm_translator
+            .unwrap_or(CliArmTranslator::None)
+            .into(),
+        boot_mode: AndroidBootMode::Android,
+        base_image_pin: None,
+    };
+
+    Ok(ConfigDraft {
+        name,
+        kind: DraftKind::Android { profile },
+        disk: DiskDraft {
+            path: PathBuf::from(&instances_root).join("disk.qcow2"),
+            source: DiskSource::BaseImage {
+                path: PathBuf::from(base_image_path),
+                linked: flags.linked,
+            },
+            size_gib: flags.overlay_size_gib,
+            compact_on_shutdown: false,
+            snapshot_timeout_secs: None,
+        },
+        firmware: FirmwareDraft {
+            enable_uefi: flags.enable_uefi,
+            ovmf_vars_template: flags.ovmf_vars_template.clone().map(PathBuf::from),
+        },
+        autostart: false,
+        cpu: None,
+        memory: None,
+        display: None,
+        gpu: None,
+        network: None,
+        audio: None,
+        input: None,
+    })
 }
 
 fn validate_linux_paths(iso_path: &str, disk_path: &str) -> Result<(String, String), String> {
@@ -313,123 +491,16 @@ fn validate_base_image_path(base_image_path: &str) -> Result<String, String> {
     Ok(canonical_base_image)
 }
 
-#[allow(clippy::too_many_arguments)] // mirrors the create CLI flags for Linux VMs
-fn build_linux_request(
-    name: String,
-    iso_path: String,
-    disk_path: String,
-    disk_size_gib: Option<u64>,
-    compact_on_shutdown: bool,
-    cdrom_bus: CliCdromBus,
-    ovmf_vars_template: String,
-    enable_uefi: bool,
-    template: Option<&crate::instance_file::TemplateFile>,
-) -> CreateInstanceRequest {
-    let mut disk = andler_core::DiskConfig::reference_default(std::path::PathBuf::from(&disk_path));
-    if let Some(gib) = disk_size_gib {
-        disk.size_bytes = gib
-            .checked_mul(andler_core::DiskConfig::GIB)
-            .expect("disk size overflow");
-    }
-    disk.compact_on_shutdown = compact_on_shutdown;
-
-    let resolved_cdrom_bus = match cdrom_bus {
-        CliCdromBus::Auto => {
-            andler_core::CdromBus::recommended_for_iso_filename(std::path::Path::new(&iso_path))
-        }
-        CliCdromBus::Virtio => andler_core::CdromBus::VirtioScsi,
-        CliCdromBus::Ide => andler_core::CdromBus::Ide,
-    };
-
-    // Template sections sit between the reference defaults and the CLI
-    // flags: sections not present in the template keep their defaults, and
-    // sections are only settable through a template, so no flag overwrite
-    // is needed here.
-    let mut req = CreateInstanceRequest {
-        name,
-        iso_path,
-        cpu: Some(andler_core::CpuConfig::reference_default().into()),
-        memory: Some(andler_core::MemoryConfig::reference_default().into()),
-        disk: Some(disk.into()),
-        display: Some(andler_core::DisplayConfig::reference_default().into()),
-        gpu: Some(andler_core::GpuConfig::reference_default().into()),
-        network: Some(andler_core::NetworkConfig::reference_default().into()),
-        firmware: Some(
-            andler_core::FirmwareConfig {
-                enable_uefi,
-                ovmf_code_path: std::path::PathBuf::new(),
-                ovmf_vars_path: std::path::PathBuf::from(&ovmf_vars_template),
-            }
-            .into(),
-        ),
-        audio: Some(andler_core::AudioConfig::reference_default().into()),
-        input: Some(andler_core::InputConfig::reference_default().into()),
-        ..Default::default()
-    };
-    if let Some(t) = template {
-        if let Some(cpu) = &t.cpu {
-            req.cpu = Some(cpu.clone().into());
-        }
-        if let Some(memory) = &t.memory {
-            req.memory = Some(memory.clone().into());
-        }
-        if let Some(display) = &t.display {
-            req.display = Some((*display).into());
-        }
-        if let Some(gpu) = &t.gpu {
-            req.gpu = Some(gpu.clone().into());
-        }
-        if let Some(network) = &t.network {
-            req.network = Some(network.clone().into());
-        }
-        if let Some(audio) = &t.audio {
-            req.audio = Some((*audio).into());
-        }
-        if let Some(input) = &t.input {
-            req.input = Some((*input).into());
-        }
-    }
-    req.set_cdrom_bus(resolved_cdrom_bus.into());
-    req
-}
-
-#[allow(clippy::too_many_arguments)] // mirrors the create CLI flags for Android VMs
-fn build_android_request(
-    name: String,
-    android_version: CliAndroidVersion,
-    base_image_path: String,
-    ovmf_vars_template: String,
-    gapps: bool,
-    microg: bool,
-    arm_translator: CliArmTranslator,
-    instances_root: String,
-    overlay_size_gib: u64,
-    linked_overlay: bool,
-) -> CreateAndroidInstanceRequest {
-    let mut profile = ProtoAndroidProfile {
-        gapps,
-        microg,
-        ..Default::default()
-    };
-    profile.set_android_version(android_version.into());
-    profile.set_arm_translator(arm_translator.into());
-
-    CreateAndroidInstanceRequest {
-        name,
-        profile: Some(profile),
-        base_image_path,
-        instances_root,
-        overlay_size_bytes: overlay_size_gib
-            .checked_mul(1024 * 1024 * 1024)
-            .expect("overlay size overflow"),
-        ovmf_vars_template,
-        linked_overlay,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::wizard::advanced::AdvancedConfig;
+    use crate::wizard::LinuxBasicResult;
+    use andler_core::config::HostFirmware;
+    use andler_core::{
+        CpuConfig, CpuPriority, DisplayConfig, GpuConfig, InstanceConfig, InstanceId, MemoryConfig,
+        NetworkConfig, Resolution,
+    };
 
     #[test]
     fn validate_linux_paths_empty_iso_is_allowed() {
@@ -492,5 +563,333 @@ mod tests {
     fn validate_base_image_path_canonicalizes() {
         let base_image = validate_base_image_path("/tmp/../tmp").unwrap();
         assert!(!base_image.contains(".."));
+    }
+
+    // --- one resolver, three ways to ask ------------------------------------
+
+    /// The identity is the one field creation is allowed to differ on (the
+    /// daemon assigns it), so two resolved configs are comparable once it is
+    /// pinned.
+    fn identity_stripped(cfg: InstanceConfig) -> InstanceConfig {
+        InstanceConfig {
+            id: "0"
+                .repeat(andler_core::INSTANCE_ID_HEX_LEN)
+                .parse::<InstanceId>()
+                .expect("all-zero id parses"),
+            ..cfg
+        }
+    }
+
+    fn workspace(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "andler-create-convergence-{}-{name}",
+            std::process::id()
+        ));
+        let instances = dir.join("instances");
+        std::fs::create_dir_all(&instances).expect("fixture dir");
+        std::fs::write(dir.join("ubuntu-24.04.iso"), b"iso").expect("fixture iso");
+        std::fs::write(dir.join("VARS.fd"), b"vars template").expect("fixture vars");
+        std::fs::write(dir.join("base.qcow2"), b"base image").expect("fixture base image");
+        dir
+    }
+
+    /// The host firmware every path sees, so the comparison does not depend on
+    /// what the machine andler runs on has installed.
+    fn fixture_host() -> HostFirmware {
+        HostFirmware {
+            ovmf_code_path: Some(PathBuf::from("/usr/share/OVMF/OVMF_CODE_4M.fd")),
+            ovmf_vars_template: Some(PathBuf::from("/usr/share/OVMF/OVMF_VARS_4M.fd")),
+        }
+    }
+
+    /// The sections all three Linux paths below describe, as a template (the
+    /// flag path's only way to set sections), a TOML file and a wizard answer
+    /// set. Deliberately real values, and deliberately not all defaults: a
+    /// divergence in any single section changes the comparison.
+    fn linux_template() -> TemplateFile {
+        TemplateFile {
+            cpu: Some(CpuConfig {
+                cores: 8,
+                sockets: 1,
+                threads: 1,
+                affinity: None,
+                priority: CpuPriority::Normal,
+            }),
+            memory: Some(MemoryConfig {
+                size_bytes: 16 * andler_core::MemoryConfig::GIB,
+                ballooning: false,
+                zram: false,
+                ksm: true,
+                mem_lock: false,
+                hugepages: false,
+            }),
+            display: Some(DisplayConfig {
+                resolution: Resolution::new(2560, 1440),
+                dpi: 96,
+                fps_limit: DisplayConfig::FPS_UNLIMITED,
+                display_engine: andler_core::DisplayEngine::Gtk,
+                fullscreen: true,
+            }),
+            gpu: Some(GpuConfig {
+                render_backend: andler_core::RenderBackend::VirGl,
+                hostmem_bytes: 8192 * andler_core::GpuConfig::MIB,
+                blob: true,
+                gl: true,
+            }),
+            network: Some(NetworkConfig {
+                mode: andler_core::NetworkMode::Nat,
+                device_model: "virtio-net-pci".to_string(),
+                nat_backend: andler_core::NatBackend::Passt,
+                port_forwards: Vec::new(),
+            }),
+            audio: Some(andler_core::AudioConfig {
+                backend: andler_core::AudioBackend::None,
+                device: andler_core::AudioDevice::VirtioSound,
+            }),
+            input: Some(andler_core::InputConfig {
+                pointer_mode: andler_core::PointerMode::Mouse,
+                hide_host_cursor: true,
+                clipboard_enabled: false,
+            }),
+        }
+    }
+
+    fn linux_toml(dir: &std::path::Path) -> String {
+        format!(
+            r#"
+name = "converged"
+iso_path = "{iso}"
+disk_path = "{disk}"
+disk_size_gib = 100
+cdrom_bus = "virtio"
+
+[cpu]
+cores = 8
+sockets = 1
+threads = 1
+priority = "Normal"
+
+[memory]
+size_bytes = 17179869184
+ballooning = false
+zram = false
+ksm = true
+mem_lock = false
+hugepages = false
+
+[display]
+resolution = {{ width = 2560, height = 1440 }}
+dpi = 96
+fps_limit = 0
+display_engine = "Gtk"
+fullscreen = true
+
+[gpu]
+render_backend = "VirGl"
+hostmem_bytes = 8589934592
+blob = true
+gl = true
+
+[network]
+mode = "Nat"
+device_model = "virtio-net-pci"
+nat_backend = "Passt"
+
+[audio]
+backend = "None"
+device = "VirtioSound"
+
+[input]
+pointer_mode = "Mouse"
+hide_host_cursor = true
+clipboard_enabled = false
+"#,
+            iso = dir.join("ubuntu-24.04.iso").display(),
+            disk = dir.join("instances").join("disk.qcow2").display(),
+        )
+    }
+
+    fn wizard_answers() -> AdvancedConfig {
+        AdvancedConfig {
+            cdrom_bus: Some(andler_core::CdromBus::VirtioScsi),
+            compact_on_shutdown: false,
+            gpu_render: andler_core::RenderBackend::VirGl,
+            gpu_memory_mib: 8192,
+            display_resolution: Resolution::new(2560, 1440),
+            fullscreen: true,
+            audio_backend: andler_core::AudioBackend::None,
+            clipboard_enabled: false,
+            input_pointer: andler_core::PointerMode::Mouse,
+            cpu_cores: 8,
+            memory_gib: 16,
+            arm_translator: None,
+            gapps: false,
+            network_mode: andler_core::NetworkMode::Nat,
+            bridge_interface: None,
+            linked_overlay: false,
+        }
+    }
+
+    /// The same Linux VM asked for three ways — CLI flags plus a template, an
+    /// instance file, and a wizard answer set — resolves to the identical
+    /// config, defaults and validation included.
+    #[test]
+    fn flags_a_toml_file_and_wizard_answers_resolve_to_the_same_config() {
+        let dir = workspace("linux");
+        let instances_root = dir.join("instances").to_string_lossy().into_owned();
+        let host = fixture_host();
+
+        let flags = PartialArgs {
+            kind: Some(WizardKind::Linux),
+            name: Some("converged".to_string()),
+            iso_path: Some(dir.join("ubuntu-24.04.iso").to_string_lossy().into_owned()),
+            disk_path: Some(
+                dir.join("instances")
+                    .join("disk.qcow2")
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
+            instances_root: Some(instances_root.clone()),
+            disk_size_gib: Some(100),
+            cdrom_bus: Some(CliCdromBus::Virtio),
+            ..Default::default()
+        };
+        let from_flags = Creation::resolve(
+            &linux_draft(&flags, Some(&linux_template())).expect("flag draft"),
+            instances_root.clone(),
+            &host,
+        )
+        .expect("flag path resolves");
+
+        let file = crate::instance_file::InstanceFile::into_draft(
+            toml::from_str::<crate::instance_file::InstanceFile>(&linux_toml(&dir))
+                .expect("fixture TOML parses"),
+        )
+        .expect("file draft");
+        let from_file =
+            Creation::resolve(&file.draft, file.instances_root, &host).expect("file path resolves");
+
+        let detected = crate::wizard::build::sample_detected();
+        let wizard_flags = PartialArgs {
+            instances_root: Some(instances_root.clone()),
+            ..Default::default()
+        };
+        let basic = LinuxBasicResult {
+            name: "converged".to_string(),
+            iso_path: dir.join("ubuntu-24.04.iso").to_string_lossy().into_owned(),
+            disk_size_gib: 100,
+            instances_root: instances_root.clone(),
+            enable_uefi: Some(true),
+        };
+        let wizard_draft = crate::wizard::build::linux_draft(
+            &basic,
+            Some(&wizard_answers()),
+            &wizard_flags,
+            &detected,
+        )
+        .expect("wizard draft");
+        let mut wizard_host = crate::create::host_firmware(&detected);
+        wizard_host.ovmf_vars_template = host.ovmf_vars_template.clone();
+        wizard_host.ovmf_code_path = host.ovmf_code_path.clone();
+        let from_wizard = Creation::resolve(&wizard_draft, instances_root, &wizard_host)
+            .expect("wizard path resolves");
+
+        assert!(
+            from_file.cfg.firmware.ovmf_vars_path.as_os_str().is_empty(),
+            "no path given an explicit template: the daemon provisions its own"
+        );
+        let expected = identity_stripped(from_flags.cfg);
+        assert_eq!(identity_stripped(from_file.cfg), expected);
+        assert_eq!(identity_stripped(from_wizard.cfg), expected);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The same input that is *not* creatable is refused with the same verdict
+    /// by all three paths — the divergence today is that `--dry-run` reports a
+    /// preview for a config creation rejects.
+    #[test]
+    fn an_uncreatable_input_is_refused_identically_by_every_path() {
+        let dir = workspace("linux-invalid");
+        let instances_root = dir.join("instances").to_string_lossy().into_owned();
+        let host = fixture_host();
+
+        let mut broken = linux_template();
+        broken.cpu = Some(CpuConfig {
+            cores: 0,
+            ..CpuConfig::reference_default()
+        });
+        let flags = PartialArgs {
+            kind: Some(WizardKind::Linux),
+            name: Some("converged".to_string()),
+            iso_path: Some(dir.join("ubuntu-24.04.iso").to_string_lossy().into_owned()),
+            disk_path: Some(
+                dir.join("instances")
+                    .join("disk.qcow2")
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
+            instances_root: Some(instances_root.clone()),
+            disk_size_gib: Some(100),
+            cdrom_bus: Some(CliCdromBus::Virtio),
+            ..Default::default()
+        };
+        let from_flags = Creation::resolve(
+            &linux_draft(&flags, Some(&broken)).expect("flag draft"),
+            instances_root.clone(),
+            &host,
+        )
+        .expect("resolution succeeds; validation is what fails");
+
+        let toml_text = linux_toml(&dir).replace("cores = 8", "cores = 0");
+        let file = crate::instance_file::InstanceFile::into_draft(
+            toml::from_str::<crate::instance_file::InstanceFile>(&toml_text)
+                .expect("fixture TOML parses"),
+        )
+        .expect("file draft");
+        let from_file =
+            Creation::resolve(&file.draft, file.instances_root, &host).expect("file resolves");
+
+        let mut answers = wizard_answers();
+        answers.cpu_cores = 0;
+        let detected = crate::wizard::build::sample_detected();
+        let wizard_flags = PartialArgs {
+            instances_root: Some(instances_root.clone()),
+            ..Default::default()
+        };
+        let basic = LinuxBasicResult {
+            name: "converged".to_string(),
+            iso_path: dir.join("ubuntu-24.04.iso").to_string_lossy().into_owned(),
+            disk_size_gib: 100,
+            instances_root: instances_root.clone(),
+            enable_uefi: Some(true),
+        };
+        let wizard_draft =
+            crate::wizard::build::linux_draft(&basic, Some(&answers), &wizard_flags, &detected)
+                .expect("wizard draft");
+        let mut wizard_host = crate::create::host_firmware(&detected);
+        wizard_host.ovmf_vars_template = host.ovmf_vars_template.clone();
+        wizard_host.ovmf_code_path = host.ovmf_code_path.clone();
+        let from_wizard =
+            Creation::resolve(&wizard_draft, instances_root, &wizard_host).expect("resolves");
+
+        let verdict = from_flags
+            .validation()
+            .expect_err("zero cores is not creatable");
+        assert_eq!(verdict, "cpu.cores must be at least 1");
+        assert_eq!(from_file.validation(), Err(verdict.clone()));
+        assert_eq!(from_wizard.validation(), Err(verdict));
+
+        let resolved = Resolved::from_creation(&from_flags, &host);
+        assert_eq!(
+            resolved.validation,
+            Err("cpu.cores must be at least 1".to_string())
+        );
+        assert!(
+            crate::preview::report_dry_run(&resolved, false).is_err(),
+            "--dry-run must not report a preview for a config creation refuses"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

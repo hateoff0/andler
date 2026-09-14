@@ -32,8 +32,8 @@ fn color_enabled() -> bool {
     std::env::var_os("NO_COLOR").is_none() && !forced_non_tty() && std::io::stdout().is_terminal()
 }
 
-fn paint(text: &str, code: &str) -> String {
-    if color_enabled() {
+fn paint(text: &str, code: &str, styled: bool) -> String {
+    if styled {
         format!("\x1b[{code}m{text}{RESET}")
     } else {
         text.to_string()
@@ -185,10 +185,28 @@ impl Screen {
     }
 
     pub(crate) fn render_to_string(&self) -> String {
-        self.render_at(screen_width())
+        self.render(screen_width(), color_enabled())
     }
 
+    /// The same layout with no styling: escape sequences must never move a
+    /// column, so this is what a caller compares line by line (and what the
+    /// summary, which is text a user may copy or a test may diff, is built
+    /// from).
+    pub(crate) fn render_plain(&self) -> String {
+        self.render(screen_width(), false)
+    }
+
+    #[cfg(test)]
     pub(crate) fn render_at(&self, width: usize) -> String {
+        self.render(width, false)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn render_styled_at(&self, width: usize) -> String {
+        self.render(width, true)
+    }
+
+    fn render(&self, width: usize, styled: bool) -> String {
         let label_width = self
             .rows
             .iter()
@@ -210,19 +228,20 @@ impl Screen {
             let part = match row {
                 Row::Section(name) => Part::Section(name.clone()),
                 Row::Field(label, detail) => {
-                    let (prefix, column) = row_prefix(label, None, label_width, status_width);
+                    let (prefix, column) =
+                        row_prefix(label, None, label_width, status_width, styled);
                     Part::Body(body(prefix, column, detail, width))
                 }
                 Row::Entry(label, status, detail) => {
                     let (prefix, column) =
-                        row_prefix(label, Some(*status), label_width, status_width);
+                        row_prefix(label, Some(*status), label_width, status_width, styled);
                     Part::Body(body(prefix, column, detail, width))
                 }
                 Row::Outcome(status, detail) => {
                     let prefix = format!(
                         "{}{}{}",
                         " ".repeat(INDENT),
-                        status_word(*status),
+                        status_word(*status, styled),
                         " ".repeat(GAP)
                     );
                     Part::Body(body(prefix, INDENT + STATUS_WIDTH + GAP, detail, width))
@@ -242,7 +261,7 @@ impl Screen {
                     if index > 0 {
                         out.push('\n');
                     }
-                    out.push_str(&section_line(name, table_width));
+                    out.push_str(&section_line(name, table_width, styled));
                 }
                 Part::Body(text) => out.push_str(text),
                 Part::Note(text) => {
@@ -272,6 +291,7 @@ fn row_prefix(
     status: Option<Status>,
     label_width: usize,
     status_width: usize,
+    styled: bool,
 ) -> (String, usize) {
     let mut prefix = " ".repeat(INDENT);
     if label_width > 0 {
@@ -281,7 +301,7 @@ fn row_prefix(
     if status_width > 0 {
         match status {
             Some(status) => {
-                prefix.push_str(&status_word(status));
+                prefix.push_str(&status_word(status, styled));
                 prefix.push_str(&" ".repeat(GAP));
             }
             None => prefix.push_str(&" ".repeat(status_width)),
@@ -290,8 +310,13 @@ fn row_prefix(
     (prefix, INDENT + label_width + GAP + status_width)
 }
 
-fn status_word(status: Status) -> String {
-    paint(&pad(status.word(), STATUS_WIDTH), status.color())
+fn status_word(status: Status, styled: bool) -> String {
+    let word = pad(status.word(), STATUS_WIDTH);
+    if styled {
+        paint(&word, status.color(), styled)
+    } else {
+        word
+    }
 }
 
 fn body(prefix: String, column: usize, text: &str, width: usize) -> String {
@@ -309,17 +334,24 @@ fn body(prefix: String, column: usize, text: &str, width: usize) -> String {
     out
 }
 
-fn section_line(name: &str, table_width: usize) -> String {
-    let head = format!("{}{}", " ".repeat(INDENT), paint(name, ACCENT));
-    let rule = table_width.saturating_sub(INDENT + visible_width(name) + GAP);
+fn section_line(name: &str, table_width: usize, styled: bool) -> String {
+    let name = if styled {
+        paint(name, ACCENT, styled)
+    } else {
+        name.to_string()
+    };
+    let head = format!("{}{}", " ".repeat(INDENT), name);
+    let rule = table_width.saturating_sub(INDENT + visible_width(&name) + GAP);
     if rule < MIN_RULE {
         return format!("{head}\n");
     }
-    format!(
-        "{head}{}{}\n",
-        " ".repeat(GAP),
-        paint(&"─".repeat(rule), DIM)
-    )
+    let rule = "─".repeat(rule);
+    let rule = if styled {
+        paint(&rule, DIM, true)
+    } else {
+        rule
+    };
+    format!("{head}{}{}\n", " ".repeat(GAP), rule)
 }
 
 fn screen_width() -> usize {
@@ -343,12 +375,12 @@ fn terminal_columns(fd: i32) -> Option<usize> {
 
 pub(crate) fn header(title: &str) {
     println!();
-    println!("{}", paint(&format!("▸ {title}"), TITLE));
+    println!("{}", paint(&format!("▸ {title}"), TITLE, color_enabled()));
 }
 
 pub(crate) fn section(title: &str) {
     println!();
-    print!("{}", section_line(title, section_width()));
+    print!("{}", section_line(title, section_width(), color_enabled()));
 }
 
 fn section_width() -> usize {
@@ -602,21 +634,48 @@ mod tests {
         }
     }
 
-    #[test]
-    fn styling_is_plain_text_when_color_is_disabled() {
-        std::env::set_var("NO_COLOR", "1");
-        let painted = paint("hello", "1");
-        let mut screen = Screen::new();
-        screen.entry("spice-vdagent", Status::Ok, "installed");
-        let rendered = screen.render_to_string();
-        let enabled = color_enabled();
-        std::env::remove_var("NO_COLOR");
+    fn strip_escapes(text: &str) -> String {
+        let mut out = String::with_capacity(text.len());
+        let mut chars = text.chars();
+        while let Some(character) = chars.next() {
+            if character == '\u{1b}' {
+                for character in chars.by_ref() {
+                    if character == 'm' {
+                        break;
+                    }
+                }
+            } else {
+                out.push(character);
+            }
+        }
+        out
+    }
 
-        assert!(!enabled, "NO_COLOR must disable styling");
-        assert_eq!(painted, "hello");
+    #[test]
+    fn styling_never_moves_a_column() {
+        let mut screen = Screen::new();
+        screen.section("installed in the guest");
+        screen.field("name", "my-android");
+        screen.entry("spice-vdagent", Status::Ok, "installed");
+        screen.entry("arm-translator", Status::Present, "already there");
+        screen.outcome(Status::Failed, "the daemon is not running");
+
+        let plain = screen.render_at(80);
+        let styled = screen.render_styled_at(80);
+
         assert!(
-            !rendered.contains('\u{1b}'),
-            "no escape sequence may reach a styled-off screen: {rendered:?}"
+            !plain.contains('\u{1b}'),
+            "an unstyled render carries no escape sequence: {plain:?}"
+        );
+        assert!(
+            styled.contains('\u{1b}'),
+            "a styled render carries the colour: {styled:?}"
+        );
+        assert_eq!(
+            strip_escapes(&styled),
+            plain,
+            "colour decorates the layout, it must never change it — the columns \
+             are what the reader's eye and the tests both follow"
         );
     }
 }

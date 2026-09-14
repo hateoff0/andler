@@ -54,14 +54,15 @@ andler create \
 |------|----------|-------------|
 | `--file <path>` | Yes* | Path to TOML config file (*mutually exclusive with `--kind`) |
 | `--kind <type>` | Yes* | VM type: `linux` or `android` (*mutually exclusive with `--file`) |
-| `--quick` | No | Skip interactive wizard, create with all defaults. Requires `--kind`. Mutually exclusive with `--file`. The defaults' guest-side selections (ARM translator, clipboard agent) are recorded but **not** installed — run `andler guest apply <id>` for that. |
+| `--quick` | No | Skip the prompts, create with the flags you passed and the defaults for everything else. Requires `--kind`. Mutually exclusive with `--file`. The defaults' guest-side selections (ARM translator, clipboard agent) are recorded but **not** installed — run `andler guest apply <id>` for that. |
 | `--name <name>` | Yes** | Instance name (**required in CLI mode) |
-| `--ovmf-vars-template <path>` | No | Path to OVMF_VARS template (auto-detected when omitted) |
+| `--ovmf-vars-template <path>` | No | Path to OVMF_VARS template (auto-detected when omitted; the daemon's own `ANDLERD_OVMF_VARS` still wins when you omit it) |
 | `--iso-path <path>` | Yes*** | Path to installer ISO (***required for `--kind linux`) |
 | `--disk-path <path>` | Yes*** | Path to disk file (***required for `--kind linux`) |
 | `--disk-size-gib <size>` | No | Disk size in GiB, must be ≥ 1 (default: 256, Linux only) |
 | `--cdrom-bus <bus>` | No | CD-ROM bus: `auto` (default), `virtio`, `ide` (Linux only) |
 | `--compact-on-shutdown` | No | Auto-compact disk after shutdown (Linux only) |
+| `--no-uefi` | No | Boot Legacy BIOS instead of UEFI (Linux only). Without it, UEFI is used when an OVMF pair is discovered and Legacy BIOS when none is |
 | `--android-version <ver>` | Yes**** | Android version: `11` or `13` (****required for `--kind android`) |
 | `--base-image-path <path>` | No | Android base image qcow2; when omitted the daemon auto-discovers the freshest matching image in `~/.andler/cache/base-images/` (flat cache root or `android<version>-<variant>/` subdirectories) |
 | `--gapps` | No | Include Google Apps |
@@ -70,9 +71,11 @@ andler create \
 | `--overlay-size-gib <size>` | No | Overlay disk size in GiB (default: 128, Android only) |
 | `--linked-overlay` | No | Use a linked (backing-file) overlay instead of a standalone copy (Android only) |
 | `--template <name>` | No | VM template applied over the defaults and under the CLI flags (merge order: defaults < template < flags). Built-ins: `headless` (CPU renderer, no display/audio) and `desktop` (Venus GPU, SDL display, audio). User templates live in `~/.andler/templates/<name>.toml` and accept the same partial sections. Only supported with `--kind linux` in this phase. |
-| `--json` | Output as a JSON object: `{"instance_id": "<id>"}` for a real create; with `--dry-run --json`, the fully resolved `InstanceConfig` (all config sections) serialized as JSON; with `--verify --json`, a `{"name","passed","checks":[...]}` report (see below) |
+| `--json` | Output as a JSON object: `{"instance_id": "<id>"}` for a real create (both flag and `--file` mode); with `--dry-run --json`, the fully resolved `InstanceConfig` (all config sections) serialized as JSON; with `--verify --json`, a `{"name","passed","checks":[...]}` report (see below) |
 
-On success both file and CLI modes print `Created instance <name> (<id>)`. TOML mode requires `disk_path` and `iso_path`; a missing field is a clean error (`missing required field disk_path in instance file`), and an unknown `android_version` is rejected (`unsupported value for android_version: 12`).
+All three modes — CLI flags (plus `--template`), `--file`, and the wizard — resolve through one resolver: the same defaults, the same hardware detection for OVMF, and one `InstanceConfig::validate` gate. The same input therefore yields the same resolved config and the same verdict whichever way you express it, and `--dry-run` refuses a config that creation would reject instead of printing a preview for it.
+
+On success both file and CLI modes print `Created instance <name> (<id>)`. TOML mode requires `disk_path` and `iso_path`; a missing field is a clean error (`missing required field disk_path in instance file`), and an unknown `android_version` (`unsupported value for android_version: 12`) or `arm_translator` value is rejected rather than silently ignored. A `[cpu]`/`[memory]`/`[display]`/`[gpu]`/`[network]`/`[audio]`/`[input]` section, or `autostart`, in an **Android** instance file is refused with the same reason `--template` is (`not supported for Android VMs in this phase`) — Android requests carry no config sections, and dropping them silently would be worse than refusing.
 
 With `--verify --json`, the output is a single JSON object: `{"name": <instance name>, "passed": <bool>, "checks": [{"name": <check name>, "ok": <bool>, "detail": <human-readable string>}]}`. `passed` is `true` only when every check passes. Exit code is `1` on failure (nothing was created) and `0` on success, identical to the text mode.
 
@@ -119,9 +122,17 @@ andler status <instance-id> [--json]
 
 Prints current state: `Created`, `Starting`, `Running`, `Paused`, `Stopping`, `Stopped`, or `Error`.
 
+The readiness line reports where the guest is on the readiness ladder
+(`SerialUp → QgaUp → DisplayApplied → GuestOsUp → WaydroidReady`, see
+[ARCHITECTURE.md](ARCHITECTURE.md)) as `<reached> of <terminal>`, or
+`<level> (terminal)` once the instance's effective `(kind, boot_mode)` profile
+has reached its terminal level. `none` means no live run has reported a level.
+The level comes from real probes run when `status` is asked, never from log
+text; a level the profile cannot observe is never reported as reached.
+
 | Flag | Description |
 |------|-------------|
-| `--json` | Output as a JSON object: `{ "instance_id", "state", "detail", "error_message" }` (`error_message` omitted when empty) |
+| `--json` | Output as a JSON object: `{ "instance_id", "state", "detail", "error_message", "readiness", "terminal_readiness" }` (`error_message` omitted when empty; `readiness` is `null` while no live run reports a level) |
 
 ### `list`
 
@@ -428,15 +439,26 @@ andler op cancel <op-id>
 ### `connect`
 
 Single entry point to the guest. `--level` selects the access method;
-`auto` picks by effective profile — Android VMs booted into `linux` mode go
-to ssh, everything else to the serial console.
+`auto` picks by effective profile **and the guest's readiness level** —
+Android VMs booted into `linux` mode go to ssh once they report `GuestOsUp`,
+Android VMs in `android` mode go to adb once they report `WaydroidReady`, and
+a Linux VM keeps the serial console. Until the profile's terminal level is
+reached, `auto` attaches the serial console and prints one line naming the
+level it is waiting for; a level the daemon cannot observe degrades the choice
+the same way instead of waiting.
 
 | Level | Mechanism | Requires |
 |-------|-----------|----------|
 | `console` | Direct attach to the VM's serial console (raw terminal; works headless, no guest OS needed) | Instance running |
 | `ssh` | Spawns `ssh -p <host_port> user@localhost` using the configured `network.port_forwards` entry for guest port 22 | Running guest with sshd; `network.port_forwards` set at create |
 | `adb` | Spawns `adb connect localhost:<host_port>` using the forward for guest port 5555 | Running Android guest with adb; forward configured |
-| `auto` | `console` for Linux VMs and Android-in-android mode; `ssh` for Android VMs booted into linux mode | — |
+| `auto` | `console` for Linux VMs; `ssh` for Android-in-linux-mode and `adb` for Android-in-android-mode once readiness has reached the profile's terminal level (`GuestOsUp` / `WaydroidReady`), `console` with a note until then | — |
+
+With `--json`, the resolved decision is reported as
+`{ "instance_id", "level", "host_port", "readiness", "terminal_readiness" }`
+plus a `note` when the chosen level is not the strongest the profile supports
+(`level` is `console`/`ssh`/`adb`; `readiness` is the ladder level reached,
+`terminal_readiness` the level the profile climbs to).
 
 ```bash
 # Attach to the serial console (raw mode; Ctrl-C detaches)
@@ -493,7 +515,7 @@ With `--json`, prints `{ "exit_code", "stdout", "stderr" }`; the CLI still exits
 
 ### `guest`
 
-Guest package management — install, remove, or list packages in the guest OS. Auto-fallback: if VM is running and guest agent is available → online via the guest agent socket (`guest-exec`); if VM is stopped → offline via `guestmount` (FUSE) + an unprivileged user namespace — zero root either way.
+Guest package management — install, remove, or list packages in the guest OS. Auto-fallback: if VM is running and guest agent is available → online via the guest agent socket (`guest-exec`); if VM is stopped → offline through the libguestfs appliance, which runs the guest's own package manager as root inside its own VM — zero root for the daemon either way.
 
 `andler guest apply <instance-id> [--json]` applies what the instance's **own configuration** asks for instead of a package named on the command line: `kind.android_profile.arm_translator` (when not `none`) installs that ARM translator, and `input.clipboard_enabled` installs `spice-vdagent` (the guest half of clipboard sharing — without it the QEMU-side setting does nothing). Each selection is applied through the state-appropriate path (offline appliance while the disk is idle, guest agent on a running VM; a translator switch needs the VM stopped) and reported on its own line:
 
@@ -512,13 +534,13 @@ Mode selection by instance state:
 |-------|----------|
 | `Running` | Online via the guest agent. If `qemu-guest-agent` is not installed/responding, the command fails with a hint to stop the VM first (offline path) — no silent fallback. |
 | `Paused` | Treated like online, but the frozen guest agent cannot respond, so the command fails with a hint to resume or stop the VM. |
-| `Created` / `Stopped` / `Error` | Offline via `guestmount` (FUSE) + `unshare` user namespace + chroot — zero root; requires `libguestfs-tools`, `/dev/fuse`, and unprivileged user namespaces (see `andler doctor`). |
+| `Created` / `Stopped` / `Error` | Offline through the libguestfs appliance (`guestfish`): the guest's own package manager runs as root inside the appliance, and the session brings up the appliance's network, the guest resolver and the package index itself — zero root on the host; requires `guestfs-tools` (see `andler doctor`). |
 | `Starting` / `Stopping` | Rejected. |
 
 ```bash
 # Install a package (smart path: online via guest agent when running;
 # auto-starts a stopped VM for maintenance and stops it again; --offline
-# forces the offline guestmount/userns path for VMs that cannot boot)
+# forces the offline appliance path for VMs that cannot boot)
 andler guest install spice-vdagent <instance-id>
 andler guest install spice-vdagent <instance-id> --offline
 
@@ -549,7 +571,7 @@ operation runs in place. Both forms are supervisor operations — progress
 is visible on `andler events` and cancellable. If the guest agent does not
 appear within `ANDLERD_GUEST_AGENT_WAIT_SECS` (default 120 s) the
 operation fails with a hint to retry with `--offline` — that path uses
-the offline guestmount + userns path — zero root, no sudoers rules.
+the offline appliance path — zero root, no sudoers rules.
 Each package-manager step in the guest (index refresh, install, remove) is
 bounded by `ANDLERD_GUEST_PACKAGE_TIMEOUT_SECS` (default 600 s, minimum 30):
 a fresh guest's first index sync plus a download takes minutes, and a timeout
@@ -739,7 +761,7 @@ Downloaded images are ordinary cache entries: `base_image::resolve` finds them, 
 andler doctor [--metrics]
 ```
 
-Checks the local environment for ANDLER prerequisites: KVM availability, QEMU/OVMF installation, daemon reachability, base images, and the offline-guest-operation prerequisites (`guestmount`/libguestfs on PATH, `/dev/fuse`, unprivileged user namespaces allowed — the `sysctl kernel.unprivileged_userns_clone=1` hint appears on Debian/Ubuntu when disabled). Read-only — works even if andlerd isn't running. Offline guest package ops (`--offline`) are zero-root: no sudoers rules, nothing to install.
+Checks the local environment for ANDLER prerequisites: KVM availability, QEMU/OVMF installation, daemon reachability, base images, and the offline-guest-operation prerequisites (`guestfish`/guestfs-tools on PATH). Read-only — works even if andlerd isn't running. Offline guest package ops (`--offline`) are zero-root: no sudoers rules, nothing to install.
 
 With `--json`, prints `{ "overall": "ok"|"needs_attention", "checks": [ ... ] }` — the same `overall`/`checks` document the human-readable report is derived from.
 
@@ -765,12 +787,15 @@ andler completions fish > ~/.config/fish/completions/andler.fish
 
 ## Instance TOML File
 
+An instance file is one of the ways to describe a creation, and it resolves through the same resolver as the CLI flags and the wizard: omitted fields take the same defaults, `ovmf_vars_path` is auto-detected exactly like `--ovmf-vars-template`, and the resulting config passes the same `validate()` gate the daemon runs.
+
 ### Linux VM (minimal)
 
 ```toml
 name = "my-linux-vm"
 iso_path = "/home/user/isos/cachyos.iso"
 disk_path = "/home/user/.andler/my-linux-vm/disk.qcow2"
+# optional; auto-detected when omitted, like omitting --ovmf-vars-template
 ovmf_vars_path = "/home/user/.andler/my-linux-vm/VARS.fd"
 ```
 
@@ -780,10 +805,13 @@ ovmf_vars_path = "/home/user/.andler/my-linux-vm/VARS.fd"
 name = "my-android"
 android_version = 13
 base_image_path = "/path/to/base.qcow2"
+# optional; auto-detected when omitted
 ovmf_vars_path = "/path/to/VARS.fd"
 ```
 
 **Auto-detection**: if `android_version` or `base_image_path` is present, the TOML file is treated as an AndroidVm config. Otherwise, it's a LinuxVm.
+
+**Linux-only fields**: `[cpu]`/`[memory]`/`[display]`/`[gpu]`/`[network]`/`[audio]`/`[input]` sections and `autostart` apply to Linux VMs. An Android instance file carrying any of them is rejected with *the `cpu` section is not supported for Android VMs in this phase* — `CreateAndroidInstanceRequest` has no section fields, so accepting them would silently drop them.
 
 ### Android VM (full example)
 
@@ -791,7 +819,7 @@ ovmf_vars_path = "/path/to/VARS.fd"
 name = "my-android"
 android_version = 13
 base_image_path = "/path/to/base.qcow2"
-ovmf_vars_path = "/path/to/VARS.fd"
+ovmf_vars_path = "/path/to/VARS.fd"   # optional; auto-detected when omitted
 
 # Optional
 overlay_size_gib = 128
@@ -807,7 +835,7 @@ instances_root = "/home/user/.andler/instances"
 name = "my-linux-vm"
 iso_path = "/home/user/isos/cachyos.iso"
 disk_path = "/home/user/.andler/my-linux-vm/disk.qcow2"
-ovmf_vars_path = "/home/user/.andler/my-linux-vm/VARS.fd"
+ovmf_vars_path = "/home/user/.andler/my-linux-vm/VARS.fd"   # optional; auto-detected when omitted
 
 disk_size_gib = 100
 snapshot_timeout_secs = 60   # accepted for compatibility; snapshot ops are synchronous

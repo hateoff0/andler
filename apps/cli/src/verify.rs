@@ -1,9 +1,8 @@
 use andler_core::InstanceKind;
-use andler_rpc::proto::{CreateAndroidInstanceRequest, CreateInstanceRequest};
+use serde::Serialize;
 
 use crate::helpers::{emit_json, format_bytes};
-use crate::preview::{resolve_android, resolve_linux, Resolved};
-use serde::Serialize;
+use crate::preview::Resolved;
 
 #[derive(Serialize)]
 struct VerifyReport {
@@ -115,15 +114,17 @@ fn check_ovmf(resolved: &Resolved, kind_requires_uefi: bool) -> Check {
 }
 
 fn check_iso(resolved: &Resolved) -> Check {
-    let InstanceKind::LinuxVm { iso_path, .. } = &resolved.cfg.kind else {
-        unreachable!("check_iso is only called for Linux VMs");
-    };
-    let result = if iso_path.as_os_str().is_empty() {
-        Ok("none given — will boot from disk".to_string())
-    } else if iso_path.exists() {
-        Ok(iso_path.display().to_string())
-    } else {
-        Err(format!("file not found: {}", iso_path.display()))
+    let result = match &resolved.cfg.kind {
+        InstanceKind::LinuxVm { iso_path, .. } => {
+            if iso_path.as_os_str().is_empty() {
+                Ok("none given — will boot from disk".to_string())
+            } else if iso_path.exists() {
+                Ok(iso_path.display().to_string())
+            } else {
+                Err(format!("file not found: {}", iso_path.display()))
+            }
+        }
+        InstanceKind::AndroidVm { .. } => Ok("not applicable to Android VMs".to_string()),
     };
     Check {
         name: "ISO image",
@@ -131,24 +132,57 @@ fn check_iso(resolved: &Resolved) -> Check {
     }
 }
 
-/// The single resolver-side sanity gate: the same `InstanceConfig::validate`
-/// the daemon runs on create. Size/range checks live in andler-core, so the
-/// CLI can never pass what the daemon would reject (and vice versa).
+fn check_base_image(resolved: &Resolved) -> Check {
+    let result = match &resolved.cfg.kind {
+        InstanceKind::AndroidVm { android_profile } => match &resolved.android_base_image {
+            Some(path) if std::path::Path::new(path).exists() => Ok(path.clone()),
+            Some(path) => Err(format!("file not found: {path}")),
+            None => andler_core::base_image::resolve(android_profile)
+                .map(|path| format!("auto-resolved: {}", path.display()))
+                .map_err(|e| e.to_string()),
+        },
+        InstanceKind::LinuxVm { .. } => Ok("not applicable to Linux VMs".to_string()),
+    };
+    Check {
+        name: "Base image",
+        result,
+    }
+}
+
+fn check_disk_mode(resolved: &Resolved) -> Check {
+    let result = match &resolved.cfg.kind {
+        InstanceKind::AndroidVm { .. } => Ok(if resolved.cfg.disk.base_image.is_some() {
+            "linked overlay (backing file: base image)".to_string()
+        } else {
+            "full copy (independent of base image)".to_string()
+        }),
+        InstanceKind::LinuxVm { .. } => Ok("standalone disk (no base image)".to_string()),
+    };
+    Check {
+        name: "Disk mode",
+        result,
+    }
+}
+
+/// The resolver-side sanity gate, reported from the verdict the one resolver
+/// already computed: `--verify` and `--dry-run` and the daemon can never
+/// disagree about whether a config is creatable.
 fn check_config_sanity(resolved: &Resolved) -> Check {
-    let result = match resolved.cfg.validate() {
+    let result = match &resolved.validation {
         Ok(()) => Ok(format!(
             "{} cores, {} GiB RAM, {} MiB GPU",
             resolved.cfg.cpu.cores,
             resolved.cfg.memory.size_bytes / andler_core::MemoryConfig::GIB,
             resolved.cfg.gpu.hostmem_bytes / andler_core::GpuConfig::MIB
         )),
-        Err(issue) => Err(issue),
+        Err(issue) => Err(issue.clone()),
     };
     Check {
         name: "Config sanity",
         result,
     }
 }
+
 /// Informational host-RAM check: the real multi-instance overcommit gate runs
 /// on the daemon (it alone sees every running instance), but the operator
 /// should still see host RAM vs the requested size before starting so the
@@ -202,66 +236,22 @@ fn read_host_total_ram() -> Option<u64> {
     None
 }
 
-pub fn verify_linux(
-    req: &CreateInstanceRequest,
-    json: bool,
-) -> Result<bool, Box<dyn std::error::Error>> {
-    let resolved = resolve_linux(req)?;
+pub(crate) fn verify(resolved: &Resolved, json: bool) -> Result<bool, Box<dyn std::error::Error>> {
+    let kind_requires_uefi = matches!(resolved.cfg.kind, InstanceKind::AndroidVm { .. });
 
-    let checks = vec![
-        check_iso(&resolved),
-        check_disk(&resolved),
-        check_ovmf(&resolved, false),
-        check_config_sanity(&resolved),
-        check_host_ram(&resolved),
-    ];
+    let mut checks = Vec::with_capacity(6);
+    if kind_requires_uefi {
+        checks.push(check_base_image(resolved));
+        checks.push(check_disk_mode(resolved));
+    } else {
+        checks.push(check_iso(resolved));
+    }
+    checks.push(check_disk(resolved));
+    checks.push(check_ovmf(resolved, kind_requires_uefi));
+    checks.push(check_config_sanity(resolved));
+    checks.push(check_host_ram(resolved));
 
-    Ok(run_checks(&resolved, checks, json))
-}
-
-pub fn verify_android(
-    req: &CreateAndroidInstanceRequest,
-    json: bool,
-) -> Result<bool, Box<dyn std::error::Error>> {
-    let resolved = resolve_android(req)?;
-
-    let base_image_check = Check {
-        name: "Base image",
-        result: if req.base_image_path.is_empty() {
-            match req.profile.clone() {
-                None => Err("missing profile".to_string()),
-                Some(profile_msg) => match andler_core::AndroidProfile::try_from(profile_msg) {
-                    Err(e) => Err(e.to_string()),
-                    Ok(profile) => andler_core::base_image::resolve(&profile)
-                        .map(|path| format!("auto-resolved: {}", path.display()))
-                        .map_err(|e| e.to_string()),
-                },
-            }
-        } else if std::path::Path::new(&req.base_image_path).exists() {
-            Ok(req.base_image_path.clone())
-        } else {
-            Err(format!("file not found: {}", req.base_image_path))
-        },
-    };
-
-    let disk_mode_check = Check {
-        name: "Disk mode",
-        result: Ok(if req.linked_overlay {
-            "linked overlay (backing file: base image)".to_string()
-        } else {
-            "full copy (independent of base image)".to_string()
-        }),
-    };
-
-    let checks = vec![
-        base_image_check,
-        disk_mode_check,
-        check_disk(&resolved),
-        check_ovmf(&resolved, true),
-        check_config_sanity(&resolved),
-        check_host_ram(&resolved),
-    ];
-    Ok(run_checks(&resolved, checks, json))
+    Ok(run_checks(resolved, checks, json))
 }
 
 #[cfg(test)]
@@ -296,10 +286,13 @@ mod tests {
             input: InputConfig::reference_default(),
             autostart: false,
         };
+        let validation = cfg.validate();
         Resolved {
             cfg,
             instance_dir: disk_path.parent().map(PathBuf::from).unwrap_or_default(),
             ovmf_vars_template: None,
+            android_base_image: None,
+            validation,
         }
     }
 
@@ -314,6 +307,7 @@ mod tests {
     fn config_sanity_fails_on_zero_disk_size() {
         let mut resolved = fixture_resolved(std::env::temp_dir().join("disk.qcow2"));
         resolved.cfg.disk.size_bytes = 0;
+        resolved.validation = resolved.cfg.validate();
         assert!(check_config_sanity(&resolved).result.is_err());
     }
 
@@ -390,6 +384,7 @@ mod tests {
         let mut resolved = fixture_resolved(std::env::temp_dir().join("disk.qcow2"));
         resolved.cfg.gpu.render_backend = andler_core::RenderBackend::Venus;
         resolved.cfg.gpu.hostmem_bytes = 64 * andler_core::GpuConfig::MIB;
+        resolved.validation = resolved.cfg.validate();
         assert!(check_config_sanity(&resolved).result.is_err());
     }
 
@@ -398,6 +393,7 @@ mod tests {
         let mut resolved = fixture_resolved(std::env::temp_dir().join("disk.qcow2"));
         resolved.cfg.gpu.render_backend = andler_core::RenderBackend::Cpu;
         resolved.cfg.gpu.hostmem_bytes = 64 * andler_core::GpuConfig::MIB;
+        resolved.validation = resolved.cfg.validate();
         assert!(check_config_sanity(&resolved).result.is_ok());
     }
 
@@ -405,6 +401,7 @@ mod tests {
     fn config_sanity_fails_on_zero_cores() {
         let mut resolved = fixture_resolved(std::env::temp_dir().join("disk.qcow2"));
         resolved.cfg.cpu.cores = 0;
+        resolved.validation = resolved.cfg.validate();
         assert!(check_config_sanity(&resolved).result.is_err());
     }
 

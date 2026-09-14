@@ -1,109 +1,193 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use andler_core::{AndroidBootMode, ArmTranslator, DisplayEngine, NetworkMode, RenderBackend};
+use andler_core::config::{ConfigDraft, DiskDraft, DiskSource, DraftKind, FirmwareDraft};
+use andler_core::{
+    AndroidBootMode, AndroidProfile, ArmTranslator, CdromBus, DisplayEngine, NetworkMode,
+    RenderBackend,
+};
 use andler_firmware::HardwareDefaults;
-use andler_rpc::proto::{AndroidProfile, CreateAndroidInstanceRequest, CreateInstanceRequest};
 
 use crate::helpers::ensure_qcow2_extension;
+use crate::instance_file::TemplateFile;
 use crate::{CliAndroidVersion, CliArmTranslator};
 
 use super::advanced::AdvancedConfig;
 use super::basic::{AndroidBasicResult, BasicResult, LinuxBasicResult};
 use super::summary::format_nat_backend;
-use super::{ui, WizardError};
+use super::{ui, PartialArgs, WizardError};
 
-pub(crate) fn build_linux_request(
-    basic: &LinuxBasicResult,
-    advanced: Option<&AdvancedConfig>,
-    detected: &HardwareDefaults,
-) -> Result<CreateInstanceRequest, WizardError> {
-    let disk_name = "disk".to_string();
-    let disk_path = ensure_qcow2_extension(&PathBuf::from(&disk_name));
-    let full_disk_path = PathBuf::from(&basic.instances_root).join(&disk_path);
-
-    let mut disk = andler_core::DiskConfig::reference_default(full_disk_path);
-    disk.size_bytes = basic
-        .disk_size_gib
-        .checked_mul(andler_core::DiskConfig::GIB)
-        .ok_or_else(|| WizardError::Inquire("disk size overflow".into()))?;
-    disk.compact_on_shutdown = advanced.map(|a| a.compact_on_shutdown).unwrap_or(false);
-
-    let cdrom_bus = if basic.iso_path.is_empty() {
-        andler_core::CdromBus::Ide
-    } else {
-        advanced.and_then(|a| a.cdrom_bus).unwrap_or_else(|| {
-            andler_core::CdromBus::recommended_for_iso_filename(std::path::Path::new(
-                &basic.iso_path,
-            ))
-        })
-    };
-
-    let gpu = build_gpu_config(advanced, detected);
-    let display = build_display_config(advanced, detected, gpu.render_backend.clone());
-    let audio = build_audio_config(advanced, detected);
-    let network = build_network_config(advanced, detected)?;
-    let input = build_input_config(advanced);
-    let cpu = build_cpu_config(advanced);
-    let memory = build_memory_config(advanced);
-
-    let ovmf_vars_template = ovmf_vars_template(detected);
-
-    let mut req = CreateInstanceRequest {
-        name: basic.name.clone(),
-        iso_path: basic.iso_path.clone(),
-        cpu: Some(cpu.into()),
-        memory: Some(memory.into()),
-        disk: Some(disk.into()),
-        display: Some(display.into()),
-        gpu: Some(gpu.into()),
-        network: Some(network.into()),
-        firmware: Some(
-            andler_core::FirmwareConfig {
-                enable_uefi: basic.enable_uefi,
-                ovmf_code_path: PathBuf::new(),
-                ovmf_vars_path: PathBuf::from(&ovmf_vars_template),
-            }
-            .into(),
-        ),
-        audio: Some(audio.into()),
-        input: Some(input.into()),
-        ..Default::default()
-    };
-    req.set_cdrom_bus(cdrom_bus.into());
-
-    Ok(req)
+/// One section of the Linux draft: an advanced answer wins, then a template's
+/// section, then hardware detection. Same order the CLI-flag path applies
+/// (template over detection, flags over both), so the wizard cannot resolve a
+/// section to anything the flag or file path would not.
+fn layered<T>(answer: Option<T>, from_template: Option<T>, detected: impl FnOnce() -> T) -> T {
+    match (answer, from_template) {
+        (Some(answer), _) => answer,
+        (None, Some(from_template)) => from_template,
+        (None, None) => detected(),
+    }
 }
 
-pub(crate) fn build_android_request(
+fn core_cdrom_bus(flags: &PartialArgs) -> Option<CdromBus> {
+    match flags.cdrom_bus? {
+        crate::CliCdromBus::Auto => None,
+        crate::CliCdromBus::Virtio => Some(CdromBus::VirtioScsi),
+        crate::CliCdromBus::Ide => Some(CdromBus::Ide),
+    }
+}
+
+fn load_template(flags: &PartialArgs) -> Result<Option<TemplateFile>, WizardError> {
+    match flags.template.as_deref() {
+        Some(name) => TemplateFile::load(name)
+            .map(Some)
+            .map_err(|e| WizardError::Inquire(e.to_string())),
+        None => Ok(None),
+    }
+}
+
+/// The wizard's Linux draft — the interactive answers and `--quick`, both
+/// filled from the CLI-flag layer and resolved by the one resolver.
+pub(crate) fn linux_draft(
+    basic: &LinuxBasicResult,
+    advanced: Option<&AdvancedConfig>,
+    flags: &PartialArgs,
+    detected: &HardwareDefaults,
+) -> Result<ConfigDraft, WizardError> {
+    let template = load_template(flags)?;
+    let template = template.as_ref();
+
+    let disk_path = match &flags.disk_path {
+        Some(path) => PathBuf::from(path),
+        None => PathBuf::from(&basic.instances_root)
+            .join(ensure_qcow2_extension(&PathBuf::from("disk"))),
+    };
+
+    let cdrom_bus = advanced
+        .and_then(|a| a.cdrom_bus)
+        .or_else(|| core_cdrom_bus(flags))
+        .unwrap_or_else(|| {
+            if basic.iso_path.is_empty() {
+                CdromBus::Ide
+            } else {
+                CdromBus::recommended_for_iso_filename(Path::new(&basic.iso_path))
+            }
+        });
+
+    let gpu = layered(
+        advanced.map(|a| build_gpu_config(Some(a), detected)),
+        template.and_then(|t| t.gpu.clone()),
+        || build_gpu_config(None, detected),
+    );
+    let display = layered(
+        advanced.map(|a| build_display_config(Some(a), detected, gpu.render_backend.clone())),
+        template.and_then(|t| t.display),
+        || build_display_config(None, detected, gpu.render_backend.clone()),
+    );
+    let network = match (advanced, template.and_then(|t| t.network.clone())) {
+        (Some(adv), _) => build_network_config(Some(adv), detected)?,
+        (None, Some(from_template)) => from_template,
+        (None, None) => build_network_config(None, detected)?,
+    };
+
+    Ok(ConfigDraft {
+        name: basic.name.clone(),
+        kind: DraftKind::Linux {
+            iso_path: PathBuf::from(&basic.iso_path),
+            cdrom_bus,
+        },
+        disk: DiskDraft {
+            path: disk_path,
+            source: DiskSource::Fresh,
+            size_gib: Some(basic.disk_size_gib),
+            compact_on_shutdown: advanced
+                .map(|a| a.compact_on_shutdown)
+                .or(flags.compact_on_shutdown)
+                .unwrap_or(false),
+            snapshot_timeout_secs: None,
+        },
+        firmware: FirmwareDraft {
+            enable_uefi: basic.enable_uefi.or(flags.enable_uefi),
+            ovmf_vars_template: flags.ovmf_vars_template.clone().map(PathBuf::from),
+        },
+        autostart: false,
+        cpu: Some(layered(
+            advanced.map(|a| build_cpu_config(Some(a))),
+            template.and_then(|t| t.cpu.clone()),
+            || build_cpu_config(None),
+        )),
+        memory: Some(layered(
+            advanced.map(|a| build_memory_config(Some(a))),
+            template.and_then(|t| t.memory.clone()),
+            || build_memory_config(None),
+        )),
+        display: Some(display),
+        gpu: Some(gpu),
+        network: Some(network),
+        audio: Some(layered(
+            advanced.map(|a| build_audio_config(Some(a), detected)),
+            template.and_then(|t| t.audio),
+            || build_audio_config(None, detected),
+        )),
+        input: Some(layered(
+            advanced.map(|a| build_input_config(Some(a))),
+            template.and_then(|t| t.input),
+            || build_input_config(None),
+        )),
+    })
+}
+
+/// The wizard's Android draft. Android instances take their config sections
+/// from the profile, so `--template` is refused for Android by the flag path
+/// rather than dropped here.
+pub(crate) fn android_draft(
     basic: &AndroidBasicResult,
     advanced: Option<&AdvancedConfig>,
+    flags: &PartialArgs,
     detected: &HardwareDefaults,
-) -> Result<CreateAndroidInstanceRequest, WizardError> {
-    let arm_translator = resolve_arm_translator(advanced, detected);
-
-    let gapps = if let Some(adv) = advanced {
-        adv.gapps
-    } else {
-        basic.gapps
+) -> Result<ConfigDraft, WizardError> {
+    let arm_translator = match advanced.and_then(|a| a.arm_translator) {
+        Some(answer) => answer,
+        None => match flags.arm_translator {
+            Some(flag) => flag,
+            None => resolve_arm_translator(None, detected),
+        },
     };
+    let gapps = advanced.map(|a| a.gapps).unwrap_or(basic.gapps);
 
-    let mut profile = AndroidProfile {
+    let profile = AndroidProfile {
+        android_version: basic.android_version.into(),
         gapps,
-        ..Default::default()
+        microg: flags.microg,
+        arm_translator: arm_translator.into(),
+        boot_mode: AndroidBootMode::Android,
+        base_image_pin: None,
     };
-    profile.set_android_version(basic.android_version.into());
-    profile.set_arm_translator(arm_translator.into());
 
-    Ok(CreateAndroidInstanceRequest {
+    Ok(ConfigDraft {
         name: basic.name.clone(),
-        profile: Some(profile),
-        base_image_path: basic.base_image.clone(),
-        instances_root: basic.instances_root.clone(),
-        overlay_size_bytes: 128_u64
-            .checked_mul(andler_core::DiskConfig::GIB)
-            .ok_or_else(|| WizardError::Inquire("overlay size overflow".into()))?,
-        ovmf_vars_template: ovmf_vars_template(detected),
-        linked_overlay: advanced.map(|a| a.linked_overlay).unwrap_or(basic.linked),
+        kind: DraftKind::Android { profile },
+        disk: DiskDraft {
+            path: PathBuf::from(&basic.instances_root).join("disk.qcow2"),
+            source: DiskSource::BaseImage {
+                path: PathBuf::from(&basic.base_image),
+                linked: advanced.map(|a| a.linked_overlay).unwrap_or(flags.linked),
+            },
+            size_gib: flags.overlay_size_gib,
+            compact_on_shutdown: false,
+            snapshot_timeout_secs: None,
+        },
+        firmware: FirmwareDraft {
+            enable_uefi: None,
+            ovmf_vars_template: flags.ovmf_vars_template.clone().map(PathBuf::from),
+        },
+        autostart: false,
+        cpu: None,
+        memory: None,
+        display: None,
+        gpu: None,
+        network: None,
+        audio: None,
+        input: None,
     })
 }
 
@@ -224,13 +308,6 @@ pub(crate) fn resolve_arm_translator(
         .unwrap_or(CliArmTranslator::None)
 }
 
-fn ovmf_vars_template(detected: &HardwareDefaults) -> String {
-    match &detected.ovmf {
-        Ok(found) => found.vars_template.to_string_lossy().into_owned(),
-        Err(_) => String::new(),
-    }
-}
-
 /// Re-resolves an auto-picked Android base image when the advanced answers
 /// changed which image the profile matches (e.g. GApps toggled on). A path
 /// the user typed is never touched: the wizard does not second-guess an
@@ -311,9 +388,21 @@ pub(crate) fn sample_detected() -> HardwareDefaults {
 mod tests {
     use super::*;
     use andler_core::{AudioBackend, PointerMode, Resolution};
-    use andler_rpc::proto::ArmTranslator as ProtoArmTranslator;
 
     use super::sample_detected;
+
+    fn resolve_linux(
+        basic: &LinuxBasicResult,
+        advanced: Option<&AdvancedConfig>,
+        flags: &PartialArgs,
+    ) -> andler_core::InstanceConfig {
+        let detected = sample_detected();
+        let draft = linux_draft(basic, advanced, flags, &detected).expect("draft must build");
+        let host = crate::create::host_firmware(&detected);
+        crate::create::Creation::resolve(&draft, "/tmp/instances".to_string(), &host)
+            .expect("must resolve")
+            .cfg
+    }
 
     #[test]
     fn build_create_request_linux_basic_mode() {
@@ -322,12 +411,22 @@ mod tests {
             iso_path: "/tmp/test.iso".into(),
             disk_size_gib: 256,
             instances_root: "/tmp/instances".into(),
-            enable_uefi: true,
+            enable_uefi: Some(true),
         };
-        let detected = sample_detected();
-        let req = build_linux_request(&basic, None, &detected).unwrap();
-        assert_eq!(req.name, "test");
-        assert_eq!(req.iso_path, "/tmp/test.iso");
+        let cfg = resolve_linux(&basic, None, &PartialArgs::default());
+        assert_eq!(cfg.name, "test");
+        assert_eq!(
+            cfg.kind,
+            andler_core::InstanceKind::LinuxVm {
+                iso_path: PathBuf::from("/tmp/test.iso"),
+                cdrom_bus: andler_core::CdromBus::Ide,
+            }
+        );
+        assert_eq!(cfg.disk.size_bytes, 256 * andler_core::DiskConfig::GIB);
+        assert_eq!(cfg.disk.path, PathBuf::from("/tmp/instances/disk.qcow2"));
+        assert!(cfg.firmware.enable_uefi);
+        cfg.validate()
+            .expect("the wizard must resolve a valid config");
     }
 
     #[test]
@@ -337,7 +436,7 @@ mod tests {
             iso_path: String::new(),
             disk_size_gib: 128,
             instances_root: "/tmp/instances".into(),
-            enable_uefi: true,
+            enable_uefi: Some(true),
         };
         let advanced = AdvancedConfig {
             cdrom_bus: None,
@@ -357,9 +456,38 @@ mod tests {
             bridge_interface: None,
             linked_overlay: false,
         };
-        let req = build_linux_request(&basic, Some(&advanced), &sample_detected()).unwrap();
-        let input = req.input.expect("input");
-        assert!(!input.clipboard_enabled);
+        let cfg = resolve_linux(&basic, Some(&advanced), &PartialArgs::default());
+        assert!(!cfg.input.clipboard_enabled);
+        assert_eq!(cfg.cpu.cores, 8);
+        assert_eq!(cfg.memory.size_bytes, 16 * andler_core::MemoryConfig::GIB);
+        assert_eq!(cfg.gpu.render_backend, RenderBackend::VirGl);
+        assert_eq!(cfg.gpu.hostmem_bytes, 8192 * andler_core::GpuConfig::MIB);
+        assert_eq!(cfg.display.resolution, Resolution::new(2560, 1440));
+        assert_eq!(cfg.audio.backend, AudioBackend::None);
+        assert!(cfg.disk.compact_on_shutdown);
+        cfg.validate()
+            .expect("the wizard must resolve a valid config");
+    }
+
+    #[test]
+    fn a_template_fills_sections_the_basic_flow_never_asks_about() {
+        let basic = LinuxBasicResult {
+            name: "templated".into(),
+            iso_path: String::new(),
+            disk_size_gib: 64,
+            instances_root: "/tmp/instances".into(),
+            enable_uefi: Some(true),
+        };
+        let flags = PartialArgs {
+            template: Some("headless".to_string()),
+            ..Default::default()
+        };
+        let cfg = resolve_linux(&basic, None, &flags);
+        assert_eq!(cfg.gpu.render_backend, RenderBackend::Cpu);
+        assert_eq!(cfg.display.display_engine, DisplayEngine::None);
+        assert_eq!(cfg.audio.backend, andler_core::AudioBackend::None);
+        cfg.validate()
+            .expect("the wizard must resolve a valid config");
     }
 
     #[test]
@@ -372,17 +500,25 @@ mod tests {
             gapps: false,
             disk_size_gib: 256,
             instances_root: "/tmp/instances".into(),
-            linked: false,
         };
-        let req = build_android_request(&basic, None, &sample_detected()).unwrap();
-        assert_eq!(req.name, "android");
+        let detected = sample_detected();
+        let flags = PartialArgs::default();
+        let draft = android_draft(&basic, None, &flags, &detected).expect("draft must build");
+        let host = crate::create::host_firmware(&detected);
+        let creation =
+            crate::create::Creation::resolve(&draft, "/tmp/instances".to_string(), &host)
+                .expect("must resolve");
+
+        assert_eq!(creation.cfg.name, "android");
         assert_eq!(
-            req.overlay_size_bytes,
+            creation.cfg.disk.size_bytes,
             128 * andler_core::DiskConfig::GIB,
-            "overlay size must be the fixed 128 GiB default, not derived from disk size"
+            "overlay size must be the resolver's 128 GiB default, not derived from disk size"
         );
-        let profile = req.profile.expect("profile");
-        assert_eq!(profile.arm_translator(), ProtoArmTranslator::Libndk);
+        let andler_core::InstanceKind::AndroidVm { android_profile } = creation.cfg.kind else {
+            panic!("expected an Android VM");
+        };
+        assert_eq!(android_profile.arm_translator, ArmTranslator::Libndk);
     }
 
     #[test]
@@ -502,7 +638,6 @@ mod tests {
             gapps: false,
             disk_size_gib: 256,
             instances_root: "/tmp/instances".into(),
-            linked: false,
         })
     }
 

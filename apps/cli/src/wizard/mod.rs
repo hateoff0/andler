@@ -1,37 +1,54 @@
-mod advanced;
+pub(crate) mod advanced;
 mod apply;
 mod base_image;
 mod basic;
-mod build;
+pub(crate) mod build;
 mod summary;
 mod ui;
 
+use andler_core::config::HostFirmware;
 use andler_core::{AndroidBootMode, ArmTranslator};
 use andler_firmware::{FirmwareError, HardwareDefaults};
-use andler_rpc::proto::{CreateAndroidInstanceRequest, CreateInstanceRequest};
 use inquire::{InquireError, Select};
 
-use crate::{CliAndroidVersion, TracedClient};
+use crate::create::Creation;
+use crate::{CliAndroidVersion, CliArmTranslator, CliCdromBus, TracedClient};
 
 pub use basic::{AndroidBasicResult, BasicResult, LinuxBasicResult};
 
-#[derive(Debug)]
-#[allow(clippy::large_enum_variant)] // carries full proto requests; boxing would complicate callers
-pub enum WizardResult {
-    Linux(CreateInstanceRequest),
-    Android(CreateAndroidInstanceRequest),
+/// The wizard's answers resolved by the one resolver: what the summary screen
+/// showed and what creation sends are the same config.
+#[derive(Debug, Clone)]
+pub(crate) struct WizardResult {
+    pub creation: Creation,
 }
 
-#[derive(Default)]
+/// The CLI-flag layer every creation path reads: whatever the operator put on
+/// the command line, independent of which question flow (or none) turns it
+/// into a config. `--quick` consults it instead of the questions, the
+/// interactive wizard prefills its questions with it, and the flag path builds
+/// its draft from it directly.
+#[derive(Default, Clone)]
 pub struct PartialArgs {
     pub kind: Option<WizardKind>,
     pub name: Option<String>,
     pub iso_path: Option<String>,
     pub base_image_path: Option<String>,
     pub instances_root: Option<String>,
+    pub disk_path: Option<String>,
+    pub disk_size_gib: Option<u64>,
+    pub overlay_size_gib: Option<u64>,
+    pub android_version: Option<CliAndroidVersion>,
+    pub arm_translator: Option<CliArmTranslator>,
+    pub cdrom_bus: Option<CliCdromBus>,
+    pub compact_on_shutdown: Option<bool>,
+    pub enable_uefi: Option<bool>,
+    pub ovmf_vars_template: Option<String>,
+    pub microg: bool,
     pub gapps: bool,
-    pub quick: bool,
     pub linked: bool,
+    pub template: Option<String>,
+    pub quick: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -46,16 +63,17 @@ enum WizardMode {
     Advanced,
 }
 
-/// Resolves the wizard's answers into the request to create — the interactive
-/// flow when there is a TTY, the defaults-only flow under `--quick`.
-pub async fn run(
+/// Resolves the wizard's answers into the one creation — the interactive flow
+/// when there is a TTY, the flags-and-defaults flow under `--quick`.
+pub(crate) async fn run(
     client: &mut TracedClient,
     partial: PartialArgs,
 ) -> Result<WizardResult, WizardError> {
     let detected = andler_firmware::detect_all();
+    let host = crate::create::host_firmware(&detected);
 
     if partial.quick {
-        return build_quick(partial, &detected);
+        return build_quick(&partial, &detected, &host);
     }
 
     if !is_tty() {
@@ -75,20 +93,22 @@ pub async fn run(
 
     let mode = ask_wizard_mode()?;
     let kind = basic::ask_kind(partial.kind)?;
-    let name = basic::ask_name(partial.name, kind)?;
+    let name = basic::ask_name(partial.name.clone(), kind)?;
 
     let mut basic_result = match kind {
         WizardKind::Linux => BasicResult::Linux(basic::run_linux(
             name,
-            partial.iso_path,
-            partial.instances_root,
+            partial.iso_path.clone(),
+            partial.instances_root.clone(),
+            partial.disk_size_gib,
         )?),
         WizardKind::Android => BasicResult::Android(
             basic::run_android(
                 client,
                 name,
-                partial.base_image_path,
-                partial.instances_root,
+                partial.base_image_path.clone(),
+                partial.instances_root.clone(),
+                partial.disk_size_gib,
             )
             .await?,
         ),
@@ -127,7 +147,7 @@ pub async fn run(
         }
     }
 
-    match &basic_result {
+    let draft = match &basic_result {
         BasicResult::Linux(l) => {
             if detected.ovmf.is_err() {
                 ui::result(
@@ -136,14 +156,32 @@ pub async fn run(
                      Install edk2-ovmf for UEFI support.",
                 );
             }
-            let req = build::build_linux_request(l, advanced_config.as_ref(), &detected)?;
-            Ok(WizardResult::Linux(req))
+            build::linux_draft(l, advanced_config.as_ref(), &partial, &detected)?
         }
         BasicResult::Android(a) => {
-            let req = build::build_android_request(a, advanced_config.as_ref(), &detected)?;
-            Ok(WizardResult::Android(req))
+            build::android_draft(a, advanced_config.as_ref(), &partial, &detected)?
         }
-    }
+    };
+
+    resolve_draft(draft, &partial, &host)
+}
+
+/// Turns a draft into the one creation, with the validation verdict every
+/// consumer reports: the wizard refuses a config the daemon would reject,
+/// exactly like `--dry-run`, `--verify` and the CLI-flag path.
+pub(crate) fn resolve_draft(
+    draft: andler_core::config::ConfigDraft,
+    flags: &PartialArgs,
+    host: &HostFirmware,
+) -> Result<WizardResult, WizardError> {
+    let instances_root = flags
+        .instances_root
+        .clone()
+        .unwrap_or_else(crate::create::default_instances_root);
+    let creation =
+        Creation::resolve(&draft, instances_root, host).map_err(WizardError::InvalidConfig)?;
+    creation.validation().map_err(WizardError::InvalidConfig)?;
+    Ok(WizardResult { creation })
 }
 
 fn ask_wizard_mode() -> Result<WizardMode, WizardError> {
@@ -165,66 +203,70 @@ fn ask_wizard_mode() -> Result<WizardMode, WizardError> {
     })
 }
 
+/// `--quick`: the flags layer and the defaults, no questions. Every create
+/// flag reaches the draft here, so `--quick --disk-size-gib 512` means the
+/// same thing as the same flag on the CLI-mode path.
 fn build_quick(
-    partial: PartialArgs,
+    flags: &PartialArgs,
     detected: &HardwareDefaults,
+    host: &HostFirmware,
 ) -> Result<WizardResult, WizardError> {
-    let kind = partial.kind.ok_or_else(|| {
+    let kind = flags.kind.ok_or_else(|| {
         WizardError::Inquire("`--quick` requires `--kind` to specify VM type".into())
     })?;
 
     match kind {
         WizardKind::Linux => {
-            let name = partial.name.unwrap_or_else(|| "quick-linux".to_string());
-            let iso = partial.iso_path.unwrap_or_default();
-            let instances_root = partial
+            let name = flags
+                .name
+                .clone()
+                .unwrap_or_else(|| "quick-linux".to_string());
+            let instances_root = flags
                 .instances_root
-                .unwrap_or_else(default_instances_root);
-
-            let enable_uefi = if detected.ovmf.is_err() {
-                ui::result(
-                    ui::Status::Warn,
-                    "OVMF not found. Legacy BIOS will be used. \
-                     Install edk2-ovmf for UEFI support.",
-                );
-                false
-            } else {
-                true
-            };
+                .clone()
+                .unwrap_or_else(crate::create::default_instances_root);
 
             let basic = LinuxBasicResult {
                 name,
-                iso_path: iso,
-                disk_size_gib: 256,
+                iso_path: flags.iso_path.clone().unwrap_or_default(),
+                disk_size_gib: flags
+                    .disk_size_gib
+                    .unwrap_or(andler_core::config::DEFAULT_DISK_GIB),
                 instances_root,
-                enable_uefi,
+                enable_uefi: flags.enable_uefi,
             };
-            let req = build::build_linux_request(&basic, None, detected)?;
-            Ok(WizardResult::Linux(req))
+            let draft = build::linux_draft(&basic, None, flags, detected)?;
+            resolve_draft(draft, flags, host)
         }
         WizardKind::Android => {
             if detected.ovmf.is_err() {
                 return Err(WizardError::Firmware(FirmwareError::OvmfVarsNotFound));
             }
 
-            let name = partial.name.unwrap_or_else(|| "quick-android".to_string());
-            let base_image_auto_resolved = partial.base_image_path.is_none();
-            let base_image = match partial.base_image_path {
+            let name = flags
+                .name
+                .clone()
+                .unwrap_or_else(|| "quick-android".to_string());
+            let android_version = flags
+                .android_version
+                .unwrap_or(CliAndroidVersion::Android13);
+            let base_image_auto_resolved = flags.base_image_path.is_none();
+            let base_image = match &flags.base_image_path {
                 Some(path) => {
-                    if !std::path::Path::new(&path).exists() {
+                    if !std::path::Path::new(path).exists() {
                         return Err(WizardError::Inquire(format!(
                             "Base image not found: {path}. Android requires a valid base image; \
                              download one with `andler image download`, or build one with \
                              `docker/images/build.sh`."
                         )));
                     }
-                    path
+                    path.clone()
                 }
                 None => {
                     let quick_profile = andler_core::AndroidProfile {
-                        android_version: andler_core::AndroidVersion::Android13,
-                        gapps: partial.gapps,
-                        microg: false,
+                        android_version: android_version.into(),
+                        gapps: flags.gapps,
+                        microg: flags.microg,
                         arm_translator: ArmTranslator::None,
                         boot_mode: AndroidBootMode::Android,
                         base_image_pin: None,
@@ -236,22 +278,24 @@ fn build_quick(
                 }
             };
 
-            let instances_root = partial
+            let instances_root = flags
                 .instances_root
-                .unwrap_or_else(default_instances_root);
+                .clone()
+                .unwrap_or_else(crate::create::default_instances_root);
 
             let basic = AndroidBasicResult {
                 name,
                 base_image,
                 base_image_auto_resolved,
-                android_version: CliAndroidVersion::Android13,
-                gapps: partial.gapps,
-                disk_size_gib: 256,
+                android_version,
+                gapps: flags.gapps,
+                disk_size_gib: flags
+                    .disk_size_gib
+                    .unwrap_or(andler_core::config::DEFAULT_DISK_GIB),
                 instances_root,
-                linked: partial.linked,
             };
-            let req = build::build_android_request(&basic, None, detected)?;
-            Ok(WizardResult::Android(req))
+            let draft = build::android_draft(&basic, None, flags, detected)?;
+            resolve_draft(draft, flags, host)
         }
     }
 }
@@ -280,9 +324,9 @@ pub async fn handle_wizard(
     };
 
     let id = apply::create(client, &result).await?;
-    let kind = match &result {
-        WizardResult::Linux(..) => WizardKind::Linux,
-        WizardResult::Android(_) => WizardKind::Android,
+    let kind = match &result.creation.cfg.kind {
+        andler_core::InstanceKind::LinuxVm { .. } => WizardKind::Linux,
+        andler_core::InstanceKind::AndroidVm { .. } => WizardKind::Android,
     };
     // `--quick` is the scripted path: it must not start a multi-MB translator
     // download (or any other guest work) behind the caller's back. The
@@ -353,12 +397,6 @@ pub enum WizardError {
     Firmware(#[from] FirmwareError),
 }
 
-fn default_instances_root() -> String {
-    andler_core::paths::instances_root()
-        .to_string_lossy()
-        .into_owned()
-}
-
 // The guard both test modules take: ANDLER_HOME is process-wide, so a test
 // that points it at a scratch cache must not run beside another one.
 #[cfg(test)]
@@ -407,12 +445,54 @@ mod tests {
             instances_root: Some("/tmp/instances".into()),
             ..Default::default()
         };
-        let result = build_quick(partial, &no_ovmf());
+        let detected = no_ovmf();
+        let host = crate::create::host_firmware(&detected);
+        let result = build_quick(&partial, &detected, &host);
         assert!(result.is_ok());
-        match result.unwrap() {
-            WizardResult::Linux(req) => assert_eq!(req.name, "quick-linux-test"),
-            WizardResult::Android(_) => panic!("expected Linux result"),
-        }
+        let creation = result.unwrap().creation;
+        assert_eq!(creation.cfg.name, "quick-linux-test");
+        assert!(
+            !creation.cfg.firmware.enable_uefi,
+            "no OVMF pair means Legacy BIOS, never an empty pflash path"
+        );
+    }
+
+    #[test]
+    fn quick_linux_honours_the_cli_flags() {
+        let partial = PartialArgs {
+            kind: Some(WizardKind::Linux),
+            name: Some("quick-flags".into()),
+            quick: true,
+            instances_root: Some("/tmp/instances".into()),
+            disk_size_gib: Some(512),
+            overlay_size_gib: Some(64),
+            compact_on_shutdown: Some(true),
+            cdrom_bus: Some(crate::CliCdromBus::Ide),
+            ..Default::default()
+        };
+        let detected = detected();
+        let host = crate::create::host_firmware(&detected);
+        let creation = build_quick(&partial, &detected, &host)
+            .expect("quick must resolve")
+            .creation;
+
+        assert_eq!(
+            creation.cfg.disk.size_bytes,
+            512 * andler_core::DiskConfig::GIB,
+            "--quick must honour --disk-size-gib instead of the fixed default"
+        );
+        assert!(
+            creation.cfg.disk.compact_on_shutdown,
+            "--quick must honour --compact-on-shutdown"
+        );
+        let andler_core::InstanceKind::LinuxVm { cdrom_bus, .. } = creation.cfg.kind else {
+            panic!("expected a Linux VM");
+        };
+        assert_eq!(
+            cdrom_bus,
+            andler_core::CdromBus::Ide,
+            "--quick must honour --cdrom-bus"
+        );
     }
 
     #[test]
@@ -425,7 +505,9 @@ mod tests {
             instances_root: Some("/tmp/instances".into()),
             ..Default::default()
         };
-        let result = build_quick(partial, &no_ovmf());
+        let detected = no_ovmf();
+        let host = crate::create::host_firmware(&detected);
+        let result = build_quick(&partial, &detected, &host);
         assert!(matches!(
             result,
             Err(WizardError::Firmware(FirmwareError::OvmfVarsNotFound))
@@ -442,7 +524,9 @@ mod tests {
             instances_root: Some("/tmp/instances".into()),
             ..Default::default()
         };
-        let result = build_quick(partial, &detected());
+        let detected = detected();
+        let host = crate::create::host_firmware(&detected);
+        let result = build_quick(&partial, &detected, &host);
         assert!(matches!(
             result,
             Err(WizardError::Inquire(msg)) if msg.contains("Base image not found")
@@ -465,15 +549,16 @@ mod tests {
             linked: true,
             ..Default::default()
         };
-        let result = build_quick(partial, &detected());
+        let detected = detected();
+        let host = crate::create::host_firmware(&detected);
+        let result = build_quick(&partial, &detected, &host);
         match result {
-            Ok(WizardResult::Android(req)) => {
+            Ok(result) => {
                 assert!(
-                    req.linked_overlay,
+                    result.creation.cfg.disk.base_image.is_some(),
                     "quick create must forward --linked-overlay into the create request"
                 );
             }
-            Ok(WizardResult::Linux(..)) => panic!("expected Android result"),
             Err(e) => panic!("build_quick failed: {e}"),
         }
         std::fs::remove_dir_all(&dir).unwrap();
@@ -492,7 +577,9 @@ mod tests {
             ..Default::default()
         };
 
-        let result = build_quick(partial, &detected());
+        let detected = detected();
+        let host = crate::create::host_firmware(&detected);
+        let result = build_quick(&partial, &detected, &host);
 
         match result {
             Err(WizardError::Inquire(message)) => assert!(
