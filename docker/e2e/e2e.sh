@@ -12,6 +12,7 @@
 # Environment:
 #   E2E_LISTEN_ADDR   daemon listen address (default 127.0.0.1:50051)
 #   E2E_DEEP_GUEST    0 disables the deep guest tests (qemu-nbd based)
+#   E2E_ONLY          run only the suites whose name contains this substring
 #   ANDLER_BIN / ANDLERD_BIN   binary paths (default /usr/local/bin/*)
 
 set -euo pipefail
@@ -60,13 +61,19 @@ SUITE=0
 SUITE_TIMEOUT="${E2E_SUITE_TIMEOUT:-600}"
 for script in "$E2E_ROOT"/tests/[0-9][0-9]_*.sh; do
     name="$(basename "$script")"
+    if [[ -n "${E2E_ONLY:-}" && "$name" != *"$E2E_ONLY"* ]]; then
+        continue
+    fi
     echo
     echo "=== $name ==="
-    # Fresh daemon + store per suite: a failing suite leaves instances
-    # behind, but they can never leak into the next suite's assertions.
+    # Fresh daemon + store per suite, and no instances left over from the
+    # previous one: instances live under ANDLER_HOME (not in the store), so a
+    # suite that failed early used to fail every later suite's "no instances"
+    # cleanup assertion instead of only its own.
     SUITE=$((SUITE + 1))
     export E2E_STORE_PATH="$E2E_WORKDIR/store.$SUITE.db"
     stop_daemon
+    rm -rf "${ANDLER_HOME:-$HOME/.andler}/instances"
     start_daemon
     START_TS=$(date +%s%N)
     if timeout -k 10 "$SUITE_TIMEOUT" bash "$script"; then
@@ -84,6 +91,10 @@ for script in "$E2E_ROOT"/tests/[0-9][0-9]_*.sh; do
             tail -20 "$E2E_WORKDIR/daemon.log" 2>/dev/null | sed 's/^/      /' || true
         else
             echo "=== $name: FAIL (${ELAPSED}s) ==="
+            echo "    --- last command stdout ---"
+            tail -20 "$E2E_LAST_OUT" 2>/dev/null | sed 's/^/      /' || true
+            echo "    --- last command stderr ---"
+            tail -20 "$E2E_LAST_ERR" 2>/dev/null | sed 's/^/      /' || true
         fi
         TOTAL=$((TOTAL + 1))
         FAILED=$((FAILED + 1))

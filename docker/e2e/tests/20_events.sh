@@ -22,9 +22,13 @@ expect_out_grep "json kind field" '"kind":"Lifecycle"'
 expect_out_grep "filtered instance id" "$ID"
 
 echo "  [stop produces lifecycle events on the filtered stream]"
+# A window rather than the first event: the readiness ladder publishes its own
+# events as a guest starts and stops, so the first event on the filtered stream
+# is no longer necessarily the lifecycle one.
 ( sleep 1; andler stop "$ID" --graceful >/dev/null ) &
-expect_ok "stop events" -- timeout 60 andler events "$ID" --json
+timeout 10 andler events "$ID" --json --follow > "$E2E_LAST_OUT" 2>/dev/null || true
 expect_out_grep "stopped transition" '"kind":"Lifecycle"'
+expect_out_grep "the lifecycle event is the stop" '"Stopped"'
 
 echo "  [cleanup]"
 # The background stop is still settling when the stream exits on the first

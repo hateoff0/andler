@@ -66,9 +66,9 @@ ANDLERD_STORE_PATH=/path/to/andlerd.db ./target/release/andlerd
 
 ### Zero-root guest operations
 
-The daemon runs unprivileged and performs no privileged operations: offline guest work (`guest install`/`remove`, ARM-translator switching, boot-mode switching) runs through `guestmount` (libguestfs FUSE) plus an unprivileged user namespace. There is no privileged helper binary and no sudoers rule.
+The daemon runs unprivileged and performs no privileged operations: offline guest work (`guest install`/`remove`, ARM-translator switching, boot-mode switching) runs through the libguestfs appliance, which mounts the disk in its own QEMU VM and runs the guest's own tools there as root. There is no privileged helper binary and no sudoers rule.
 
-Prerequisites (`andler doctor`): libguestfs-tools (`guestmount`), `/dev/fuse`, and unprivileged user namespaces (Debian/Ubuntu may need `sysctl kernel.unprivileged_userns_clone=1`).
+Prerequisites (`andler doctor`): guestfs-tools (`guestfish`) and KVM.
 
 ### Default Paths
 
@@ -126,7 +126,7 @@ Coverage (all CLI commands):
 3. Disk: create/info/resize (grow + shrink refusal)/compact (qcow2 + raw), zero-size and unparsable-size negatives
 4. Snapshots: live create (incl. duplicate tag)/list/`--json`, offline restore, restore-while-running, create/delete-while-stopped
 5. Clone/export: Android create (incl. missing base image), linked/full-standalone/shared-base clones, live-clone removal protection, export, nonexistent-source negatives
-6. Guest: error paths always; deep tests (offline install/remove/list against a real Debian rootfs via guestmount + userns, Android boot-mode switching) — SKIP when guestmount/FUSE is unavailable, rest of the suite still runs
+6. Guest: error paths always; deep tests (offline install/remove/list against a real Debian rootfs through the libguestfs appliance, Android boot-mode switching) — SKIP when guestfish is unavailable, rest of the suite still runs
 7. Client-side: `create --dry-run`, `--verify` pass/fail, wizard non-TTY refusal, shell completions, `andler doctor`
 8. Persistence: daemon restart against the same store (state survives), final cleanup
 
@@ -204,8 +204,7 @@ andler/
 │   │       ├── qcow2.rs          # qemu-img wrapper (7 functions)
 │   │       ├── overlay.rs        # Android overlay disks
 │   │       ├── clone.rs          # 3 clone modes
-│   │       ├── guest_offline.rs # zero-root guestmount + userns chroot
-│   │       ├── guest_tools.rs    # offline guest provisioning (guestmount + userns)
+│   │       ├── guest_tools.rs    # offline guest provisioning (libguestfs appliance)
 │   │       ├── arm_translator.rs # ARM translator package staging
 │   │       ├── diskspace.rs      # free-space pre-check for snapshots
 │   │       └── error.rs          # DiskError

@@ -18,7 +18,7 @@ daemon/
 ├── instance_ops.rs →  create, create_linux_instance, start, stop, pause, resume, remove, resolve_instance_id
 ├── clone_ops.rs    →  clone_instance, export_instance_disk, find_live_clones
 ├── snapshot_ops.rs →  create/restore/delete/list snapshots (create is live over QMP on a Running/Paused VM; restore/delete are offline)
-├── health_ops.rs   →  periodic crash detection for Running instances (Error transition, no auto-restart)
+├── health_ops.rs   →  periodic crash detection for Running instances (Error transition, no auto-restart) + guest readiness probes
 ├── tests/          →  unit test modules (11 files, no network)
 └── query_ops.rs    →  status, list_instances, get_instance_config, update_instance_config, stream logs/metrics
                ↓
@@ -119,7 +119,7 @@ Overridable via:
 
 **Guest Agent Dual-Path**: The guest agent methods use a two-tier fallback strategy:
 - **Online path (QGA)**: If the instance is `Running` and the guest agent responds, commands run inside the guest via the QEMU guest agent — `guest-exec`/`guest-exec-status` for package install/remove, `guest-file-*` for config writes (e.g. the resolution change flow). The agent is reached on the dedicated chardev socket `*.qga.sock` (`virtserialport name=org.qemu.guest_agent.0`), *not* the QMP monitor — QEMU ≥ 9 no longer registers `guest-*` commands on QMP. Requires `qemu-guest-agent` running inside the guest (base image ships it enabled).
-- **Offline path (zero-root)**: If the instance is not running (or QGA is unavailable), the disk is mounted via `guestmount` (libguestfs FUSE) and package commands run chrooted inside an unprivileged user namespace (`unshare --user --map-root-user --mount`). The chroot preamble writes the guest `/etc/resolv.conf` from the host nameservers and bind-mounts `/dev`/`/proc`/`/sys` with a tmpfs on guest `/run`; package indexes are refreshed before install. No root and no sudoers rules — the former NBD/chroot helper surface is gone.
+- **Offline path (zero-root)**: If the instance is not running (or QGA is unavailable), the guest's own package manager runs as root inside the libguestfs appliance (`guestfish`), which mounts the disk and chroots into the guest. The appliance session brings up the appliance's QEMU user networking and its resolver, refreshes the package index and then installs or removes the package — all in one batch. No root on the host and no sudoers rules; the former NBD/chroot helper surface and the `guestmount` FUSE kitchen are gone.
 
 
 **Clone/Export Methods**:
@@ -207,9 +207,11 @@ Handles: `clone_instance` (Linked/FullStandalone/SharedBase modes), `export_inst
 
 Handles: `create_snapshot`, `restore_snapshot`, `delete_snapshot`, `list_snapshots`.
 
-### `daemon/health_ops.rs` — Crash Detection
+### `daemon/health_ops.rs` — Crash Detection and Guest Readiness Probes
 
 Handles: `run_health_check_once` (spawned periodically from `main.rs`, `ANDLERD_HEALTH_CHECK_INTERVAL_SECS`, default 30s). Polls every `Running` instance's real backend status; if the process has died outside `stop_instance`, transitions the FSM record to `Error` and persists it. Doesn't auto-restart the instance itself — `andler start <id>` works on it right after (see `fsm.rs`: `Stopped`/`Error` accept `Start`), this is a deliberate policy choice (silent auto-restart on top of a possibly-broken config risks masking a real failure behind a crash loop with no attempt limit/backoff), not a technical limitation. See the module doc comment for the full reasoning.
+
+`probe_readiness(id)` is the second half of the module: it walks the guest readiness ladder (`andler_core::events::ReadinessLadder`) for one instance, weakest level first, and reports each probe's answer to the supervisor that owns the ladder. `SerialUp` is read from the backend's live status (the console chardev serves one client, so the daemon never connects to it), `QgaUp` from the agent handshake, and `DisplayApplied`/`GuestOsUp`/`WaydroidReady` from a guest-agent command that reads the guest's own state (`/etc/andler/display.conf`, `systemctl is-system-running`, `systemctl is-active waydroid-container.service`). A probe answers `Ready` / `NotReady` / `Unobservable`; only `Ready` moves the ladder, and a level the instance's effective `(kind, boot_mode)` profile cannot observe is never reported as reached. `GetInstanceStatus` calls it before answering, and the periodic health pass calls it for every `Running` instance; both skip the pass entirely while another operation holds the guest agent, and an instance at its terminal level costs nothing. See [ARCHITECTURE.md](../../docs/ARCHITECTURE.md#guest-readiness-contract).
 
 ### `daemon/guest_profile.rs` — Guest Selections Apply
 

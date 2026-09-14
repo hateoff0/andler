@@ -69,8 +69,7 @@ Wrapper around `qemu-img` for disk creation/cloning/resizing, plus guest tools o
 - `qcow2.rs`: 7 async functions wrapping `qemu-img` CLI
 - `overlay.rs`: Android-specific overlay disk creation + factory reset
 - `clone.rs`: 3 clone modes (linked, full-standalone, shared-base)
-- `guest_offline.rs`: the chroot environment for offline package work — `prepare_resolv` writes the guest's `/etc/resolv.conf` from the host's nameservers (a dangling `stub-resolv.conf` symlink would make a bind-mount fail with ENOENT), and the `chroot_exec` preamble bind-mounts `/dev/*`, `/proc`, `/sys` and mounts a fresh tmpfs on the guest's `/run` (gpg-agent, used by pacman, needs a writable `/run`). The former NBD mount path and its privileged helper are gone.
-- `guest_offline.rs` + `guest_tools.rs`: zero-root offline guest provisioning — the disk is mounted via `guestmount` (libguestfs FUSE) and package-manager commands run chrooted inside an unprivileged user namespace (`unshare --user --map-root-user --mount`); detects the package manager (apt-get/dnf/pacman), refreshes package indexes and installs/removes packages. No `/dev/nbd*`, no root, no sudoers rules
+- `guest_tools.rs`: zero-root offline guest package work through the libguestfs appliance — detects the package manager (apt-get/dnf/pacman) by probing four paths in one batch, gates on the manager's own query, then runs the whole recipe (appliance network, guest resolver, index refresh, install/remove, systemd-unit enablement) as shell commands chrooted into the guest as root. No `/dev/nbd*`, no root, no sudoers rules, no FUSE mount
 - `arm_translator.rs`: ARM translator package staging in guest images (atomic staging + rename)
 - `boot_mode.rs`: Android/Linux boot-mode switching by re-pointing the guest's `default.target` symlink through a `GuestMutator` (`switch_boot_mode_with`) — offline via the `GuestfsMutator` appliance, online via QGA; reading the mode is config-backed, no disk access
 - `diskspace.rs`: free-space pre-check before snapshots
@@ -84,9 +83,15 @@ Wrapper around `qemu-img` for disk creation/cloning/resizing, plus guest tools o
 `backends/andler-qemu`). Drives the libguestfs appliance (`guestfish`)
 against a guest image: the appliance boots its own unprivileged QEMU,
 mounts the filesystem under an exclusive qemu image lock and applies a
-batch of `MutatorOp` mutations in one session. Zero root; the package
-install/remove path stays on the chroot kitchen (spike-verified
-suspended variant). The trait + batch contract + shared conformance
+batch of `MutatorOp` mutations in one session. Zero root, and the same
+mechanism serves every offline operation, package install/remove
+included — a `RunShell` command runs via the *guest's* `/bin/sh` with the
+guest root as `/` and the appliance's `/dev`, `/dev/pts`, `/proc` and
+`/sys` in place, so the guest's own package manager runs as root without
+root on the host. `GuestfsMutator::for_packages` is that session: QEMU
+user networking (`guestfish --network`) plus the package-step budget
+(`ANDLERD_GUEST_PACKAGE_TIMEOUT_SECS`), because the appliance has no
+network of its own. The trait + batch contract + shared conformance
 suite live in `andler-core`.
 
 ### `services/andler-net` — Network Configuration
@@ -94,7 +99,7 @@ suite live in `andler-core`.
 Implements bridge and isolated network modes for QEMU VMs via host-side network configuration.
 
 **Key components:**
-- `lib.rs`: `NetworkService` trait and `DefaultNetworkService` implementation using `iproute2` for bridge setup/teardown. `setup_isolated` is **not implemented** yet (returns an explicit `SetupFailed("isolated network mode is not implemented yet")` error) — the config type exists, the network setup does not.
+- `lib.rs`: `NetworkService` trait and `DefaultNetworkService` implementation using `iproute2`. Bridge mode builds and tears down a host bridge and a per-instance tap; `setup_isolated` returns an `IsolatedNet` — the tap name plus the argv prefix that starts the guest's QEMU inside a fresh unprivileged user + network namespace, where that tap is the only interface and there is no route to any host network (QMP and the guest-agent chardev are UNIX sockets, so host-side control survives the namespace; the tap name derives from the instance id, so a daemon that restarted can still tear it down). A host that cannot provide the namespace is refused with an actionable reason before QEMU is touched.
 
 ### `services/andler-firmware` — Firmware & Hardware Detection
 
@@ -190,13 +195,15 @@ Package management and resolution changes inside a guest use a two-tier strategy
 
 **Online (VM `Running`, guest agent available)**: commands run inside the guest via the QEMU guest agent (QGA) — `guest-exec`/`guest-exec-status` (package install/remove, package-manager detection) and `guest-file-*` (config file writes, e.g. `display.conf` on resolution change). The agent wire runs over the dedicated `*.qga.sock` chardev (`virtserialport name=org.qemu.guest_agent.0`), never the QMP monitor. This requires `qemu-guest-agent` inside the guest, which the base image ships enabled (`qemu-guest-agent.service`).
 
-**Offline path (VM stopped)** — the disk is mounted via `guestmount` (libguestfs FUSE, zero root) and operations run chrooted inside an unprivileged user namespace (`unshare --user --map-root-user --mount`):
+**Offline path (VM stopped)** — the guest's own root filesystem is the root of the command: the libguestfs appliance (`guestfish`, zero root) mounts the disk and `MutatorOp::RunShell` commands run via the guest's `/bin/sh` as root inside the appliance, so a package manager sees the real guest (`dpkg`'s `access(R_OK|W_OK)` check on `/var/lib/dpkg` included) without any privilege on the host:
 
-- package manager detected by binary (`apt-get`/`dnf`/`pacman`); package index is refreshed first (`apt-get update` / `dnf makecache` / `pacman -Sy`) so installs work on fresh images
-- the chroot is made network- and signature-capable by the `chroot_exec` preamble: host nameservers are written into the guest's `/etc/resolv.conf` (via `prepare_resolv`, replacing the dangling `stub-resolv.conf` symlink), `/dev/*`, `/proc`, `/sys` are bind-mounted, and a tmpfs is mounted on the guest's `/run` (gpg-agent needs it for pacman signatures)
-- nothing is privileged: `guestmount` needs only `/dev/fuse` access, `unshare --user` needs unprivileged user namespaces allowed by the kernel (Debian/Ubuntu: `sysctl kernel.unprivileged_userns_clone=1`); the old qemu-nbd + `andler-helper` sudoers surface is gone entirely
+- package manager detected by probing `/usr/bin/apt-get`, `/usr/bin/dnf`, `/usr/bin/yum` and `/usr/bin/pacman` in one appliance batch; the manager's own query (`dpkg -l` / `rpm -q` / `pacman -Qi`) decides whether the package is already there
+- the session's own network and resolver: the guest has no network while its disk is idle, so the recipe brings up the appliance's QEMU user networking (`eth0`, `169.254.2.15/16`, gateway `169.254.2.2`), writes `nameserver 169.254.2.3` into a tmpfs on `/run` and bind-mounts that over the guest's `/etc/resolv.conf` (the appliance's own resolver file is a read-only bind with no nameservers when the host has no `dhcpcd`). Nothing of this reaches the guest image
+- package index is refreshed first (`apt-get update` / `dnf makecache` / `pacman -Sy`), then the install/remove runs, then a package's systemd unit is linked into `multi-user.target.wants` (`deb-systemd-helper` cannot enable one without a running systemd)
+- the whole recipe is one `apply` batch — one appliance session, not one per step; the appliance's `/dev`, `/dev/pts`, `/proc` and `/sys` mounts are provided by libguestfs, so the old bind-mount preamble is gone with the FUSE kitchen
+- nothing is privileged and nothing is mounted on the host: the appliance needs `guestfish`, `/dev/kvm` and an image lock, and no path requires unprivileged user namespaces any more; the old qemu-nbd + `andler-helper` sudoers surface and the `guestmount` FUSE mount are gone entirely
 
-ARM translators (`libndk`/`libhoudini`) use the same offline mount machinery via `switch_arm_translator`: version-keyed download (MD5-verified, cached under `~/.andler/cache/arm-translators/`), staged into `var/lib/waydroid/overlay/system`, `build.prop` updated, old translator removed only after the new one is fully staged.
+ARM translators (`libndk`/`libhoudini`) use the same appliance sessions via `switch_arm_translator`: version-keyed download (MD5-verified, cached under `~/.andler/cache/arm-translators/`), staged into `var/lib/waydroid/overlay/system`, `build.prop` updated, old translator removed only after the new one is fully staged.
 
 ### Applying an instance's own selections (`ApplyGuestProfile`)
 
@@ -217,7 +224,7 @@ One failing selection never aborts the others: the clipboard agent is still inst
 ```
 andler CLI → gRPC → daemon
   ├─ running: backend.qga socket (*.qga.sock) → qemu-ga (guest) → guest-exec/file ops
-  └─ stopped: andler-disk → guestmount (FUSE) → unshare --user --map-root-user --mount → chroot → package manager (apt needs APT::Sandbox::User=root + ForceIPv4 in userns)
+  └─ stopped: andler-disk → guestfish appliance (QEMU user network + resolver) → guest's own shell as root → package manager
 ```
 
 ## Base images (cache, manifest, release downloads)
@@ -277,27 +284,65 @@ The daemon's `status` reports the guest's readiness as an explicit level, not a
 guess from log text. The contract (decision from the architecture rework,
 documented here) is a monotonic ladder — each level implies the previous one:
 
-| Level | Meaning |
-|---|---|
-| `SerialUp` | VM process is up, serial chardev responds |
-| `QgaUp` | QEMU guest agent answers probes (QGA chardev socket) |
-| `DisplayApplied` | configured display resolution was applied inside the guest |
-| `GuestOsUp` | guest OS finished booting (systemd / init reports ready) |
-| `WaydroidReady` | Android session: Waydroid container is running (AndroidVm only) |
+| Level | Meaning | Observed by |
+|---|---|---|
+| `SerialUp` | VM process is up, serial chardev responds | the backend's own live status (QMP `query-status`) |
+| `QgaUp` | QEMU guest agent answers probes (QGA chardev socket) | QGA handshake (`guest-ping`) |
+| `DisplayApplied` | configured display resolution was applied inside the guest | QGA read of the guest's own record, `/etc/andler/display.conf` |
+| `GuestOsUp` | guest OS finished booting (systemd / init reports ready) | QGA `systemctl is-system-running` |
+| `WaydroidReady` | Android session: Waydroid container is running (AndroidVm only) | QGA `systemctl is-active waydroid-container.service` |
 
-**Effective profile, not just `kind`**: the terminal level depends on the
-`(kind, boot_mode)` pair, because an `AndroidVm` switched to Linux boot-mode
-never brings up Waydroid. For `LinuxVm` (and Android-in-Linux-mode) the
-terminal level is `GuestOsUp`; for Android-in-waydroid-mode it is
-`WaydroidReady`. Callers that consume readiness (status display, guest access
-levels) must derive the terminal level from the effective profile, never from
-`kind` alone.
+The serial chardev serves exactly one client and the daemon never takes it
+away from an `andler connect --level console` session, so `SerialUp` is read
+from the backend's live status instead of by connecting to the socket.
 
-How levels are reached is the guest's own reporting (systemd units + QGA
-probes + fw_cfg phase marker); the readiness event flows through the
-daemon event bus as `DaemonEvent::Readiness { level }` (see `andler-core`
-events). The implementation of the reporting mechanism itself is phase 3
-work (QMP/QGA subscription); the contract above is the stable interface.
+**Effective profile, not just `kind`**: the levels a run can reach depend on
+the `(kind, boot_mode)` pair, because an `AndroidVm` switched to Linux
+boot-mode never brings up Waydroid. `andler-core` resolves the pair into a
+`ReadinessProfile` (`LinuxGuest`, `AndroidLinuxMode`, `AndroidWaydroid`),
+which fixes the profile's level sequence and its terminal level:
+
+| Profile | Ladder | Terminal level |
+|---|---|---|
+| `LinuxGuest` (`LinuxVm`) | `SerialUp → QgaUp → DisplayApplied → GuestOsUp` | `GuestOsUp` |
+| `AndroidLinuxMode` (`AndroidVm`, `boot_mode = linux`) | `SerialUp → QgaUp → DisplayApplied → GuestOsUp` | `GuestOsUp` |
+| `AndroidWaydroid` (`AndroidVm`, `boot_mode = android`) | `SerialUp → QgaUp → DisplayApplied → GuestOsUp → WaydroidReady` | `WaydroidReady` |
+
+A level outside a profile's ladder **cannot be observed for that profile**: it
+is never reported for it, neither as reached nor as failed. `WaydroidReady`
+for a Linux guest is the case this rule exists for. A switch of the Android
+boot mode re-derives the ladder and clears it: a run of a different profile is
+a different ladder, not a continuation.
+
+**Probes answer in three states, not two.** `Ready` only ever comes from the
+guest saying so. `NotReady` means the probe measured the level and the guest
+reports it has not reached it. `Unobservable` means the level could not be
+measured at all — no agent answered, the guest carries no reporter for it (a
+guest whose init keeps no readiness state), or its profile never reaches it.
+A probe that cannot answer is never rounded up to a reached level. Probing
+walks the profile's ladder weakest-first and stops at the first non-`Ready`
+answer; levels above `QgaUp` are observed through the agent, so a guest
+without one reports `QgaUp` and stops there.
+
+**Monotonic by construction.** Only a `Ready` probe moves a run's position,
+only upwards in the profile's own order, and never onto a level the profile
+cannot reach — so a probe that flips back, a re-observed level, or an
+out-of-order observation of a stronger level can never move a run backwards.
+The position belongs to the run: it is cleared when a run starts (`Starting`),
+stops (`Stopping`/`Stopped`) or fails (`Error`), and preserved across
+pause/resume.
+
+The per-instance supervisor is the only writer of the position, so a probe
+pass cannot race another one. Each advance is published on the daemon event
+bus as `DaemonEvent::Readiness { level }` and appended to the instance's
+`events.jsonl` audit trail; `GetInstanceStatus` runs the probe pass for the
+instance it is asked about and reports the position (`readiness`) together
+with the profile's terminal level (`terminal_readiness`). Guest access
+(`andler connect --level auto`) picks `ssh`/`adb` from the reached level and
+falls back to the serial console with a note when the terminal level has not
+been reached — an unobservable level degrades the choice, it never blocks it.
+The probe pass is skipped entirely while another operation holds the guest
+agent, because the QGA chardev serves one client.
 
 ## Snapshot Mechanism
 
@@ -425,32 +470,40 @@ of disk with logs). Policy (decision from the architecture rework):
 - Rotation is a daemon mechanism, not a CLI concern: `andler logs` reads
   through the same file, so a rotated file never breaks the stream contract.
 
-### Offline zero-root: FUSE mount flags
+### Offline zero-root: the appliance session
 
-The offline package path (`--offline`) mounts the guest disk via
-`guestmount` (FUSE) and runs the package manager chrooted in a user
-namespace. Three mount options make this work for a non-root user:
+The offline package path (`--offline`) never mounts anything on the host. The
+libguestfs appliance mounts the disk, and a `RunShell` op runs through the
+*guest's* `/bin/sh` with the guest root as `/`, so the guest's package
+manager executes as root inside the appliance's own VM.
 
-- `-o uid=<euid> -o gid=<egid>` map every guest uid/gid to the mounting
-  user, so inside the namespace the guest files belong to root. Two
-  separate flags: the comma form `-o uid=X,gid=Y` silently drops gid in
-  libguestfs 1.48.
-- `-o default_permissions` enables real POSIX permission checks. Without
-  it the kernel answers `access(2)` from its stricter FUSE path that
-  compares the caller against the mount owner and rejects non-root even
-  when the files belong to the caller; dpkg aborts with "required
-  read/write access to the dpkg database directory". With the flag,
-  access is decided by mode bits against the mapped owners, which is
-  exactly what dpkg's `access(R_OK|W_OK)` needs. Verified with a full
-  `dpkg -i` inside the chroot on the cloud image.
+That root is what makes `dpkg` work: it verifies its database directory with
+`access(R_OK|W_OK)`, and a FUSE-mounted guest filesystem denies that check to
+a non-root process on some kernels (observed on cachyos 7.6 with libfuse2:
+`dpkg` aborts with "required read/write access to the dpkg database
+directory"). The FUSE kitchen tried `-o uid=<euid> -o gid=<egid>` and
+`-o default_permissions` to make the kernel answer `access(2)` favourably; the
+appliance removes the question. The `test -w /var/lib/dpkg` probe that used to
+gate the offline install is gone with it.
 
-The daemon still probes `test -w /var/lib/dpkg` in the chroot right
-after mounting and fails with the workaround named instead of failing
-after a minutes-long apt run, in case a host combination breaks one of
-these assumptions in the future. `subuid`/`newuidmap` range mapping is
-not needed: the single identity required inside the chroot (guest root)
-is covered by the uid/gid mapping alone. The smart online path is
-unaffected.
+Two details an appliance session owns itself, both because the guest has no
+network while its disk is idle:
+
+- **User networking**: `GuestfsMutator::for_packages` passes `--network`, and
+  the recipe configures `eth0` (`169.254.2.15/16`, gateway `169.254.2.2` —
+  libguestfs's link-local user-net subnet) rather than relying on the
+  appliance's boot-time DHCP, which needs a `dhcpcd` the host does not always
+  have installed.
+- **Resolver**: the appliance bind-mounts its own read-only `/etc/resolv.conf`
+  into the guest, and that file has no nameservers when its DHCP never ran. The
+  recipe writes `nameserver 169.254.2.3` (slirp's resolver, one address above
+  the gateway) into a tmpfs on `/run` and bind-mounts that file over the guest's
+  `/etc/resolv.conf` for the session. The guest image is not written to; the
+  tmpfs also gives `gpg-agent`, which pacman needs for signatures, a writable
+  `/run`.
+
+`subuid`/`newuidmap` mapping and unprivileged user namespaces are not needed
+any more: no path in the daemon uses them. The smart online path is unaffected.
 
 ### Log redaction
 
@@ -488,10 +541,11 @@ desktop running QEMU/KVM.
 
 - **Boundary**: the VM is the isolation boundary — guests are untrusted. The
   daemon runs as the user, not root, and performs no privileged operations at
-  all: offline guest work goes through `guestmount` (FUSE) plus an unprivileged
-  user namespace, and the former privileged helper and its sudoers rules were
-  removed. There is no root-capable surface left for a compromised daemon to
-  abuse — it is **not** a sandbox; the boundary is against bugs and other users.
+  all: offline guest work runs the guest's own tools as root *inside the
+  libguestfs appliance*, a QEMU VM of its own, and the former privileged helper
+  and its sudoers rules were removed. There is no root-capable surface left for
+  a compromised daemon to abuse — it is **not** a sandbox; the boundary is
+  against bugs and other users.
 - **IPC boundary**: `andlerd` listens on TCP loopback (`ANDLERD_LISTEN_ADDR`,
   default `127.0.0.1:50051`). Loopback bounds the network, not the user; the
   rework explicitly chose the documented assumption **one host user per

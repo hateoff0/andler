@@ -36,7 +36,7 @@ The following flags define how instance configuration is provided — they are *
 | `andler stop <instance-id> [--graceful]` | Stop an instance (default: force kill (SIGKILL); `--graceful`: graceful ACPI shutdown (SIGTERM)) |
 | `andler pause <instance-id>` | Pause a running instance |
 | `andler resume <instance-id>` | Resume a paused instance |
-| `andler status <instance-id> [--json]` | Print current state. `--json`: JSON object with state/detail/error_message |
+| `andler status <instance-id> [--json]` | Print current state and the guest readiness level (`<reached> of <terminal>`, see [ARCHITECTURE.md](../../docs/ARCHITECTURE.md)). `--json`: JSON object with state/detail/error_message/readiness/terminal_readiness |
 
 ### Information
 
@@ -80,7 +80,7 @@ Default: UUIDs truncated to 12 characters (matching `docker ps`). Use `--full-id
 |---------|-------------|
 | `andler config edit <instance-id>` | Open the real `instance.toml` in `$VISUAL`/`$EDITOR` (fallback `vi`/`vim`/`nano`) and apply edits via gRPC |
 | `andler wizard` | Launch interactive wizard (default when no subcommand given) |
-| `andler doctor` | Check the local environment (KVM, QEMU, OVMF, `CAP_NET_ADMIN`, the zero-root offline prerequisites — `guestmount`, `/dev/fuse`, unprivileged user namespaces — andlerd reachability, base images) — read-only, works even if andlerd isn't running |
+| `andler doctor` | Check the local environment (KVM, QEMU, OVMF, `CAP_NET_ADMIN`, the zero-root offline prerequisite — `guestfish` — andlerd reachability, base images) — read-only, works even if andlerd isn't running |
 | `andler completions <shell>` | Generate shell completion script (bash/zsh/fish) |
 
 ### Disk Management
@@ -98,7 +98,7 @@ Size format: `64GB`, `128000MB`, `1T`, `512000` (bytes). Case-insensitive.
 
 | Command | Description |
 |---------|-------------|
-| `andler guest install <package> <instance-id>` | Install a package in the guest OS. Online via the QGA guest-agent socket when the VM runs; a stopped VM is auto-started headless for maintenance and stopped again. `--offline` forces the zero-root `guestmount` + user-namespace path. Special case: `libndk`/`libhoudini`/`none` route to the ARM-translator switcher instead (`none` disables ARM translation — no download; `--translator-dir <path>` points at a local extracted cache) |
+| `andler guest install <package> <instance-id>` | Install a package in the guest OS. Online via the QGA guest-agent socket when the VM runs; a stopped VM is auto-started headless for maintenance and stopped again. `--offline` forces the zero-root libguestfs appliance path. Special case: `libndk`/`libhoudini`/`none` route to the ARM-translator switcher instead (`none` disables ARM translation — no download; `--translator-dir <path>` points at a local extracted cache) |
 | `andler guest remove <package> <instance-id>` | Remove a package from the guest OS (auto-fallback). A translator name (`libndk`/`libhoudini`/`none`) switches the ARM translator to `none` instead |
 | `andler guest list <instance-id>` | List known packages and their status in the guest OS |
 | `andler guest boot-mode <instance-id> [android\|linux]` | Get (no argument) or switch the guest's boot target on an Android VM's unified base image. Requires a restart to apply. |

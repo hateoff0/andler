@@ -19,11 +19,14 @@ expect_ok "start" -- andler start "$ID"
 # The OVMF firmware only echoes serial output while waiting for a key
 # ("Press any key to enter the Boot Manager Menu"); attach after it
 # reaches that phase, then retry until the chardev socket is bound.
-sleep 6
+sleep 2
+# Firmware output is only produced once: a client that attaches after the
+# firmware has finished sees the UEFI shell prompt instead of the banner, so
+# the window is long enough to contain one of them either way.
 expect_ok "console attach relays guest output" -- bash -c '
     rc=1
-    for i in $(seq 1 10); do
-        (sleep 1; printf "\r") | timeout 4 andler connect "$ID" --level console > "$E2E_LAST_OUT" 2>/dev/null
+    for i in $(seq 1 6); do
+        (sleep 1; printf "\r") | timeout 8 andler connect "$ID" --level console > "$E2E_LAST_OUT" 2>/dev/null
         rc=${PIPESTATUS[1]}
         if [[ $rc -eq 124 || $rc -eq 0 ]]; then
             break
@@ -31,7 +34,7 @@ expect_ok "console attach relays guest output" -- bash -c '
         sleep 0.5
     done
     [[ $rc -eq 124 || $rc -eq 0 ]]'
-expect_out_grep "guest serial output arrives" "BdsDxe"
+expect_out_grep "guest serial output arrives" "(BdsDxe|Shell>|Press ESC)"
 
 expect_fail "unknown instance is rejected" -- andler connect "$UNKNOWN_ID" --level console
 expect_err_grep "unknown-instance message" "no instance found"
