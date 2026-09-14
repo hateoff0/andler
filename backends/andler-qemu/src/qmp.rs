@@ -1665,11 +1665,7 @@ mod tests {
                 buf.read_line(&mut extra),
             )
             .await;
-            let no_retry = match n {
-                Err(_) => true,
-                Ok(Ok(0)) => true,
-                _ => false,
-            };
+            let no_retry = matches!(n, Err(_) | Ok(Ok(0)));
             assert!(no_retry, "no retry expected after non-in-use error");
         });
         let err = client

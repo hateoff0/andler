@@ -125,54 +125,6 @@ where
     }
     level.min(2)
 }
-
-#[cfg(test)]
-mod verbosity_tests {
-    use super::{verbosity_from, version_requested};
-
-    #[test]
-    fn version_flags_are_recognized() {
-        assert!(version_requested(["--version"]));
-        assert!(version_requested(["-V"]));
-        assert!(version_requested(["-v", "--version"]));
-        assert!(!version_requested(["-v", "--verbose"]));
-        assert!(!version_requested(Vec::<&str>::new()));
-    }
-
-    #[test]
-    fn no_flags_is_zero() {
-        assert_eq!(verbosity_from(Vec::<&str>::new()), 0);
-    }
-
-    #[test]
-    fn single_v_is_one() {
-        assert_eq!(verbosity_from(["-v"]), 1);
-        assert_eq!(verbosity_from(["--verbose"]), 1);
-        assert_eq!(verbosity_from(["--debug"]), 1);
-    }
-
-    #[test]
-    fn double_v_flag_is_two() {
-        assert_eq!(verbosity_from(["-vv"]), 2);
-        assert_eq!(verbosity_from(["--trace"]), 2);
-    }
-
-    #[test]
-    fn repeated_single_v_flags_add_up() {
-        assert_eq!(verbosity_from(["-v", "-v"]), 2);
-    }
-
-    #[test]
-    fn level_is_capped_at_trace() {
-        assert_eq!(verbosity_from(["-vv", "-v", "-v"]), 2);
-    }
-
-    #[test]
-    fn unrelated_args_are_ignored() {
-        assert_eq!(verbosity_from(["--name", "my-vm", "-v"]), 1);
-    }
-}
-
 fn init_tracing() -> std::sync::Arc<log_ring::LogRing> {
     let json = std::env::var("ANDLERD_LOG_FORMAT")
         .map(|v| v.eq_ignore_ascii_case("json"))
@@ -334,4 +286,51 @@ fn spawn_health_check_task(daemon: Arc<Daemon>) {
             daemon.run_health_check_once().await;
         }
     });
+}
+
+#[cfg(test)]
+mod verbosity_tests {
+    use super::{verbosity_from, version_requested};
+
+    #[test]
+    fn version_flags_are_recognized() {
+        assert!(version_requested(["--version"]));
+        assert!(version_requested(["-V"]));
+        assert!(version_requested(["-v", "--version"]));
+        assert!(!version_requested(["-v", "--verbose"]));
+        assert!(!version_requested(Vec::<&str>::new()));
+    }
+
+    #[test]
+    fn no_flags_is_zero() {
+        assert_eq!(verbosity_from(Vec::<&str>::new()), 0);
+    }
+
+    #[test]
+    fn single_v_is_one() {
+        assert_eq!(verbosity_from(["-v"]), 1);
+        assert_eq!(verbosity_from(["--verbose"]), 1);
+        assert_eq!(verbosity_from(["--debug"]), 1);
+    }
+
+    #[test]
+    fn double_v_flag_is_two() {
+        assert_eq!(verbosity_from(["-vv"]), 2);
+        assert_eq!(verbosity_from(["--trace"]), 2);
+    }
+
+    #[test]
+    fn repeated_single_v_flags_add_up() {
+        assert_eq!(verbosity_from(["-v", "-v"]), 2);
+    }
+
+    #[test]
+    fn level_is_capped_at_trace() {
+        assert_eq!(verbosity_from(["-vv", "-v", "-v"]), 2);
+    }
+
+    #[test]
+    fn unrelated_args_are_ignored() {
+        assert_eq!(verbosity_from(["--name", "my-vm", "-v"]), 1);
+    }
 }

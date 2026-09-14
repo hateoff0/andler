@@ -3,8 +3,6 @@ use super::*;
 use andler_core::{InstanceConfig, MemoryConfig};
 
 /// Distinct disk paths per instance so the disk-conflict gate never fires
-
-/// Distinct disk paths per instance so the disk-conflict gate never fires
 /// before the affinity gate; creates the files so a successful start can
 /// pass validation.
 fn distinct_disks(cfg_a: &mut InstanceConfig, cfg_b: &mut InstanceConfig) {
@@ -20,10 +18,10 @@ async fn start_rejects_cpu_affinity_overlapping_another_running_instance() {
 
     let mut cfg_a = sample_config();
     cfg_a.cpu.affinity = Some(vec![0, 1, 2]);
-    cfg_a.memory.size_bytes = 1 * MemoryConfig::GIB;
+    cfg_a.memory.size_bytes = MemoryConfig::GIB;
     let mut cfg_b = sample_config();
     cfg_b.cpu.affinity = Some(vec![2, 3]);
-    cfg_b.memory.size_bytes = 1 * MemoryConfig::GIB;
+    cfg_b.memory.size_bytes = MemoryConfig::GIB;
     distinct_disks(&mut cfg_a, &mut cfg_b);
 
     let id_a = cfg_a.id;
@@ -55,10 +53,10 @@ async fn start_allows_disjoint_cpu_affinity() {
 
     let mut cfg_a = sample_config();
     cfg_a.cpu.affinity = Some(vec![0, 1]);
-    cfg_a.memory.size_bytes = 1 * MemoryConfig::GIB;
+    cfg_a.memory.size_bytes = MemoryConfig::GIB;
     let mut cfg_b = sample_config();
     cfg_b.cpu.affinity = Some(vec![4, 5]);
-    cfg_b.memory.size_bytes = 1 * MemoryConfig::GIB;
+    cfg_b.memory.size_bytes = MemoryConfig::GIB;
     distinct_disks(&mut cfg_a, &mut cfg_b);
 
     let _id_a = cfg_a.id;
@@ -85,10 +83,10 @@ async fn unpinned_instance_does_not_conflict_with_pinned_one() {
 
     let mut cfg_a = sample_config();
     cfg_a.cpu.affinity = Some(vec![0, 1]);
-    cfg_a.memory.size_bytes = 1 * MemoryConfig::GIB;
+    cfg_a.memory.size_bytes = MemoryConfig::GIB;
     let mut cfg_b = sample_config();
     cfg_b.cpu.affinity = None;
-    cfg_b.memory.size_bytes = 1 * MemoryConfig::GIB;
+    cfg_b.memory.size_bytes = MemoryConfig::GIB;
     distinct_disks(&mut cfg_a, &mut cfg_b);
 
     let _id_a = cfg_a.id;
@@ -115,10 +113,10 @@ async fn pinned_instance_does_not_conflict_with_unpinned_runner() {
 
     let mut cfg_a = sample_config();
     cfg_a.cpu.affinity = None;
-    cfg_a.memory.size_bytes = 1 * MemoryConfig::GIB;
+    cfg_a.memory.size_bytes = MemoryConfig::GIB;
     let mut cfg_b = sample_config();
     cfg_b.cpu.affinity = Some(vec![0]);
-    cfg_b.memory.size_bytes = 1 * MemoryConfig::GIB;
+    cfg_b.memory.size_bytes = MemoryConfig::GIB;
     distinct_disks(&mut cfg_a, &mut cfg_b);
 
     let _id_a = cfg_a.id;

@@ -199,7 +199,7 @@ async fn attach_disk_requires_running_or_paused_state() {
     let id = cfg.id;
     register_with_state(&daemon, cfg, InstanceState::Created, None).await;
     let err = daemon
-        .attach_disk(id, None, 1 * DiskConfig::GIB)
+        .attach_disk(id, None, DiskConfig::GIB)
         .await
         .unwrap_err();
     assert!(matches!(
@@ -213,23 +213,20 @@ async fn attach_disk_rejects_duplicate_path() {
     let dir = TestTempDir::new();
     let (daemon, _mock, id) = running_instance_with_mock(dir.path()).await;
     let path = dir.path().join("disk-extra0.qcow2");
-    daemon
-        .attach_disk(id, None, 1 * DiskConfig::GIB)
-        .await
-        .unwrap();
+    daemon.attach_disk(id, None, DiskConfig::GIB).await.unwrap();
     let err = daemon
-        .attach_disk(id, Some(path.clone()), 1 * DiskConfig::GIB)
+        .attach_disk(id, Some(path.clone()), DiskConfig::GIB)
         .await
         .unwrap_err();
     assert!(matches!(err, DaemonError::DiskAlreadyAttached(_, _)));
 
     let another = dir.path().join("elsewhere.qcow2");
     daemon
-        .attach_disk(id, Some(another.clone()), 1 * DiskConfig::GIB)
+        .attach_disk(id, Some(another.clone()), DiskConfig::GIB)
         .await
         .unwrap();
     let err = daemon
-        .attach_disk(id, Some(another), 1 * DiskConfig::GIB)
+        .attach_disk(id, Some(another), DiskConfig::GIB)
         .await
         .unwrap_err();
     assert!(matches!(err, DaemonError::DiskAlreadyAttached(_, _)));
@@ -243,7 +240,7 @@ async fn attach_disk_rolls_back_created_file_on_backend_failure() {
         .store(true, std::sync::atomic::Ordering::SeqCst);
 
     let err = daemon
-        .attach_disk(id, None, 1 * DiskConfig::GIB)
+        .attach_disk(id, None, DiskConfig::GIB)
         .await
         .unwrap_err();
     assert!(matches!(err, DaemonError::Backend(_)));
@@ -277,10 +274,7 @@ async fn attach_disk_existing_image_uses_virtual_size() {
 async fn detach_disk_removes_config_entry_but_keeps_file() {
     let dir = TestTempDir::new();
     let (daemon, _mock, id) = running_instance_with_mock(dir.path()).await;
-    let (path, _) = daemon
-        .attach_disk(id, None, 1 * DiskConfig::GIB)
-        .await
-        .unwrap();
+    let (path, _) = daemon.attach_disk(id, None, DiskConfig::GIB).await.unwrap();
     daemon.detach_disk(id, path.clone()).await.unwrap();
 
     let config = daemon.handle_for(id).await.unwrap().config();

@@ -306,10 +306,21 @@ enum InstanceStateKind {
     ERROR = 7;
 }
 
+enum GuestReadinessLevel {
+    GUEST_READINESS_LEVEL_UNSPECIFIED = 0;
+    SERIAL_UP = 1;
+    QGA_UP = 2;
+    DISPLAY_APPLIED = 3;
+    GUEST_OS_UP = 4;
+    WAYDROID_READY = 5;
+}
+
 message InstanceStatusResponse {
     InstanceStateKind state = 1;
     string error_message = 2;
     string detail = 3;
+    GuestReadinessLevel readiness = 4;
+    GuestReadinessLevel terminal_readiness = 5;
 }
 
 message InstanceListEntry {

@@ -1405,7 +1405,7 @@ mod tests {
         let mut cfg = sample_instance_config();
         cfg.autostart = true;
         let req = instance_config_to_update_request(cfg.clone(), "vm-0".into());
-        let back = update_request_to_instance_config(cfg.id.clone(), req).unwrap();
+        let back = update_request_to_instance_config(cfg.id, req).unwrap();
         assert!(back.autostart);
     }
 
@@ -1889,7 +1889,7 @@ mod tests {
     fn export_instance_oci_round_trips_through_proto() {
         let id = InstanceId::new();
         let cmd = ExportInstanceOciCmd {
-            source_instance_id: id.clone(),
+            source_instance_id: id,
             dest_path: PathBuf::from("/tmp/export.tar"),
             disk_format: DiskFormat::Qcow2,
             disk_path: Some(PathBuf::from("/tmp/disk.qcow2")),

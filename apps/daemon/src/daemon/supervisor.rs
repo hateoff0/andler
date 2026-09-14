@@ -3,8 +3,9 @@ use std::path::PathBuf;
 use std::time::SystemTime;
 
 use andler_core::{
-    BackendHandle, DaemonEvent, EventKind, FsmError, InstanceConfig, InstanceEvent, InstanceId,
-    InstanceState, OpId, Operation, Resolution,
+    BackendHandle, DaemonEvent, EventKind, FsmError, GuestReadinessLevel, InstanceConfig,
+    InstanceEvent, InstanceId, InstanceState, OpId, Operation, ProbeOutcome, ReadinessLadder,
+    ReadinessProfile, ReadinessSnapshot, Resolution,
 };
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 
@@ -24,6 +25,9 @@ pub(crate) struct SupervisorHandle {
     pub(crate) state_rx: watch::Receiver<InstanceState>,
     pub(crate) handle_rx: watch::Receiver<Option<BackendHandle>>,
     pub(crate) config_rx: watch::Receiver<InstanceConfig>,
+    /// Guest readiness ladder position of the current run: the level reached
+    /// so far plus the profile the run's terminal level comes from.
+    pub(crate) readiness_rx: watch::Receiver<ReadinessSnapshot>,
 }
 
 impl SupervisorHandle {
@@ -82,6 +86,15 @@ pub(crate) enum SupervisorCommand {
     CancelOperation {
         op_id: OpId,
         ack: oneshot::Sender<Result<bool, DaemonError>>,
+    },
+    /// Applies one readiness probe answer to the run's ladder. Answering with
+    /// the level when the ladder advanced is the supervisor's job alone — it
+    /// is the only writer, so the ladder cannot be advanced from two places
+    /// at once.
+    ObserveReadiness {
+        level: GuestReadinessLevel,
+        outcome: ProbeOutcome,
+        ack: oneshot::Sender<ReadinessSnapshot>,
     },
     GetActiveOp {
         ack: oneshot::Sender<Option<Operation>>,
@@ -188,6 +201,33 @@ impl SupervisorHandle {
 
     pub(crate) fn config(&self) -> InstanceConfig {
         self.config_rx.borrow().clone()
+    }
+
+    /// Readiness ladder position of the current run (never a probe: the
+    /// daemon's probe pass is what moves it).
+    pub(crate) fn readiness(&self) -> ReadinessSnapshot {
+        *self.readiness_rx.borrow()
+    }
+
+    /// Applies one probe answer to the ladder and reports the position the
+    /// run is at afterwards.
+    pub(crate) async fn observe_readiness(
+        &self,
+        level: GuestReadinessLevel,
+        outcome: ProbeOutcome,
+    ) -> Result<ReadinessSnapshot, DaemonError> {
+        let (ack_tx, ack_rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SupervisorCommand::ObserveReadiness {
+                level,
+                outcome,
+                ack: ack_tx,
+            })
+            .await
+            .map_err(|_| DaemonError::InstanceSupervisorGone(self.id))?;
+        ack_rx
+            .await
+            .map_err(|_| DaemonError::InstanceSupervisorGone(self.id))
     }
 
     /// Applies an FSM event inside the supervisor task. Errors are returned
@@ -374,6 +414,11 @@ struct InstanceSupervisor {
     file_config: Option<InstanceConfig>,
     file_error: Option<String>,
     live_resolution: Option<Resolution>,
+    /// Position on the guest readiness ladder for the current run. Reset
+    /// whenever a run starts or ends, and re-derived whenever the effective
+    /// `(kind, boot_mode)` profile changes (an Android boot-mode switch).
+    ladder: ReadinessLadder,
+    readiness_tx: watch::Sender<ReadinessSnapshot>,
     active_op: Option<watch::Sender<Operation>>,
     active_op_key: Option<String>,
     /// The instance id an in-flight clone is creating; reported to a
@@ -407,6 +452,8 @@ pub(crate) fn spawn_supervisor(
     let (handle_tx, handle_rx) = watch::channel(handle.clone());
     let (config_tx, config_rx) = watch::channel(config.clone());
     let (op_done_tx, op_done_rx) = mpsc::unbounded_channel::<u64>();
+    let ladder = ReadinessLadder::new(ReadinessProfile::of(&config.kind));
+    let (readiness_tx, readiness_rx) = watch::channel(ladder.snapshot());
 
     // The registry directory (instances_root/<id>) owns instance.toml and
     // events.jsonl. It is NOT derived from disk.path — a config can point
@@ -430,6 +477,8 @@ pub(crate) fn spawn_supervisor(
         file_config: None,
         file_error: None,
         live_resolution: None,
+        ladder,
+        readiness_tx,
         active_op: None,
         active_op_key: None,
         active_op_new_id: None,
@@ -460,6 +509,7 @@ pub(crate) fn spawn_supervisor(
         state_rx,
         handle_rx,
         config_rx,
+        readiness_rx,
     }
 }
 
@@ -510,6 +560,7 @@ impl InstanceSupervisor {
                                 self.live_resolution = Some(resolution);
                             }
                             self.config = config.clone();
+                            self.rebase_ladder();
                             let _ = self.config_tx.send(config);
                             self.persist().await;
                             let _ = ack.send(Ok(()));
@@ -564,6 +615,13 @@ impl InstanceSupervisor {
                                 .as_ref()
                                 .map(|active| active.borrow().clone());
                             let _ = ack.send(active);
+                        }
+                        SupervisorCommand::ObserveReadiness {
+                            level,
+                            outcome,
+                            ack,
+                        } => {
+                            let _ = ack.send(self.observe_readiness(level, outcome).await);
                         }
                         SupervisorCommand::JoinActive { key, ack } => {
                             let _ = ack.send(match self.join_decision(key.as_ref()) {
@@ -724,6 +782,50 @@ impl InstanceSupervisor {
         }
     }
 
+    /// Applies one probe answer. The ladder advances at most once per level
+    /// and never moves down; an advance is published on the daemon bus and
+    /// appended to the audit trail, so consumers read levels from the bus
+    /// instead of deriving them.
+    async fn observe_readiness(
+        &mut self,
+        level: GuestReadinessLevel,
+        outcome: ProbeOutcome,
+    ) -> ReadinessSnapshot {
+        if let Some(reached) = self.ladder.observe(level, outcome) {
+            let event = DaemonEvent {
+                ts_ms: chrono::Utc::now().timestamp_millis() as u64,
+                instance_id: Some(self.id),
+                kind: EventKind::Readiness { level: reached },
+            };
+            tracing::info!(
+                instance_id = %self.id,
+                level = ?reached,
+                "guest readiness level reached"
+            );
+            let _ = self.events.send(event.clone());
+            super::audit::append_event(&self.audit_dir, &event).await;
+        }
+        let snapshot = self.ladder.snapshot();
+        self.readiness_tx.send_replace(snapshot);
+        snapshot
+    }
+
+    /// Clears the ladder and republishes: the position is per run, so a run
+    /// that has not started (or has ended) reports no level.
+    fn reset_ladder(&mut self) {
+        self.ladder = ReadinessLadder::new(ReadinessProfile::of(&self.config.kind));
+        self.readiness_tx.send_replace(self.ladder.snapshot());
+    }
+
+    /// Re-derives the ladder when the effective `(kind, boot_mode)` profile
+    /// changed (an Android boot-mode switch). A run of a different profile is
+    /// a different ladder, not a continuation of the old one.
+    fn rebase_ladder(&mut self) {
+        if self.ladder.snapshot().profile != ReadinessProfile::of(&self.config.kind) {
+            self.reset_ladder();
+        }
+    }
+
     async fn apply_transition(
         &mut self,
         event: InstanceEvent,
@@ -733,6 +835,17 @@ impl InstanceSupervisor {
         match self.state.clone().apply(event.clone()) {
             Ok(new_state) => {
                 self.state = new_state.clone();
+                // A run's ladder belongs to that run: a new run starts empty,
+                // and a run that is no longer live keeps no level to report.
+                if matches!(
+                    new_state,
+                    InstanceState::Starting
+                        | InstanceState::Stopping
+                        | InstanceState::Stopped
+                        | InstanceState::Error { .. }
+                ) {
+                    self.reset_ladder();
+                }
                 let reason = match &event {
                     InstanceEvent::Fail(message) => Some(message.clone()),
                     _ => None,
@@ -795,6 +908,7 @@ impl InstanceSupervisor {
                 self.file_error = None;
                 if self.state.is_disk_idle() {
                     self.config = cfg.clone();
+                    self.rebase_ladder();
                     let _ = self.config_tx.send(cfg);
                 }
             }

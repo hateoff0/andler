@@ -113,11 +113,9 @@ async fn cancel_operation_sets_token_and_marks_cancelled() {
         .expect("cancel must reach the supervisor");
     assert!(cancelled);
 
-    let result = done
-        .await
+    done.await
         .expect("done channel must resolve")
         .expect("cooperative cancel returns Ok, not an error");
-    assert_eq!(result, ());
     assert!(handle.active_operation().await.unwrap().is_none());
 }
 

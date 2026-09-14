@@ -114,7 +114,7 @@ async fn autostart_skips_instances_not_in_stopped_state() {
     // again (a second spawn would be a supervisor violation).
     let mut cfg_running = sample_config();
     cfg_running.autostart = true;
-    cfg_running.memory.size_bytes = 1 * MemoryConfig::GIB;
+    cfg_running.memory.size_bytes = MemoryConfig::GIB;
     cfg_running.disk.path = std::path::PathBuf::from("/nonexistent-running-disk.qcow2");
     let id_running = cfg_running.id;
     register_with_state(&daemon, cfg_running, InstanceState::Running, None).await;
@@ -122,7 +122,7 @@ async fn autostart_skips_instances_not_in_stopped_state() {
     // Stopped autostart=true instance: gets the start attempt (fails fast).
     let mut cfg_stopped = sample_config();
     cfg_stopped.autostart = true;
-    cfg_stopped.memory.size_bytes = 1 * MemoryConfig::GIB;
+    cfg_stopped.memory.size_bytes = MemoryConfig::GIB;
     cfg_stopped.disk.path = std::path::PathBuf::from("/nonexistent-stopped-disk.qcow2");
     let id_stopped = cfg_stopped.id;
     register_with_state(&daemon, cfg_stopped, InstanceState::Stopped, None).await;

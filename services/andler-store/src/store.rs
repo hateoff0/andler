@@ -409,7 +409,7 @@ mod tests {
             let path = std::env::temp_dir().join(format!(
                 "andler-store-test-{}-{}",
                 std::process::id(),
-                InstanceId::new().to_string()
+                InstanceId::new()
             ));
             std::fs::create_dir_all(&path).expect("create test temp dir");
             TempDir(path)

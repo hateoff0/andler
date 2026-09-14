@@ -1479,7 +1479,7 @@ mod main_error_formatting_tests {
 
     #[test]
     fn looks_like_daemon_not_running_matches_top_level_message() {
-        let err = std::io::Error::new(std::io::ErrorKind::Other, "connection refused");
+        let err = std::io::Error::other("connection refused");
         assert!(looks_like_daemon_not_running(&err));
     }
 

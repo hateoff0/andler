@@ -184,7 +184,8 @@ async fn restore_migrates_legacy_store_configs_to_toml() {
     let root = TestTempDir::new();
     let cfg = sample_config();
     let id = cfg.id;
-    let store = seed_legacy_store(&root.path().join("andlerd.db"), &[cfg.clone()]).await;
+    let store =
+        seed_legacy_store(&root.path().join("andlerd.db"), std::slice::from_ref(&cfg)).await;
 
     let daemon = Daemon::restore_with_root(store.clone(), root.path().to_path_buf())
         .await

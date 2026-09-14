@@ -12,7 +12,7 @@ fn state() -> InstanceState {
 }
 
 fn io_err() -> std::io::Error {
-    std::io::Error::new(std::io::ErrorKind::Other, "test io error")
+    std::io::Error::other("test io error")
 }
 
 #[test]

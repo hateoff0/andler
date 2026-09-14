@@ -584,7 +584,7 @@ mod tests {
 
         // Overwrite the blob with different bytes; the layout is now corrupt.
         fs::write(
-            dir.join("blobs").join("sha256").join(&sha256_hex(&tar)),
+            dir.join("blobs").join("sha256").join(sha256_hex(&tar)),
             b"other",
         )
         .unwrap();

@@ -40,8 +40,8 @@ pub enum GuestAction {
         #[arg(long)]
         translator_dir: Option<std::path::PathBuf>,
 
-        /// Force the offline path (guestmount FUSE + userns chroot — zero
-        /// root) instead of the smart path: install via the guest agent,
+        /// Force the offline path (the zero-root libguestfs appliance)
+        /// instead of the smart path: install via the guest agent,
         /// auto-starting a stopped VM for maintenance when needed.
         #[arg(long)]
         offline: bool,
@@ -57,8 +57,8 @@ pub enum GuestAction {
 
         instance_id: String,
 
-        /// Force the offline path (guestmount FUSE + userns chroot — zero
-        /// root) instead of the smart path: remove via the guest agent,
+        /// Force the offline path (the zero-root libguestfs appliance)
+        /// instead of the smart path: remove via the guest agent,
         /// auto-starting a stopped VM for maintenance when needed.
         #[arg(long)]
         offline: bool,

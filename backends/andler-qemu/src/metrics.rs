@@ -334,7 +334,6 @@ mod tests {
         let kb: u64 = rss_line
             .strip_prefix("VmRSS:")
             .unwrap()
-            .trim()
             .split_whitespace()
             .next()
             .unwrap()
@@ -353,11 +352,11 @@ mod tests {
 
         for line in lines {
             let trimmed = line.trim_start();
-            if let Some(_) = trimmed.strip_prefix("lo:") {
+            if trimmed.strip_prefix("lo:").is_some() {
                 continue;
             }
             if let Some(rest) = trimmed.split_once(':') {
-                let parts: Vec<&str> = rest.1.trim().split_whitespace().collect();
+                let parts: Vec<&str> = rest.1.split_whitespace().collect();
                 assert_eq!(parts[0], "67890"); // rx_bytes
                 assert_eq!(parts[8], "54321"); // tx_bytes
                 break;
