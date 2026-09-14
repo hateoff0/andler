@@ -49,3 +49,26 @@ of the script.
 - The conformance suite (`core::guest_mutator::conformance`) runs
   against this implementation under `cargo test -- --ignored`; it needs
   `guestfish`, `qemu-img` and `mke2fs` on PATH.
+
+## The listening session
+
+The appliance is the cost: a session takes about two seconds to boot before it
+does anything, which is why a `guest install` that asked nine separate questions
+spent ~22s of appliance time on a 21s operation whose actual work takes a
+fraction of a second. `GuestfsMutator` therefore boots `guestfish --listen` once
+and sends every later call to that booted session (`guestfish --remote=<pid>`),
+so the same operation runs in two boots with ~10ms per call — measured,
+`guest install libndk`: 20.8s → 7.7s.
+
+Three properties the session keeps:
+
+- it is stopped with the mutator (a kill of the serving pid, which
+  `guestfish --listen` prints as `GUESTFISH_PID=`), and that line is also its
+  readiness signal;
+- a listener left behind by a killed daemon still holds the guest image's lock,
+  so booting a session reaps orphaned listeners (a guestfish whose parent is
+  gone) first;
+- a command the appliance rejects can end the listener with it, and the process
+  is not gone until it is reaped (a pid probe still answers), so the client
+  treats "server is not running" as retryable, stops the old session before
+  booting the next one, and never leaves the image lock to a session nobody owns.

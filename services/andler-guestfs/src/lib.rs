@@ -48,8 +48,10 @@ impl SessionBudget {
 /// The appliance boots its own unprivileged QEMU, mounts the guest image
 /// with exclusive locking (qemu image lock — the same guarantee the old
 /// NbdGuard flock provided, without our own code), and needs zero root.
-/// One appliance session per `apply` batch: a staging run that touches
-/// hundreds of files is one guestfish invocation, not hundreds.
+/// The appliance boots once per mutator and then listens: every later call is
+/// a cheap `--remote` client against the same booted session, so a batch still
+/// costs one session and the questions around it cost none. The session holds
+/// the image lock until the mutator is dropped.
 pub struct GuestfsMutator {
     disk: PathBuf,
     /// Explicit `guestfish -m` mount spec (`/dev/sda:/`), used when the
@@ -57,6 +59,30 @@ pub struct GuestfsMutator {
     mount: Option<String>,
     network: bool,
     budget: SessionBudget,
+    /// The booted appliance every call is sent to, started on first use. A
+    /// session costs seconds before it does anything, so one per mutator
+    /// replaces one per question (a translator install asked nine).
+    session: tokio::sync::Mutex<Option<ListeningSession>>,
+}
+
+/// The booted guestfish appliance: it listens for commands and every later
+/// call is a `--remote` client against the same session. `guestfish --listen`
+/// forks, so the wrapper process and the serving process are both ours to
+/// stop.
+struct ListeningSession {
+    server_pid: i32,
+    child: tokio::process::Child,
+}
+
+impl Drop for ListeningSession {
+    fn drop(&mut self) {
+        // SAFETY: kill with a pid we spawned and a signal number; no memory is
+        // involved.
+        unsafe {
+            libc::kill(self.server_pid, libc::SIGKILL);
+        }
+        let _ = self.child.start_kill();
+    }
 }
 
 impl GuestfsMutator {
@@ -66,6 +92,7 @@ impl GuestfsMutator {
             mount: None,
             network: false,
             budget: SessionBudget::Appliance,
+            session: tokio::sync::Mutex::new(None),
         }
     }
 
@@ -75,6 +102,7 @@ impl GuestfsMutator {
             mount: Some(mount),
             network: false,
             budget: SessionBudget::Appliance,
+            session: tokio::sync::Mutex::new(None),
         }
     }
 
@@ -88,25 +116,215 @@ impl GuestfsMutator {
             mount: None,
             network: true,
             budget: SessionBudget::Package,
+            session: tokio::sync::Mutex::new(None),
         }
     }
 
+    /// The socket of a live appliance session, booting one when there is none
+    /// or the previous one exited.
+    async fn live_session(&self, slot: &mut Option<ListeningSession>) -> Result<i32, MutatorError> {
+        let alive = session_alive(slot);
+        if !alive {
+            if slot.is_some() {
+                tracing::debug!("the listening appliance exited; booting a fresh one");
+            }
+            *slot = Some(self.start_session().await?);
+        }
+        match slot.as_ref() {
+            Some(session) => Ok(session.server_pid),
+            None => Err(MutatorError::Io(
+                "the appliance session could not be started".to_string(),
+            )),
+        }
+    }
+
+    async fn start_session(&self) -> Result<ListeningSession, MutatorError> {
+        self.reap_orphaned_listeners();
+        let mut cmd = tokio::process::Command::new("guestfish");
+        cmd.args(listen_args(self.mount.as_deref(), self.network));
+        cmd.args(["-a", &self.disk.display().to_string()]);
+        cmd.stdin(std::process::Stdio::null());
+        cmd.stdout(std::process::Stdio::piped());
+        cmd.stderr(std::process::Stdio::piped());
+
+        let started = std::time::Instant::now();
+        let mut child = cmd
+            .spawn()
+            .map_err(|e| MutatorError::Io(format!("cannot spawn guestfish: {e}")))?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| MutatorError::Io("guestfish stdout unavailable".to_string()))?;
+        let bound = self.budget.timeout();
+        // The listener announces itself with `GUESTFISH_PID=<pid>; export
+        // GUESTFISH_PID` — that line is the readiness signal, and the pid is
+        // what every later call and the teardown address.
+        use tokio::io::AsyncBufReadExt;
+        let mut lines = tokio::io::BufReader::new(stdout).lines();
+        let server_pid = loop {
+            match tokio::time::timeout(bound, lines.next_line()).await {
+                Ok(Ok(Some(line))) => {
+                    if let Some(pid) = line
+                        .trim()
+                        .strip_prefix("GUESTFISH_PID=")
+                        .and_then(|rest| rest.split(';').next())
+                        .and_then(|pid| pid.trim().parse::<i32>().ok())
+                    {
+                        break pid;
+                    }
+                }
+                Ok(Ok(None)) => {
+                    let detail = child
+                        .wait_with_output()
+                        .await
+                        .map(|output| String::from_utf8_lossy(&output.stderr).trim().to_string())
+                        .unwrap_or_default();
+                    let mut message =
+                        "the libguestfs appliance closed before it started listening".to_string();
+                    if !detail.is_empty() {
+                        message.push_str(": ");
+                        message.push_str(&detail);
+                    }
+                    return Err(MutatorError::Io(message));
+                }
+                Ok(Err(e)) => {
+                    return Err(MutatorError::Io(format!(
+                        "cannot read the appliance's readiness line: {e}"
+                    )))
+                }
+                Err(_) => {
+                    let _ = child.start_kill();
+                    return Err(MutatorError::Io(format!(
+                        "the libguestfs appliance did not start listening within {}s — it is \
+                         stuck starting (or cannot start on this host); `andler doctor` verifies \
+                         guestfish and /dev/kvm, and {} raises this bound",
+                        bound.as_secs(),
+                        self.budget.variable()
+                    )));
+                }
+            }
+            if started.elapsed() > bound {
+                let _ = child.start_kill();
+                return Err(MutatorError::Io(format!(
+                    "the libguestfs appliance did not start listening within {}s",
+                    bound.as_secs()
+                )));
+            }
+        };
+        // Whatever else the listener writes is not this crate's business; keep
+        // the pipe drained so it can never block on a full buffer.
+        tokio::spawn(async move { while let Ok(Some(_)) = lines.next_line().await {} });
+        tracing::debug!(
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            server_pid,
+            "guestfish appliance is listening"
+        );
+        Ok(ListeningSession { server_pid, child })
+    }
+
+    /// Kills listeners left behind by a daemon that died: `guestfish --listen`
+    /// forks, so a killed daemon can leave the serving process holding the
+    /// guest image's lock, and nothing else would ever reap it.
+    fn reap_orphaned_listeners(&self) {
+        let dir = std::env::temp_dir().join(format!(".guestfish-{}", user_id()));
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let Some(pid) = name
+                .strip_prefix("socket-")
+                .and_then(|pid| pid.parse::<i32>().ok())
+            else {
+                continue;
+            };
+            let proc_dir = PathBuf::from(format!("/proc/{pid}"));
+            let cmdline = match std::fs::read_to_string(proc_dir.join("cmdline")) {
+                Ok(cmdline) => cmdline,
+                Err(_) => continue,
+            };
+            if !cmdline.contains("guestfish") {
+                continue;
+            }
+            let orphaned = std::fs::read_to_string(proc_dir.join("stat"))
+                .ok()
+                .and_then(|stat| stat.rsplit(')').next().map(str::to_string))
+                .and_then(|rest| rest.split_whitespace().nth(1).map(str::to_string))
+                .map(|parent| parent == "1")
+                .unwrap_or(false);
+            if orphaned {
+                tracing::debug!(pid, "killing an appliance listener left by a dead daemon");
+                // SAFETY: kill with a pid read from this user's own socket
+                // directory after checking the process is a guestfish.
+                unsafe {
+                    libc::kill(pid, libc::SIGKILL);
+                }
+            }
+        }
+    }
+
+    /// Runs one command in the session, held under the session lock: the
+    /// appliance serves one command at a time, and holding it keeps a second
+    /// caller from interleaving with this one.
+    ///
+    /// The client retries the gap between one client finishing and the listener
+    /// accepting the next: it closes its socket and reopens it per command, so a
+    /// call that arrives in between gets "the server is not running" from a
+    /// session that is very much alive.
     async fn run_guestfish(
         &self,
-        extra_args: &[&str],
+        script: &str,
+        capture_stdout: bool,
+    ) -> Result<Vec<u8>, MutatorError> {
+        let mut slot = self.session.lock().await;
+        let mut server_pid = self.live_session(&mut slot).await?;
+        let mut attempt = 0;
+        let mut reboots = 0;
+        loop {
+            attempt += 1;
+            match self.run_remote(server_pid, script, capture_stdout).await {
+                Ok(output) => return Ok(output),
+                Err(error) => {
+                    let transient = matches!(
+                        &error,
+                        MutatorError::Io(message)
+                            if message.contains("server is not running")
+                                || message.contains("No such file")
+                    );
+                    if !transient || attempt >= 20 {
+                        return Err(error);
+                    }
+                    // The listener can end with the command that failed it, and
+                    // until it is reaped it still holds the guest image's lock:
+                    // drop the old session (which stops it) before booting a
+                    // fresh one, or the new listener would fail to mount.
+                    if attempt % 4 == 0 && reboots < 3 {
+                        reboots += 1;
+                        tracing::debug!(reboots, "the appliance session is unreachable; rebooting");
+                        if let Some(dead) = slot.take() {
+                            drop(dead);
+                        }
+                        *slot = Some(self.start_session().await?);
+                        server_pid = self.live_session(&mut slot).await?;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
+            }
+        }
+    }
+
+    async fn run_remote(
+        &self,
+        server_pid: i32,
         script: &str,
         capture_stdout: bool,
     ) -> Result<Vec<u8>, MutatorError> {
         let mut cmd = tokio::process::Command::new("guestfish");
-        // The waiter's timeout is the only thing that ends this process, so it
-        // must not outlive the future watching it.
+        // The waiter's timeout is the only thing that ends this client, so it
+        // must not outlive the future watching it; the appliance belongs to the
+        // session, not to this call.
         cmd.kill_on_drop(true);
-        cmd.args(appliance_args(
-            &self.disk,
-            self.mount.as_deref(),
-            self.network,
-            extra_args,
-        ));
+        cmd.arg(format!("--remote={server_pid}"));
         cmd.stdin(std::process::Stdio::piped());
         if capture_stdout {
             cmd.stdout(std::process::Stdio::piped());
@@ -118,7 +336,7 @@ impl GuestfsMutator {
         let started = std::time::Instant::now();
         let mut child = cmd
             .spawn()
-            .map_err(|e| MutatorError::Io(format!("cannot spawn guestfish: {e}")))?;
+            .map_err(|e| MutatorError::Io(format!("cannot reach the appliance session: {e}")))?;
 
         {
             let mut stdin = child
@@ -134,8 +352,7 @@ impl GuestfsMutator {
 
         // Wall-clock bound: a stuck appliance used to hang the operation that
         // started it, with nothing in the log and no way for the caller to
-        // tell "slow" from "never". `kill_on_drop` makes the appliance die
-        // with the future that is waiting for it.
+        // tell "slow" from "never".
         let timeout = self.budget.timeout();
         let budget_var = self.budget.variable();
         let output = match tokio::time::timeout(timeout, child.wait_with_output()).await {
@@ -152,7 +369,7 @@ impl GuestfsMutator {
 
         tracing::debug!(
             elapsed_ms = started.elapsed().as_millis() as u64,
-            "guestfish session finished"
+            "guestfish call finished"
         );
 
         if !output.status.success() {
@@ -178,16 +395,37 @@ fn quote(path: &str) -> String {
     format!("'{}'", path.replace('\'', "'\\''"))
 }
 
-/// The guestfish command line for one session. Kept separate from the spawn
-/// so the arguments — the appliance's network in particular — are testable
-/// without an appliance.
-fn appliance_args(
-    disk: &Path,
-    mount: Option<&str>,
-    network: bool,
-    extra_args: &[&str],
-) -> Vec<String> {
-    let mut args = vec!["-a".to_string(), disk.display().to_string()];
+/// The guestfish arguments that boot the appliance once and leave it
+/// listening. `--no-progress` is a session-level flag, so it belongs to the
+/// boot rather than to each later call, and `-i`/`-m` launch the appliance
+/// here, so later calls are commands rather than a second boot. Kept separate
+/// from the spawn so the arguments — the appliance's network in particular —
+/// are testable without an appliance.
+/// Whether the session's appliance is still there. The client's own error is
+/// the ground truth for reachability (see `run_guestfish`); this answers the
+/// coarser question of whether there is still a process to stop.
+fn session_alive(slot: &Option<ListeningSession>) -> bool {
+    match slot {
+        Some(session) => process_alive(session.server_pid),
+        None => false,
+    }
+}
+
+/// This process's user id.
+fn user_id() -> u32 {
+    // SAFETY: getuid takes no arguments and cannot fail.
+    unsafe { libc::getuid() }
+}
+
+/// Whether the process is still there (signal 0 asks without delivering one).
+fn process_alive(pid: i32) -> bool {
+    // SAFETY: kill with a pid we spawned and signal 0, which only performs the
+    // permission and existence checks.
+    unsafe { libc::kill(pid, 0) == 0 }
+}
+
+fn listen_args(mount: Option<&str>, network: bool) -> Vec<String> {
+    let mut args = vec!["--listen".to_string(), "--no-progress".to_string()];
     if network {
         args.push("--network".to_string());
     }
@@ -198,7 +436,6 @@ fn appliance_args(
         }
         None => args.push("-i".to_string()),
     }
-    args.extend(extra_args.iter().map(|arg| arg.to_string()));
     args
 }
 
@@ -276,7 +513,7 @@ impl GuestMutator for GuestfsMutator {
                 }
             }
             let script = build_script(ops, &content_dir);
-            self.run_guestfish(&[], &script, false).await?;
+            self.run_guestfish(&script, false).await?;
             Ok::<(), MutatorError>(())
         }
         .await;
@@ -287,12 +524,12 @@ impl GuestMutator for GuestfsMutator {
 
     async fn read_file(&self, path: &str) -> Result<Vec<u8>, MutatorError> {
         let script = format!("download {} -\n", quote(path));
-        self.run_guestfish(&["--no-progress"], &script, true).await
+        self.run_guestfish(&script, true).await
     }
 
     async fn exists(&self, path: &str) -> Result<bool, MutatorError> {
         let script = format!("exists {}\n", quote(path));
-        let out = self.run_guestfish(&[], &script, true).await?;
+        let out = self.run_guestfish(&script, true).await?;
         Ok(String::from_utf8_lossy(&out).trim() == "true")
     }
 
@@ -304,7 +541,7 @@ impl GuestMutator for GuestfsMutator {
         for path in paths {
             script.push_str(&format!("exists {}\n", quote(path)));
         }
-        let out = self.run_guestfish(&[], &script, true).await?;
+        let out = self.run_guestfish(&script, true).await?;
         parse_probe_answers(&out, paths.len())
     }
 }
@@ -343,12 +580,10 @@ fn uuid4() -> String {
 #[cfg(test)]
 mod timeout_tests {
     use super::{
-        appliance_args, SessionBudget, DEFAULT_GUESTFS_TIMEOUT_SECS,
+        listen_args, SessionBudget, DEFAULT_GUESTFS_TIMEOUT_SECS,
         DEFAULT_GUEST_PACKAGE_TIMEOUT_SECS, MIN_GUESTFS_TIMEOUT_SECS,
         MIN_GUEST_PACKAGE_TIMEOUT_SECS,
     };
-    use std::path::Path;
-
     #[test]
     fn the_appliance_bound_is_configurable_and_never_silly() {
         std::env::remove_var("ANDLERD_GUESTFS_TIMEOUT_SECS");
@@ -401,28 +636,24 @@ mod timeout_tests {
     }
 
     #[test]
-    fn package_sessions_enable_the_appliance_network() {
-        // The guest's own network is down while the disk is idle, so a
-        // package session that did not enable the appliance's user networking
-        // would fail every download with a resolver error.
-        let packages = appliance_args(Path::new("/d/base.qcow2"), None, true, &[]);
+    fn the_appliance_boots_once_and_listens() {
+        // The boot is the cost: a session takes seconds before it does any
+        // work, so every call after the first is a client of this one. `-i`
+        // and `-m` launch the appliance at boot, so the later calls are plain
+        // commands rather than another launch.
+        let packages = listen_args(None, true);
         assert_eq!(
             packages,
-            vec!["-a", "/d/base.qcow2", "--network", "-i"],
+            vec!["--listen", "--no-progress", "--network", "-i"],
             "{packages:?}"
         );
 
-        let plain = appliance_args(Path::new("/d/base.qcow2"), None, false, &[]);
-        assert_eq!(plain, vec!["-a", "/d/base.qcow2", "-i"], "{plain:?}");
+        let plain = listen_args(None, false);
+        assert_eq!(plain, vec!["--listen", "--no-progress", "-i"], "{plain:?}");
 
         assert_eq!(
-            appliance_args(
-                Path::new("/d/base.qcow2"),
-                Some("/dev/sda:/"),
-                false,
-                &["--no-progress"]
-            ),
-            vec!["-a", "/d/base.qcow2", "-m", "/dev/sda:/", "--no-progress"]
+            listen_args(Some("/dev/sda:/"), false),
+            vec!["--listen", "--no-progress", "-m", "/dev/sda:/"]
         );
     }
 }

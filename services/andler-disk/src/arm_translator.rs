@@ -499,16 +499,29 @@ fn parse_build_prop(content: &str) -> HashMap<String, String> {
 async fn base_build_prop_with(
     mutator: &dyn GuestMutator,
 ) -> Result<HashMap<String, String>, DiskError> {
-    match mutator.read_file("/system/build.prop").await {
-        Ok(content) => return Ok(parse_build_prop(&String::from_utf8_lossy(&content))),
-        Err(err) => tracing::debug!("no plain /system/build.prop: {err}"),
+    // Which layout this image uses is asked with a probe rather than by reading
+    // and failing: a command the appliance rejects ends the session with it, and
+    // a reboot costs seconds.
+    const PLAIN: &str = "/system/build.prop";
+    const SYSTEM_IMAGE: &str = "/etc/waydroid-extra/images/system.img";
+    let present = mutator
+        .probe_paths(&[PLAIN, SYSTEM_IMAGE])
+        .await
+        .map_err(|e| DiskError::FileSystem(format!("failed to inspect the guest: {e}")))?;
+
+    if present.first().copied().unwrap_or(false) {
+        let content = mutator
+            .read_file(PLAIN)
+            .await
+            .map_err(|e| DiskError::FileSystem(format!("failed to read {PLAIN}: {e}")))?;
+        return Ok(parse_build_prop(&String::from_utf8_lossy(&content)));
     }
 
-    match mutator
-        .read_file("/etc/waydroid-extra/images/system.img")
-        .await
-    {
-        Ok(image) => {
+    match present.get(1).copied().unwrap_or(false) {
+        true => {
+            let image = mutator.read_file(SYSTEM_IMAGE).await.map_err(|e| {
+                DiskError::FileSystem(format!("failed to read {SYSTEM_IMAGE}: {e}"))
+            })?;
             let tmp = std::env::temp_dir().join(format!(
                 "andler-system-img-{}-{}.img",
                 std::process::id(),
@@ -535,7 +548,7 @@ async fn base_build_prop_with(
                 String::from_utf8_lossy(&output.stderr).trim()
             )));
         }
-        Err(err) => tracing::debug!("no waydroid system image either: {err}"),
+        false => tracing::debug!("neither the plain nor the waydroid build.prop source is present"),
     }
 
     Err(DiskError::FileSystem(
