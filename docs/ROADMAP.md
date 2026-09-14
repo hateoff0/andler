@@ -62,6 +62,7 @@ What is next is the short-term list below.
 
 ## 📐 Next — short term
 
+- **Appliance session economy in `services/andler-guestfs`** — a guest operation still pays one appliance boot (~2s) per session, and a `guest install` uses nine of them: the work takes seconds and the boots take most of a minute. Either a long-lived session reused across the calls of one mutator, or fewer sessions per operation, whichever the next measurement supports.
 - **USB device passthrough** — `usb-host,vendorid=…,productid=…` for both guest kinds: a peripheral into a Linux guest, a physical device into Android. Needs static declaration plus hot-plug/detach parity with the existing disk and network hot-plug.
 - **CPU-flag accumulator in `cmdline.rs`** — dedup and conflict detection (reject `+flag` after `-flag` instead of emitting a broken QEMU argument list), landed together with the module split by device category that its current size calls for.
 - **Wizard host-capacity tiering** — scale default RAM and cores to the host (and hard-fail with the exact config key when a guest OS floor is not met), instead of a single fixed default.
@@ -81,7 +82,7 @@ What is next is the short-term list below.
 ## ✅ Shipped
 
 <details>
-<summary><strong>Core engine, graphics, Android, storage, guest ops, observability, isolation, UX, quality gates</strong></summary>
+<summary><strong>Everything <a href="CHANGELOG.md">0.1.0</a> ships — core engine, graphics, Android, storage, guest ops, observability, isolation, UX, quality gates</strong></summary>
 
 ### Core engine
 - ✅ `HypervisorBackend` trait — hypervisor-agnostic contract; QEMU is the implementation.

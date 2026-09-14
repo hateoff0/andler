@@ -136,6 +136,8 @@ jobs:
           set -euo pipefail
           version="${{ steps.version.outputs.version }}"
           repo="${{ github.repository }}"
+          tag="${{ github.event.inputs.tag || github.ref_name }}"
+          commit="${GITHUB_SHA}"
           awk -v ver="$version" '
             $0 ~ "^## \\[" ver "\\]" { found = 1; next }
             found && /^## \[/ { exit }
@@ -148,6 +150,13 @@ jobs:
               echo "**<a href=\"https://github.com/${repo}#readme\">README</a>** &nbsp;•&nbsp; **<a href=\"https://github.com/${repo}#-quick-start\">Quick start</a>** &nbsp;•&nbsp; **<a href=\"https://github.com/${repo}/blob/main/docs/CHANGELOG.md\">Changelog</a>** &nbsp;•&nbsp; **<a href=\"https://github.com/${repo}/blob/main/docs/ROADMAP.md\">Roadmap</a>**"
               echo
               sed '/./,$!d' section.md
+              # Which build these notes describe: the notes are the changelog
+              # section verbatim, so the commit and the verification of the
+              # archives are stated here rather than left to be guessed.
+              echo
+              echo "---"
+              echo
+              echo "<sub><b>Note: Release \`${tag}\`</b> · built from <a href=\"https://github.com/${repo}/commit/${commit}\"><code>${commit:0:12}</code></a> on $(date -u +%Y-%m-%d) · every archive ships a <code>.sha256</code> sidecar and a <a href=\"https://github.com/${repo}/attestations\">build-provenance attestation</a> where the repository is public · the notes above are the <code>[${version}]</code> section of <code>docs/CHANGELOG.md</code> verbatim</sub>"
             } > notes.md
             echo "have_notes=true" >> "$GITHUB_OUTPUT"
           else

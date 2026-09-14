@@ -40,6 +40,8 @@ _Nothing yet._
 
 ## [0.1.0] - 2026-09-13
 
+_Published as [`v0.1.0`](https://github.com/hateoff0/andler/releases/tag/v0.1.0): archives with checksums and a build-provenance attestation, installed by [`scripts/install.sh`](https://github.com/hateoff0/andler/blob/main/scripts/install.sh)._
+
 **The first release of ANDLER** — a QEMU/KVM control plane that runs Linux and Android virtual machines as managed systems: one daemon, one CLI, one declarative `instance.toml`.
 
 | | |
