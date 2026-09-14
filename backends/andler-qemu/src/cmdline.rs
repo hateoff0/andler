@@ -20,7 +20,7 @@ pub fn build_args(
     }
     args.extend(disk_args(cfg));
     args.extend(input_args(cfg));
-    args.extend(network_args(cfg));
+    args.extend(network_args(cfg)?);
     args.extend(audio_args(cfg));
     args.extend(qmp_args(qmp_socket_path));
     args.extend(guest_agent_args(cfg, qmp_socket_path));
@@ -100,9 +100,20 @@ pub fn extra_net_bridge_tap_iface(instance_id: &str, index: usize) -> String {
     format!("tap{short}-e{index}")
 }
 
-/// Host-side veth endpoint name for a hotplugged isolated NIC.
-pub fn extra_net_isolated_iface(index: usize) -> String {
-    format!("andler-e{index}")
+pub fn primary_net_isolated_iface() -> String {
+    "andler0".to_string()
+}
+
+pub fn isolated_extra_nic_error() -> BackendError {
+    BackendError::InvalidConfig {
+        backend: "qemu",
+        reason: "an additional NIC cannot be attached with isolated networking: the guest is off \
+                 every host network because its whole QEMU process runs in its own network \
+                 namespace, and a NIC outside that namespace is not isolated while a second NIC \
+                 inside it has no host to reach. Use NAT or Bridge mode when the guest needs more \
+                 than one interface."
+            .to_string(),
+    }
 }
 
 fn guest_agent_args(cfg: &InstanceConfig, qmp_socket_path: &Path) -> Vec<String> {
@@ -414,7 +425,21 @@ fn input_args(cfg: &InstanceConfig) -> Vec<String> {
     args
 }
 
-fn network_args(cfg: &InstanceConfig) -> Vec<String> {
+fn network_args(cfg: &InstanceConfig) -> Result<Vec<String>, BackendError> {
+    if matches!(cfg.network.mode, NetworkMode::Isolated) && !cfg.extra_networks.is_empty() {
+        return Err(BackendError::InvalidConfig {
+            backend: "qemu",
+            reason: format!(
+                "network.mode = \"isolated\" takes no additional NICs ({} configured): the guest is \
+                 off every host network because its whole QEMU process runs in its own network \
+                 namespace, and a second NIC would either need a namespace of its own or leak host \
+                 connectivity into the guest. Remove extra_networks, or use network.mode = \
+                 \"nat\" / \"bridge\".",
+                cfg.extra_networks.len()
+            ),
+        });
+    }
+
     let mut args = primary_network_args(cfg);
 
     for (index, extra) in cfg.extra_networks.iter().enumerate() {
@@ -431,8 +456,16 @@ fn network_args(cfg: &InstanceConfig) -> Vec<String> {
                 )
             }
             NetworkMode::Isolated => {
-                let tap_iface = extra_net_isolated_iface(index);
-                format!("tap,id={netdev_id},ifname={tap_iface},script=no,downscript=no")
+                return Err(BackendError::InvalidConfig {
+                    backend: "qemu",
+                    reason: format!(
+                        "extra_networks[{index}].mode = \"isolated\" cannot be attached: only the \
+                         instance's primary network can put the guest in a network namespace, and a \
+                         NIC added outside it is not isolated. Use network.mode = \"nat\" / \
+                         \"bridge\" for this NIC, or create the instance with the primary network \
+                         isolated."
+                    ),
+                })
             }
         };
         args.push("-netdev".to_string());
@@ -445,7 +478,7 @@ fn network_args(cfg: &InstanceConfig) -> Vec<String> {
         ));
     }
 
-    args
+    Ok(args)
 }
 
 fn primary_network_args(cfg: &InstanceConfig) -> Vec<String> {
@@ -481,10 +514,10 @@ fn primary_network_args(cfg: &InstanceConfig) -> Vec<String> {
             ]
         }
         NetworkMode::Isolated => {
-            let vm_iface = "andler0";
+            let vm_iface = primary_net_isolated_iface();
             vec![
                 "-netdev".to_string(),
-                format!("tap,id=net0,ifname={},script=no,downscript=no", vm_iface),
+                format!("tap,id=net0,ifname={vm_iface},script=no,downscript=no"),
                 "-device".to_string(),
                 format!("{},netdev=net0", cfg.network.device_model),
             ]
@@ -918,7 +951,7 @@ mod tests {
     fn network_args_match_start_sh() {
         let cfg = start_sh_equivalent_config();
         assert_eq!(
-            network_args(&cfg),
+            network_args(&cfg).expect("valid network config"),
             vec!["-nic", "user,model=virtio-net-pci"]
         );
     }
@@ -928,7 +961,7 @@ mod tests {
         let mut cfg = start_sh_equivalent_config();
         cfg.network.nat_backend = NatBackend::Passt;
         assert_eq!(
-            network_args(&cfg),
+            network_args(&cfg).expect("valid network config"),
             vec![
                 "-netdev",
                 "passt,id=net0",
@@ -943,7 +976,7 @@ mod tests {
         cfg.network.mode = NetworkMode::Bridge {
             interface: "br0".to_string(),
         };
-        let args = network_args(&cfg);
+        let args = network_args(&cfg).expect("valid network config");
         let tap_iface = primary_net_bridge_tap_iface(&cfg.id.to_string());
         assert_eq!(
             args,
@@ -968,7 +1001,7 @@ mod tests {
     fn network_args_isolated_mode_generates_correct_args() {
         let mut cfg = start_sh_equivalent_config();
         cfg.network.mode = NetworkMode::Isolated;
-        let args = network_args(&cfg);
+        let args = network_args(&cfg).expect("valid network config");
         assert_eq!(
             args,
             vec![
@@ -998,7 +1031,7 @@ mod tests {
                 host_address: Some("127.0.0.1".to_string()),
             },
         ];
-        let args = network_args(&cfg);
+        let args = network_args(&cfg).expect("valid network config");
         assert_eq!(
             args,
             vec![
@@ -1020,7 +1053,7 @@ mod tests {
             guest_port: 22,
             host_address: None,
         }];
-        let args = network_args(&cfg);
+        let args = network_args(&cfg).expect("valid network config");
         assert_eq!(
             args,
             vec![
@@ -1233,7 +1266,7 @@ mod tests {
     fn extra_net_ids_and_host_ifaces_follow_index_scheme() {
         assert_eq!(extra_net_id(2), "net-extra2");
         assert_eq!(extra_net_bridge_tap_iface("deadbeef", 2), "tapdeadbeef-e2");
-        assert_eq!(extra_net_isolated_iface(2), "andler-e2");
+        assert_eq!(primary_net_isolated_iface(), "andler0");
     }
 
     #[test]
@@ -1261,13 +1294,7 @@ mod tests {
             nat_backend: NatBackend::Slirp,
             port_forwards: vec![],
         });
-        cfg.extra_networks.push(NetworkConfig {
-            mode: NetworkMode::Isolated,
-            device_model: "virtio-net-pci".to_string(),
-            nat_backend: NatBackend::Slirp,
-            port_forwards: vec![],
-        });
-        let args = network_args(&cfg);
+        let args = network_args(&cfg).expect("valid network config");
         let primary_len = primary_network_args(&cfg).len();
         assert_eq!(
             args[primary_len..],
@@ -1283,12 +1310,42 @@ mod tests {
                 ),
                 "-device".to_string(),
                 "e1000e,netdev=net-extra1,bus=root-port-9".to_string(),
-                "-netdev".to_string(),
-                "tap,id=net-extra2,ifname=andler-e2,script=no,downscript=no".to_string(),
-                "-device".to_string(),
-                "virtio-net-pci,netdev=net-extra2,bus=root-port-10".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn isolated_primary_refuses_extra_networks() {
+        let mut cfg = start_sh_equivalent_config();
+        cfg.network.mode = NetworkMode::Isolated;
+        cfg.extra_networks.push(NetworkConfig {
+            mode: NetworkMode::Nat,
+            device_model: "virtio-net-pci".to_string(),
+            nat_backend: NatBackend::Slirp,
+            port_forwards: vec![],
+        });
+        let reason = network_args(&cfg).expect_err("a NIC beside an isolated primary leaks");
+        let message = reason.to_string();
+        assert!(message.contains("isolated"), "{message}");
+        assert!(message.contains("nat"), "{message}");
+        assert!(message.contains("bridge"), "{message}");
+    }
+
+    #[test]
+    fn isolated_extra_network_is_refused() {
+        let mut cfg = start_sh_equivalent_config();
+        cfg.extra_networks.push(NetworkConfig {
+            mode: NetworkMode::Isolated,
+            device_model: "virtio-net-pci".to_string(),
+            nat_backend: NatBackend::Slirp,
+            port_forwards: vec![],
+        });
+        let reason = network_args(&cfg)
+            .expect_err("an isolated NIC cannot be attached to a guest outside a namespace");
+        let message = reason.to_string();
+        assert!(message.contains("extra_networks[0]"), "{message}");
+        assert!(message.contains("nat"), "{message}");
+        assert!(message.contains("bridge"), "{message}");
     }
 
     #[test]
@@ -1300,7 +1357,7 @@ mod tests {
             nat_backend: NatBackend::Passt,
             port_forwards: vec![],
         });
-        let args = network_args(&cfg);
+        let args = network_args(&cfg).expect("valid network config");
         assert!(args.contains(&"passt,id=net-extra0".to_string()));
     }
 }

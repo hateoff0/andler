@@ -4,7 +4,7 @@ Network configuration for virtual machine instances. Provides bridge and NAT net
 
 ## Current State
 
-Partially implemented. Contains `NetworkService` trait and `DefaultNetworkService` implementation for host-side network configuration. **Bridge and NAT (Slirp/Passt) are implemented; `NetworkMode::Isolated` is config-representable but `setup_isolated` returns an explicit `SetupFailed("isolated network mode is not implemented yet")`** — the daemon surfaces that error on start, it does not silently degrade.
+Implements all three network modes for host-side configuration: NAT (slirp/passt), bridge (a host bridge plus a per-instance tap), and isolated. **Isolated gives the guest its own unprivileged user + network namespace**: `setup_isolated` returns the tap name and the argv prefix that launches the guest's QEMU inside that namespace, where the tap is the only interface and no route to a host network exists — QMP/QGA stay reachable because they are UNIX sockets. Setup validates the result before returning (exactly `lo` plus the tap, no IPv4 route) and refuses with an actionable reason when the host cannot provide a namespace; teardown is idempotent, and the daemon derives the same tap name on a restart so an adopted guest can still be stopped.
 
 ## Features
 

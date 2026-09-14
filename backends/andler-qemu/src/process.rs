@@ -63,27 +63,35 @@ impl QemuProcess {
         log_file_path: Option<PathBuf>,
         kill_on_drop: bool,
         cpu_affinity: Option<&[usize]>,
+        launcher: Option<&[String]>,
     ) -> Result<Self, ProcessError> {
-        let mut command = match cpu_affinity {
+        let mut argv: Vec<String> = Vec::new();
+        if let Some(affinity) = cpu_affinity {
             // taskset pins every QEMU thread (vCPU, iothread, main) to the
             // configured host CPUs: threads inherit the process affinity.
             // The thread-context QEMU object exists but its accel binding
             // is absent on the QEMU versions this project targets, so the
             // process-level pin is the version-independent mechanism.
-            Some(affinity) => {
-                let list = affinity
-                    .iter()
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>()
-                    .join(",");
-                let mut command = Command::new("taskset");
-                command.args(["-c", &list]).arg(QEMU_BINARY);
-                command
-            }
-            None => Command::new(QEMU_BINARY),
-        };
+            let list = affinity
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(",");
+            argv.push("taskset".to_string());
+            argv.push("-c".to_string());
+            argv.push(list);
+        }
+        // The launcher runs the program inside the guest's own namespace and
+        // execs it in place, so the pid tracked below is still QEMU's own.
+        if let Some(prefix) = launcher {
+            argv.extend(prefix.iter().cloned());
+        }
+        argv.push(QEMU_BINARY.to_string());
+        argv.extend(args.iter().cloned());
+
+        let mut command = Command::new(&argv[0]);
         let mut child = command
-            .args(args)
+            .args(&argv[1..])
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .stdin(Stdio::null())
@@ -352,7 +360,7 @@ mod tests {
             "-nographic".to_string(),
         ];
 
-        let mut process = QemuProcess::spawn(&args, qmp_path, None, true, None)
+        let mut process = QemuProcess::spawn(&args, qmp_path, None, true, None, None)
             .await
             .unwrap();
         assert!(process.is_alive());
@@ -371,7 +379,7 @@ mod tests {
             "-nographic".to_string(),
         ];
 
-        let mut process = QemuProcess::spawn(&args, qmp_path, None, true, None)
+        let mut process = QemuProcess::spawn(&args, qmp_path, None, true, None, None)
             .await
             .unwrap();
         process.force_kill().await.unwrap();

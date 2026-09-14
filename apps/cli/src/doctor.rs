@@ -100,9 +100,11 @@ fn hypervisor_checks() -> Vec<Check> {
     checks
 }
 
-/// CAP_NET_ADMIN (bit 12) is required for bridge mode: `ip link add ... type
-/// tap` / `master <bridge>` run directly in andlerd, with no sudo hop (see
-/// services/andler-net). Users without it can still use nat/isolated modes.
+/// CAP_NET_ADMIN (bit 12) is required for bridge mode: `ip tuntap add` /
+/// `master <bridge>` run directly in andlerd, with no sudo hop (see
+/// services/andler-net). Users without it can still use nat and isolated modes;
+/// isolated mode needs no host capability at all, because the guest's QEMU gets
+/// CAP_NET_ADMIN inside the user namespace it creates for itself.
 fn parse_cap_eff(status: &str) -> Option<u64> {
     status
         .lines()
@@ -124,68 +126,131 @@ fn cap_net_admin_check() -> Check {
             "CAP_NET_ADMIN",
             "absent — bridge networking (network mode = \"Bridge\") will fail",
             "grant the capability or run andlerd under a user that has it: \
-             sudo setcap cap_net_admin+ep $(which andlerd), or use mode = \"Nat\"",
+             sudo setcap cap_net_admin+ep $(which andlerd), or use mode = \"Nat\" / \"Isolated\" \
+             (neither needs a host capability)",
         ),
     }
 }
 
-/// Offline guest operations are zero-root since the guestmount+userns
-/// migration: the disk is mounted through guestmount (FUSE)
-/// and package commands run inside an unprivileged user namespace — no
-/// sudoers rules exist anymore. These checks pin the three prerequisites.
+/// Offline guest operations are zero-root: a libguestfs appliance (`guestfish`)
+/// boots its own unprivileged QEMU, mounts the guest's disk and applies a batch
+/// of mutations in one session — no root, no sudoers rules, no FUSE mount and
+/// no host user namespace. These checks pin what that needs.
 fn offline_checks() -> Vec<Check> {
+    vec![
+        match which("oras") {
+            Some(p) => ok("oras", p.display().to_string()),
+            None => warn(
+                "oras",
+                "not found in PATH — OCI export/import will fail",
+                "install oras (https://oras.land/); it is the OCI registry client andler uses",
+            ),
+        },
+        match which("guestfish") {
+            Some(p) => ok("guestfish", p.display().to_string()),
+            None => warn(
+                "guestfish",
+                "not found in PATH — offline guest operations (--offline) will fail",
+                "install libguestfs-tools / guestfs-tools; the appliance it starts is what mounts \
+                 the guest disk without root",
+            ),
+        },
+    ]
+}
+
+/// Isolated networking needs no host capability at all: the guest's QEMU gets
+/// CAP_NET_ADMIN inside the user namespace it creates for itself, builds its tap
+/// there and never joins a host network. What it does need is the kernel's
+/// permission to create that namespace, `ip` to build the tap inside it, and a
+/// usable `/dev/net/tun`. These checks pin all three.
+fn isolated_checks() -> Vec<Check> {
     let mut checks = Vec::new();
 
-    checks.push(match which("oras") {
-        Some(p) => ok("oras", p.display().to_string()),
-        None => warn(
-            "oras",
-            "not found in PATH — OCI export/import will fail",
-            "install oras (https://oras.land/); it is the OCI registry client andler uses",
+    checks.push(match which("unshare") {
+        Some(path) => ok("unshare", path.display().to_string()),
+        None => fail(
+            "unshare",
+            "not found in PATH — network mode = \"isolated\" cannot start a guest",
+            "install util-linux: isolated mode starts the guest's QEMU inside an unprivileged \
+             user + network namespace it creates with unshare",
         ),
     });
 
-    checks.push(match which("guestmount") {
-        Some(p) => ok("guestmount (FUSE)", p.display().to_string()),
-        None => warn(
-            "guestmount (FUSE)",
-            "not found in PATH — offline guest package ops (--offline) will fail",
-            "install libguestfs-tools / guestfs-tools; the smart online path needs it only \
-             when a VM cannot boot",
+    checks.push(match which("ip") {
+        Some(path) => ok("ip (iproute2)", path.display().to_string()),
+        None => fail(
+            "ip (iproute2)",
+            "not found in PATH — network modes bridge and isolated cannot be configured",
+            "install iproute2; it creates the taps both modes hand to QEMU",
         ),
     });
 
-    let fuse = Path::new("/dev/fuse");
-    checks.push(if !fuse.exists() {
-        warn(
-            "/dev/fuse",
-            "not present — guestmount cannot mount guest disks",
-            "ensure FUSE is enabled in the kernel and /dev/fuse exists (usually automatic)",
-        )
-    } else {
-        ok("/dev/fuse", "accessible")
-    });
-
-    let userns_ok = std::process::Command::new("unshare")
-        .args(["--user", "--map-root-user", "--mount", "--", "true"])
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false);
-    checks.push(if userns_ok {
-        ok("unprivileged user namespaces", "allowed")
-    } else {
-        warn(
+    checks.push(match unshare_probe(&["--net", "--", "true"]) {
+        Ok(()) => ok(
             "unprivileged user namespaces",
-            "disabled — offline guest package ops (--offline) will fail",
-            "enable them: sudo sysctl kernel.unprivileged_userns_clone=1 (Debian/Ubuntu); \
-             Arch-based distros allow them by default. The smart online path needs none of this.",
-        )
+            "allowed — an isolated guest gets CAP_NET_ADMIN inside its own namespace, so it needs \
+             no host capability",
+        ),
+        Err(reason) => fail(
+            "unprivileged user namespaces",
+            format!("refused ({reason}) — network mode = \"isolated\" will fail"),
+            "enable them: sudo sysctl kernel.unprivileged_userns_clone=1 (Debian/Ubuntu-style \
+             kernels), sudo sysctl -w user.max_user_namespaces=10000 (upstream limit), and on \
+             Ubuntu 24.04+ sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0. \
+             nat and bridge modes need none of this.",
+        ),
     });
+
+    checks.push(
+        match unshare_probe(&[
+            "--net",
+            "--",
+            "sh",
+            "-c",
+            "ip link set lo up && ip tuntap add dev andler-doctor0 mode tap && ip link set \
+             andler-doctor0 up",
+        ]) {
+            Ok(()) => ok(
+                "namespace + tap",
+                "a guest tap can be created and brought up inside a fresh namespace",
+            ),
+            Err(reason) => fail(
+                "namespace + tap",
+                format!("cannot create a tap inside a namespace: {reason}"),
+                "load the tun module (sudo modprobe tun) and check that /dev/net/tun exists; \
+                 without it neither bridge nor isolated mode can hand QEMU a tap",
+            ),
+        },
+    );
 
     checks
+}
+
+fn unshare_probe(extra_args: &[&str]) -> Result<(), String> {
+    let mut args = vec!["--user", "--map-root-user"];
+    args.extend_from_slice(extra_args);
+
+    let output = match std::process::Command::new("unshare")
+        .args(&args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .output()
+    {
+        Ok(output) => output,
+        Err(error) => return Err(error.to_string()),
+    };
+
+    if output.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    Err(
+        match stderr.lines().map(str::trim).find(|line| !line.is_empty()) {
+            Some(line) => line.to_string(),
+            None => format!("unshare exited with {}", output.status),
+        },
+    )
 }
 
 async fn daemon_check(addr: &str) -> Check {
@@ -271,24 +336,23 @@ fn print_section(title: &str, checks: &[Check]) -> bool {
 pub async fn run(daemon_addr: &str, json: bool) -> bool {
     let hypervisor = hypervisor_checks();
     let offline = offline_checks();
+    let isolated = isolated_checks();
     let daemon = daemon_check(daemon_addr).await;
     let base_images = base_image_check();
 
+    let sections: [&[Check]; 5] = [
+        &hypervisor,
+        &offline,
+        &isolated,
+        std::slice::from_ref(&daemon),
+        std::slice::from_ref(&base_images),
+    ];
+
     if json {
-        let all_ok = all_sections_ok(
-            &hypervisor,
-            &offline,
-            std::slice::from_ref(&daemon),
-            std::slice::from_ref(&base_images),
-        );
+        let all_ok = all_sections_ok(&sections);
         match serde_json::to_string(&serde_json::json!({
             "overall": if all_ok { "ok" } else { "needs_attention" },
-            "checks": flatten_checks(
-                &hypervisor,
-                &offline,
-                std::slice::from_ref(&daemon),
-                std::slice::from_ref(&base_images),
-            ),
+            "checks": flatten_checks(&sections),
         })) {
             Ok(s) => println!("{s}"),
             Err(e) => eprintln!("failed to serialize doctor output: {e}"),
@@ -298,12 +362,17 @@ pub async fn run(daemon_addr: &str, json: bool) -> bool {
 
     println!("andler doctor\n");
 
-    let hv_ok = print_section("Hypervisor", &hypervisor);
-    let offline_ok = print_section("Offline guest operations (guestmount + userns)", &offline);
-    let daemon_ok = print_section("Daemon", std::slice::from_ref(&daemon));
-    let base_ok = print_section("Base images", std::slice::from_ref(&base_images));
-
-    let all_ok = hv_ok && offline_ok && daemon_ok && base_ok;
+    let mut all_ok = true;
+    let sections: [(&str, &[Check]); 5] = [
+        ("Hypervisor", &hypervisor),
+        ("Offline guest operations (libguestfs appliance)", &offline),
+        ("Isolated network mode (netns + tap)", &isolated),
+        ("Daemon", std::slice::from_ref(&daemon)),
+        ("Base images", std::slice::from_ref(&base_images)),
+    ];
+    for (title, checks) in sections {
+        all_ok &= print_section(title, checks);
+    }
 
     if all_ok {
         println!("All checks passed.");
@@ -318,36 +387,19 @@ pub async fn run(daemon_addr: &str, json: bool) -> bool {
     all_ok
 }
 
-/// Whether every check across all four doctor sections passed (no warn/fail).
-fn all_sections_ok(
-    hypervisor: &[Check],
-    offline: &[Check],
-    daemon: &[Check],
-    base_images: &[Check],
-) -> bool {
-    hypervisor
+/// Whether every check in every doctor section passed (no warn/fail).
+fn all_sections_ok(sections: &[&[Check]]) -> bool {
+    sections
         .iter()
-        .chain(offline)
-        .chain(daemon)
-        .chain(base_images)
+        .flat_map(|section| section.iter())
         .all(|c| matches!(c.status, Status::Ok(_)))
 }
 
 /// Flattens every check into a JSON object: name, status (ok/warn/fail),
 /// detail, and fix (when present). Used by `doctor --json`.
-fn flatten_checks<'a>(
-    hypervisor: &'a [Check],
-    offline: &'a [Check],
-    daemon: &'a [Check],
-    base_images: &'a [Check],
-) -> Vec<serde_json::Value> {
+fn flatten_checks(sections: &[&[Check]]) -> Vec<serde_json::Value> {
     let mut checks = Vec::new();
-    for check in hypervisor
-        .iter()
-        .chain(offline)
-        .chain(daemon)
-        .chain(base_images)
-    {
+    for check in sections.iter().flat_map(|section| section.iter()) {
         let (status, detail) = match &check.status {
             Status::Ok(detail) => ("ok", detail.as_str()),
             Status::Warn(detail) => ("warn", detail.as_str()),

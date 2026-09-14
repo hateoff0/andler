@@ -82,7 +82,7 @@
 | **Storage engine** | QCOW2 external overlay chains | Live snapshots, non-destructive branching, OCI image export |
 | **State & config** | Declarative `instance.toml` per instance + SQLite snapshot metadata | Hand-edited TOML is honored; crash-safe registry scan on restart |
 | **Interfaces** | Interactive wizard · flags · TOML · `--json` on every reader | Scriptable end to end, plus a terminal-native wizard for humans |
-| **Security** | QGA online + `guestmount` FUSE inside unprivileged user namespaces | 100 % zero-root guest provisioning — no sudoers, no helper binary |
+| **Security** | QGA online + the libguestfs appliance offline | 100 % zero-root guest provisioning — no sudoers, no helper binary |
 
 ---
 
@@ -173,7 +173,7 @@ flowchart TB
     SUP --> QEMU["andler-qemu<br/>QMP · cmdline · /proc"]
     SUP --> DISK["andler-disk<br/>qcow2 · overlays · OCI"]
     SUP --> GUESTFS["andler-guestfs<br/>libguestfs appliance"]
-    SUP --> NET["andler-net<br/>bridge via iproute2"]
+    SUP --> NET["andler-net<br/>NAT · bridge · isolated netns"]
     SUP --> STORE["andler-store<br/>snapshot metadata"]
 
     QEMU -->|spawn / QMP| QEMUP["QEMU process"]
@@ -193,7 +193,7 @@ andler/
 ├── services/
 │   ├── andler-disk/         qemu-img, overlays, clones, zero-root guest ops, base-image downloads
 │   ├── andler-guestfs/      GuestfsMutator — libguestfs appliance, zero root
-│   ├── andler-net/          Bridge networking via iproute2 (isolated: config-only)
+│   ├── andler-net/          NAT, bridge and isolated (netns) networking via iproute2
 │   ├── andler-store/        SQLite snapshot metadata + legacy config migration
 │   ├── andler-firmware/     OVMF discovery, hardware auto-detect, AMD/NVIDIA/Intel GPU metrics
 │   └── andler-rpc/          Protobuf definitions, gRPC, proto ↔ domain conversions
@@ -381,10 +381,10 @@ Linked clones protect their source chain — a restore or delete that would brea
 | :--- | :--- | :--- |
 | **Online** | `qemu-guest-agent` over the private `*.qga.sock` chardev — `guest-exec`, file writes, resolution changes | VM is `Running` |
 | **Maintenance** | The daemon auto-starts a stopped VM headless, installs through QGA, then stops it again — one cancellable supervisor operation | `guest install` / `guest remove` on a stopped VM |
-| **Offline** | `guestmount` (libguestfs FUSE) + `unshare --user --map-root-user --mount` + `chroot` | `--offline`, or a VM that cannot boot |
+| **Offline** | the libguestfs appliance runs the guest's own package manager as root inside its own QEMU VM | `--offline`, or a VM that cannot boot |
 
 > [!TIP]
-> There is no privileged helper binary and no sudoers rule anywhere in ANDLER. `andler doctor` verifies the offline prerequisites (`guestmount`, `/dev/fuse`, unprivileged user namespaces) and prints the exact sysctl or package that enables each one.
+> There is no privileged helper binary and no sudoers rule anywhere in ANDLER. `andler doctor` verifies the offline prerequisite (`guestfish`, from guestfs-tools) and prints the package that provides it.
 
 ```bash
 andler guest install hello dev           # online or maintenance path, chosen automatically
@@ -568,10 +568,8 @@ andler cache list|clean [--dry-run|--json]        &&   andler completions <bash|
 | `ANDLERD_LOG_FORMAT=json` | daemon | Structured JSON logging (tee'd into the daemon log ring) |
 | `ANDLERD_HEALTH_CHECK_INTERVAL_SECS` | daemon | Health-check interval (default `30`, `0` disables) |
 | `ANDLERD_GUEST_AGENT_WAIT_SECS` | daemon | How long a maintenance auto-start waits for QGA (default `120`) |
-| `ANDLERD_GUEST_PACKAGE_TIMEOUT_SECS` | daemon | How long one in-guest package-manager step (index refresh, install, remove) may run (default `600`, minimum `30`) — raise it when a guest's mirrors are slow |
+| `ANDLERD_GUEST_PACKAGE_TIMEOUT_SECS` | daemon | How long one in-guest package-manager step (index refresh, install, remove) may run (default `600`, minimum `30`) — raise it when a guest's mirrors are slow; this is also the bound of the offline appliance session that runs them |
 | `ANDLERD_GUESTFS_TIMEOUT_SECS` | daemon | How long one libguestfs appliance session may run (default `300`, minimum `30`) |
-| `ANDLERD_GUEST_MOUNT_TIMEOUT_SECS` | daemon | How long `guestmount` may take to bring its FUSE mount up (default `120`, minimum `15`) |
-| `ANDLERD_GUEST_COMMAND_TIMEOUT_SECS` | daemon | How long one chroot batch (index refresh, package install) may run (default `900`, minimum `30`) |
 | `ANDLERD_DEV_RESTART=1` | daemon | SIGTERM/Ctrl+C leaves VMs running; the next start adopts them |
 | `ANDLERD_IMAGE_REPO` | daemon | `owner/repo` whose releases hold the base images (default `hateoff0/andler`) |
 | `ANDLERD_IMAGE_API_BASE` | daemon | API base for the release catalog (default `https://api.github.com`) |
@@ -619,7 +617,7 @@ Instance IDs are 64-hex; commands accept Docker-style prefixes, and `list` shows
 | Linux with KVM (`/dev/kvm`, user in `kvm`) | every VM | mandatory; without it QEMU falls back to unusable software emulation |
 | `qemu-system-x86_64` + `qemu-img` | spawn, disk ops | OVMF/UEFI boot support required |
 | OVMF/UEFI firmware pair | guest boot | auto-discovered across distro layouts; override with `ANDLERD_OVMF_CODE` / `ANDLERD_OVMF_VARS` |
-| `guestmount` + `/dev/fuse` + unprivileged user namespaces | offline guest operations | the online QGA path needs none of this |
+| `guestfish` (guestfs-tools) | offline guest operations | the online QGA path needs none of this |
 | `oras` | OCI image export/import | optional; `doctor` warns when missing |
 | `CAP_NET_ADMIN` on `andlerd` | bridge networking | `Nat` mode works without it |
 | `protoc` | building from source | contributors only |
@@ -646,12 +644,9 @@ Hypervisor
   ⚠ CAP_NET_ADMIN: not held — bridge networking will fail
       → setcap on andlerd, or use network mode = "Nat"
 
-Offline guest operations (guestmount + userns)
+Offline guest operations (libguestfs appliance)
   ✓ oras: /usr/bin/oras
-  ✓ guestmount (FUSE): /usr/bin/guestmount
-  ✓ /dev/fuse: accessible
-  ⚠ unprivileged user namespaces: disabled
-      → sudo sysctl kernel.unprivileged_userns_clone=1
+  ✓ guestfish: /usr/bin/guestfish
 
 Daemon
   ✓ andlerd: reachable at http://127.0.0.1:50051
@@ -682,7 +677,7 @@ No. Venus (Vulkan) and VirGL (OpenGL) share your existing host GPU over `virtio-
 <details>
 <summary><strong>Is root required?</strong></summary>
 
-No. The daemon runs as your user and performs no privileged operations: online guest work goes over the guest agent, offline work through `guestmount` plus an unprivileged user namespace. Bridge networking is the one feature that additionally wants `CAP_NET_ADMIN` on `andlerd`; `Nat` mode needs nothing.
+No. The daemon runs as your user and performs no privileged operations: online guest work goes over the guest agent, offline work inside the libguestfs appliance, a QEMU VM of its own. Bridge networking is the one feature that additionally wants `CAP_NET_ADMIN` on `andlerd`; `Nat` mode needs nothing.
 
 </details>
 
@@ -823,7 +818,7 @@ ANDLER is mostly glue around excellent work by other people. Every link below is
 - [Linux KVM](https://www.kvm.org/) — the hardware virtualization ANDLER targets
 - [virtio](https://docs.oasis-open.org/virtio/) — paravirtualized devices (blk, net, gpu, serial, sound)
 - [OVMF / edk2](https://github.com/tianocore/edk2) — UEFI firmware for guest boot
-- [libguestfs](https://libguestfs.org/) — `guestmount` and the appliance behind zero-root offline guest work
+- [libguestfs](https://libguestfs.org/) — the appliance behind zero-root offline guest work
 
 ### 🎮 Paravirtualized graphics
 - [Mesa Venus](https://docs.mesa3d.org/drivers/venus.html) — Vulkan over `virtio-gpu`

@@ -7,7 +7,7 @@ use andler_core::{
     InstanceConfig, InstanceKind, InstanceState, LogLine, LogStreamSource, NatBackend,
     NetworkConfig, NetworkMode, RenderBackend, Resolution, ResourceMetrics,
 };
-use andler_net::{DefaultNetworkService, NetworkService};
+use andler_net::{DefaultNetworkService, IsolatedNet, NetworkService};
 use async_trait::async_trait;
 use futures_core::stream::BoxStream;
 use futures_util::StreamExt;
@@ -43,7 +43,7 @@ struct RunningInstance {
 #[derive(Clone)]
 enum NetworkInfo {
     Bridge { bridge: String, tap_iface: String },
-    Isolated { host_veth: String, vm_veth: String },
+    Isolated(IsolatedNet),
     Nat,
 }
 
@@ -352,15 +352,7 @@ exit 30";
                     tap_iface,
                 })
             }
-            NetworkMode::Isolated => {
-                let vm_iface = cmdline::extra_net_isolated_iface(index);
-                let (host_veth, vm_veth) = self
-                    .network_service
-                    .setup_isolated(&vm_iface)
-                    .await
-                    .map_err(|e| BackendError::Io(e.to_string()))?;
-                Ok(NetworkInfo::Isolated { host_veth, vm_veth })
-            }
+            NetworkMode::Isolated => Err(cmdline::isolated_extra_nic_error()),
             NetworkMode::Nat => Ok(NetworkInfo::Nat),
         }
     }
@@ -373,11 +365,8 @@ exit 30";
                     .teardown_bridge(bridge, tap_iface)
                     .await;
             }
-            NetworkInfo::Isolated { host_veth, vm_veth } => {
-                let _ = self
-                    .network_service
-                    .teardown_isolated(host_veth, vm_veth)
-                    .await;
+            NetworkInfo::Isolated(net) => {
+                let _ = self.network_service.teardown_isolated(net).await;
             }
             NetworkInfo::Nat => {}
         }
@@ -792,13 +781,13 @@ impl HypervisorBackend for QemuBackend {
                 }
             }
             NetworkMode::Isolated => {
-                let vm_iface = "andler0";
-                let (host_veth, vm_veth) = self
+                let vm_iface = cmdline::primary_net_isolated_iface();
+                let net = self
                     .network_service
-                    .setup_isolated(vm_iface)
+                    .setup_isolated(&vm_iface)
                     .await
                     .map_err(|e| BackendError::Io(e.to_string()))?;
-                NetworkInfo::Isolated { host_veth, vm_veth }
+                NetworkInfo::Isolated(net)
             }
             NetworkMode::Nat => NetworkInfo::Nat,
         };
@@ -822,12 +811,17 @@ impl HypervisorBackend for QemuBackend {
         let dev_restart = std::env::var("ANDLERD_DEV_RESTART")
             .map(|value| value == "1")
             .unwrap_or(false);
+        let launcher = match &network_info {
+            NetworkInfo::Isolated(net) => Some(net.launcher()),
+            _ => None,
+        };
         let process = QemuProcess::spawn(
             &args,
             qmp_socket_path,
             log_file_path,
             !dev_restart,
             cfg.cpu.affinity.as_deref(),
+            launcher,
         )
         .await;
         if let Err(err) = process {
@@ -892,16 +886,19 @@ impl HypervisorBackend for QemuBackend {
         let process = QemuProcess::adopt(pid, qmp_socket_path, log_file_path)
             .map_err(process_error_to_backend_error)?;
 
-        // Host-side network state is deterministic for Bridge (the tap name
-        // derives from the instance id), so `stop` can still tear it down;
-        // Isolated mode cannot be alive (setup always fails today) and Nat
-        // needs no teardown, so both degrade to NetworkInfo::Nat.
+        // Host-side network state is deterministic for Bridge (the tap name derives
+        // from the instance id) and for Isolated (the namespace and its tap belong to
+        // the surviving QEMU process, and nothing is left on the host), so `stop` can
+        // still tear both down after a daemon restart; Nat needs no teardown.
         let network_info = match &cfg.network.mode {
             NetworkMode::Bridge { interface } => NetworkInfo::Bridge {
                 bridge: interface.clone(),
                 tap_iface: cmdline::primary_net_bridge_tap_iface(&cfg.id.to_string()),
             },
-            NetworkMode::Isolated | NetworkMode::Nat => NetworkInfo::Nat,
+            NetworkMode::Isolated => {
+                NetworkInfo::Isolated(IsolatedNet::new(cmdline::primary_net_isolated_iface()))
+            }
+            NetworkMode::Nat => NetworkInfo::Nat,
         };
 
         // The adopted QEMU may have live snapshot overlays from before the
@@ -1060,9 +1057,9 @@ impl HypervisorBackend for QemuBackend {
                     .await
                     .map_err(|e| BackendError::Io(e.to_string()))?;
             }
-            NetworkInfo::Isolated { host_veth, vm_veth } => {
+            NetworkInfo::Isolated(net) => {
                 self.network_service
-                    .teardown_isolated(&host_veth, &vm_veth)
+                    .teardown_isolated(&net)
                     .await
                     .map_err(|e| BackendError::Io(e.to_string()))?;
             }
@@ -1077,9 +1074,9 @@ impl HypervisorBackend for QemuBackend {
                         .await
                         .map_err(|e| BackendError::Io(e.to_string()))?;
                 }
-                NetworkInfo::Isolated { host_veth, vm_veth } => {
+                NetworkInfo::Isolated(net) => {
                     self.network_service
-                        .teardown_isolated(host_veth, vm_veth)
+                        .teardown_isolated(net)
                         .await
                         .map_err(|e| BackendError::Io(e.to_string()))?;
                 }
@@ -1327,32 +1324,39 @@ impl HypervisorBackend for QemuBackend {
             .ok_or_else(|| BackendError::HandleNotFound(handle.0.clone()))?;
         let instance_id = Self::instance_id_from_handle(handle)?.to_string();
 
+        // An isolated guest is off every host network because its whole process
+        // lives in its own namespace: a NIC added here would either land outside
+        // that namespace or be a network with nothing behind it.
+        if matches!(instance.network_info, NetworkInfo::Isolated(_)) {
+            return Err(cmdline::isolated_extra_nic_error());
+        }
+
         // Host-side tap/veth first, so a failure leaves the VM completely untouched.
         let info = self
             .setup_extra_network(network, index, &instance_id)
             .await?;
 
-        let network = network.clone();
+        let nat_backend = network.nat_backend;
+        let tap_ifname = match &network.mode {
+            NetworkMode::Nat => None,
+            NetworkMode::Bridge { .. } => {
+                Some(cmdline::extra_net_bridge_tap_iface(&instance_id, index))
+            }
+            NetworkMode::Isolated => return Err(cmdline::isolated_extra_nic_error()),
+        };
+
         let model = network.device_model.clone();
         let result = Self::run_qmp_operation(instance, &self.qmp_reconnects, move |qmp| {
             let model = model.clone();
-            let network = network.clone();
-            let instance_id = instance_id.clone();
+            let tap_ifname = tap_ifname.clone();
             Box::pin(async move {
                 let netdev_id = cmdline::extra_net_id(index);
-                match &network.mode {
-                    NetworkMode::Nat => match network.nat_backend {
+                match tap_ifname {
+                    Some(ifname) => qmp.netdev_add_tap(&netdev_id, &ifname).await?,
+                    None => match nat_backend {
                         NatBackend::Slirp => qmp.netdev_add_user(&netdev_id).await?,
                         NatBackend::Passt => qmp.netdev_add_passt(&netdev_id).await?,
                     },
-                    NetworkMode::Bridge { .. } => {
-                        let ifname = cmdline::extra_net_bridge_tap_iface(&instance_id, index);
-                        qmp.netdev_add_tap(&netdev_id, &ifname).await?
-                    }
-                    NetworkMode::Isolated => {
-                        let ifname = cmdline::extra_net_isolated_iface(index);
-                        qmp.netdev_add_tap(&netdev_id, &ifname).await?
-                    }
                 }
                 qmp.device_add_net(&netdev_id, &netdev_id, &model, index)
                     .await
@@ -1796,7 +1800,7 @@ mod tests {
             let path = std::env::temp_dir().join(format!(
                 "andler-qemu-test-{}-{}",
                 std::process::id(),
-                InstanceId::new().to_string()
+                InstanceId::new()
             ));
             std::fs::create_dir_all(&path).expect("create test temp dir");
             TestTempDir(path)
