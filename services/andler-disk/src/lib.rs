@@ -4,7 +4,6 @@ pub mod boot_mode;
 pub mod clone;
 pub mod diskspace;
 pub mod error;
-pub mod guest_offline;
 pub mod guest_tools;
 pub mod overlay;
 pub mod qcow2;

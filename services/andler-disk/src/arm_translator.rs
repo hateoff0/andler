@@ -906,8 +906,7 @@ mod tests {
 
         let err = base_build_prop_with(&m)
             .await
-            .err()
-            .expect("no base source must be a hard error, not a silent empty set");
+            .expect_err("no base source must be a hard error, not a silent empty set");
         let text = err.to_string();
         assert!(
             text.contains("no base build.prop found"),

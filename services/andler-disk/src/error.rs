@@ -26,8 +26,8 @@ pub enum DiskError {
     #[error("filesystem operation failed: {0}")]
     FileSystem(String),
 
-    #[error("nbd setup failed: {0}")]
-    NbdSetupFailed(String),
+    #[error("offline guest operation failed: {0}")]
+    OfflineGuestFailed(String),
 
     #[error(
         "shrinking {path} from {current_size_bytes} to {requested_size_bytes} bytes requires \
@@ -42,16 +42,17 @@ pub enum DiskError {
     #[error("compact is not applicable to `{format}` disks (only qcow2 has reclaimable metadata): {path}")]
     CompactNotApplicable { path: PathBuf, format: String },
 
-    #[error(
-        "no supported package manager (apt/dnf/pacman) found in guest filesystem: {mount_point}"
-    )]
-    PackageManagerNotFound { mount_point: PathBuf },
+    #[error("no supported package manager (apt/dnf/pacman) found in the guest filesystem: {disk}")]
+    PackageManagerNotFound { disk: PathBuf },
 
     #[error("package `{package}` is already installed in guest filesystem")]
     AgentAlreadyInstalled { package: String },
 
     #[error("package `{package}` is not installed in guest filesystem")]
     AgentNotInstalled { package: String },
+
+    #[error("cannot run the guest's package manager with `{package}`: {reason}")]
+    InvalidPackageName { package: String, reason: String },
 
     #[error("QEMU guest agent is not available in instance {instance_id}")]
     GuestAgentUnavailable { instance_id: String },

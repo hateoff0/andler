@@ -1,6 +1,6 @@
 # andler-disk
 
-Disk operations for virtual machines: creation, cloning, resizing, compaction — a wrapper around `qemu-img`, plus domain-specific overlay disk logic for Android instances, and zero-root offline guest provisioning via `guestmount` (libguestfs FUSE) inside unprivileged user namespaces.
+Disk operations for virtual machines: creation, cloning, resizing, compaction — a wrapper around `qemu-img`, plus domain-specific overlay disk logic for Android instances, and zero-root offline guest provisioning through the libguestfs appliance.
 
 ## Modules
 
@@ -55,25 +55,81 @@ Three modes for cloning an existing instance's disk into a new disk (not from a 
 
 ### `guest_tools` — Offline Guest Package Management
 
-Checks and manages packages in guest OS filesystems via `guestmount` (libguestfs FUSE) + an unprivileged-user-namespace chroot.
+Checks and manages packages in a stopped instance's guest OS through the
+libguestfs appliance: `GuestfsMutator` mounts the disk with `guestfish`, and
+`MutatorOp::RunShell` commands run chrooted into the guest as root, so the
+guest's own package manager sees its real root filesystem — `dpkg`'s
+`access(R_OK|W_OK)` check on `/var/lib/dpkg` included — with no privilege on
+the host.
 
 | Function | Signature | Description |
 |----------|-----------|-------------|
-| `detect_package_manager` | `(mount_point: &Path) -> Option<PackageManager>` | Detect package manager from binary presence (`usr/bin/apt-get` → Apt, `usr/bin/dnf` or `usr/bin/yum` → Dnf, `usr/bin/pacman` → Pacman) |
-| `is_agent_installed` | `(mount_point: &Path, pm: PackageManager, package: &str) -> Result<bool, DiskError>` | Check installation via the manager's query (`dpkg -l` / `rpm -q` / `pacman -Q`), run chrooted inside an unprivileged user namespace |
-| `install_agent_offline` | `(disk_path: &Path, package: &str) -> Result<(), DiskError>` | Install package offline (guestmount → index refresh → chroot install). Wrapped in `spawn_blocking`. |
-| `remove_agent_offline` | `(disk_path: &Path, package: &str) -> Result<(), DiskError>` | Remove package offline (guestmount → chroot remove). Wrapped in `spawn_blocking`. |
-| `check_package_status_offline` | `(mount_point: &Path, binary_checks: &[&str]) -> PackageStatus` | Check binary presence in mounted filesystem — any candidate path (`/usr/bin/...` and `/usr/sbin/...`) marks the package installed |
-| `check_all_packages_offline` | `(mount_point: &Path) -> Vec<(&GuestPackage, PackageStatus)>` | Check all KNOWN_PACKAGES in mounted filesystem |
-| `check_all_packages_offline_with_disk` | `(disk_path: &Path) -> Result<Vec<(&GuestPackage, PackageStatus)>, DiskError>` | Full offline check: guestmount + check + unmount |
-| `check_android_packages_offline_with_disk` | `(disk_path: &Path) -> Result<Vec<(&GuestPackage, PackageStatus)>, DiskError>` | Full offline check for Android packages: guestmount + check + unmount |
-| `available_packages` | `(kind: &InstanceKind) -> &'static [GuestPackage]` | Return package list for instance kind: `ANDROID_PACKAGES` for Android, `KNOWN_PACKAGES` for Linux |
+| `install_agent_offline` | `async (&dyn GuestMutator, &Path, &str) -> Result<(), DiskError>` | Install a package offline: detect, refuse if already installed, then run the install recipe in one appliance batch |
+| `remove_agent_offline` | `async (&dyn GuestMutator, &Path, &str) -> Result<(), DiskError>` | Remove a package offline: same gate, then the removal recipe |
+| `check_packages_offline` | `async (&dyn GuestMutator, &Path, &InstanceKind) -> Result<Vec<(&GuestPackage, PackageStatus)>, DiskError>` | One probe batch for every known package of the kind |
+| `packages_for` | `(kind: &InstanceKind) -> Vec<&'static GuestPackage>` | Shared packages, plus the platform's own |
 
-**`PackageManager`**: `Apt` | `Dnf` | `Pacman`, with `binary_name()`, `install_args(pkg)`, `remove_args(pkg)`, `check_installed_command(pkg)` helpers.
+**`PackageManager`** (from `andler-core`): `Apt` | `Dnf` | `Pacman`, with
+`binary_name()`, `install_args(pkg)`, `remove_args(pkg)`,
+`refresh_args()`, `check_installed_command(pkg)` — the same command shapes
+the online QGA path uses.
 
-**`PackageStatus`**: `Installed` | `NotInstalled` | `Unknown` (the check scripts can exit non-zero for reasons other than "not installed").
+**`PackageStatus`**: `Installed` | `NotInstalled`, decided by probing the
+package's `binary_checks` paths.
 
-**Offline install flow**: `guestmount` (libguestfs FUSE) → detect package manager → refuse if already installed (`AgentAlreadyInstalled`) → refresh indexes first (`apt-get update` / `dnf makecache` / `pacman -Sy`) so installs succeed on fresh images → chroot install inside an unprivileged user namespace (`unshare --user --map-root-user --mount`). An index-refresh failure is a hard error (reported with exit status + stderr), and the guest's `/etc/resolv.conf` content is logged at `info` for DNS diagnosis. Nothing is privileged: `guestmount` needs only `/dev/fuse`, and `unshare --user` needs unprivileged user namespaces allowed by the kernel.
+**Session shape.** An install or remove is three appliance sessions (each one
+is an appliance boot, ~2 s warm):
+
+1. **Detect** — one `probe_paths` batch for `/usr/bin/apt-get`,
+   `/usr/bin/dnf`, `/usr/bin/yum`, `/usr/bin/pacman`; the first hit picks the
+   manager, and none of them is `DiskError::PackageManagerNotFound`.
+2. **Gate** — the manager's own query (`dpkg -l` / `rpm -q` / `pacman -Qi`)
+   as a shell command in the appliance: exit 0 means installed. An install of
+   an installed package ends as `AgentAlreadyInstalled`, a removal of a missing
+   one as `AgentNotInstalled`, both without touching the disk further.
+3. **Recipe** — a single `apply` batch, so nothing is spread over sessions.
+   For an install, in order:
+   - the appliance's QEMU user networking, brought up on `eth0` itself
+     (`169.254.2.15/16`, gateway `169.254.2.2` — the link-local subnet
+     libguestfs hands its appliance). The appliance's boot-time DHCP needs a
+     host `dhcpcd` that is not always installed, and a package session with no
+     address fails every mirror download;
+   - a resolver: a tmpfs on `/run`, `nameserver 169.254.2.3` (slirp's resolver
+     above the gateway) written there and bind-mounted over the guest's
+     `/etc/resolv.conf`. The appliance bind-mounts its own read-only
+     `resolv.conf` there — a file with no nameservers when its DHCP never ran —
+     so the session replaces it for its duration. The tmpfs also gives
+     `gpg-agent` (pacman signatures) a writable `/run`, and nothing of this is
+     written into the guest image;
+   - the index refresh (`apt-get update` / `dnf makecache` / `pacman -Sy`), so
+     a guest that never synced still installs;
+   - the install itself (`apt-get install -y` / `dnf install -y` /
+     `pacman -S --noconfirm`). For apt, `-o Acquire::ForceIPv4=true`: the
+     appliance's network is IPv4-only;
+   - for a package whose `GuestPackage::systemd_unit` is set, the
+     `multi-user.target.wants` symlink (`deb-systemd-helper` cannot enable a
+     unit without a running systemd, which is always the case here).
+
+   A removal runs the same network and resolver steps and then
+   `remove_args` — no index refresh.
+
+**Why the appliance and not a FUSE chroot.** `dpkg` verifies its database
+directory with `access(R_OK|W_OK)`, and a `guestmount` FUSE mount denies that
+check to a non-root process on some kernels (observed on cachyos 7.6 with
+libfuse2: `dpkg` aborts with "required read/write access to the dpkg database
+directory"). Inside the appliance the same command runs as real root with the
+guest's own root as `/`, so the check passes and the host stays unprivileged.
+The phase-0 spike that concluded "installroot does not work in the appliance"
+tested `virt-customize --install`, which needs a package manager *inside the
+appliance* (an Arch supermin appliance has none); running the *guest's* manager
+chrooted into the guest is a different thing and is what this module does —
+verified live against the Android 13 base image (`guest install
+spice-vdagent`, 10 s end to end).
+
+**Input safety.** The recipe is shell text the guest runs, so a package name
+is accepted only if every character is alphanumeric or one of `._+-,:=@`
+(`DiskError::InvalidPackageName` otherwise) — the online path passes argv to
+`guest-exec` and never had this constraint.
 
 **Known Packages** (`KNOWN_PACKAGES`): `spice-vdagent` (`/usr/bin/spice-vdagentd`), `qemu-guest-agent` (`/usr/bin/qemu-ga`), `spice-webdavd` (`/usr/bin/spice-webdavd`).
 
@@ -85,10 +141,10 @@ Repoints the guest's `etc/systemd/system/default.target` symlink between the And
 
 | Function | Signature | Description |
 |----------|-----------|-------------|
-| `switch_boot_mode` | `(overlay_path: &Path, mode: AndroidBootMode) -> Result<(), DiskError>` | guestmount → verify target unit exists → `ln -sfn` the `default.target` link inside an unprivileged-user-namespace chroot. Fails with `BackingFileNotFound` if the disk doesn't exist. |
+| `switch_boot_mode` | `(overlay_path: &Path, mode: AndroidBootMode) -> Result<(), DiskError>` | Verify the target unit exists, then `ln -sfn` the `default.target` link through the mutator. Fails with `BackingFileNotFound` if the disk doesn't exist. |
 | `current_boot_mode` | `(overlay_path: &Path) -> Result<AndroidBootMode, DiskError>` | Read the current target from the mounted disk (`default.target` → Android target ⇒ Android, anything else ⇒ Linux; error if the link is missing). |
 
-The guest's `/etc/systemd/system` is root-owned 755, so the mutation runs through the user-namespace chroot (a direct `std::fs` write fails with EPERM even though the mount is rw); `ln -sfn` both removes the old symlink and creates the new one in one step.
+The guest's `/etc/systemd/system` is root-owned 755, so the link is replaced through the mutator (offline: the appliance, as root; online: QGA), not by a host-side `symlink` call on a mount; `ln -sfn` both removes the old symlink and creates the new one in one step.
 
 ### `diskspace` — Free Disk Space Pre-check
 
@@ -104,10 +160,13 @@ Uses `f_bavail` (blocks available to an unprivileged user), not `f_bfree` (which
 
 ### `nbd` — removed
 
-NBD-based mounting was replaced by `guestmount` (libguestfs FUSE) plus an
-unprivileged-user-namespace chroot; `nbd.rs` is no longer part of the
-crate's build, and the offline mounting path now lives in
-`guest_offline.rs`.
+NBD-based mounting is gone from the crate: `nbd.rs` (qemu-nbd + host mount
++ `sudo andler-helper chroot-run`) was first replaced by `guestmount`
+(libguestfs FUSE) with an unprivileged-user-namespace chroot, and that
+kitchen was in turn retired when offline guest work moved onto the
+libguestfs appliance (`GuestfsMutator`, `MutatorOp::RunShell`). No module in
+the crate mounts anything on the host, and `guest_offline.rs` no longer
+exists.
 
 ### `arm_translator` — ARM Translation Layer Management
 
@@ -178,7 +237,7 @@ waydroid-helper and waydroid_script on 2026-08-07.
    into `~/.andler/cache/arm-translators/<dir_name>/`; extraction flattens
    the `<repo>-<commit>/prebuilts/` wrapper so the payload sits directly
    under the cache root.
-3. The instance disk is mounted via `guestmount` (libguestfs FUSE) and the
+3. The instance disk is mounted through the libguestfs appliance and the
    target becomes `/var/lib/waydroid/overlay/system/`
    (created if missing — waydroid merges this overlay over `/system` at
    container start, so a never-booted instance is supported).
@@ -270,7 +329,7 @@ instance before the fixes; the defects found and how they were fixed:
 | 6 | Old payloads survived a switch (archive `ndk_translation.rc`, `bin/arm`, `bin/arm64` leftovers) | removal now uses the same expansion; stale rc (`<dir_name>.rc`) is always removed |
 | 7 | Props leaked between translators (`ro.ndk_translation.version`, `ro.vendor.*` stayed after switching to houdini) | `MANAGED_PROP_KEYS` remove-then-set on every switch, incl. `None` |
 | 8 | Fresh install hard-errored when `build.prop` was absent (never-booted instance) | the upper `build.prop` is always regenerated from the base below the overlay: plain `system/build.prop`, or `/system/build.prop` extracted with `debugfs` from `etc/waydroid-extra/images/system.img`; no base source is a hard error, never a silent partial upper |
-| 9 | Privilege surface: the install needed NOPASSWD `cp/mkdir/mv/rm/chmod` beyond the documented NBD set | all guest-fs mutations go through the `file`/`guest-write` subcommands of a single privileged **`andler-helper`** binary (sole NOPASSWD rule, `apps/helper`); `andler doctor --fix` installs the binary and migrates the old per-binary rules away. **Superseded:** the helper, `doctor --fix` and every sudoers rule were later removed — offline mutations are zero-root now (`guestmount` + unprivileged user namespaces) |
+| 9 | Privilege surface: the install needed NOPASSWD `cp/mkdir/mv/rm/chmod` beyond the documented NBD set | all guest-fs mutations go through the `file`/`guest-write` subcommands of a single privileged **`andler-helper`** binary (sole NOPASSWD rule, `apps/helper`); `andler doctor --fix` installs the binary and migrates the old per-binary rules away. **Superseded twice:** the helper, `doctor --fix` and every sudoers rule were removed when offline mutations became zero-root (`guestmount` + unprivileged user namespaces), and that FUSE kitchen was itself retired when offline package work moved into the libguestfs appliance |
 | 10 | **Live boot failure: Android stuck at boot after a translator install.** The upper overlay `build.prop` contained only the 10 translator props and shadowed the base's full build.prop wholesale — waydroid could not parse the Android version from the merged rootfs (`Failed to parse android version from system.img: invalid literal for int() with base 10: ''`) and ART's `derive_classpath` aborted, so the container never finished booting | `base_build_prop()` extracts the base's `/system/build.prop` from `system.img` via `debugfs` and merges translator props into the full file; the upper is regenerated on every install (never read back), so already-broken installs are repaired by re-running `guest install` (or `config set arm_translator none`); E2E 07 crafts a `system.img` fixture and asserts the merged upper; regression tests `base_build_prop_reads_plain_layout_and_errors_without_source`, `base_build_prop_prefers_plain_layout_over_system_image`, `parse_build_prop_skips_blank_and_comment_lines` |
 
 #### Reference comparison (waydroid-helper / waydroid_script)
@@ -297,7 +356,7 @@ instance before the fixes; the defects found and how they were fixed:
 Sandbox recipe used for the audit (all temp, removed afterwards): build a
 2 GiB qcow2 with an ext4 root partition, run `andlerd` on a scratch port with
 `ANDLER_HOME` pointed at a temp dir (offline guest work needs only
-`guestmount` and unprivileged user namespaces — no root, no helper),
+the libguestfs appliance — no root, no helper),
 create an Android 13 instance with
 that disk as base, then `andler guest install libndk`/`libhoudini` and mount
 the overlay to inspect `bin/`, `etc/`, `lib/`, `lib64/`, `build.prop` and
@@ -315,15 +374,16 @@ the overlay to inspect `bin/`, `etc/`, `lib/`, `lib64/`, `build.prop` and
 | `ParseError` | `String` | Failed to parse `qemu-img info --output=json` |
 | `Io` | `path`, `source` | Filesystem error at path |
 | `FileSystem` | `String` | Generic filesystem operation failure |
-| `NbdSetupFailed` | `String` | NBD device error (module not loaded, no free device, mount/umount failure) |
+| `OfflineGuestFailed` | `String` | A step of the offline appliance path failed (batch recipe, appliance, download) |
 | `ShrinkRequiresConfirmation` | `path`, `current_size_bytes`, `requested_size_bytes` | Refusing to shrink without `--shrink` flag |
 | `CompactNotApplicable` | `path`, `format` | Compact only works on qcow2 disks |
-| `PackageManagerNotFound` | `mount_point: PathBuf` | No known package manager binary in guest filesystem |
+| `PackageManagerNotFound` | `disk: PathBuf` | No known package manager binary in the guest filesystem |
 | `AgentAlreadyInstalled` | `package: String` | Package already installed in guest |
 | `AgentNotInstalled` | `package: String` | Package not found in guest for removal |
+| `InvalidPackageName` | `package: String`, `reason: String` | The package name cannot be handed to the guest's shell (see `guest_tools`) |
 | `GuestAgentUnavailable` | `instance_id: String` | Guest agent (qemu-ga) not available for online operations |
 | `InsufficientDiskSpace` | `path`, `required_bytes`, `available_bytes` | Not enough free space on `path`'s filesystem for the operation (pre-checked, not a failure mid-operation) |
-| `NoGuestOs` | `path` | The disk holds no filesystem libguestfs can inspect (an ISO-install VM before the OS is installed); `guestmount -i`'s "no operating system was found" is turned into this type so callers classify it instead of pattern-matching text |
+| `NoGuestOs` | `path` | The disk holds no filesystem libguestfs can inspect (an ISO-install VM before the OS is installed); the appliance's "no operating system was found" is turned into this type so callers classify it instead of pattern-matching text |
 | `ImageIndex` | `url`, `message` | The base-image release catalog could not be read (unreachable API, HTTP error, unparseable release index) |
 | `ImageDownload` | `asset`, `message` | One published asset could not be transferred (request failure, HTTP error, truncated body, retries exhausted) |
 | `ImageVerify` | `message` | A downloaded part, or the unpacked image, does not match the sha256 its manifest declares |
@@ -336,7 +396,7 @@ the overlay to inspect `bin/`, `etc/`, `lib/`, `lib64/`, `build.prop` and
 - **`clone`**: `shared_base_clone_reports_missing_source_as_io_error`.
 - **`boot_mode`**: `read_boot_mode_recognizes_android_target`, `read_boot_mode_treats_anything_else_as_linux`, `read_boot_mode_errors_when_no_default_target_link`.
 - **`diskspace`**: `available_bytes_on_temp_dir_is_nonzero`, `available_bytes_resolves_to_nearest_existing_ancestor`, `check_available_space_passes_for_a_tiny_requirement`, `check_available_space_fails_for_an_absurd_requirement`.
-- **`guest_tools`**: `detect_package_manager_returns_apt`/`dnf`/`pacman`/`none_for_empty_dir`, `package_manager_install_args`, `package_manager_remove_args`, `check_package_status_offline_returns_installed_*`/`not_installed_*`, `known_packages_has_entries`.
+- **`guest_tools`**: `install_recipe_runs_every_step_in_order`, `install_recipe_enables_only_the_units_the_package_ships`, `install_recipe_for_apt_keeps_the_ipv4_override_and_drops_the_userns_sandbox`, `remove_recipe_removes_without_refreshing_the_index`, `package_names_the_guest_shell_would_interpret_are_refused`, `install_runs_the_whole_recipe_in_one_appliance_batch`, `install_of_a_package_the_query_reports_leaves_the_disk_alone`, `remove_of_a_package_the_query_reports_missing_leaves_the_disk_alone`, `a_guest_without_a_package_manager_is_named_not_guessed`, `a_disk_without_a_guest_os_keeps_its_own_error`, `a_failed_install_reports_the_appliance_and_the_disk`, `offline_listing_answers_every_package_from_one_probe_batch`, `android_packages_include_the_shared_clipboard_agent`, `linux_packages_are_the_shared_set_without_translators`, `known_packages_has_entries` (all against a fake `GuestMutator` that records the recipe).
 - **`nbd`**: `lock_path_for_is_colocated_and_hidden`, `acquire_disk_lock_succeeds_on_a_fresh_path`, `acquire_disk_lock_is_reentrant_within_the_same_process`, `find_free_nbd_device_returns_existing_device_or_explains_absence` (environment-tolerant), `unique_mount_name_is_unique`, `find_root_partition_picks_the_last_partition_not_the_esp`, `find_root_partition_errors_on_empty_list`.
 - **`arm_translator`**: `detect_current_translator_returns_none_on_empty_dir`, `build_prop_content_sorts_keys_and_appends_newline`, `resolve_entry_paths_expands_wildcards_in_parent_dir`, `resolve_entry_paths_returns_empty_for_unmatched_wildcard`.
 - **`translator_download`**: `extract_zip_flattens_repo_prebuilts_prefix`, `flatten_prebuilts_does_not_touch_already_flat_payload_dirs`, `flatten_prebuilts_errors_on_collision_instead_of_silently_skipping` (plus offline download/checksum error paths).

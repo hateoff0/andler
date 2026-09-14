@@ -30,7 +30,7 @@ pub async fn ensure_translator_with_progress(
         .find(|(ver, _, _)| *ver == android_version)
         .map(|(_, url, md5)| (*url, *md5))
         .ok_or_else(|| {
-            DiskError::NbdSetupFailed(format!(
+            DiskError::OfflineGuestFailed(format!(
                 "no download available for {translator:?} android {android_version}"
             ))
         })?;
@@ -81,17 +81,17 @@ async fn download_file_streaming(
         .connect_timeout(connect_timeout)
         .timeout(total_timeout)
         .build()
-        .map_err(|e| DiskError::NbdSetupFailed(format!("failed to build http client: {e}")))?;
+        .map_err(|e| DiskError::OfflineGuestFailed(format!("failed to build http client: {e}")))?;
 
     let mut response = client.get(url).send().await.map_err(|e| {
-        DiskError::NbdSetupFailed(format!(
+        DiskError::OfflineGuestFailed(format!(
             "failed to download {url}: {e}; check your network connection or \
                  pass --translator-dir <path> with a local copy of the translator"
         ))
     })?;
 
     if !response.status().is_success() {
-        return Err(DiskError::NbdSetupFailed(format!(
+        return Err(DiskError::OfflineGuestFailed(format!(
             "download failed for {url}: HTTP {}",
             response.status()
         )));
@@ -111,7 +111,7 @@ async fn download_file_streaming(
     while let Some(chunk) = response
         .chunk()
         .await
-        .map_err(|e| DiskError::NbdSetupFailed(format!("failed to read download: {e}")))?
+        .map_err(|e| DiskError::OfflineGuestFailed(format!("failed to read download: {e}")))?
     {
         bytes.extend_from_slice(&chunk);
         if let Some(progress) = progress {
@@ -120,6 +120,102 @@ async fn download_file_streaming(
     }
 
     Ok(bytes)
+}
+
+fn verify_md5(bytes: &[u8], expected: &str) -> Result<(), DiskError> {
+    let result = format!("{:x}", md5::compute(bytes));
+
+    if result != expected {
+        return Err(DiskError::OfflineGuestFailed(format!(
+            "MD5 mismatch: expected {expected}, got {result}"
+        )));
+    }
+    Ok(())
+}
+
+fn extract_zip(bytes: &[u8], target: &PathBuf) -> Result<(), DiskError> {
+    let cursor = std::io::Cursor::new(bytes);
+    let mut archive = zip::ZipArchive::new(cursor)
+        .map_err(|e| DiskError::OfflineGuestFailed(format!("failed to open zip: {e}")))?;
+
+    std::fs::create_dir_all(target)
+        .map_err(|e| DiskError::OfflineGuestFailed(format!("failed to create dir: {e}")))?;
+
+    for i in 0..archive.len() {
+        let mut file = archive
+            .by_index(i)
+            .map_err(|e| DiskError::OfflineGuestFailed(format!("failed to read zip entry: {e}")))?;
+
+        let outpath = target.join(file.mangled_name());
+
+        if file.is_dir() {
+            std::fs::create_dir_all(&outpath)
+                .map_err(|e| DiskError::OfflineGuestFailed(format!("failed to create dir: {e}")))?;
+        } else {
+            if let Some(parent) = outpath.parent() {
+                std::fs::create_dir_all(parent).map_err(|e| {
+                    DiskError::OfflineGuestFailed(format!("failed to create parent dir: {e}"))
+                })?;
+            }
+            let mut out = std::fs::File::create(&outpath).map_err(|e| {
+                DiskError::OfflineGuestFailed(format!("failed to create file: {e}"))
+            })?;
+            std::io::copy(&mut file, &mut out)
+                .map_err(|e| DiskError::OfflineGuestFailed(format!("failed to write file: {e}")))?;
+        }
+    }
+
+    flatten_prebuilts(target)?;
+
+    Ok(())
+}
+
+// GitHub archive zips of the prebuilt repos wrap the payload in a single
+// `<repo>-<commit>/prebuilts/` directory. The cache existence check and the
+// install path joins expect the files directly under the cache root, so hoist
+// the payload up and drop the wrapper. Directories without a `prebuilts/`
+// subdir are already-flattened payload dirs (bin/, lib/, ...) and are left
+// alone — hoisting their contents would corrupt the layout.
+fn flatten_prebuilts(target: &Path) -> Result<(), DiskError> {
+    let entries: Vec<PathBuf> = std::fs::read_dir(target)
+        .map_err(|e| DiskError::OfflineGuestFailed(format!("failed to read extract dir: {e}")))?
+        .flatten()
+        .map(|e| e.path())
+        .collect();
+
+    for dir in entries {
+        if !dir.is_dir() {
+            continue;
+        }
+        let payload = dir.join("prebuilts");
+        if !payload.is_dir() {
+            continue;
+        }
+        for entry in std::fs::read_dir(&payload)
+            .map_err(|e| DiskError::OfflineGuestFailed(format!("failed to read extract dir {e}")))?
+        {
+            let entry = entry.map_err(|e| {
+                DiskError::OfflineGuestFailed(format!("failed to read extract entry: {e}"))
+            })?;
+            let dst = target.join(entry.file_name());
+            if dst.exists() {
+                return Err(DiskError::OfflineGuestFailed(format!(
+                    "extract target {} already contains {}; remove the translator \
+                     cache dir and retry",
+                    target.display(),
+                    dst.display()
+                )));
+            }
+            std::fs::rename(entry.path(), &dst).map_err(|e| {
+                DiskError::OfflineGuestFailed(format!("failed to move extract entry: {e}"))
+            })?;
+        }
+        std::fs::remove_dir_all(&dir).map_err(|e| {
+            DiskError::OfflineGuestFailed(format!("failed to clean extract dir: {e}"))
+        })?;
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -356,98 +452,4 @@ mod tests {
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
-}
-
-fn verify_md5(bytes: &[u8], expected: &str) -> Result<(), DiskError> {
-    let result = format!("{:x}", md5::compute(bytes));
-
-    if result != expected {
-        return Err(DiskError::NbdSetupFailed(format!(
-            "MD5 mismatch: expected {expected}, got {result}"
-        )));
-    }
-    Ok(())
-}
-
-fn extract_zip(bytes: &[u8], target: &PathBuf) -> Result<(), DiskError> {
-    let cursor = std::io::Cursor::new(bytes);
-    let mut archive = zip::ZipArchive::new(cursor)
-        .map_err(|e| DiskError::NbdSetupFailed(format!("failed to open zip: {e}")))?;
-
-    std::fs::create_dir_all(target)
-        .map_err(|e| DiskError::NbdSetupFailed(format!("failed to create dir: {e}")))?;
-
-    for i in 0..archive.len() {
-        let mut file = archive
-            .by_index(i)
-            .map_err(|e| DiskError::NbdSetupFailed(format!("failed to read zip entry: {e}")))?;
-
-        let outpath = target.join(file.mangled_name());
-
-        if file.is_dir() {
-            std::fs::create_dir_all(&outpath)
-                .map_err(|e| DiskError::NbdSetupFailed(format!("failed to create dir: {e}")))?;
-        } else {
-            if let Some(parent) = outpath.parent() {
-                std::fs::create_dir_all(parent).map_err(|e| {
-                    DiskError::NbdSetupFailed(format!("failed to create parent dir: {e}"))
-                })?;
-            }
-            let mut out = std::fs::File::create(&outpath)
-                .map_err(|e| DiskError::NbdSetupFailed(format!("failed to create file: {e}")))?;
-            std::io::copy(&mut file, &mut out)
-                .map_err(|e| DiskError::NbdSetupFailed(format!("failed to write file: {e}")))?;
-        }
-    }
-
-    flatten_prebuilts(target)?;
-
-    Ok(())
-}
-
-// GitHub archive zips of the prebuilt repos wrap the payload in a single
-// `<repo>-<commit>/prebuilts/` directory. The cache existence check and the
-// install path joins expect the files directly under the cache root, so hoist
-// the payload up and drop the wrapper. Directories without a `prebuilts/`
-// subdir are already-flattened payload dirs (bin/, lib/, ...) and are left
-// alone — hoisting their contents would corrupt the layout.
-fn flatten_prebuilts(target: &Path) -> Result<(), DiskError> {
-    let entries: Vec<PathBuf> = std::fs::read_dir(target)
-        .map_err(|e| DiskError::NbdSetupFailed(format!("failed to read extract dir: {e}")))?
-        .flatten()
-        .map(|e| e.path())
-        .collect();
-
-    for dir in entries {
-        if !dir.is_dir() {
-            continue;
-        }
-        let payload = dir.join("prebuilts");
-        if !payload.is_dir() {
-            continue;
-        }
-        for entry in std::fs::read_dir(&payload)
-            .map_err(|e| DiskError::NbdSetupFailed(format!("failed to read extract dir {e}")))?
-        {
-            let entry = entry.map_err(|e| {
-                DiskError::NbdSetupFailed(format!("failed to read extract entry: {e}"))
-            })?;
-            let dst = target.join(entry.file_name());
-            if dst.exists() {
-                return Err(DiskError::NbdSetupFailed(format!(
-                    "extract target {} already contains {}; remove the translator \
-                     cache dir and retry",
-                    target.display(),
-                    dst.display()
-                )));
-            }
-            std::fs::rename(entry.path(), &dst).map_err(|e| {
-                DiskError::NbdSetupFailed(format!("failed to move extract entry: {e}"))
-            })?;
-        }
-        std::fs::remove_dir_all(&dir)
-            .map_err(|e| DiskError::NbdSetupFailed(format!("failed to clean extract dir: {e}")))?;
-    }
-
-    Ok(())
 }

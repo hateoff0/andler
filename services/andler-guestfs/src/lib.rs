@@ -3,19 +3,45 @@ use std::path::{Path, PathBuf};
 use andler_core::{GuestMutator, MutatorError, MutatorOp};
 use async_trait::async_trait;
 
-/// How long one appliance session may run. Starting the appliance on a busy
-/// host takes seconds; a batch that stages hundreds of files takes a while
-/// longer. The bound exists so a stuck appliance becomes an error instead of a
-/// hang.
 const DEFAULT_GUESTFS_TIMEOUT_SECS: u64 = 300;
 const MIN_GUESTFS_TIMEOUT_SECS: u64 = 30;
+const DEFAULT_GUEST_PACKAGE_TIMEOUT_SECS: u64 = 600;
+const MIN_GUEST_PACKAGE_TIMEOUT_SECS: u64 = 30;
 
-fn guestfish_timeout() -> std::time::Duration {
-    std::time::Duration::from_secs(andler_core::timeout::env_secs(
-        "ANDLERD_GUESTFS_TIMEOUT_SECS",
-        DEFAULT_GUESTFS_TIMEOUT_SECS,
-        MIN_GUESTFS_TIMEOUT_SECS,
-    ))
+/// The wall-clock bound of one appliance session, and the variable that
+/// raises it. A package session runs several package-manager steps back to
+/// back (index refresh, download, install) and gets the package budget the
+/// online path gives a single in-guest package step; everything else gets
+/// the plain appliance bound.
+#[derive(Debug, Clone, Copy)]
+enum SessionBudget {
+    Appliance,
+    Package,
+}
+
+impl SessionBudget {
+    fn timeout(self) -> std::time::Duration {
+        let secs = match self {
+            SessionBudget::Appliance => andler_core::timeout::env_secs(
+                "ANDLERD_GUESTFS_TIMEOUT_SECS",
+                DEFAULT_GUESTFS_TIMEOUT_SECS,
+                MIN_GUESTFS_TIMEOUT_SECS,
+            ),
+            SessionBudget::Package => andler_core::timeout::env_secs(
+                "ANDLERD_GUEST_PACKAGE_TIMEOUT_SECS",
+                DEFAULT_GUEST_PACKAGE_TIMEOUT_SECS,
+                MIN_GUEST_PACKAGE_TIMEOUT_SECS,
+            ),
+        };
+        std::time::Duration::from_secs(secs)
+    }
+
+    fn variable(self) -> &'static str {
+        match self {
+            SessionBudget::Appliance => "ANDLERD_GUESTFS_TIMEOUT_SECS",
+            SessionBudget::Package => "ANDLERD_GUEST_PACKAGE_TIMEOUT_SECS",
+        }
+    }
 }
 
 /// Offline `GuestMutator` over the libguestfs appliance (guestfish).
@@ -29,17 +55,39 @@ pub struct GuestfsMutator {
     /// Explicit `guestfish -m` mount spec (`/dev/sda:/`), used when the
     /// disk has no inspectable OS (conformance images); `None` uses `-i`.
     mount: Option<String>,
+    network: bool,
+    budget: SessionBudget,
 }
 
 impl GuestfsMutator {
     pub fn new(disk: PathBuf) -> Self {
-        GuestfsMutator { disk, mount: None }
+        GuestfsMutator {
+            disk,
+            mount: None,
+            network: false,
+            budget: SessionBudget::Appliance,
+        }
     }
 
     pub fn with_mount(disk: PathBuf, mount: String) -> Self {
         GuestfsMutator {
             disk,
             mount: Some(mount),
+            network: false,
+            budget: SessionBudget::Appliance,
+        }
+    }
+
+    /// An appliance session for offline package work: the guest starts with
+    /// no network of its own, so the appliance's QEMU user networking is
+    /// enabled for the manager's mirrors, and the session runs on the
+    /// package budget rather than the generic appliance one.
+    pub fn for_packages(disk: PathBuf) -> Self {
+        GuestfsMutator {
+            disk,
+            mount: None,
+            network: true,
+            budget: SessionBudget::Package,
         }
     }
 
@@ -53,16 +101,12 @@ impl GuestfsMutator {
         // The waiter's timeout is the only thing that ends this process, so it
         // must not outlive the future watching it.
         cmd.kill_on_drop(true);
-        cmd.arg("-a").arg(&self.disk);
-        match &self.mount {
-            Some(spec) => {
-                cmd.arg("-m").arg(spec);
-            }
-            None => {
-                cmd.arg("-i");
-            }
-        }
-        cmd.args(extra_args);
+        cmd.args(appliance_args(
+            &self.disk,
+            self.mount.as_deref(),
+            self.network,
+            extra_args,
+        ));
         cmd.stdin(std::process::Stdio::piped());
         if capture_stdout {
             cmd.stdout(std::process::Stdio::piped());
@@ -92,14 +136,15 @@ impl GuestfsMutator {
         // started it, with nothing in the log and no way for the caller to
         // tell "slow" from "never". `kill_on_drop` makes the appliance die
         // with the future that is waiting for it.
-        let timeout = guestfish_timeout();
+        let timeout = self.budget.timeout();
+        let budget_var = self.budget.variable();
         let output = match tokio::time::timeout(timeout, child.wait_with_output()).await {
             Ok(result) => result.map_err(|e| MutatorError::Io(format!("guestfish failed: {e}")))?,
             Err(_) => {
                 return Err(MutatorError::Io(format!(
                     "the libguestfs appliance did not finish within {}s — it is stuck starting \
                      (or cannot start on this host); `andler doctor` verifies guestfish and \
-                     /dev/kvm, and ANDLERD_GUESTFS_TIMEOUT_SECS raises this bound",
+                     /dev/kvm, and {budget_var} raises this bound",
                     timeout.as_secs()
                 )))
             }
@@ -131,6 +176,30 @@ impl GuestfsMutator {
 /// (which is shell-like: it honors quotes), escaping embedded quotes.
 fn quote(path: &str) -> String {
     format!("'{}'", path.replace('\'', "'\\''"))
+}
+
+/// The guestfish command line for one session. Kept separate from the spawn
+/// so the arguments — the appliance's network in particular — are testable
+/// without an appliance.
+fn appliance_args(
+    disk: &Path,
+    mount: Option<&str>,
+    network: bool,
+    extra_args: &[&str],
+) -> Vec<String> {
+    let mut args = vec!["-a".to_string(), disk.display().to_string()];
+    if network {
+        args.push("--network".to_string());
+    }
+    match mount {
+        Some(spec) => {
+            args.push("-m".to_string());
+            args.push(spec.to_string());
+        }
+        None => args.push("-i".to_string()),
+    }
+    args.extend(extra_args.iter().map(|arg| arg.to_string()));
+    args
 }
 
 /// Builds the guestfish script for a mutation batch. `WriteFile` content
@@ -273,22 +342,88 @@ fn uuid4() -> String {
 
 #[cfg(test)]
 mod timeout_tests {
-    use super::{guestfish_timeout, DEFAULT_GUESTFS_TIMEOUT_SECS, MIN_GUESTFS_TIMEOUT_SECS};
+    use super::{
+        appliance_args, SessionBudget, DEFAULT_GUESTFS_TIMEOUT_SECS,
+        DEFAULT_GUEST_PACKAGE_TIMEOUT_SECS, MIN_GUESTFS_TIMEOUT_SECS,
+        MIN_GUEST_PACKAGE_TIMEOUT_SECS,
+    };
+    use std::path::Path;
 
     #[test]
     fn the_appliance_bound_is_configurable_and_never_silly() {
         std::env::remove_var("ANDLERD_GUESTFS_TIMEOUT_SECS");
-        assert_eq!(guestfish_timeout().as_secs(), DEFAULT_GUESTFS_TIMEOUT_SECS);
+        assert_eq!(
+            SessionBudget::Appliance.timeout().as_secs(),
+            DEFAULT_GUESTFS_TIMEOUT_SECS
+        );
 
         std::env::set_var("ANDLERD_GUESTFS_TIMEOUT_SECS", "900");
-        assert_eq!(guestfish_timeout().as_secs(), 900);
+        assert_eq!(SessionBudget::Appliance.timeout().as_secs(), 900);
 
         std::env::set_var("ANDLERD_GUESTFS_TIMEOUT_SECS", "1");
-        assert_eq!(guestfish_timeout().as_secs(), MIN_GUESTFS_TIMEOUT_SECS);
+        assert_eq!(
+            SessionBudget::Appliance.timeout().as_secs(),
+            MIN_GUESTFS_TIMEOUT_SECS
+        );
 
         std::env::set_var("ANDLERD_GUESTFS_TIMEOUT_SECS", "whenever");
-        assert_eq!(guestfish_timeout().as_secs(), DEFAULT_GUESTFS_TIMEOUT_SECS);
+        assert_eq!(
+            SessionBudget::Appliance.timeout().as_secs(),
+            DEFAULT_GUESTFS_TIMEOUT_SECS
+        );
         std::env::remove_var("ANDLERD_GUESTFS_TIMEOUT_SECS");
+    }
+
+    #[test]
+    fn package_sessions_get_the_package_budget() {
+        // A package session runs an index refresh and a download on a guest
+        // that has never synced; the generic appliance bound is too tight for
+        // it, and it is a different variable, so it is a different budget.
+        std::env::remove_var("ANDLERD_GUEST_PACKAGE_TIMEOUT_SECS");
+        assert_eq!(
+            SessionBudget::Package.timeout().as_secs(),
+            DEFAULT_GUEST_PACKAGE_TIMEOUT_SECS
+        );
+        assert_eq!(
+            SessionBudget::Package.variable(),
+            "ANDLERD_GUEST_PACKAGE_TIMEOUT_SECS"
+        );
+
+        std::env::set_var("ANDLERD_GUEST_PACKAGE_TIMEOUT_SECS", "1200");
+        assert_eq!(SessionBudget::Package.timeout().as_secs(), 1200);
+
+        std::env::set_var("ANDLERD_GUEST_PACKAGE_TIMEOUT_SECS", "1");
+        assert_eq!(
+            SessionBudget::Package.timeout().as_secs(),
+            MIN_GUEST_PACKAGE_TIMEOUT_SECS
+        );
+        std::env::remove_var("ANDLERD_GUEST_PACKAGE_TIMEOUT_SECS");
+    }
+
+    #[test]
+    fn package_sessions_enable_the_appliance_network() {
+        // The guest's own network is down while the disk is idle, so a
+        // package session that did not enable the appliance's user networking
+        // would fail every download with a resolver error.
+        let packages = appliance_args(Path::new("/d/base.qcow2"), None, true, &[]);
+        assert_eq!(
+            packages,
+            vec!["-a", "/d/base.qcow2", "--network", "-i"],
+            "{packages:?}"
+        );
+
+        let plain = appliance_args(Path::new("/d/base.qcow2"), None, false, &[]);
+        assert_eq!(plain, vec!["-a", "/d/base.qcow2", "-i"], "{plain:?}");
+
+        assert_eq!(
+            appliance_args(
+                Path::new("/d/base.qcow2"),
+                Some("/dev/sda:/"),
+                false,
+                &["--no-progress"]
+            ),
+            vec!["-a", "/d/base.qcow2", "-m", "/dev/sda:/", "--no-progress"]
+        );
     }
 }
 

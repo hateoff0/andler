@@ -904,7 +904,7 @@ impl Daemon {
                                     "VM was auto-started for maintenance but the guest agent \
                                      did not respond within {wait_secs}s — the VM may not boot. \
                                      Retry with `--offline` to {action} `{package}` without \
-                                     starting the VM (use `--offline` with the zero-root guestmount path)"
+                                     starting the VM (the zero-root libguestfs appliance path)"
                                 ),
                             };
                             progress.finish(Err(err.to_string()));
@@ -1101,8 +1101,12 @@ impl Daemon {
                         ));
                     }
                     _ if offline => {
-                        andler_disk::guest_tools::install_agent_offline(&disk_path, &package)
-                            .await?;
+                        let mutator =
+                            andler_guestfs::GuestfsMutator::for_packages(disk_path.clone());
+                        andler_disk::guest_tools::install_agent_offline(
+                            &mutator, &disk_path, &package,
+                        )
+                        .await?;
                     }
                     _ => {
                         self.auto_start_maintenance(id, &package, true, idempotency_token)
@@ -1112,7 +1116,7 @@ impl Daemon {
                 tracing::info!(
                     instance_id = %id,
                     package = %package,
-                    "package installed via offline guestmount"
+                    "package installed via the libguestfs appliance"
                 );
                 Ok(())
             }
@@ -1202,8 +1206,12 @@ impl Daemon {
                         ));
                     }
                     _ if offline => {
-                        andler_disk::guest_tools::remove_agent_offline(&disk_path, &package)
-                            .await?;
+                        let mutator =
+                            andler_guestfs::GuestfsMutator::for_packages(disk_path.clone());
+                        andler_disk::guest_tools::remove_agent_offline(
+                            &mutator, &disk_path, &package,
+                        )
+                        .await?;
                     }
                     _ => {
                         self.auto_start_maintenance(id, &package, false, idempotency_token)
@@ -1213,7 +1221,7 @@ impl Daemon {
                 tracing::info!(
                     instance_id = %id,
                     package = %package,
-                    "package removed via offline guestmount"
+                    "package removed via the libguestfs appliance"
                 );
                 Ok(())
             }
@@ -1362,10 +1370,13 @@ impl Daemon {
                     return Err(DaemonError::InstanceNotFound(id));
                 }
 
-                let package_status = andler_disk::guest_tools::check_packages_offline_with_disk(
+                let mutator = andler_guestfs::GuestfsMutator::new(disk_path.clone());
+                let package_status = andler_disk::guest_tools::check_packages_offline(
+                    &mutator,
                     &disk_path,
                     &config_kind,
-                )?;
+                )
+                .await?;
                 for (pkg, status) in package_status {
                     results.push((
                         pkg.name.to_string(),
@@ -1375,7 +1386,6 @@ impl Daemon {
                             andler_disk::guest_tools::PackageStatus::NotInstalled => {
                                 "not_installed"
                             }
-                            andler_disk::guest_tools::PackageStatus::Unknown => "unknown",
                         }
                         .to_string(),
                     ));

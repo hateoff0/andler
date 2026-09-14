@@ -26,11 +26,20 @@ of the script.
 - `GuestfsMutator` lives here, not in `andler-disk`: the appliance has
   a different lifecycle (external process, appliance boot, batch
   sessions) and a different dependency set than qcow2/DiskChain code.
-- Package-manager operations (installroot) do **not** work in the
-  appliance — the phase-0 spike confirmed the suspended variant; guest
-  package install/remove still runs on the zero-root chroot kitchen in
-  `andler-disk` (`guestmount` + unprivileged user namespaces), with no
-  privileged helper involved.
+- Package-manager operations run in the appliance, but not as
+  `virt-customize --install` installroot: the guest's *own* package manager
+  runs there. `sh` (i.e. `MutatorOp::RunShell`) goes through the **guest's**
+  `/bin/sh` with the guest root as `/`, as root, and the appliance mounts
+  `/dev`, `/dev/pts`, `/proc` and `/sys` for it — so `apt-get`/`dnf`/`pacman`
+  execute against the guest's real filesystem. `GuestfsMutator::for_packages`
+  is the session shape for that work: `guestfish --network` (the appliance has
+  no network of its own) plus the package-step budget. The phase-0 spike's
+  "installroot does not start" result was about a package manager *inside the
+  appliance*, which the Arch supermin appliance does not have; this path needs
+  the guest's.
+- The `guestmount` FUSE kitchen in `andler-disk` is gone: it is no longer
+  needed by any path (`guest install`/`remove`, `guest list` and the
+  translators all run through this crate).
 
 ## Integration notes
 
