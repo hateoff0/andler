@@ -374,7 +374,7 @@ struct InstanceSupervisor {
     file_config: Option<InstanceConfig>,
     file_error: Option<String>,
     live_resolution: Option<Resolution>,
-    active_op: Option<Operation>,
+    active_op: Option<watch::Sender<Operation>>,
     active_op_key: Option<String>,
     /// The instance id an in-flight clone is creating; reported to a
     /// same-key joiner so a retried clone reports the instance the first
@@ -544,22 +544,26 @@ impl InstanceSupervisor {
                                 .await;
                         }
                         SupervisorCommand::CancelOperation { op_id, ack } => {
-                            let cancelled = match &self.active_op {
-                                Some(active) if active.op_id == op_id => {
-                                    if let Some(cancel_tx) = &self.op_cancel {
-                                        let _ = cancel_tx.send(true);
-                                        self.active_op_cancelled = true;
-                                        true
-                                    } else {
-                                        false
-                                    }
+                            let is_active = self
+                                .active_op
+                                .as_ref()
+                                .is_some_and(|active| active.borrow().op_id == op_id);
+                            let cancelled = match &self.op_cancel {
+                                Some(cancel_tx) if is_active => {
+                                    let _ = cancel_tx.send(true);
+                                    self.active_op_cancelled = true;
+                                    true
                                 }
                                 _ => false,
                             };
                             let _ = ack.send(Ok(cancelled));
                         }
                         SupervisorCommand::GetActiveOp { ack } => {
-                            let _ = ack.send(self.active_op.clone());
+                            let active = self
+                                .active_op
+                                .as_ref()
+                                .map(|active| active.borrow().clone());
+                            let _ = ack.send(active);
                         }
                         SupervisorCommand::JoinActive { key, ack } => {
                             let _ = ack.send(match self.join_decision(key.as_ref()) {
@@ -615,7 +619,9 @@ impl InstanceSupervisor {
         let op_done_tx = self.op_done_tx.clone();
         let seq = self.next_op_seq;
         self.next_op_seq += 1;
-        self.active_op = Some(op.clone());
+        let phases = op.phases.clone();
+        let op_tx = watch::Sender::new(op);
+        self.active_op = Some(op_tx.clone());
         self.active_op_key = key;
         self.active_op_new_id = None;
         self.active_op_seq = Some(seq);
@@ -623,15 +629,7 @@ impl InstanceSupervisor {
         self.op_cancel = Some(cancel_tx);
 
         tokio::spawn(async move {
-            let mut progress = OpProgress::new(
-                op.kind,
-                op.instance_id,
-                op.op_id,
-                op.phases,
-                events,
-                audit_dir,
-                cancel_rx,
-            );
+            let mut progress = OpProgress::new(op_tx, phases, events, audit_dir, cancel_rx);
             progress.mark_running();
             // The operation itself calls progress.finish() (it owns the
             // handle); the sub-task only forwards the result.
@@ -678,7 +676,9 @@ impl InstanceSupervisor {
         let op_done_tx = self.op_done_tx.clone();
         let seq = self.next_op_seq;
         self.next_op_seq += 1;
-        self.active_op = Some(op.clone());
+        let phases = op.phases.clone();
+        let op_tx = watch::Sender::new(op);
+        self.active_op = Some(op_tx.clone());
         self.active_op_key = key;
         self.active_op_new_id = Some(new_id);
         self.active_op_seq = Some(seq);
@@ -686,15 +686,7 @@ impl InstanceSupervisor {
         self.op_cancel = Some(cancel_tx);
 
         tokio::spawn(async move {
-            let mut progress = OpProgress::new(
-                op.kind,
-                op.instance_id,
-                op.op_id,
-                op.phases,
-                events,
-                audit_dir,
-                cancel_rx,
-            );
+            let mut progress = OpProgress::new(op_tx, phases, events, audit_dir, cancel_rx);
             progress.mark_running();
             let result = run(progress).await;
             let _ = done_tx.send(result);
@@ -706,19 +698,18 @@ impl InstanceSupervisor {
     fn join_decision(&self, key: Option<&String>) -> JoinDecision {
         match &self.active_op {
             Some(active) => {
+                let active = active.borrow().clone();
                 if key.is_some() && key == self.active_op_key.as_ref() {
                     if self.active_op_cancelled {
                         JoinDecision::Free
                     } else {
                         JoinDecision::Joined {
-                            active: active.clone(),
+                            active,
                             new_id: self.active_op_new_id,
                         }
                     }
                 } else {
-                    JoinDecision::Busy {
-                        active: active.clone(),
-                    }
+                    JoinDecision::Busy { active }
                 }
             }
             None => JoinDecision::Free,

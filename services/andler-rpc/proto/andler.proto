@@ -483,6 +483,9 @@ message OperationInfo {
     double progress = 5;
     string state = 6;
     string error = 7;
+    // Phase the daemon is running right now; empty before the first phase and
+    // for a daemon that predates the field.
+    string current_phase = 8;
 }
 
 message OperationPhase {

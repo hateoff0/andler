@@ -325,6 +325,7 @@ impl Daemon {
                     kind: OperationKind::SnapshotRestore,
                     phases: phases.clone(),
                     progress: 0.0,
+                    current_phase: None,
                     state: OperationState::Queued,
                     error: None,
                 },

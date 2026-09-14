@@ -700,6 +700,7 @@ impl AndlerService for DaemonService {
                 progress: op.progress as f64,
                 state: format!("{:?}", op.state),
                 error: op.error.unwrap_or_default(),
+                current_phase: op.current_phase.unwrap_or_default(),
             })
             .collect();
         Ok(Response::new(OpListResponse { operations }))

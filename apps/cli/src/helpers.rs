@@ -330,10 +330,14 @@ fn render_operation(operation: &andler_rpc::proto::OperationInfo) -> String {
     )
 }
 
-/// The daemon publishes the phase list and the overall progress; the active
-/// phase is the first one whose cumulative weight covers that progress, so the
-/// CLI can name it without another field on the wire.
+/// The daemon names the phase it is running. A daemon predating the field
+/// publishes only the phase list and the overall progress, so fall back to the
+/// first phase whose cumulative weight covers that progress.
 fn operation_phase(op: &andler_rpc::proto::OperationInfo) -> String {
+    if !op.current_phase.is_empty() {
+        return op.current_phase.clone();
+    }
+
     let total: f64 = op.phases.iter().map(|phase| phase.weight).sum();
     if op.phases.is_empty() || total <= 0.0 {
         return "working".to_string();
@@ -570,5 +574,46 @@ mod tests {
     #[test]
     fn format_size_fractional_gib() {
         assert_eq!(format_size(1024 * 1024 * 1024 + 1), "1.0 GiB");
+    }
+
+    fn translator_operation(
+        current_phase: &str,
+        progress: f64,
+    ) -> andler_rpc::proto::OperationInfo {
+        andler_rpc::proto::OperationInfo {
+            op_id: "op-1".to_string(),
+            instance_id: "a1b2c3".to_string(),
+            kind: "GuestInstall".to_string(),
+            phases: vec![
+                andler_rpc::proto::OperationPhase {
+                    name: "downloading".to_string(),
+                    weight: 0.5,
+                },
+                andler_rpc::proto::OperationPhase {
+                    name: "staging".to_string(),
+                    weight: 0.5,
+                },
+            ],
+            progress,
+            state: "Running".to_string(),
+            error: String::new(),
+            current_phase: current_phase.to_string(),
+        }
+    }
+
+    /// The daemon skips `downloading` on a cache hit and stages straight away.
+    /// 0.5 is exactly the weight boundary the derived name resolves to
+    /// `downloading`, so the reported phase has to win.
+    #[test]
+    fn operation_phase_uses_the_phase_the_daemon_entered() {
+        let op = translator_operation("staging", 0.5);
+        assert_eq!(operation_phase(&op), "staging");
+        assert_eq!(render_operation(&op), "GuestInstall — staging (50%)");
+    }
+
+    #[test]
+    fn operation_phase_derives_the_phase_when_the_daemon_omits_it() {
+        let op = translator_operation("", 0.5);
+        assert_eq!(operation_phase(&op), "downloading");
     }
 }

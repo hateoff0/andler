@@ -27,6 +27,7 @@ fn test_op(id: InstanceId, kind: OperationKind) -> Operation {
         kind,
         phases: vec![("phase-a".to_string(), 0.5), ("phase-b".to_string(), 0.5)],
         progress: 0.0,
+        current_phase: None,
         state: OperationState::Queued,
         error: None,
     }
@@ -199,6 +200,7 @@ fn test_op_with(id: InstanceId, kind: OperationKind, op_id: &str) -> Operation {
         kind,
         phases: vec![("phase-a".to_string(), 1.0)],
         progress: 0.0,
+        current_phase: None,
         state: OperationState::Queued,
         error: None,
     }
@@ -465,4 +467,127 @@ async fn a_join_waits_for_the_operation_and_surfaces_its_outcome() {
         matches!(result, Err(DaemonError::OperationFailed { .. })),
         "a failed joined operation must surface as an error, got {result:?}"
     );
+}
+
+/// The phase the runner entered is the one the CLI must name. A translator
+/// switch whose payload is already cached skips `downloading` and stages
+/// straight away; the CLI used to name the phase back from the progress
+/// weight, so it printed "downloading" for minutes while the daemon staged.
+#[tokio::test]
+async fn a_skipped_phase_is_never_reported_as_the_running_one() {
+    let (_dir, handle, id, events) = sample_supervisor_with_events().await;
+    let mut rx = events.subscribe();
+
+    let run: OpRunner = Box::new(|mut progress| {
+        Box::pin(async move {
+            progress.mark_running();
+            progress.enter_phase("staging");
+            progress.finish(Ok(()));
+            Ok(())
+        })
+    });
+
+    let accept = handle
+        .run_operation(
+            Operation {
+                op_id: "op-skipped-phase".to_string(),
+                instance_id: id,
+                kind: OperationKind::GuestInstall,
+                phases: vec![
+                    ("downloading".to_string(), 0.5),
+                    ("staging".to_string(), 0.5),
+                ],
+                progress: 0.0,
+                current_phase: None,
+                state: OperationState::Queued,
+                error: None,
+            },
+            None,
+            run,
+        )
+        .await
+        .expect("operation must be accepted");
+    let OpAccept::Started { done } = accept else {
+        unreachable!()
+    };
+    done.await.expect("finish").expect("Ok");
+
+    let mut published = Vec::new();
+    while let Ok(event) = rx.try_recv() {
+        if let EventKind::Operation { op } = event.kind {
+            published.push(op);
+        }
+    }
+
+    let staged = published
+        .iter()
+        .find(|op| op.state == OperationState::Running && op.progress > 0.0)
+        .expect("the running phase must be published");
+    assert_eq!(
+        staged.current_phase.as_deref(),
+        Some("staging"),
+        "the phase that ran must be reported, not the weight-earliest one"
+    );
+    // 0.5 is exactly the boundary the CLI used to resolve to "downloading".
+    assert_eq!(staged.progress, 0.5);
+    assert!(
+        published
+            .iter()
+            .all(|op| op.current_phase.as_deref() != Some("downloading")),
+        "a phase that never ran must not be reported"
+    );
+}
+
+/// The registry `list_operations` answers from is what `andler op list` and
+/// every progress line poll while an operation runs. It must report the phase
+/// and progress the runner is at *now*: a copy taken when the operation was
+/// accepted leaves the CLI frozen on the first phase for the whole operation,
+/// however many phases the runner enters.
+#[tokio::test]
+async fn active_operation_tracks_the_phase_the_runner_entered() {
+    let (_dir, handle, id) = sample_supervisor().await;
+
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel::<()>();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+    let run: OpRunner = Box::new(move |mut progress| {
+        Box::pin(async move {
+            progress.enter_phase("phase-a");
+            // Both mutations land before `entered_tx` fires, so the assertion
+            // below never races the runner.
+            progress.enter_phase("phase-b");
+            progress.set_progress(0.5);
+            let _ = entered_tx.send(());
+            let _ = release_rx.await;
+            progress.finish(Ok(()));
+            Ok(())
+        })
+    });
+
+    let accept = handle
+        .run_operation(test_op(id, OperationKind::GuestInstall), None, run)
+        .await
+        .expect("operation must be accepted");
+    let OpAccept::Started { done } = accept else {
+        unreachable!()
+    };
+    entered_rx.await.expect("the runner must reach phase-b");
+
+    let active = handle
+        .active_operation()
+        .await
+        .expect("the supervisor must answer")
+        .expect("the operation is still running");
+    assert_eq!(
+        active.current_phase.as_deref(),
+        Some("phase-b"),
+        "the registry must name the phase the runner is in"
+    );
+    assert_eq!(
+        active.progress, 0.75,
+        "phase-b (weight 0.5) at half progress must be 0.75, not the phase it started in"
+    );
+    assert_eq!(active.state, OperationState::Running);
+
+    let _ = release_tx.send(());
+    done.await.expect("done must resolve").expect("Ok");
 }

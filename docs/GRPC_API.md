@@ -596,7 +596,7 @@ Lists the long-running operations currently tracked per instance.
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `operations` | `repeated OperationInfo` | Active operations (one per instance; empty when nothing is running). |
+| `operations` | `repeated OperationInfo` | Active operations (one per instance; empty when nothing is running). Each entry is the running operation itself, not a copy taken when it was accepted, so `progress`, `current_phase` and `state` advance as the operation works. |
 
 ### `OperationInfo`
 
@@ -605,10 +605,11 @@ Lists the long-running operations currently tracked per instance.
 | `op_id` | `string` | Unique operation id (used by `CancelOperation`). |
 | `instance_id` | `string` | Instance the operation belongs to. |
 | `kind` | `string` | What the operation does (e.g. `SnapshotRestore`). |
-| `phases` | `repeated OperationPhase` | Weighted progress phases; the running phase is the progress label. |
+| `phases` | `repeated OperationPhase` | Weighted progress phases, in order of execution. |
 | `progress` | `double` | 0..1 completion estimate. |
 | `state` | `string` | `Running`/`Done`/`Cancelled`/`Failed`. |
 | `error` | `string` | Failure message when `state` is `Failed`. |
+| `current_phase` | `string` | Name of the phase the daemon is running, as `phases` names it. Empty before the first phase is entered; empty from a daemon that predates the field, in which case the phase can only be derived from `progress`. |
 
 ### `OperationPhase`
 
@@ -967,7 +968,7 @@ Request for a partial configuration update by key/value.
 | Field | Type | Description |
 |-------|------|-------------|
 | `instance_ref` | `string` | Instance ID (full or prefix). |
-| `key` | `string` | Configuration key. The whitelist is the settable key-path table in `andler-core` (`config_keys()`): `name`, `cpu.cores`/`sockets`/`threads`/`priority`, `memory.size_bytes`/`ballooning`/`zram`/`ksm`/`mem_lock`/`hugepages`, `disk.thin_provisioning`/`trim_on_shutdown`/`compact_on_shutdown`/`snapshot_timeout_secs`, `display.resolution` (any state; applied live to a running guest via the guest agent), `display.dpi`/`fps_limit`/`display_engine`/`fullscreen`, `gpu.render_backend`/`hostmem_bytes`/`blob`/`gl`, `network.mode`/`device_model`/`nat_backend`, `audio.backend`/`device`, `input.pointer_mode`/`hide_host_cursor`/`clipboard_enabled`, `firmware.enable_uefi`, `kind.android_profile.arm_translator` (Android, stopped instance). Any other key is rejected with `InvalidC…
+| `key` | `string` | Configuration key. The whitelist is the settable key-path table in `andler-core` (`config_keys()`): `name`, `cpu.cores`/`sockets`/`threads`/`priority`, `memory.size_bytes`/`ballooning`/`zram`/`ksm`/`mem_lock`/`hugepages`, `disk.thin_provisioning`/`trim_on_shutdown`/`compact_on_shutdown`/`snapshot_timeout_secs`, `display.resolution` (any state; applied live to a running guest via the guest agent), `display.dpi`/`fps_limit`/`display_engine`/`fullscreen`, `gpu.render_backend`/`hostmem_bytes`/`blob`/`gl`, `network.mode`/`device_model`/`nat_backend`, `audio.backend`/`device`, `input.pointer_mode`/`hide_host_cursor`/`clipboard_enabled`, `firmware.enable_uefi`. Any other key is rejected with `InvalidC…
 | `value` | `string` | New value. |
 
 ### `GuestPackageEntry`

@@ -1,8 +1,6 @@
 use std::path::PathBuf;
 
-use andler_core::{
-    DaemonEvent, EventKind, InstanceId, OpId, Operation, OperationKind, OperationState,
-};
+use andler_core::{DaemonEvent, EventKind, Operation, OperationState};
 use tokio::sync::{broadcast, watch};
 
 use super::audit;
@@ -12,7 +10,7 @@ use super::audit;
 /// final states, to the per-instance events.jsonl audit trail — progress
 /// ticks alone would drown the audit log without adding history.
 pub(crate) struct OpProgress {
-    op: Operation,
+    op: watch::Sender<Operation>,
     phases: Vec<(String, f32)>,
     phase_index: usize,
     phase_progress: f32,
@@ -23,16 +21,14 @@ pub(crate) struct OpProgress {
 
 impl OpProgress {
     pub(crate) fn new(
-        kind: OperationKind,
-        instance_id: InstanceId,
-        op_id: OpId,
+        op: watch::Sender<Operation>,
         phases: Vec<(String, f32)>,
         events: broadcast::Sender<DaemonEvent>,
         audit_dir: PathBuf,
         cancel: watch::Receiver<bool>,
     ) -> Self {
         OpProgress {
-            op: Operation::new(kind, instance_id, op_id),
+            op,
             phase_index: 0,
             phase_progress: 0.0,
             phases,
@@ -53,20 +49,25 @@ impl OpProgress {
             self.phase_index = index;
         }
         self.phase_progress = 0.0;
-        self.op.progress = self.compute_progress();
+        let progress = self.compute_progress();
+        self.op.send_modify(|op| {
+            op.current_phase = Some(name.to_string());
+            op.progress = progress;
+        });
         self.publish();
     }
 
     /// Sets progress within the current phase (0.0..=1.0); broadcast only.
     pub(crate) fn set_progress(&mut self, p: f32) {
         self.phase_progress = p.clamp(0.0, 1.0);
-        self.op.progress = self.compute_progress();
+        let progress = self.compute_progress();
+        self.op.send_modify(|op| op.progress = progress);
         self.publish_broadcast();
     }
 
     /// Marks the operation running; broadcast + audit.
     pub(crate) fn mark_running(&mut self) {
-        self.op.state = OperationState::Running;
+        self.op.send_modify(|op| op.state = OperationState::Running);
         self.publish();
     }
 
@@ -74,17 +75,18 @@ impl OpProgress {
     /// is carried as its Display text (the event shape has no typed error).
     pub(crate) fn finish(&mut self, result: Result<(), String>) {
         if self.is_cancelled() {
-            self.op.state = OperationState::Cancelled;
+            self.op
+                .send_modify(|op| op.state = OperationState::Cancelled);
         } else {
             match result {
-                Ok(()) => {
-                    self.op.state = OperationState::Done;
-                    self.op.progress = 1.0;
-                }
-                Err(message) => {
-                    self.op.state = OperationState::Failed;
-                    self.op.error = Some(message);
-                }
+                Ok(()) => self.op.send_modify(|op| {
+                    op.state = OperationState::Done;
+                    op.progress = 1.0;
+                }),
+                Err(message) => self.op.send_modify(|op| {
+                    op.state = OperationState::Failed;
+                    op.error = Some(message);
+                }),
             }
         }
         self.publish();
@@ -104,12 +106,11 @@ impl OpProgress {
     }
 
     fn event(&self) -> DaemonEvent {
+        let op = self.op.borrow().clone();
         DaemonEvent {
             ts_ms: chrono::Utc::now().timestamp_millis() as u64,
-            instance_id: Some(self.op.instance_id),
-            kind: EventKind::Operation {
-                op: self.op.clone(),
-            },
+            instance_id: Some(op.instance_id),
+            kind: EventKind::Operation { op },
         }
     }
 

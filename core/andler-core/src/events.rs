@@ -102,6 +102,10 @@ pub struct Operation {
     pub phases: Vec<(String, f32)>,
     /// Overall progress, 0.0..=1.0.
     pub progress: f32,
+    /// Name of the phase the runner entered; `None` before the first phase.
+    /// Absent in events stored by an older daemon.
+    #[serde(default)]
+    pub current_phase: Option<String>,
     pub state: OperationState,
     pub error: Option<String>,
 }
@@ -148,6 +152,7 @@ impl Operation {
             kind,
             phases: Vec::new(),
             progress: 0.0,
+            current_phase: None,
             state: OperationState::Queued,
             error: None,
         }
@@ -193,6 +198,7 @@ mod tests {
             kind: OperationKind::SnapshotCreate,
             phases: vec![("freeze".to_string(), 0.3), ("commit".to_string(), 0.7)],
             progress: 0.3,
+            current_phase: Some("commit".to_string()),
             state: OperationState::Running,
             error: None,
         };
@@ -200,6 +206,21 @@ mod tests {
         let restored: Operation = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(restored, op);
         assert!(!op.finished());
+    }
+
+    #[test]
+    fn operation_without_a_current_phase_deserializes() {
+        let json = r#"{
+            "op_id": "op-1",
+            "instance_id": "0000000000000000000000000000000000000000000000000000000000000000",
+            "kind": "SnapshotCreate",
+            "phases": [["freeze", 0.3], ["commit", 0.7]],
+            "progress": 0.3,
+            "state": "Running",
+            "error": null
+        }"#;
+        let restored: Operation = serde_json::from_str(json).expect("deserialize");
+        assert_eq!(restored.current_phase, None);
     }
 
     #[test]
