@@ -39,22 +39,24 @@
 | **Graphics & display** | ✅ | Venus · VirGL · Virtio-GPU · CPU, five display engines, live guest resolution |
 | **Android** | ✅ | Android 11 & 13, VANILLA/GAPPS, Weston compositor, ARM translators, boot-mode switch |
 | **Storage & snapshots** | ✅ | External overlay chains, branching, three clone modes, OCI export |
-| **Guest provisioning** | 🚧 | Zero-root online + offline shipped; appliance-based package install and readiness reporting remain |
+| **Guest provisioning** | ✅ | Zero-root online (guest agent) + offline (libguestfs appliance), readiness ladder, declarative provision manifests |
+| **Networking** | ✅ | NAT (slirp/passt), bridge, and isolated mode in its own user + network namespace |
 | **Resource controls** | ✅ | CPU pinning, mlock, hugepages, overcommit gate, start-time conflict gates |
 | **Observability** | ✅ | `/proc` + vendor GPU telemetry, event stream, daemon logs and metrics |
-| **Hardware I/O** | 📐 | Isolated network mode, USB device passthrough |
+| **Hardware I/O** | 📐 | USB device passthrough |
 
 ---
 
 ## 🚧 Now — active work
 
-- **Readiness ladder, end to end.** The contract is documented in [`docs/ARCHITECTURE.md`](ARCHITECTURE.md): a monotonic ladder `SerialUp → QgaUp → DisplayApplied → GuestOsUp → WaydroidReady`, derived from the effective `(kind, boot_mode)` profile rather than `kind` alone. The event transport (dedicated QMP event monitor + QGA) is **done**; what remains is the guest-side reporting of the display and OS-ready levels so `status` and the guest-access levels consume a real level instead of log text.
+Nothing is open here. The four tracks that were in progress all shipped, each with its own tests and a live check:
 
-- **Config-path convergence.** The wizard, a TOML file, CLI flags, `config set`, and `config edit` must resolve to the *same* config through the *same* validation, so a key added in one place works everywhere. The key schema (`ConfigKey`) now covers the whole `InstanceConfig`; the remaining work is proving every creation path goes through one resolver.
+- the **readiness ladder** (`SerialUp → QgaUp → DisplayApplied → GuestOsUp → WaydroidReady`) is produced by real probes and published on the event bus — `status` prints `readiness: SerialUp of GuestOsUp` on a booting Linux guest, and `connect` waits for the profile's terminal level instead of guessing from log text;
+- **offline package installs** run through the libguestfs appliance only: one zero-root path serves every offline mutation, `guest install --offline spice-vdagent` installs into a stopped instance in ~10s with the VM never started, and `guest list` reports it;
+- **isolated network mode** builds a user + network namespace whose tap is the guest's only interface — the guest's QEMU has no route to any host network, and `stop` leaves nothing behind;
+- **config-path convergence** resolves flags, a TOML file and the wizard's answers through one resolver, so the same input yields the same config (and the same validation outcome) whichever front-end produced it.
 
-- **Offline package installs through the libguestfs appliance.** Today offline package work runs on the `guestmount` + userns chroot kitchen, while `GuestfsMutator` drives `guestfish` for other mutations. A spike is tracking whether the chroot recipe (guest resolv.conf, `/dev` `/proc` `/sys` binds, tmpfs `/run`, index refresh) transfers into the appliance, so one path serves every offline mutation.
-
-- **Isolated network mode.** `network.mode = "Isolated"` is config-representable and round-trips through proto, but `andler-net::setup_isolated` still returns an explicit *not implemented* error. Needs the netns/veth plumbing that keeps the guest off every host network while still allowing host-side control.
+What is next is the short-term list below.
 
 ---
 
@@ -106,8 +108,14 @@
 
 ### Guest operations
 - ✅ Online path via the QEMU guest agent on a private `*.qga.sock` chardev (install/remove, exec, file writes, resolution).
-- ✅ Zero-root offline path: `guestmount` FUSE + unprivileged user namespaces + chroot; no `/dev/nbd*`, no root, no sudoers.
+- ✅ Zero-root offline path: one libguestfs appliance session per batch (`guestfish`), the guest chrooted inside it, no FUSE mount, no root, no sudoers.
+- ✅ Readiness ladder (`SerialUp → QgaUp → DisplayApplied → GuestOsUp → WaydroidReady`) derived from the effective `(kind, boot_mode)` profile, produced by probes rather than parsed from log text, published on the event bus and shown by `status`; `connect` waits for the profile's terminal level.
+- ✅ Offline package install/remove/list through the same appliance, so the online and offline paths agree: `guest install --offline <pkg>` works on a stopped instance with the VM never started, and `guest list` reports what landed.
 - ✅ Smart maintenance path (headless auto-start → QGA install → stop), declarative provision manifests, and `guest apply` from the instance's own config.
+
+### Networking
+- ✅ NAT (slirp and passt, with port forwards), bridge mode, and isolated mode.
+- ✅ Isolated mode gives the guest its own user + network namespace: the tap inside it is the guest's only interface, there is no route to any host network, and QMP/QGA stay reachable because they are UNIX sockets. Teardown leaves no namespace or tap behind, and `doctor` reports what the host is missing when it cannot provide one.
 
 ### Observability
 - ✅ `/proc`-based CPU, RSS, disk and network metrics, plus AMD sysfs / NVIDIA NVML / Intel `i915`-`xe` GPU and VRAM fields.
@@ -117,6 +125,7 @@
 - ✅ Zero-root guest provisioning — no privileged helper, no sudoers rules anywhere.
 - ✅ Start-time gates: host-port conflict, disk already in use, overlapping CPU pins, memory overcommit — each with an actionable message.
 - ✅ Unified `create` + interactive wizard, VM templates, `config view|edit|set|status`, `--dry-run`/`--verify`, `--json`, partial instance IDs, shell completions, `doctor`.
+- ✅ One resolver for every creation front-end: flags, a TOML file and the wizard's answers produce the same config and the same validation outcome (proved by a test that runs all three through the same draft).
 - ✅ Unit, integration, gRPC round-trip, and containerized E2E tiers; the four-step pre-merge gate plus per-commit gating on `main`.
 - ✅ Release pipeline: a `v*` tag publishes `andler` + `andlerd` archives with `SHA256SUMS` and a build-provenance attestation, so installation is a download rather than a build.
 - ✅ OVMF discovery across distro packaging layouts via a prioritized candidate list (Arch, Debian/Ubuntu, Fedora, openSUSE, `qemu` layouts).
