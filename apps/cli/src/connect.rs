@@ -171,9 +171,11 @@ async fn resolve_auto(
         None => Ok((
             ResolvedLevel::Console,
             Some(format!(
-                "readiness is {terminal}, but no port forward to guest port {guest_port} is \
-                 configured: add `tcp:<host_port>->{guest_port}` to network.port_forwards for \
-                 {what}, or keep using the serial console"
+                "readiness is {terminal} ({what} needs port {guest_port}), but no forward to \
+                 that port is configured: add `tcp:<host_port>->{guest_port}` to \
+                 network.port_forwards, or keep using the serial console — on this Android VM \
+                 that console is the host Linux side it boots, not the Android UI, which runs \
+                 on the display"
             )),
         )),
     }
@@ -299,6 +301,47 @@ async fn resolve_full_id(
     }
 }
 
+/// Ctrl+] ends the console session. The relay runs with `ISIG` off so that ^C,
+/// ^Z and ^\\ reach the guest like they would on a physical serial line, which
+/// is also why the local session needs an escape of its own: without one there
+/// is no key that ends it, and a guest that never returns to its prompt (or
+/// never boots) leaves the operator attached with no way out.
+const DETACH: u8 = 0x1d;
+
+/// Set by the exit-signal handlers. The relay polls with a short timeout, so a
+/// signal that arrives while it is attached leaves through the same path as a
+/// detach — terminal restored first — instead of leaving the tty in raw mode.
+static SIGNALLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn install_exit_handlers() {
+    extern "C" fn on_signal(_signal: libc::c_int) {
+        SIGNALLED.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+    // SAFETY: the handler only stores to an atomic — async-signal-safe — and
+    // every other sigaction field is a null/zero constant set below.
+    unsafe {
+        for signal in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP] {
+            let mut action: libc::sigaction = std::mem::zeroed();
+            // Through a raw pointer: casting a function item straight to an
+            // integer is what `function_casts_as_integer` forbids.
+            let handler: extern "C" fn(libc::c_int) = on_signal;
+            action.sa_sigaction = handler as *const () as libc::sighandler_t;
+            libc::sigemptyset(&mut action.sa_mask);
+            libc::sigaction(signal, &action, std::ptr::null_mut());
+        }
+    }
+}
+
+/// How an attached console session ended.
+enum Detached {
+    /// The operator pressed the detach key.
+    ByKey,
+    /// The serial side closed (VM stopped, or QEMU exited).
+    Serial,
+    /// A signal asked this process to leave.
+    Signal,
+}
+
 /// Attaches to the serial console socket in raw terminal mode. The chardev
 /// serves a single client; the daemon never touches this socket, so a CLI
 /// attach session cannot starve it (unlike the QMP/QGA sockets).
@@ -313,13 +356,30 @@ async fn connect_console(full_id: &str) -> Result<(), Box<dyn std::error::Error>
     })?;
     stream.set_read_timeout(None)?;
 
+    install_exit_handlers();
+    eprintln!("[console attached — Ctrl+] detaches, ^C goes to the guest]");
     let mut terminal = RawTerminal::enter()?;
-    let result = pump_console(&mut stream);
+    let outcome = pump_console(&mut stream);
     terminal.restore();
-    result
+    match outcome? {
+        Detached::ByKey => {
+            println!("[detached]");
+            Ok(())
+        }
+        Detached::Serial => {
+            println!("[console disconnected — VM serial closed]");
+            Ok(())
+        }
+        Detached::Signal => Ok(()),
+    }
 }
 
-fn pump_console(stream: &mut UnixStream) -> Result<(), Box<dyn std::error::Error>> {
+/// Where the detach key sits in a chunk of typed bytes, if it is there at all.
+fn detach_at(bytes: &[u8]) -> Option<usize> {
+    bytes.iter().position(|byte| *byte == DETACH)
+}
+
+fn pump_console(stream: &mut UnixStream) -> Result<Detached, Box<dyn std::error::Error>> {
     use std::os::unix::io::AsRawFd;
 
     let mut stdout = std::io::stdout();
@@ -343,15 +403,24 @@ fn pump_console(stream: &mut UnixStream) -> Result<(), Box<dyn std::error::Error
             },
         ];
         // SAFETY: poll(2) watches two valid open fds with a fresh pollfd array.
-        let ready = unsafe { libc::poll(fds.as_mut_ptr(), 2, -1) };
+        // The timeout only bounds how long a signal can wait behind the relay.
+        let ready = unsafe { libc::poll(fds.as_mut_ptr(), 2, 200) };
+        if SIGNALLED.load(std::sync::atomic::Ordering::SeqCst) {
+            return Ok(Detached::Signal);
+        }
         if ready < 0 {
-            return Err(std::io::Error::last_os_error().into());
+            let error = std::io::Error::last_os_error();
+            // A signal that arrived between the check above and here is not a
+            // relay failure; anything else is.
+            if error.kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(error.into());
         }
         if fds[0].revents & libc::POLLIN != 0 {
             let read = stream.read(&mut buf)?;
             if read == 0 {
-                println!("\n[console disconnected — VM serial closed]");
-                return Ok(());
+                return Ok(Detached::Serial);
             }
             stdout.write_all(&buf[..read])?;
             stdout.flush()?;
@@ -362,8 +431,17 @@ fn pump_console(stream: &mut UnixStream) -> Result<(), Box<dyn std::error::Error
                 stdin_open = false;
                 continue;
             }
-            stream.write_all(&buf[..read])?;
-            stream.flush()?;
+            match detach_at(&buf[..read]) {
+                Some(at) => {
+                    stream.write_all(&buf[..at])?;
+                    stream.flush()?;
+                    return Ok(Detached::ByKey);
+                }
+                None => {
+                    stream.write_all(&buf[..read])?;
+                    stream.flush()?;
+                }
+            }
         }
     }
 }
@@ -419,5 +497,23 @@ impl RawTerminal {
 impl Drop for RawTerminal {
     fn drop(&mut self) {
         self.restore();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_detach_key_is_found_wherever_it_is_typed() {
+        assert_eq!(detach_at(b"ls -la"), None);
+        assert_eq!(detach_at(b"abc"), None);
+        assert_eq!(
+            detach_at(b"\x03\x03"),
+            None,
+            "^C belongs to the guest — the escape that ends the session has to be its own key"
+        );
+        assert_eq!(detach_at(&[b'a', DETACH, b'b']), Some(1));
+        assert_eq!(detach_at(&[DETACH]), Some(0));
     }
 }

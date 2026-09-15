@@ -449,7 +449,7 @@ the same way instead of waiting.
 
 | Level | Mechanism | Requires |
 |-------|-----------|----------|
-| `console` | Direct attach to the VM's serial console (raw terminal; works headless, no guest OS needed) | Instance running |
+| `console` | Direct attach to the VM's serial console (raw terminal; works headless, no guest OS needed). Everything typed — `^C` included — goes to the guest like on a physical serial line, so the session ends with `Ctrl+]` (`[detached]`); `SIGINT`/`SIGTERM`/`SIGHUP` end it too, and the terminal mode is restored on every exit path. On an Android VM the serial console is the host Linux side it boots, not the Android UI — that runs on the display | Instance running |
 | `ssh` | Spawns `ssh -p <host_port> user@localhost` using the configured `network.port_forwards` entry for guest port 22 | Running guest with sshd; `network.port_forwards` set at create |
 | `adb` | Spawns `adb connect localhost:<host_port>` using the forward for guest port 5555 | Running Android guest with adb; forward configured |
 | `auto` | `console` for Linux VMs; `ssh` for Android-in-linux-mode and `adb` for Android-in-android-mode once readiness has reached the profile's terminal level (`GuestOsUp` / `WaydroidReady`), `console` with a note until then | — |
@@ -461,7 +461,7 @@ plus a `note` when the chosen level is not the strongest the profile supports
 `terminal_readiness` the level the profile climbs to).
 
 ```bash
-# Attach to the serial console (raw mode; Ctrl-C detaches)
+# Attach to the serial console (raw mode; Ctrl+] detaches, ^C goes to the guest)
 andler connect <instance-id> --level console
 
 # Interactive ssh session to the forwarded guest port
