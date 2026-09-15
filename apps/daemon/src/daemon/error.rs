@@ -279,7 +279,12 @@ pub enum DaemonError {
     #[error("no instance found matching {0:?}")]
     InstanceRefNotFound(String),
 
-    #[error("instance reference {prefix:?} is ambiguous, matches: {candidates:?}")]
+    // The candidates are hex ids, not their internal byte arrays: this message
+    // is how an operator picks one of them.
+    #[error(
+        "instance reference {prefix:?} is ambiguous, matches: {}",
+        .candidates.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ")
+    )]
     AmbiguousInstanceId {
         prefix: String,
         candidates: Vec<InstanceId>,

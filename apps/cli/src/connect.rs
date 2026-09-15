@@ -294,8 +294,9 @@ async fn resolve_full_id(
         0 => Err(format!("no instance found matching {raw:?}").into()),
         1 => Ok(matches[0].clone()),
         _ => Err(format!(
-            "instance id {raw:?} is ambiguous ({} instances match)",
-            matches.len()
+            "instance id {raw:?} is ambiguous, matches: {} — pass more characters of the id you \
+             want (andler list shows them)",
+            matches.join(", ")
         )
         .into()),
     }
