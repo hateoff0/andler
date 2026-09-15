@@ -59,6 +59,7 @@
 - **Offline failures say what the appliance said.** A failed appliance command reported `guestfish exited with exit status: 1` whenever the message arrived on stdout; both streams are captured now and the error carries whichever one spoke.
 
 - **`andler connect` had no way out.** The console relay clears `ISIG` so that `^C`, `^Z` and `^\` reach the guest like they would on a physical serial line — and with no escape of its own, the session had no key that ended it: a poll on the socket that blocks forever left an operator attached to a guest that never returned to its prompt. `Ctrl+]` detaches (`[detached]`), `SIGINT`/`SIGTERM`/`SIGHUP` end the session through the same path — the terminal mode is restored on every exit, the signal one included — and the attach line names the key. On an Android VM that line also says what the console is: the host Linux side the image boots, not the Android UI, which runs on the display.
+- **The disk size the wizard asked for was dropped on Android VMs.** The question was asked, the review panel showed the answer, and the request carried `--overlay-size-gib` instead — so a bare `andler` run created the base image's own size (128 GiB) whatever the operator typed. The answer is what gets created now, `--overlay-size-gib` seeds that question's default, and `--quick --kind android --overlay-size-gib N` still resolves to N.
 ---
 
 ## [0.1.0] - 2026-09-13

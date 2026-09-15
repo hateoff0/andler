@@ -171,7 +171,10 @@ pub(crate) fn android_draft(
                 path: PathBuf::from(&basic.base_image),
                 linked: advanced.map(|a| a.linked_overlay).unwrap_or(flags.linked),
             },
-            size_gib: flags.overlay_size_gib,
+            // The size the operator answered. `--overlay-size-gib` seeds that
+            // question's default (see the wizard's run helpers); it does not
+            // replace the answer, which is what the review panel shows.
+            size_gib: Some(basic.disk_size_gib),
             compact_on_shutdown: false,
             snapshot_timeout_secs: None,
         },
@@ -506,8 +509,9 @@ mod tests {
         assert_eq!(creation.cfg.name, "android");
         assert_eq!(
             creation.cfg.disk.size_bytes,
-            128 * andler_core::DiskConfig::GIB,
-            "overlay size must be the resolver's 128 GiB default, not derived from disk size"
+            256 * andler_core::DiskConfig::GIB,
+            "the disk size the operator answered is the one the request carries — the review \
+             panel showing one number while the config gets another is the bug this pins"
         );
         let andler_core::InstanceKind::AndroidVm { android_profile } = creation.cfg.kind else {
             panic!("expected an Android VM");

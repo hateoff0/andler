@@ -59,7 +59,7 @@ andler create \
 | `--ovmf-vars-template <path>` | No | Path to OVMF_VARS template (auto-detected when omitted; the daemon's own `ANDLERD_OVMF_VARS` still wins when you omit it) |
 | `--iso-path <path>` | Yes*** | Path to installer ISO (***required for `--kind linux`) |
 | `--disk-path <path>` | Yes*** | Path to disk file (***required for `--kind linux`) |
-| `--disk-size-gib <size>` | No | Disk size in GiB, must be ≥ 1 (default: 256, Linux only) |
+| `--disk-size-gib <size>` | No | Disk size in GiB, must be ≥ 1 (default: 256, Linux only). For an Android VM it is the wizard's disk-size question, seeded by `--overlay-size-gib` |
 | `--cdrom-bus <bus>` | No | CD-ROM bus: `auto` (default), `virtio`, `ide` (Linux only) |
 | `--compact-on-shutdown` | No | Auto-compact disk after shutdown (Linux only) |
 | `--no-uefi` | No | Boot Legacy BIOS instead of UEFI (Linux only). Without it, UEFI is used when an OVMF pair is discovered and Legacy BIOS when none is |
@@ -68,7 +68,7 @@ andler create \
 | `--gapps` | No | Include Google Apps |
 | `--microg` | No | Record microG in the profile. **Nothing installs it yet** — no base-image variant ships MicroG and no guest step registers it (see ROADMAP); the flag is stored so a TOML round-trip keeps the choice |
 | `--arm-translator <mode>` | No | ARM→x86 translation: `none` (default), `libndk`, `libhoudini` |
-| `--overlay-size-gib <size>` | No | Overlay disk size in GiB (default: 128, Android only) |
+| `--overlay-size-gib <size>` | No | Android disk size in GiB — the qcow2 the base image is copied into (default: 128). It is the same question as `--disk-size-gib`, and in the wizard it seeds that question's default (the answer is what gets created) |
 | `--linked-overlay` | No | Use a linked (backing-file) overlay instead of a standalone copy (Android only) |
 | `--template <name>` | No | VM template applied over the defaults and under the CLI flags (merge order: defaults < template < flags). Built-ins: `headless` (CPU renderer, no display/audio) and `desktop` (Venus GPU, SDL display, audio). User templates live in `~/.andler/templates/<name>.toml` and accept the same partial sections. Only supported with `--kind linux` in this phase. |
 | `--json` | Output as a JSON object: `{"instance_id": "<id>"}` for a real create (both flag and `--file` mode); with `--dry-run --json`, the fully resolved `InstanceConfig` (all config sections) serialized as JSON; with `--verify --json`, a `{"name","passed","checks":[...]}` report (see below) |
@@ -740,6 +740,7 @@ Interactive guided instance creation wizard (also the default when `andler` is i
 - **Progress**: creation and the guest-selection apply report as spinners, and a base-image download as a progress bar with transferred bytes against the total, the transfer rate and an ETA. Nothing is drawn when stderr is not a terminal.
 - **Terminal requirement**: the questions are drawn on stderr and read from stdin, so a terminal is needed on both — `andler create 2>log` refuses with the same non-TTY message and exit code 2 (a usage error) rather than prompting into a file, and `ANDLER_WIZARD_NOT_TTY` forces that refusal in tests. `--quick` never prompts.
 - **Cancelling** a question with `Esc`/`Ctrl-C` ends the wizard with `Nothing was created.` and exit code 0 — no instance, no partial state.
+- **The disk size asked for is the disk size created**: for an Android VM the wizard's `disk size (GiB)` answer is the size of the qcow2 the base image is copied into, the same value `--overlay-size-gib` sets — the review panel and the created `instance.toml` show one number, never two.
 - **Android base image**: if no local image matches the requested Android version/package set, the wizard offers to download the newest published build (`andler image download`) — a download failure falls back to entering a path manually, it never fails the wizard.
 - **microG is not offered**: nothing implements it yet (see the `--microg` flag note above).
 

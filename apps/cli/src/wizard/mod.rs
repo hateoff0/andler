@@ -108,7 +108,10 @@ pub(crate) async fn run(
                 name,
                 partial.base_image_path.clone(),
                 partial.instances_root.clone(),
-                partial.disk_size_gib,
+                // `--disk-size-gib` and `--overlay-size-gib` are the same
+                // question for this kind; whichever the operator passed seeds
+                // its default.
+                partial.disk_size_gib.or(partial.overlay_size_gib),
             )
             .await?,
         ),
@@ -292,6 +295,7 @@ fn build_quick(
                 gapps: flags.gapps,
                 disk_size_gib: flags
                     .disk_size_gib
+                    .or(flags.overlay_size_gib)
                     .unwrap_or(andler_core::config::DEFAULT_DISK_GIB),
                 instances_root,
             };
@@ -542,6 +546,36 @@ mod tests {
             result,
             Err(WizardError::Message(msg)) if msg.contains("Base image not found")
         ));
+    }
+
+    #[test]
+    fn quick_android_honours_the_overlay_size_flag() {
+        let dir =
+            std::env::temp_dir().join(format!("andler-wizard-quick-disk-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let base = dir.join("base.qcow2");
+        std::fs::write(&base, b"stand-in base image").unwrap();
+        let partial = PartialArgs {
+            kind: Some(WizardKind::Android),
+            name: Some("quick-disk".into()),
+            base_image_path: Some(base.to_string_lossy().into_owned()),
+            instances_root: Some(dir.join("instances").to_string_lossy().into_owned()),
+            quick: true,
+            overlay_size_gib: Some(200),
+            ..Default::default()
+        };
+        let detected = detected();
+        let host = crate::create::host_firmware(&detected);
+        let creation = build_quick(&partial, &detected, &host)
+            .expect("quick must resolve")
+            .creation;
+
+        assert_eq!(
+            creation.cfg.disk.size_bytes,
+            200 * andler_core::DiskConfig::GIB,
+            "--overlay-size-gib is the Android disk size and must reach the request"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
