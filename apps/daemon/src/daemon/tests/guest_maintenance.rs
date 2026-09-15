@@ -300,8 +300,31 @@ impl GuestMutator for FsMutator {
                     .map_err(|e| MutatorError::Io(format!("chmod {path}: {e}")))?;
                 }
                 MutatorOp::Symlink { target, link } => {
-                    std::os::unix::fs::symlink(target, self.resolve(link))
+                    let link_path = self.resolve(link);
+                    if let Some(parent) = link_path.parent() {
+                        std::fs::create_dir_all(parent)
+                            .map_err(|e| MutatorError::Io(format!("mkdir {parent:?}: {e}")))?;
+                    }
+                    // Guest-absolute targets are rewritten under the test root,
+                    // so following the link lands inside the fake guest — the
+                    // same thing `/etc/systemd/system/...` means to a real one.
+                    let target = if target.starts_with('/') {
+                        self.resolve(target).to_string_lossy().into_owned()
+                    } else {
+                        target.clone()
+                    };
+                    std::os::unix::fs::symlink(&target, &link_path)
                         .map_err(|e| MutatorError::Io(format!("symlink {link}: {e}")))?;
+                }
+                MutatorOp::RmRf { path } => {
+                    let target = self.resolve(path);
+                    match std::fs::symlink_metadata(&target) {
+                        Ok(meta) if meta.is_dir() => std::fs::remove_dir_all(&target)
+                            .map_err(|e| MutatorError::Io(format!("rm -rf {path}: {e}")))?,
+                        Ok(_) => std::fs::remove_file(&target)
+                            .map_err(|e| MutatorError::Io(format!("rm {path}: {e}")))?,
+                        Err(_) => {}
+                    }
                 }
                 other => {
                     return Err(MutatorError::Io(format!(
@@ -320,6 +343,71 @@ impl GuestMutator for FsMutator {
     async fn exists(&self, path: &str) -> Result<bool, MutatorError> {
         Ok(self.resolve(path).exists())
     }
+}
+
+/// Forwards reads to an `FsMutator` and silently drops every write — what a
+/// batch that never reached the image looks like from the caller's side.
+struct SwallowingMutator {
+    inner: FsMutator,
+}
+
+#[async_trait::async_trait]
+impl GuestMutator for SwallowingMutator {
+    fn name(&self) -> &'static str {
+        "swallowing-mock"
+    }
+
+    async fn apply(&self, _ops: &[MutatorOp]) -> Result<(), MutatorError> {
+        Ok(())
+    }
+
+    async fn read_file(&self, path: &str) -> Result<Vec<u8>, MutatorError> {
+        self.inner.read_file(path).await
+    }
+
+    async fn exists(&self, path: &str) -> Result<bool, MutatorError> {
+        self.inner.exists(path).await
+    }
+}
+
+#[tokio::test]
+async fn a_boot_mode_switch_that_did_not_land_is_an_error() {
+    let dir = TestTempDir::new();
+    let root = dir.path().join("guest");
+    let system = root.join("etc/systemd/system");
+    std::fs::create_dir_all(&system).unwrap();
+    std::fs::write(system.join("android.target"), b"android target unit\n").unwrap();
+    std::fs::write(
+        system.join("multi-user.target"),
+        b"multi-user target unit\n",
+    )
+    .unwrap();
+    std::fs::write(system.join("default.target"), b"multi-user target unit\n").unwrap();
+
+    andler_disk::boot_mode::switch_boot_mode_with(
+        &FsMutator { root: root.clone() },
+        andler_core::AndroidBootMode::Android,
+    )
+    .await
+    .expect("a switch whose write reaches the filesystem is a success");
+    assert_eq!(
+        std::fs::read(system.join("default.target")).unwrap(),
+        b"android target unit\n",
+        "default.target must follow the target the mode names"
+    );
+
+    let error = andler_disk::boot_mode::switch_boot_mode_with(
+        &SwallowingMutator {
+            inner: FsMutator { root },
+        },
+        andler_core::AndroidBootMode::Linux,
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        matches!(error, andler_disk::DiskError::FileSystem(_)),
+        "a batch that was accepted but never landed must fail the switch, not report it: {error:?}"
+    );
 }
 
 #[tokio::test]

@@ -563,7 +563,17 @@ impl GuestMutator for GuestfsMutator {
                         .map_err(|e| MutatorError::Io(format!("cannot stage upload: {e}")))?;
                 }
             }
-            let script = build_script(ops, &content_dir);
+            // Every write batch ends with a flush. The session is torn down by
+            // killing the appliance (see `ListeningSession`), and QEMU holds the
+            // image with `cache=writeback`: a write that is still in that cache
+            // when the kill lands is simply gone, while the caller was already
+            // told the batch succeeded. A small write at the end of a short
+            // session — enabling a unit, switching the boot target — is exactly
+            // the shape that loses the race. `sync` is a guestfish command, so
+            // it travels with the batch and flushes the guest filesystem into
+            // the virtio write cache, which QEMU turns into an `fdatasync` of
+            // the image before it answers.
+            let script = format!("{}\nsync", build_script(ops, &content_dir));
             self.run_guestfish(&script).await?;
             Ok::<(), MutatorError>(())
         }

@@ -76,6 +76,13 @@ Three properties the session keeps:
   is not gone until it is reaped (a pid probe still answers), so the client
   treats "server is not running" as retryable, stops the old session before
   booting the next one, and never leaves the image lock to a session nobody owns;
+- every write batch ends with `sync` (guestfish's own command, so it travels
+  with the batch). The teardown is a kill and QEMU holds the image with a
+  write-back cache, so a batch that is not flushed can be accepted, reported as
+  successful, and then be gone — a symlink written at the end of a short session
+  is exactly that shape. `sync` pushes the guest filesystem into the virtio
+  write cache, which QEMU turns into an `fdatasync` of the image before it
+  answers;
 - every call captures both streams, and a failed one reports the appliance's own
   output on whichever stream carried it: a command that fails on the guest's
   side says why there, and the status alone ("guestfish exited with exit status:
