@@ -53,7 +53,24 @@ expect_ok "verify --json reports check entries" -- jq -e '.checks | all(.ok == t
 
 expect_fail "verify fails on a missing iso" -- andler create --kind linux --name ver2 --iso-path "$WORK/missing.iso" --disk-path "$WORK/disk.qcow2" --ovmf-vars-template "$WORK/VARS.fd" --verify
 expect_fail "verify --json fails on a missing iso" -- andler create --kind linux --name ver3 --iso-path "$WORK/missing.iso" --disk-path "$WORK/disk.qcow2" --ovmf-vars-template "$WORK/VARS.fd" --verify --json
-expect_ok "verify --json reports passed=false" -- jq -e '.passed == false' "$E2E_LAST_OUT"
+# A missing ISO never reaches the report: the draft canonicalizes the ISO
+# before verify runs, so the refusal is an `{"error": …}` document on stderr
+# (the JSON error contract, suite 30) and stdout stays empty.
+expect_err_grep "the missing iso is refused while the draft is built" "ISO file not found"
+# What the report *does* carry is a failing check, so exercise one the
+# resolver cannot see up front: an OVMF template that does not exist.
+expect_fail "verify --json fails a check on a missing OVMF template" \
+    -- andler create --kind linux --name ver4 --iso-path "$WORK/empty.iso" \
+        --disk-path "$WORK/disk.qcow2" --ovmf-vars-template "$WORK/absent.fd" \
+        --verify --json
+# `expect_ok` redirects its command's stdout onto $E2E_LAST_OUT, so a jq
+# reading that file would read the truncation it just caused — compare a copy.
+cp "$E2E_LAST_OUT" "$WORK/verify-failed.json"
+expect_ok "verify --json reports passed=false" \
+    -- jq -e '.passed == false' "$WORK/verify-failed.json"
+expect_ok "the failing check is the OVMF one" \
+    -- jq -e '[.checks[] | select(.name == "OVMF firmware" and .ok == false)] | length == 1' \
+        "$WORK/verify-failed.json"
 
 expect_ok "nothing was created by --verify" -- andler list
 expect_out_grep "no instances" "no instances"
