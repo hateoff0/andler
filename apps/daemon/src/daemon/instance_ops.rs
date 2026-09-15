@@ -301,7 +301,7 @@ impl Daemon {
                         id
                     )));
                 }
-                let actual = andler_core::base_image::sha256_of(base_image_path)?;
+                let actual = super::base_image_digest::sha256(base_image_path)?;
                 if actual != pin.sha256 {
                     return Err(DaemonError::BaseImagePinMismatch(format!(
                         "base image {} changed since it was pinned (expected sha256 {}, \
@@ -316,7 +316,7 @@ impl Daemon {
                 Ok(None)
             }
             None => {
-                let sha256 = andler_core::base_image::sha256_of(base_image_path)?;
+                let sha256 = super::base_image_digest::sha256(base_image_path)?;
                 Ok(Some(andler_core::BaseImagePin { id, sha256 }))
             }
         }
@@ -1100,17 +1100,40 @@ impl Daemon {
                                 .to_string(),
                         ));
                     }
-                    _ if offline => {
-                        let mutator =
-                            andler_guestfs::GuestfsMutator::for_packages(disk_path.clone());
-                        andler_disk::guest_tools::install_agent_offline(
-                            &mutator, &disk_path, &package,
-                        )
-                        .await?;
+                    // `Created` means the VM has never been booted, so its
+                    // guest agent has never answered anything: the appliance
+                    // installs in seconds what a maintenance boot would wait
+                    // its whole agent budget for. `Stopped` keeps the smart
+                    // path — that instance has run, and its agent may well
+                    // answer.
+                    _ if offline || matches!(state, InstanceState::Created) => {
+                        install_package_offline(&disk_path, &package).await?
                     }
                     _ => {
-                        self.auto_start_maintenance(id, &package, true, idempotency_token)
-                            .await?;
+                        // The smart path boots the VM and installs through its
+                        // own agent. When the guest cannot answer — a fresh
+                        // Android image has the agent on the disk but does not
+                        // start it, so the wait runs its whole budget — the
+                        // appliance does the same work without a boot. Doing it
+                        // here is what turns "waited two minutes, then told to
+                        // retry with --offline" into one command that works.
+                        match self
+                            .auto_start_maintenance(id, &package, true, idempotency_token)
+                            .await
+                        {
+                            Ok(()) => (),
+                            Err(e @ DaemonError::GuestAgentUnavailable { .. }) => {
+                                tracing::warn!(
+                                    instance_id = %id,
+                                    package = %package,
+                                    reason = %e,
+                                    "the guest agent did not answer; installing through the \
+                                     libguestfs appliance instead"
+                                );
+                                install_package_offline(&disk_path, &package).await?;
+                            }
+                            Err(other) => return Err(other),
+                        }
                     }
                 }
                 tracing::info!(
@@ -1205,17 +1228,27 @@ impl Daemon {
                                 .to_string(),
                         ));
                     }
-                    _ if offline => {
-                        let mutator =
-                            andler_guestfs::GuestfsMutator::for_packages(disk_path.clone());
-                        andler_disk::guest_tools::remove_agent_offline(
-                            &mutator, &disk_path, &package,
-                        )
-                        .await?;
+                    _ if offline || matches!(state, InstanceState::Created) => {
+                        remove_package_offline(&disk_path, &package).await?
                     }
                     _ => {
-                        self.auto_start_maintenance(id, &package, false, idempotency_token)
-                            .await?;
+                        match self
+                            .auto_start_maintenance(id, &package, false, idempotency_token)
+                            .await
+                        {
+                            Ok(()) => (),
+                            Err(e @ DaemonError::GuestAgentUnavailable { .. }) => {
+                                tracing::warn!(
+                                    instance_id = %id,
+                                    package = %package,
+                                    reason = %e,
+                                    "the guest agent did not answer; removing through the \
+                                     libguestfs appliance instead"
+                                );
+                                remove_package_offline(&disk_path, &package).await?;
+                            }
+                            Err(other) => return Err(other),
+                        }
                     }
                 }
                 tracing::info!(
@@ -1708,6 +1741,26 @@ impl Daemon {
         tracing::info!(instance_id = %id, key, value, "config set");
         Ok(())
     }
+}
+
+/// One package, installed into a disk nobody is using: the zero-root
+/// libguestfs appliance runs the guest's own package manager in a chroot.
+async fn install_package_offline(
+    disk_path: &std::path::Path,
+    package: &str,
+) -> Result<(), DaemonError> {
+    let mutator = andler_guestfs::GuestfsMutator::for_packages(disk_path.to_path_buf());
+    andler_disk::guest_tools::install_agent_offline(&mutator, disk_path, package).await?;
+    Ok(())
+}
+
+async fn remove_package_offline(
+    disk_path: &std::path::Path,
+    package: &str,
+) -> Result<(), DaemonError> {
+    let mutator = andler_guestfs::GuestfsMutator::for_packages(disk_path.to_path_buf());
+    andler_disk::guest_tools::remove_agent_offline(&mutator, disk_path, package).await?;
+    Ok(())
 }
 
 fn instance_dir_of(cfg: &InstanceConfig) -> std::path::PathBuf {

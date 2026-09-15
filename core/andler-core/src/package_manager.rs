@@ -40,6 +40,21 @@ impl PackageManager {
         }
     }
 
+    /// A lock file this manager leaves behind when a transaction is killed.
+    /// The offline path runs with the guest stopped and the appliance holding
+    /// the disk alone, so a lock file there cannot belong to a live
+    /// transaction — and pacman's is a plain file rather than a lock the
+    /// kernel releases, so one interrupted run (a killed appliance session, a
+    /// daemon that died mid-transaction) makes every later transaction fail
+    /// with "could not lock database" until it is removed. apt and dnf lock
+    /// through the kernel, so they have nothing to clear.
+    pub fn stale_lock_path(&self) -> Option<&'static str> {
+        match self {
+            PackageManager::Apt | PackageManager::Dnf => None,
+            PackageManager::Pacman => Some("/var/lib/pacman/db.lck"),
+        }
+    }
+
     pub fn remove_args<'a>(&self, package: &'a str) -> Vec<&'a str> {
         match self {
             PackageManager::Apt => vec!["remove", "-y", package],
@@ -100,6 +115,17 @@ mod tests {
     }
 
     #[test]
+    #[test]
+    fn only_pacman_leaves_a_lock_file_behind() {
+        assert_eq!(
+            PackageManager::Pacman.stale_lock_path(),
+            Some("/var/lib/pacman/db.lck"),
+            "a killed pacman leaves a plain lock file that blocks the next transaction"
+        );
+        assert_eq!(PackageManager::Apt.stale_lock_path(), None);
+        assert_eq!(PackageManager::Dnf.stale_lock_path(), None);
+    }
+
     fn refresh_shapes_match_each_manager() {
         assert_eq!(PackageManager::Apt.refresh_args(), vec!["update"]);
         assert_eq!(PackageManager::Dnf.refresh_args(), vec!["makecache"]);

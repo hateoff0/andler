@@ -167,7 +167,10 @@ fn manager_command(manager: PackageManager, args: &[&str]) -> String {
         argv.insert(1, "-o");
     }
     argv.extend(args.iter().copied());
-    argv.join(" ")
+    match manager.stale_lock_path() {
+        Some(lock) => format!("rm -f {lock} && {}", argv.join(" ")),
+        None => argv.join(" "),
+    }
 }
 
 fn enable_unit_command(unit: &str) -> String {
@@ -638,6 +641,31 @@ mod tests {
     }
 
     #[test]
+    fn a_stale_package_manager_lock_is_cleared_before_the_transaction() {
+        let install = steps_for(
+            PackageAction::Install,
+            PackageManager::Pacman,
+            "spice-vdagent",
+        );
+        assert!(
+            install
+                .iter()
+                .any(|step| step.contains("rm -f /var/lib/pacman/db.lck && pacman -Sy")),
+            "pacman's lock is a file that outlives the run that made it, and a stale one              fails every later transaction: {install:?}"
+        );
+
+        for manager in [PackageManager::Apt, PackageManager::Dnf] {
+            let recipe = steps_for(PackageAction::Install, manager, "spice-vdagent");
+            assert!(
+                !recipe
+                    .iter()
+                    .any(|step| step.contains("rm -f /var/lib/pacman/db.lck")),
+                "{manager:?} locks through the kernel, so it has no stale file to clear: {recipe:?}"
+            );
+        }
+    }
+
+    #[test]
     fn the_resolver_configuration_keeps_only_usable_upstreams() {
         let parsed = parse_nameservers(
             "# comment\nnameserver 127.0.0.53\nnameserver 192.168.1.1\n\
@@ -687,8 +715,14 @@ mod tests {
                 "ip link set eth0 up && ip addr replace 169.254.2.15/16 dev eth0 && \
                  ip route replace default via 169.254.2.2"
                     .to_string(),
-                format!("{} ; pacman -Sy", resolver_step()),
-                format!("{} ; pacman -S --noconfirm spice-vdagent", resolver_step()),
+                format!(
+                    "{} ; rm -f /var/lib/pacman/db.lck && pacman -Sy",
+                    resolver_step()
+                ),
+                format!(
+                    "{} ; rm -f /var/lib/pacman/db.lck && pacman -S --noconfirm spice-vdagent",
+                    resolver_step()
+                ),
                 "mkdir -p /etc/systemd/system/multi-user.target.wants && \
                  ln -sf /lib/systemd/system/spice-vdagentd.service \
                  /etc/systemd/system/multi-user.target.wants/spice-vdagentd.service"
@@ -787,9 +821,9 @@ mod tests {
             "spice-vdagent",
         );
         assert!(
-            steps
-                .last()
-                .is_some_and(|step| step.ends_with("; pacman -R --noconfirm spice-vdagent")),
+            steps.last().is_some_and(|step| step.ends_with(
+                "; rm -f /var/lib/pacman/db.lck && pacman -R --noconfirm spice-vdagent"
+            )),
             "{steps:?}"
         );
         assert!(!steps.iter().any(|step| step.contains("-Sy")), "{steps:?}");
@@ -843,10 +877,12 @@ mod tests {
         // The resolver step carries the host's own upstream servers, so only its
         // shape is fixed here; `install_recipe_runs_every_step_in_order` pins
         // the exact text with a resolver it controls.
+        let manager_step = "rm -f /var/lib/pacman/db.lck && pacman -Sy";
         assert!(
             batch[1].starts_with("mount -t tmpfs -o mode=0755 tmpfs /run")
-                && batch[1]
-                    .contains("mount --bind /run/andler/resolv.conf /etc/resolv.conf ; pacman -Sy"),
+                && batch[1].contains(&format!(
+                    "mount --bind /run/andler/resolv.conf /etc/resolv.conf ; {manager_step}"
+                )),
             "the session gives the guest a resolver in the same command the package manager \
              runs in, because a mount does not survive into the next line: {:?}",
             batch[1]

@@ -102,7 +102,13 @@ is an appliance boot, ~2 s warm):
      `gpg-agent` (pacman signatures) a writable `/run`, and nothing of this is
      written into the guest image;
    - the index refresh (`apt-get update` / `dnf makecache` / `pacman -Sy`), so
-     a guest that never synced still installs;
+     a guest that never synced still installs. Every transaction clears the
+     manager's stale lock first (`PackageManager::stale_lock_path`: pacman's
+     `/var/lib/pacman/db.lck`, nothing for apt and dnf, which lock through the
+     kernel). The guest is not running while the appliance holds the disk, so a
+     lock file there can only be the remains of a transaction that was killed —
+     and pacman's is a plain file, so one interrupted run failed every later
+     transaction with "could not lock database" until someone removed it;
    - the install itself (`apt-get install -y` / `dnf install -y` /
      `pacman -S --noconfirm`). For apt, `-o Acquire::ForceIPv4=true`: the
      appliance's network is IPv4-only;

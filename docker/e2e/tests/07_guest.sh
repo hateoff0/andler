@@ -127,11 +127,17 @@ expect_out_grep "remove reports success" "removed successfully"
 expect_ok "guest list after remove" -- andler guest list "$LID"
 expect_out_grep "qemu-ga removed again" "qemu-guest-agent.*not installed"
 
-echo "  [smart path: stopped VM without QGA falls back with an actionable hint]"
-expect_fail "guest install without --offline on a non-booting VM" -- timeout 200 andler guest install qemu-guest-agent "$LID"
-expect_err_grep "auto-started for maintenance" "Retry with .--offline."
-expect_ok "smart-path failure left the instance stopped" -- andler status "$LID"
+echo "  [smart path: a stopped VM whose agent never answers falls back to the appliance]"
+# This VM does not boot (no guest agent ever answers), so the maintenance boot
+# runs out its whole wait budget. The daemon used to stop there and tell the
+# operator to re-run with --offline; it now does that itself, in the same
+# command.
+expect_ok "guest install without --offline falls back to the appliance" -- timeout 400 andler guest install qemu-guest-agent "$LID"
+expect_out_grep "the fallback install reports success" "installed successfully"
+expect_ok "the fallback left the instance stopped" -- andler status "$LID"
 expect_out_grep "instance is stopped" "Stopped"
+expect_ok "guest list shows the fallback install" -- timeout 120 andler guest list "$LID"
+expect_out_grep "qemu-ga installed by the fallback" "qemu-guest-agent.*installed"
 
 echo "  [deep: provision manifest applies offline via the guestfs appliance]"
 mkdir -p "$WORK/provision"

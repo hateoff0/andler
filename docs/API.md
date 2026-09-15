@@ -534,13 +534,15 @@ Mode selection by instance state:
 |-------|----------|
 | `Running` | Online via the guest agent. If `qemu-guest-agent` is not installed/responding, the command fails with a hint to stop the VM first (offline path) — no silent fallback. |
 | `Paused` | Treated like online, but the frozen guest agent cannot respond, so the command fails with a hint to resume or stop the VM. |
-| `Created` / `Stopped` / `Error` | Offline through the libguestfs appliance (`guestfish`): the guest's own package manager runs as root inside the appliance, and the session brings up the appliance's network, the guest resolver and the package index itself — zero root on the host; requires `guestfs-tools` (see `andler doctor`). |
+| `Created` | Offline through the libguestfs appliance (`guestfish`): the VM has never been booted, so its agent has never answered, and the appliance installs in seconds what a maintenance boot would wait its whole agent budget for. The guest's own package manager runs as root inside the appliance, and the session brings up the appliance's network, the guest resolver and the package index itself — zero root on the host; requires `guestfs-tools` (see `andler doctor`). |
+| `Stopped` / `Error` | The smart path: the VM is booted headless for maintenance, the package goes in through its guest agent, and the VM is stopped again. If the agent never appears the wait runs out once (`ANDLERD_GUEST_AGENT_WAIT_SECS`) and the same command continues through the appliance above, so the install still happens — the fallback is reported in the daemon log. |
 | `Starting` / `Stopping` | Rejected. |
 
 ```bash
 # Install a package (smart path: online via guest agent when running;
-# auto-starts a stopped VM for maintenance and stops it again; --offline
-# forces the offline appliance path for VMs that cannot boot)
+# auto-starts a stopped VM for maintenance and stops it again, falling back to
+# the appliance when the agent never answers; --offline skips the boot
+# entirely)
 andler guest install spice-vdagent <instance-id>
 andler guest install spice-vdagent <instance-id> --offline
 
@@ -569,9 +571,10 @@ a stopped instance is booted headless, the package is installed via the
 guest agent, and the VM is stopped again; on an already-running VM the
 operation runs in place. Both forms are supervisor operations — progress
 is visible on `andler events` and cancellable. If the guest agent does not
-appear within `ANDLERD_GUEST_AGENT_WAIT_SECS` (default 120 s) the
-operation fails with a hint to retry with `--offline` — that path uses
-the offline appliance path — zero root, no sudoers rules.
+appear within `ANDLERD_GUEST_AGENT_WAIT_SECS` (default 120 s), the same
+command continues through the offline appliance instead of failing: the wait
+is a fast path, not a gate, and the package is installed either way — zero
+root, no sudoers rules.
 Each package-manager step in the guest (index refresh, install, remove) is
 bounded by `ANDLERD_GUEST_PACKAGE_TIMEOUT_SECS` (default 600 s, minimum 30):
 a fresh guest's first index sync plus a download takes minutes, and a timeout
@@ -734,7 +737,7 @@ Interactive guided instance creation wizard (also the default when `andler` is i
 - **Advanced mode** groups its questions (boot & disks, display & GPU, devices, CPU & memory, network, Android); `Change some settings` on the summary screen asks which groups to revisit and re-asks every question of the picked groups, with the previous answer as the default — nothing is silently kept.
 - **Summary screen**: framed panel with the identity, storage, display/GPU, device, CPU and network answers, followed by what will be **installed inside the VM** (ARM translator, clipboard agent).
 - **Create applies the answers**: immediately after the instance is created, the wizard calls the same route as `andler guest apply <id>` (see above), so a selected ARM translator or clipboard sharing is actually present in the guest. Per-selection results are printed; a failure leaves the created VM in place and prints the retry command. With `--quick` nothing is installed (a scripted create must not start a translator download on its own): the report names `andler guest apply <id>` instead.
-- **Progress**: creation and the guest-selection apply report as spinners, and a base-image download as a progress bar with transferred bytes against the total and an ETA. Nothing is drawn when stderr is not a terminal.
+- **Progress**: creation and the guest-selection apply report as spinners, and a base-image download as a progress bar with transferred bytes against the total, the transfer rate and an ETA. Nothing is drawn when stderr is not a terminal.
 - **Terminal requirement**: the questions are drawn on stderr and read from stdin, so a terminal is needed on both — `andler create 2>log` refuses with the same non-TTY message and exit code 2 (a usage error) rather than prompting into a file, and `ANDLER_WIZARD_NOT_TTY` forces that refusal in tests. `--quick` never prompts.
 - **Cancelling** a question with `Esc`/`Ctrl-C` ends the wizard with `Nothing was created.` and exit code 0 — no instance, no partial state.
 - **Android base image**: if no local image matches the requested Android version/package set, the wizard offers to download the newest published build (`andler image download`) — a download failure falls back to entering a path manually, it never fails the wizard.
@@ -751,7 +754,7 @@ andler image download (--android-version <11|13> --variant <vanilla|gapps> | --r
 
 `list` prints the newest build per (version, package set) with its download size and whether it is already in `~/.andler/cache/base-images/<android>-<variant>/`; `--json` reports `{source, images:[…]}`. `download` verifies every asset against the sha256 in the release's manifest, unpacks the zstd stream, verifies the unpacked qcow2 and installs the image together with the manifest exactly as published. An already-cached build is reused (`already cached`) unless `--force`; an interrupted download resumes from its verified parts. `--json` emits one JSON document per progress line.
 
-Progress goes to stderr and depends on where it is read: on a terminal `download` shows the same bar the wizard's guest-image question uses (phase, transferred bytes against the total, ETA) and finishes with `✓ downloaded and verified` plus the installed path; without a terminal it prints the phase transitions and one line per 10 % of the payload, ending with `done: …` and `installed …` — the shape a log or a script consumes.
+Progress goes to stderr and depends on where it is read: on a terminal `download` shows the same bar the wizard's guest-image question uses (phase, transferred bytes against the total, transfer rate, ETA) and finishes with `✓ downloaded and verified` plus the installed path; without a terminal it prints the phase transitions and one line per 10 % of the payload, ending with `done: …` and `installed …` — the shape a log or a script consumes.
 
 The daemon reads `ANDLERD_IMAGE_REPO` (default `hateoff0/andler`), `ANDLERD_IMAGE_API_BASE` (default `https://api.github.com`) and `ANDLERD_IMAGE_TOKEN` (unless `GH_TOKEN`/`GITHUB_TOKEN` is already set). The token is required when the repository is private — GitHub answers `404` for its release index otherwise, which the error explains — and it also raises the anonymous rate limit (60 requests/hour) to 5000.
 

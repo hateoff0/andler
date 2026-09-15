@@ -62,13 +62,21 @@ so the same operation runs in two boots with ~10ms per call — measured,
 
 Three properties the session keeps:
 
-- it is stopped with the mutator (a kill of the serving pid, which
-  `guestfish --listen` prints as `GUESTFISH_PID=`), and that line is also its
-  readiness signal;
-- a listener left behind by a killed daemon still holds the guest image's lock,
-  so booting a session reaps orphaned listeners (a guestfish whose parent is
-  gone) first;
+- it is stopped with the mutator, and the kill is aimed at the session's whole
+  process group: `guestfish --listen` (the pid it prints as `GUESTFISH_PID=`)
+  forks a server, and that server starts the appliance's own QEMU — killing the
+  listener alone leaves the QEMU orphaned but alive, still holding the guest
+  image open, and every later session on that image then fails to mount it. The
+  session is spawned in a process group of its own so the group kill cannot
+  reach the daemon, and the printed line is also its readiness signal;
+- a session left behind by a killed daemon is reaped the same way before a new
+  one boots: the socket names the listener, the listener's group (read from
+  `/proc/<pid>/stat`) names the appliance, and both are killed;
 - a command the appliance rejects can end the listener with it, and the process
   is not gone until it is reaped (a pid probe still answers), so the client
   treats "server is not running" as retryable, stops the old session before
-  booting the next one, and never leaves the image lock to a session nobody owns.
+  booting the next one, and never leaves the image lock to a session nobody owns;
+- every call captures both streams, and a failed one reports the appliance's own
+  output on whichever stream carried it: a command that fails on the guest's
+  side says why there, and the status alone ("guestfish exited with exit status:
+  1") cannot be told apart from the client being unable to reach the session.

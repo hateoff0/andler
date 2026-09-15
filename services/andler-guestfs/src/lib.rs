@@ -68,17 +68,27 @@ pub struct GuestfsMutator {
 /// The booted guestfish appliance: it listens for commands and every later
 /// call is a `--remote` client against the same session. `guestfish --listen`
 /// forks, so the wrapper process and the serving process are both ours to
-/// stop.
+/// stop — and so is the appliance's own QEMU, which the *server* started.
+///
+/// That last one is why the session runs in its own process group and is torn
+/// down by group: killing the server alone leaves its QEMU orphaned but alive,
+/// still holding the guest disk open. Every later session on that disk then
+/// fails to mount it (the file is locked), which is how a single lost session
+/// used to poison the disk for the rest of the daemon's life.
 struct ListeningSession {
     server_pid: i32,
+    /// The session's process group: the wrapper, the server it forks, and the
+    /// appliance QEMU that server starts all live in it.
+    group: i32,
     child: tokio::process::Child,
 }
 
 impl Drop for ListeningSession {
     fn drop(&mut self) {
-        // SAFETY: kill with a pid we spawned and a signal number; no memory is
-        // involved.
+        // SAFETY: killpg against a group this crate created for one appliance
+        // session; the daemon itself is never a member of it.
         unsafe {
+            libc::killpg(self.group, libc::SIGKILL);
             libc::kill(self.server_pid, libc::SIGKILL);
         }
         let _ = self.child.start_kill();
@@ -141,6 +151,9 @@ impl GuestfsMutator {
     async fn start_session(&self) -> Result<ListeningSession, MutatorError> {
         self.reap_orphaned_listeners();
         let mut cmd = tokio::process::Command::new("guestfish");
+        // Its own process group (see `ListeningSession`): the appliance QEMU
+        // has to die with the session, not outlive it and lock the disk.
+        cmd.process_group(0);
         cmd.args(listen_args(self.mount.as_deref(), self.network));
         cmd.args(["-a", &self.disk.display().to_string()]);
         cmd.stdin(std::process::Stdio::null());
@@ -151,6 +164,10 @@ impl GuestfsMutator {
         let mut child = cmd
             .spawn()
             .map_err(|e| MutatorError::Io(format!("cannot spawn guestfish: {e}")))?;
+        let wrapper_pid = child
+            .id()
+            .and_then(|pid| i32::try_from(pid).ok())
+            .ok_or_else(|| MutatorError::Io("guestfish session has no pid".to_string()))?;
         let stdout = child
             .stdout
             .take()
@@ -219,7 +236,11 @@ impl GuestfsMutator {
             server_pid,
             "guestfish appliance is listening"
         );
-        Ok(ListeningSession { server_pid, child })
+        Ok(ListeningSession {
+            server_pid,
+            group: wrapper_pid,
+            child,
+        })
     }
 
     /// Kills listeners left behind by a daemon that died: `guestfish --listen`
@@ -253,10 +274,20 @@ impl GuestfsMutator {
                 .map(|parent| parent == "1")
                 .unwrap_or(false);
             if orphaned {
-                tracing::debug!(pid, "killing an appliance listener left by a dead daemon");
-                // SAFETY: kill with a pid read from this user's own socket
-                // directory after checking the process is a guestfish.
+                // The group, not just the listener: a listener's appliance QEMU
+                // outlives its parent and holds the guest disk open, so killing
+                // only the pid would leave the disk locked with no server left
+                // to blame.
+                let group = process_group(pid).unwrap_or(pid);
+                tracing::debug!(
+                    pid,
+                    group,
+                    "killing an appliance session left by a dead daemon"
+                );
+                // SAFETY: killpg/kill against pids read from this user's own
+                // socket directory after checking the process is a guestfish.
                 unsafe {
+                    libc::killpg(group, libc::SIGKILL);
                     libc::kill(pid, libc::SIGKILL);
                 }
             }
@@ -271,18 +302,14 @@ impl GuestfsMutator {
     /// accepting the next: it closes its socket and reopens it per command, so a
     /// call that arrives in between gets "the server is not running" from a
     /// session that is very much alive.
-    async fn run_guestfish(
-        &self,
-        script: &str,
-        capture_stdout: bool,
-    ) -> Result<Vec<u8>, MutatorError> {
+    async fn run_guestfish(&self, script: &str) -> Result<Vec<u8>, MutatorError> {
         let mut slot = self.session.lock().await;
         let mut server_pid = self.live_session(&mut slot).await?;
         let mut attempt = 0;
         let mut reboots = 0;
         loop {
             attempt += 1;
-            match self.run_remote(server_pid, script, capture_stdout).await {
+            match self.run_remote(server_pid, script).await {
                 Ok(output) => return Ok(output),
                 Err(error) => {
                     let transient = matches!(
@@ -313,12 +340,7 @@ impl GuestfsMutator {
         }
     }
 
-    async fn run_remote(
-        &self,
-        server_pid: i32,
-        script: &str,
-        capture_stdout: bool,
-    ) -> Result<Vec<u8>, MutatorError> {
+    async fn run_remote(&self, server_pid: i32, script: &str) -> Result<Vec<u8>, MutatorError> {
         let mut cmd = tokio::process::Command::new("guestfish");
         // The waiter's timeout is the only thing that ends this client, so it
         // must not outlive the future watching it; the appliance belongs to the
@@ -326,11 +348,10 @@ impl GuestfsMutator {
         cmd.kill_on_drop(true);
         cmd.arg(format!("--remote={server_pid}"));
         cmd.stdin(std::process::Stdio::piped());
-        if capture_stdout {
-            cmd.stdout(std::process::Stdio::piped());
-        } else {
-            cmd.stdout(std::process::Stdio::null());
-        }
+        // Stdout is captured on every call, not just the probing ones: a failing
+        // appliance command can report on either stream, and its output is the
+        // only thing that explains what went wrong.
+        cmd.stdout(std::process::Stdio::piped());
         cmd.stderr(std::process::Stdio::piped());
 
         let started = std::time::Instant::now();
@@ -374,19 +395,49 @@ impl GuestfsMutator {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            let reason = stderr.trim();
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let reason = if stderr.trim().is_empty() {
+                stdout.trim()
+            } else {
+                stderr.trim()
+            };
             let msg = if reason.is_empty() {
                 format!("guestfish exited with {}", output.status)
             } else {
                 reason.to_string()
             };
-            if msg.contains("not found") || msg.contains("No such file") {
-                return Err(MutatorError::NotFound(msg));
-            }
-            return Err(MutatorError::Io(msg));
+            return Err(classify_failure(&msg));
         }
         Ok(output.stdout)
     }
+}
+
+/// A process's process-group id, from `/proc/<pid>/stat` (field 5).
+fn process_group(pid: i32) -> Option<i32> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    // The command name sits in parentheses and may contain spaces, so the
+    // fields after it are the ones to count from.
+    let rest = stat.rsplit(')').next()?;
+    rest.split_whitespace().nth(2)?.parse::<i32>().ok()
+}
+
+/// Which failure a dead client reported.
+///
+/// The two cases look alike in text and are nothing alike in cause: a command
+/// that could not find a *guest* path is final, while a client that cannot
+/// reach its own appliance session is transient — the session is repaired by
+/// rebooting it (see `run_guestfish`), and the retry loop only retries what it
+/// can tell apart. A session failure names the appliance's socket
+/// (`$TMPDIR/.guestfish-<uid>/socket-<pid>`); a guest failure names the guest
+/// path.
+fn classify_failure(message: &str) -> MutatorError {
+    if message.contains("server is not running") || message.contains(".guestfish-") {
+        return MutatorError::Io(message.to_string());
+    }
+    if message.contains("not found") || message.contains("No such file") {
+        return MutatorError::NotFound(message.to_string());
+    }
+    MutatorError::Io(message.to_string())
 }
 
 /// Wraps a guest path in single quotes for the guestfish script parser
@@ -513,7 +564,7 @@ impl GuestMutator for GuestfsMutator {
                 }
             }
             let script = build_script(ops, &content_dir);
-            self.run_guestfish(&script, false).await?;
+            self.run_guestfish(&script).await?;
             Ok::<(), MutatorError>(())
         }
         .await;
@@ -524,12 +575,12 @@ impl GuestMutator for GuestfsMutator {
 
     async fn read_file(&self, path: &str) -> Result<Vec<u8>, MutatorError> {
         let script = format!("download {} -\n", quote(path));
-        self.run_guestfish(&script, true).await
+        self.run_guestfish(&script).await
     }
 
     async fn exists(&self, path: &str) -> Result<bool, MutatorError> {
         let script = format!("exists {}\n", quote(path));
-        let out = self.run_guestfish(&script, true).await?;
+        let out = self.run_guestfish(&script).await?;
         Ok(String::from_utf8_lossy(&out).trim() == "true")
     }
 
@@ -541,7 +592,7 @@ impl GuestMutator for GuestfsMutator {
         for path in paths {
             script.push_str(&format!("exists {}\n", quote(path)));
         }
-        let out = self.run_guestfish(&script, true).await?;
+        let out = self.run_guestfish(&script).await?;
         parse_probe_answers(&out, paths.len())
     }
 }
@@ -661,6 +712,34 @@ mod timeout_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_process_group_is_readable_from_proc() {
+        let own = process_group(std::process::id() as i32).expect("own /proc entry");
+        assert!(own > 0, "the test process has a process group");
+        assert_eq!(process_group(i32::MAX), None, "a missing pid has no group");
+    }
+
+    #[test]
+    fn a_dead_session_is_not_confused_with_a_missing_guest_path() {
+        // The retry loop reboots the session on the first and refuses on the
+        // second, so the two must not classify alike — and the dead-session
+        // text also contains "No such file", which is what made an install
+        // fail after two seconds instead of being retried.
+        let dead = "/tmp/.guestfish-1000/socket-2447725: No such file or directory\n                    guestfish: remote: looks like the server is not running";
+        assert!(
+            matches!(classify_failure(dead), MutatorError::Io(_)),
+            "a session failure must stay retryable"
+        );
+        assert!(matches!(
+            classify_failure("libguestfs: error: stat: /etc/nope: No such file or directory"),
+            MutatorError::NotFound(_)
+        ));
+        assert!(matches!(
+            classify_failure("chroot: failed to run command 'nope': No such file or directory"),
+            MutatorError::NotFound(_)
+        ));
+    }
 
     #[test]
     fn probe_answers_must_match_the_paths_asked() {

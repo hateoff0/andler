@@ -193,7 +193,7 @@ async fn stopped_remove_auto_starts_removes_and_stops_again() {
 }
 
 #[tokio::test]
-async fn stopped_install_without_agent_fails_and_leaves_instance_stopped() {
+async fn stopped_install_without_agent_falls_back_to_the_appliance() {
     let dir = TestTempDir::new();
     std::env::set_var("ANDLERD_GUEST_AGENT_WAIT_SECS", "5");
     let (daemon, mock, id) = stopped_instance_with_maintenance_backend(dir.path(), false).await;
@@ -205,8 +205,14 @@ async fn stopped_install_without_agent_fails_and_leaves_instance_stopped() {
 
     std::env::remove_var("ANDLERD_GUEST_AGENT_WAIT_SECS");
     assert!(
-        matches!(&err, DaemonError::GuestAgentUnavailable { message, .. } if message.contains("--offline")),
-        "err: {err}"
+        matches!(err, DaemonError::Disk(_)),
+        "an agent that never answers is not the end of the install — the appliance path runs \
+         next, and fails here only because this test's disk holds no guest: {err}"
+    );
+    assert_eq!(
+        mock.spawns.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "the smart path still boots the VM once before giving up on its agent"
     );
     assert_eq!(mock.stops.load(std::sync::atomic::Ordering::SeqCst), 1);
     let handle = daemon.handle_for(id).await.unwrap();
