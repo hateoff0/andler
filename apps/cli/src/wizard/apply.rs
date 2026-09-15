@@ -2,14 +2,15 @@ use andler_rpc::proto::{GuestProfileEntry, GuestProfileStatus, InstanceIdRequest
 
 use crate::TracedClient;
 
-use super::ui::{self, Progress, Screen, Status};
+use super::ui::{self, Screen, Status};
 use super::{WizardError, WizardKind, WizardResult};
 
 pub async fn create(
     client: &mut TracedClient,
     result: &WizardResult,
 ) -> Result<String, WizardError> {
-    let mut progress = Progress::start("creating the vm");
+    let spinner = cliclack::spinner();
+    spinner.start("creating the virtual machine");
     let created = match result.creation.clone().into_request() {
         crate::create::ProtoRequest::Linux(req) => client
             .create_instance(*req)
@@ -20,22 +21,37 @@ pub async fn create(
             .await
             .map(|response| response.into_inner().instance_id),
     };
-    progress.finish();
 
-    created.map_err(|e| WizardError::Inquire(crate::format_grpc_error(&e)))
+    match created {
+        Ok(id) => {
+            spinner.stop(format!(
+                "{} created ({})",
+                result.creation.cfg.name,
+                crate::helpers::short_id(&id)
+            ));
+            Ok(id)
+        }
+        Err(e) => {
+            let message = crate::format_grpc_error(&e);
+            spinner.error("the instance could not be created");
+            Err(WizardError::Message(message))
+        }
+    }
 }
 
 pub async fn apply_guest_selections(
     client: &mut TracedClient,
     id: &str,
 ) -> Result<Vec<GuestProfileEntry>, WizardError> {
-    let mut progress = Progress::start("applying your selections inside the vm");
+    let spinner = cliclack::spinner();
+    spinner.start("applying your selections inside the VM");
+    let updates = spinner.clone();
     let mut call_client = client.clone();
     let result = crate::helpers::call_with_operation_progress(
         client,
         id,
         "applying the guest selections",
-        |line| progress.update(line),
+        |line| updates.set_message(line),
         async move {
             call_client
                 .apply_guest_profile(InstanceIdRequest {
@@ -45,11 +61,17 @@ pub async fn apply_guest_selections(
         },
     )
     .await;
-    progress.finish();
 
     match result {
-        Ok(response) => Ok(response.into_inner().entries),
-        Err(e) => Err(WizardError::Inquire(crate::format_grpc_error(&e))),
+        Ok(response) => {
+            spinner.stop("guest selections applied");
+            Ok(response.into_inner().entries)
+        }
+        Err(e) => {
+            let message = crate::format_grpc_error(&e);
+            spinner.error("the guest selections could not be applied");
+            Err(WizardError::Message(message))
+        }
     }
 }
 

@@ -271,7 +271,8 @@ backend = "None"
 - Missing required Linux field fails
 - Missing file → `Read` error
 - Invalid TOML → `Parse` error
-- Wizard: `--quick` request building for Linux/Android (incl. base-image resolution failures and `--linked-overlay` forwarding), non-TTY refusal, request builders per mode, `AdvancedConfig::default` = the recommended configuration, network-mode mapping, Android group labels unique
+- Wizard: `--quick` request building for Linux/Android (incl. base-image resolution failures and `--linked-overlay` forwarding), non-TTY refusal, request builders per mode, `AdvancedConfig::default` = the recommended configuration, network choice ↔ mode mapping (incl. the bridge interface staying with its own question), Android group labels unique
+- Wizard answers: name (trimmed, separators rejected) and disk-size validators incl. range boundaries, resolution parsing, and the base-image download's per-phase progress line (batch position only when the daemon reports one)
 - Wizard presentation: panels render equal-width frames regardless of how long a base-image path is, `NO_COLOR` disables styling, summary text carries the answers and lists what will be installed inside the VM
 - Image command: the release-catalog JSON shape and progress-line rendering
 
@@ -318,9 +319,9 @@ GPU fields (vram, gpu) appear when AMD, NVIDIA, or Intel GPU data is available.
 | `helpers.rs` | — | `parse_size`, `format_size`, `format_bytes`, `ensure_qcow2_extension`, `spinner`, `short_id`, `emit_json` |
 | `wizard/mod.rs` | — | Wizard orchestration: `run` (answers → request), `--quick` defaults, `handle_wizard` (create + apply + report), errors |
 | `wizard/basic.rs` | — | Basic questions: kind, name, ISO, disk size, UEFI, Android version/package set |
-| `wizard/advanced.rs` | — | Advanced questions grouped by area (boot/disks, display/GPU, devices, CPU/memory, network, Android); "change some settings" re-asks only the picked groups |
+| `wizard/advanced.rs` | — | Advanced questions grouped by area (boot/disks, display/GPU, devices, CPU/memory, network, Android); "change some settings" re-asks the picked groups, each question defaulting to its previous answer |
 | `wizard/build.rs` | — | Config building — wizard answers → `CreateInstanceRequest`/`CreateAndroidInstanceRequest`, base-image re-resolution |
-| `wizard/ui.rs` | — | Presentation — content-sized panels, step/group headers, NO_COLOR-aware styling |
+| `wizard/ui.rs` | — | Presentation — content-sized panels with NO_COLOR-aware styling, plus the dialog's framing: session intro/outro, step and warning lines, and the typed prompts' shared error mapping |
 | `wizard/base_image.rs` | — | Base-image question: local cache lookup, offering a published build for download, manual path |
 | `wizard/apply.rs` | — | Create + apply the guest selections + report (instance id, per-selection outcome, next steps) |
 | `wizard/summary.rs` | — | Summary screen (identity/storage/display/CPU/network + what will be installed inside the VM) and Create/Change/Cancel |

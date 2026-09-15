@@ -1,6 +1,5 @@
 use andler_core::{DisplayEngine, NatBackend, NetworkMode, RenderBackend, Resolution};
 use andler_firmware::HardwareDefaults;
-use inquire::Select;
 
 use crate::CliArmTranslator;
 
@@ -8,7 +7,7 @@ use super::advanced::AdvancedConfig;
 use super::basic::BasicResult;
 use super::build::resolve_arm_translator;
 use super::ui::Screen;
-use super::{map_inquire_err, ui, WizardError};
+use super::{ui, WizardError};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SummaryAction {
@@ -26,23 +25,22 @@ pub fn run(
     print!("{}", summary_text(basic, advanced, detected));
     println!();
 
-    let create = "Create the VM";
-    let modify = "Change some settings";
-    let cancel = "Cancel";
-    let choice = Select::new("Proceed?", vec![create, modify, cancel])
-        .with_help_message(
-            "The guest-side selections below are installed inside the VM right after creation.",
+    let action = cliclack::select("What next?")
+        .item(
+            SummaryAction::Create,
+            "Create the VM",
+            "creates it and installs the guest selections listed above",
         )
-        .prompt()
-        .map_err(map_inquire_err)?;
+        .item(
+            SummaryAction::Modify,
+            "Change some settings",
+            "re-asks only the groups you pick",
+        )
+        .item(SummaryAction::Cancel, "Cancel", "nothing is created")
+        .initial_value(SummaryAction::Create)
+        .interact()?;
 
-    Ok(if choice == create {
-        SummaryAction::Create
-    } else if choice == modify {
-        SummaryAction::Modify
-    } else {
-        SummaryAction::Cancel
-    })
+    Ok(action)
 }
 
 fn summary_text(

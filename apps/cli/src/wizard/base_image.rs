@@ -1,14 +1,12 @@
 use andler_rpc::proto::{
-    AndroidVersion as ProtoAndroidVersion, BaseImageDownloadPhase, DownloadBaseImageRequest,
-    ListRemoteBaseImagesRequest, RemoteBaseImageEntry,
+    AndroidVersion as ProtoAndroidVersion, BaseImageDownloadPhase, BaseImageDownloadProgress,
+    DownloadBaseImageRequest, ListRemoteBaseImagesRequest, RemoteBaseImageEntry,
 };
-use inquire::{Confirm, Select, Text};
 
 use crate::{CliAndroidVersion, TracedClient};
 
 use super::basic::validate_base_image_path;
-use super::map_inquire_err;
-use super::ui::{self, Progress, Status};
+use super::ui;
 use super::WizardError;
 
 /// Where the Android base image comes from: an existing file, or a build the
@@ -20,7 +18,13 @@ pub struct Choice {
     pub auto_resolved: bool,
 }
 
-const ENTER_MANUALLY: &str = "Enter a path manually";
+/// The two answers to "where does the image come from", as values: the labels
+/// carry a build id and a size, which is not something to parse back out.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Source {
+    Published,
+    Manual,
+}
 
 pub async fn ask(
     client: &mut TracedClient,
@@ -50,64 +54,58 @@ pub async fn ask(
                 auto_resolved: true,
             });
         }
-        None => fetch_catalog(client, version, gapps).await,
+        None => fetch_catalog(client, version, gapps).await?,
     };
 
-    let mut options: Vec<String> = Vec::new();
-    if let Some(image) = &published {
-        options.push(format!(
-            "Download {} ({}) from the release pipeline",
-            image.id,
-            super::basic::describe_size(image.download_bytes)
-        ));
-    }
-    options.push(ENTER_MANUALLY.to_string());
-
-    let prompt = format!(
-        "No matching {variant} image for Android {} in the cache:",
-        version.number()
-    );
-    let choice = Select::new(&prompt, options.clone())
-        .with_help_message(&match &published {
-            Some(image) => format!(
-                "Downloads into ~/.andler/cache/base-images/ and installs the image there; \
-                 published as release {}",
-                image.release_tag
-            ),
-            None => {
-                "Build one with docker/images/build.sh, or point at an existing .qcow2".to_string()
-            }
-        })
-        .prompt()
-        .map_err(map_inquire_err)?;
-
-    match published {
-        Some(image) if choice == options[0] => download(client, &image).await,
-        _ => {
-            ui::note(
-                "Expected an existing .qcow2 built by docker/images/build.sh \
-                 (a plain path also works).",
-            );
-            let path = Text::new("Path to Android base image:")
-                .with_placeholder("/home/user/.andler/cache/base-images/android13-vanilla/…")
-                .with_validator(|s: &str| {
-                    if s.trim().is_empty() {
-                        Ok(inquire::validator::Validation::Invalid(
-                            "Base image path is required".into(),
-                        ))
-                    } else {
-                        Ok(inquire::validator::Validation::Valid)
-                    }
-                })
-                .prompt()
-                .map_err(map_inquire_err)?;
-            validate_base_image_path(&path)?;
-            Ok(Choice {
-                path,
-                auto_resolved: false,
-            })
+    let choice = match &published {
+        Some(image) => cliclack::select(format!(
+            "No {variant} image for Android {} in the cache\nwhere should the guest image come from?",
+            version.number()
+        ))
+        .item(
+            Source::Published,
+            "Download the published build",
+            // The build id is 36 columns long and the list prefix takes five:
+            // the id belongs in the confirmation question below (and in the
+            // summary), not on the highlighted line.
+            format!("{} — into the cache", super::basic::describe_size(image.download_bytes)),
+        )
+        .item(
+            Source::Manual,
+            "Enter a path manually",
+            "an existing .qcow2 on this host",
+        )
+        .initial_value(Source::Published)
+        .interact()?,
+        None => {
+            // One option is not a question: the catalog said there is no
+            // build to offer, so say why and ask for the path directly.
+            ui::info(format!(
+                "No {variant} image for Android {} in the cache, and no published build was \
+                 found. Build one with `docker/images/build.sh <11|13> <VANILLA|GAPPS>`, \
+                 download a published one with `andler image download`, or point at an \
+                 existing .qcow2.",
+                version.number()
+            ))?;
+            Source::Manual
         }
+    };
+
+    if let (Source::Published, Some(image)) = (choice, published) {
+        return download(client, &image).await;
     }
+
+    let path: String = cliclack::input("Path to the Android base image")
+        .placeholder("/home/user/.andler/cache/base-images/android13-vanilla/…")
+        .validate(|input: &String| {
+            validate_base_image_path(input.trim()).map_err(|e| e.to_string())
+        })
+        .interact()?;
+
+    Ok(Choice {
+        path: path.trim().to_string(),
+        auto_resolved: false,
+    })
 }
 
 /// The newest published build for this (version, package set), if the daemon
@@ -117,27 +115,33 @@ async fn fetch_catalog(
     client: &mut TracedClient,
     version: CliAndroidVersion,
     gapps: bool,
-) -> Option<RemoteBaseImageEntry> {
-    let mut progress = Progress::start("checking published base images");
+) -> Result<Option<RemoteBaseImageEntry>, WizardError> {
+    let spinner = cliclack::spinner();
+    spinner.start("reading the published base-image catalog");
     let result = client
         .list_remote_base_images(ListRemoteBaseImagesRequest {
             android_version: ProtoAndroidVersion::from(version) as i32,
             android_variant: if gapps { "GAPPS" } else { "VANILLA" }.to_string(),
         })
         .await;
-    progress.finish();
 
     match result {
-        Ok(response) => response.into_inner().images.into_iter().next(),
+        Ok(response) => {
+            let found = response.into_inner().images.into_iter().next();
+            match &found {
+                Some(image) => spinner.stop(format!("published build: {}", image.id)),
+                None => spinner.stop("the pipeline has published no build for this configuration"),
+            }
+            Ok(found)
+        }
         Err(e) => {
-            ui::result(
-                Status::Warn,
-                &format!(
-                    "Could not read the published base-image catalog: {}",
-                    crate::format_grpc_error(&e)
-                ),
-            );
-            None
+            // The daemon's message is long and carries the actionable half
+            // (which env var to point elsewhere), so it goes through the log
+            // line — written after the spinner is stopped — instead of the
+            // transient progress line, whose tail the next redraw overwrites.
+            spinner.error("the published base-image catalog could not be read");
+            ui::warn(crate::format_grpc_error(&e))?;
+            Ok(None)
         }
     }
 }
@@ -146,23 +150,34 @@ async fn download(
     client: &mut TracedClient,
     image: &RemoteBaseImageEntry,
 ) -> Result<Choice, WizardError> {
-    let confirmed = Confirm::new(&format!(
-        "Download {} ({})?",
+    let confirmed = cliclack::confirm(format!(
+        "Download {} ({})?\nverified against the release manifest's sha256\n\
+         installed into ~/.andler/cache/base-images/",
         image.id,
         super::basic::describe_size(image.download_bytes)
     ))
-    .with_default(true)
-    .with_help_message(
-        "Verified against the sha256 in the release manifest before it is installed.",
-    )
-    .prompt()
-    .map_err(map_inquire_err)?;
+    .initial_value(true)
+    .interact()?;
     if !confirmed {
         return Err(WizardError::Cancelled);
     }
 
-    let mut progress = Progress::start(&format!("downloading {}", image.id));
-    let mut stream = client
+    // One bar for the whole payload: the daemon reports bytes fetched so far
+    // across every asset, so the bar only moves forward — across parts, and
+    // across the extraction that follows them.
+    //
+    // The template is cliclack's download shape minus `[{elapsed_precise}]`
+    // and with a 20-column bar: the stock one spends 98 columns on this line
+    // (3 for the symbol, 25 for the message, 30 for the bar, 20 for the byte
+    // counters, 4 for the ETA), and a live frame wider than the terminal wraps
+    // — the redraw then leaves the wrapped remainder on screen.
+    let progress = cliclack::progress_bar(1)
+        .with_template("{msg} [{bar:20.cyan/blue}] {bytes}/{total_bytes} ({eta})");
+    // The message stays short on purpose: it shares the line with the bar,
+    // the byte counters and the ETA.
+    progress.start("downloading the base image");
+
+    let mut stream = match client
         .download_base_image(DownloadBaseImageRequest {
             android_version: ProtoAndroidVersion::Unspecified as i32,
             android_variant: String::new(),
@@ -170,53 +185,54 @@ async fn download(
             force: false,
         })
         .await
-        .map_err(|e| WizardError::Inquire(crate::format_grpc_error(&e)))?
-        .into_inner();
+    {
+        Ok(response) => response.into_inner(),
+        Err(e) => {
+            // The daemon's message is long and names what to do next, so it
+            // goes through the log line (which wraps) rather than the one-line
+            // progress frame (which does not).
+            let message = crate::format_grpc_error(&e);
+            progress.error("the download could not be started");
+            ui::warn(&message)?;
+            return Err(WizardError::Message(message));
+        }
+    };
 
     let mut installed = String::new();
     loop {
         match stream.message().await {
             Ok(Some(message)) => {
-                let line = match message.phase() {
-                    BaseImageDownloadPhase::Downloading => format!(
-                        "downloading {} ({}/{}) — {} / {}",
-                        message.asset,
-                        message.asset_index,
-                        message.asset_count,
-                        crate::helpers::format_bytes(message.downloaded_bytes),
-                        crate::helpers::format_bytes(message.total_bytes),
-                    ),
-                    BaseImageDownloadPhase::Verifying => {
-                        format!("verifying {}", message.asset)
-                    }
-                    BaseImageDownloadPhase::Extracting => "unpacking the image".to_string(),
-                    BaseImageDownloadPhase::Installing => "installing into the cache".to_string(),
-                    BaseImageDownloadPhase::Resolving => "resolving the build".to_string(),
-                    BaseImageDownloadPhase::Done => "done".to_string(),
-                    BaseImageDownloadPhase::Unspecified => String::new(),
-                };
-                progress.update(&line);
+                if message.total_bytes > 0 {
+                    progress.set_length(message.total_bytes);
+                    progress.set_position(message.downloaded_bytes.min(message.total_bytes));
+                }
+                let line = progress_line(&message);
+                if !line.is_empty() {
+                    progress.set_message(line);
+                }
                 if message.phase() == BaseImageDownloadPhase::Done {
                     installed = message.installed_path;
                 }
             }
             Ok(None) => break,
             Err(e) => {
-                progress.finish();
-                return Err(WizardError::Inquire(crate::format_grpc_error(&e)));
+                let message = crate::format_grpc_error(&e);
+                progress.error("the download failed");
+                ui::warn(&message)?;
+                return Err(WizardError::Message(message));
             }
         }
     }
-    progress.finish();
 
     if installed.is_empty() {
-        return Err(WizardError::Inquire(
+        progress.error("the download reported no installed path");
+        return Err(WizardError::Message(
             "the download finished without reporting an installed path; \
              run `andler image list` to see what is in the cache"
                 .to_string(),
         ));
     }
-    ui::result(Status::Ok, &format!("Base image ready: {installed}"));
+    progress.stop("base image ready");
     // The wizard picked this build out of the published catalog, so it is as
     // "auto" as a local cache hit: if a later answer changes which image the
     // profile matches (the Android group's GApps toggle), re-resolution runs
@@ -226,4 +242,126 @@ async fn download(
         path: installed,
         auto_resolved: true,
     })
+}
+
+/// What the line under the progress bar says for one stream message. The
+/// batch position is only printed when the daemon knows it — mid-transfer
+/// messages carry no asset index, and `(0/0)` is not something to show.
+fn progress_line(message: &BaseImageDownloadProgress) -> String {
+    match message.phase() {
+        BaseImageDownloadPhase::Downloading if message.asset_count > 0 => {
+            format!(
+                "downloading part {}/{}",
+                message.asset_index, message.asset_count
+            )
+        }
+        BaseImageDownloadPhase::Downloading => "downloading".to_string(),
+        BaseImageDownloadPhase::Verifying => "verifying".to_string(),
+        BaseImageDownloadPhase::Extracting => "unpacking the image".to_string(),
+        BaseImageDownloadPhase::Installing => "installing the image".to_string(),
+        BaseImageDownloadPhase::Resolving => "resolving the build".to_string(),
+        BaseImageDownloadPhase::Done => "done".to_string(),
+        BaseImageDownloadPhase::Unspecified => String::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn message(
+        phase: BaseImageDownloadPhase,
+        asset: &str,
+        asset_index: u32,
+        asset_count: u32,
+    ) -> BaseImageDownloadProgress {
+        BaseImageDownloadProgress {
+            phase: phase.into(),
+            asset: asset.to_string(),
+            asset_index,
+            asset_count,
+            downloaded_bytes: 0,
+            total_bytes: 0,
+            message: String::new(),
+            installed_path: String::new(),
+        }
+    }
+
+    #[test]
+    fn every_phase_names_itself_on_the_progress_line() {
+        assert_eq!(
+            progress_line(&message(
+                BaseImageDownloadPhase::Verifying,
+                "image.qcow2.zst.00.part",
+                1,
+                2
+            )),
+            "verifying"
+        );
+        assert_eq!(
+            progress_line(&message(BaseImageDownloadPhase::Extracting, "stem", 0, 0)),
+            "unpacking the image"
+        );
+        assert_eq!(
+            progress_line(&message(BaseImageDownloadPhase::Installing, "stem", 0, 0)),
+            "installing the image"
+        );
+        assert_eq!(
+            progress_line(&message(BaseImageDownloadPhase::Resolving, "stem", 0, 0)),
+            "resolving the build"
+        );
+        assert_eq!(
+            progress_line(&message(BaseImageDownloadPhase::Done, "stem", 0, 0)),
+            "done"
+        );
+        assert_eq!(
+            progress_line(&message(BaseImageDownloadPhase::Unspecified, "stem", 0, 0)),
+            "",
+            "an unspecified phase must not overwrite the line already on screen"
+        );
+    }
+
+    #[test]
+    fn the_batch_position_only_appears_when_the_daemon_knows_it() {
+        assert_eq!(
+            progress_line(&message(
+                BaseImageDownloadPhase::Downloading,
+                "image.qcow2.zst.00.part",
+                1,
+                2
+            )),
+            "downloading part 1/2"
+        );
+        assert_eq!(
+            progress_line(&message(
+                BaseImageDownloadPhase::Downloading,
+                "image.qcow2.zst.00.part",
+                0,
+                0
+            )),
+            "downloading",
+            "mid-transfer messages carry no index, and (0/0) is noise"
+        );
+    }
+
+    #[test]
+    fn a_progress_line_stays_inside_the_terminal() {
+        // The download template adds `[{elapsed}] [30-char bar] {bytes}/{total}
+        // ({eta})` — about 55 columns — so anything above ~24 here wraps the
+        // live frame, and a wrapped frame leaves its tail behind on redraw.
+        for phase in [
+            BaseImageDownloadPhase::Downloading,
+            BaseImageDownloadPhase::Verifying,
+            BaseImageDownloadPhase::Extracting,
+            BaseImageDownloadPhase::Installing,
+            BaseImageDownloadPhase::Resolving,
+            BaseImageDownloadPhase::Done,
+        ] {
+            let line = progress_line(&message(phase, "some-image.qcow2.zst.00.part", 12, 97));
+            assert!(
+                line.chars().count() <= 24,
+                "{phase:?} renders {line:?}, which is too long for the download template's chrome"
+            );
+        }
+    }
 }

@@ -1,4 +1,4 @@
-use std::io::{IsTerminal, Write};
+use std::io::IsTerminal;
 
 use andler_core::{
     ArmTranslator, AudioBackend, CdromBus, DisplayEngine, PointerMode, RenderBackend,
@@ -20,7 +20,6 @@ const INDENT: usize = 2;
 const GAP: usize = 2;
 const MIN_COLUMNS: usize = 32;
 const MAX_COLUMNS: usize = 100;
-const SECTION_COLUMNS: usize = 80;
 const MIN_RULE: usize = 4;
 const STATUS_WIDTH: usize = 7;
 
@@ -107,7 +106,6 @@ pub(crate) enum Status {
     Present,
     Skipped,
     Unknown,
-    Warn,
     Failed,
 }
 
@@ -118,7 +116,6 @@ impl Status {
             Status::Present => "present",
             Status::Skipped => "skipped",
             Status::Unknown => "unknown",
-            Status::Warn => "warn",
             Status::Failed => "failed",
         }
     }
@@ -126,7 +123,7 @@ impl Status {
     fn color(self) -> &'static str {
         match self {
             Status::Ok | Status::Present => OK,
-            Status::Skipped | Status::Unknown | Status::Warn => ATTENTION,
+            Status::Skipped | Status::Unknown => ATTENTION,
             Status::Failed => ERROR,
         }
     }
@@ -373,92 +370,52 @@ fn terminal_columns(fd: i32) -> Option<usize> {
     (measured == 0 && size.ws_col > 0).then_some(size.ws_col as usize)
 }
 
+/// The header of a panel — the readable record of a step, on stdout like the
+/// rest of the panel (the dialog itself is on stderr).
 pub(crate) fn header(title: &str) {
     println!();
     println!("{}", paint(&format!("▸ {title}"), TITLE, color_enabled()));
 }
 
-pub(crate) fn section(title: &str) {
-    println!();
-    print!("{}", section_line(title, section_width(), color_enabled()));
+/// Opens the wizard's prompt session (cliclack's `┌` frame). Prompts, log
+/// lines and progress bars all go to stderr: they are the dialog, and the
+/// panels stay the part a caller can redirect.
+pub(crate) fn intro(title: &str) -> std::io::Result<()> {
+    cliclack::intro(title)
 }
 
-fn section_width() -> usize {
-    screen_width().min(SECTION_COLUMNS)
+pub(crate) fn outro(message: &str) -> std::io::Result<()> {
+    cliclack::outro(message)
 }
 
-pub(crate) fn note(text: &str) {
-    let mut screen = Screen::new();
-    screen.note(text);
-    screen.print();
+pub(crate) fn outro_cancel(message: &str) -> std::io::Result<()> {
+    cliclack::outro_cancel(message)
 }
 
-pub(crate) fn result(status: Status, text: &str) {
-    let mut screen = Screen::new();
-    screen.outcome(status, text);
-    screen.print();
+/// One question group of the dialog, so a long advanced pass stays readable.
+pub(crate) fn step(title: impl std::fmt::Display) -> std::io::Result<()> {
+    cliclack::log::step(title)
 }
 
-pub(crate) struct Progress {
-    live: bool,
-    columns: usize,
-    reported: String,
+/// cliclack does not wrap a log message: it draws the first line after the
+/// symbol and prefixes the rest with its bar, so a message longer than the
+/// terminal is left to the terminal's own mid-word wrap. Wrapping here keeps
+/// every line inside the width — which matters for the daemon's messages,
+/// where the actionable half sits at the end.
+fn wrapped(text: &str) -> String {
+    let width = screen_width().min(MAX_COLUMNS).saturating_sub(INDENT + GAP);
+    text.lines()
+        .flat_map(|line| wrap(line, width))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
-impl Progress {
-    pub(crate) fn start(label: &str) -> Self {
-        let live = std::io::stderr().is_terminal() && !forced_non_tty();
-        let mut progress = Self {
-            live,
-            columns: terminal_columns(libc::STDERR_FILENO).unwrap_or(MAX_COLUMNS),
-            reported: String::new(),
-        };
-        progress.show(label);
-        progress
-    }
-
-    pub(crate) fn update(&mut self, line: &str) {
-        self.show(line);
-    }
-
-    pub(crate) fn finish(&mut self) {
-        if std::mem::replace(&mut self.live, false) {
-            erase_line();
-        }
-    }
-
-    fn show(&mut self, line: &str) {
-        if self.live {
-            let mut stderr = std::io::stderr();
-            let _ = write!(stderr, "\r{}\u{1b}[K", fit(line, self.columns));
-            let _ = stderr.flush();
-        } else if line != self.reported {
-            eprintln!("{}{line}", " ".repeat(INDENT));
-        }
-        self.reported.clear();
-        self.reported.push_str(line);
-    }
+pub(crate) fn info(text: impl std::fmt::Display) -> std::io::Result<()> {
+    cliclack::log::info(wrapped(&text.to_string()))
 }
 
-impl Drop for Progress {
-    fn drop(&mut self) {
-        self.finish();
-    }
-}
-
-fn erase_line() {
-    let mut stderr = std::io::stderr();
-    let _ = write!(stderr, "\r\u{1b}[K");
-    let _ = stderr.flush();
-}
-
-fn fit(line: &str, columns: usize) -> String {
-    if visible_width(line) <= columns {
-        return line.to_string();
-    }
-    let mut fitted: String = line.chars().take(columns.saturating_sub(1)).collect();
-    fitted.push('\u{2026}');
-    fitted
+pub(crate) fn warn(text: impl std::fmt::Display) -> std::io::Result<()> {
+    cliclack::log::warning(wrapped(&text.to_string()))
 }
 
 pub(crate) fn hardware_screen(detected: &HardwareDefaults, kind: Option<WizardKind>) {
@@ -623,7 +580,6 @@ mod tests {
             Status::Present,
             Status::Skipped,
             Status::Unknown,
-            Status::Warn,
             Status::Failed,
         ] {
             assert!(

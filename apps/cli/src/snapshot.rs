@@ -63,11 +63,11 @@ pub async fn handle(
             timeout,
         } => {
             if std::io::stdin().is_terminal() {
-                let confirmed = inquire::Confirm::new(&format!(
+                let confirmed = cliclack::confirm(format!(
                     "This permanently deletes snapshot {tag:?} of instance {instance_id}. Continue?"
                 ))
-                .with_default(false)
-                .prompt()
+                .initial_value(false)
+                .interact()
                 .map_err(|e| format!("delete aborted: {e}"))?;
                 if !confirmed {
                     println!("Cancelled.");

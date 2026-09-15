@@ -9,7 +9,6 @@ mod ui;
 use andler_core::config::HostFirmware;
 use andler_core::{AndroidBootMode, ArmTranslator};
 use andler_firmware::{FirmwareError, HardwareDefaults};
-use inquire::{InquireError, Select};
 
 use crate::create::Creation;
 use crate::{CliAndroidVersion, CliArmTranslator, CliCdromBus, TracedClient};
@@ -89,6 +88,7 @@ pub(crate) async fn run(
         ));
     }
 
+    ui::intro("andler · create a virtual machine")?;
     ui::hardware_screen(&detected, partial.kind);
 
     let mode = ask_wizard_mode()?;
@@ -121,7 +121,7 @@ pub(crate) async fn run(
         }),
         WizardMode::Basic => None,
     };
-    build::reresolve_android_base_image(&mut basic_result, advanced_config.as_ref(), &detected);
+    build::reresolve_android_base_image(&mut basic_result, advanced_config.as_ref(), &detected)?;
 
     loop {
         match summary::run(&basic_result, advanced_config.as_ref(), &detected)? {
@@ -141,7 +141,7 @@ pub(crate) async fn run(
                     &mut basic_result,
                     advanced_config.as_ref(),
                     &detected,
-                );
+                )?;
             }
             summary::SummaryAction::Cancel => return Err(WizardError::Cancelled),
         }
@@ -150,11 +150,10 @@ pub(crate) async fn run(
     let draft = match &basic_result {
         BasicResult::Linux(l) => {
             if detected.ovmf.is_err() {
-                ui::result(
-                    ui::Status::Warn,
-                    "OVMF not found. Legacy BIOS will be used. \
-                     Install edk2-ovmf for UEFI support.",
-                );
+                ui::warn(
+                    "OVMF not found: the VM will boot with legacy BIOS. Install edk2-ovmf \
+                     for UEFI support.",
+                )?;
             }
             build::linux_draft(l, advanced_config.as_ref(), &partial, &detected)?
         }
@@ -185,22 +184,24 @@ pub(crate) fn resolve_draft(
 }
 
 fn ask_wizard_mode() -> Result<WizardMode, WizardError> {
-    let recommended = "Recommended settings (basic)";
-    let custom = "Customize everything (advanced)";
-    let choice = Select::new("Configuration mode:", vec![recommended, custom])
-        .with_help_message(
-            "Basic — only the essential questions; everything else comes from hardware \
-             detection.\nAdvanced — full control over GPU, display, audio, CPU, memory, \
-             network and the guest packages.",
+    let mode = cliclack::select("How much do you want to configure?")
+        .item(
+            WizardMode::Basic,
+            "Recommended settings",
+            // Kept short: cliclack draws the hint on the same line as the
+            // label and does not wrap it, so list lines have to fit the
+            // terminal themselves.
+            "essentials only; the rest is auto-detected",
         )
-        .prompt()
-        .map_err(map_inquire_err)?;
+        .item(
+            WizardMode::Advanced,
+            "Customize everything",
+            "every group: GPU, display, CPU, network, guest",
+        )
+        .initial_value(WizardMode::Basic)
+        .interact()?;
 
-    Ok(if choice == recommended {
-        WizardMode::Basic
-    } else {
-        WizardMode::Advanced
-    })
+    Ok(mode)
 }
 
 /// `--quick`: the flags layer and the defaults, no questions. Every create
@@ -212,7 +213,7 @@ fn build_quick(
     host: &HostFirmware,
 ) -> Result<WizardResult, WizardError> {
     let kind = flags.kind.ok_or_else(|| {
-        WizardError::Inquire("`--quick` requires `--kind` to specify VM type".into())
+        WizardError::Message("`--quick` requires `--kind` to specify VM type".into())
     })?;
 
     match kind {
@@ -254,7 +255,7 @@ fn build_quick(
             let base_image = match &flags.base_image_path {
                 Some(path) => {
                     if !std::path::Path::new(path).exists() {
-                        return Err(WizardError::Inquire(format!(
+                        return Err(WizardError::Message(format!(
                             "Base image not found: {path}. Android requires a valid base image; \
                              download one with `andler image download`, or build one with \
                              `docker/images/build.sh`."
@@ -272,7 +273,7 @@ fn build_quick(
                         base_image_pin: None,
                     };
                     andler_core::base_image::resolve(&quick_profile)
-                        .map_err(|e| WizardError::Inquire(e.to_string()))?
+                        .map_err(|e| WizardError::Message(e.to_string()))?
                         .to_string_lossy()
                         .into_owned()
                 }
@@ -311,7 +312,9 @@ pub async fn handle_wizard(
     let result = match run(client, partial).await {
         Ok(result) => result,
         Err(WizardError::Cancelled) => {
-            println!("Cancelled.");
+            // The prompt that was cancelled printed its own footer; this only
+            // says what the cancellation means.
+            ui::outro_cancel("Nothing was created.")?;
             return Ok(());
         }
         Err(err @ WizardError::NotTty) => {
@@ -338,6 +341,10 @@ pub async fn handle_wizard(
         Some(apply::apply_guest_selections(client, &id).await)
     };
     apply::report(&id, kind, applied.as_ref());
+    if !quick {
+        // Closes the session `run` opened; `--quick` never opened one.
+        ui::outro("The instance is ready.")?;
+    }
 
     Ok(())
 }
@@ -361,13 +368,17 @@ fn libc_isatty(fd: i32) -> bool {
     unsafe { isatty(fd) != 0 }
 }
 
-pub(crate) fn map_inquire_err(e: InquireError) -> WizardError {
-    match e {
-        InquireError::NotTTY => WizardError::NotTty,
-        InquireError::OperationCanceled | InquireError::OperationInterrupted => {
-            WizardError::Cancelled
+/// A cliclack prompt fails with a plain `io::Error`; the two kinds the wizard
+/// reacts to are the two the library uses for its own states — `Interrupted`
+/// is Esc/Ctrl-C, `NotConnected` is "this is not a terminal". Everything else
+/// is a real I/O failure and keeps its message.
+impl From<std::io::Error> for WizardError {
+    fn from(e: std::io::Error) -> Self {
+        match e.kind() {
+            std::io::ErrorKind::NotConnected => WizardError::NotTty,
+            std::io::ErrorKind::Interrupted => WizardError::Cancelled,
+            _ => WizardError::Message(e.to_string()),
         }
-        other => WizardError::Inquire(other.to_string()),
     }
 }
 
@@ -388,7 +399,7 @@ pub enum WizardError {
     Cancelled,
 
     #[error("{0}")]
-    Inquire(String),
+    Message(String),
 
     #[error("{0}")]
     InvalidConfig(String),
@@ -529,7 +540,7 @@ mod tests {
         let result = build_quick(&partial, &detected, &host);
         assert!(matches!(
             result,
-            Err(WizardError::Inquire(msg)) if msg.contains("Base image not found")
+            Err(WizardError::Message(msg)) if msg.contains("Base image not found")
         ));
     }
 
@@ -582,7 +593,7 @@ mod tests {
         let result = build_quick(&partial, &detected, &host);
 
         match result {
-            Err(WizardError::Inquire(message)) => assert!(
+            Err(WizardError::Message(message)) => assert!(
                 message.contains("no base image found"),
                 "the resolve error must say no image matched: {message}"
             ),

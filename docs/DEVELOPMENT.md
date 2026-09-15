@@ -127,7 +127,7 @@ Coverage (all CLI commands):
 4. Snapshots: live create (incl. duplicate tag)/list/`--json`, offline restore, restore-while-running, create/delete-while-stopped
 5. Clone/export: Android create (incl. missing base image), linked/full-standalone/shared-base clones, live-clone removal protection, export, nonexistent-source negatives
 6. Guest: error paths always; deep tests (offline install/remove/list against a real Debian rootfs through the libguestfs appliance, Android boot-mode switching) — SKIP when guestfish is unavailable, rest of the suite still runs
-7. Client-side: `create --dry-run`, `--verify` pass/fail, wizard non-TTY refusal, shell completions, `andler doctor`
+7. Client-side: `create --dry-run`, `--verify` pass/fail, wizard non-TTY refusal plus its positive path driven on a real PTY (`script`, key sequence, created config asserted), shell completions, `andler doctor`
 8. Persistence: daemon restart against the same store (state survives), final cleanup
 
 ```bash
@@ -264,9 +264,13 @@ andler/
 │           ├── verify.rs         # `create --verify` checks
 │           ├── wizard/           # Interactive wizard
 │           │   ├── mod.rs        # Wizard entry point, handle_wizard()
-│           │   ├── basic.rs      # BasicResult, ask_kind, ask_name, ask_iso, ask_disk
-│           │   ├── advanced.rs   # AdvancedConfig, 16 ask_* functions
-│           │   └── summary.rs    # SummaryAction, print_summary
+│           │   ├── basic.rs      # BasicResult and the basic questions (kind, name, ISO, disk, UEFI)
+│           │   ├── advanced.rs   # AdvancedConfig and the grouped advanced questions
+│           │   ├── base_image.rs # Android base-image choice: cache, published download, manual path
+│           │   ├── apply.rs      # Create, apply the guest selections, report
+│           │   ├── build.rs      # Answers -> ConfigDraft (one resolver for every front-end)
+│           │   ├── ui.rs         # Panels, and the dialog's steps/warnings/session framing
+│           │   └── summary.rs    # SummaryAction and the summary screen
 │           └── helpers.rs        # parse_size, format_size, format_bytes, ensure_qcow2_extension
 │
 ├── docker/

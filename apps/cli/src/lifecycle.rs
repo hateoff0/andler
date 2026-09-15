@@ -128,11 +128,11 @@ pub async fn handle_remove(
             Some(name) => format!("{} ({name})", crate::helpers::short_id(&id)),
             None => crate::helpers::short_id(&id).to_string(),
         };
-        let confirmed = inquire::Confirm::new(&format!(
+        let confirmed = cliclack::confirm(format!(
             "This permanently deletes instance {label} and its disk image. Continue?"
         ))
-        .with_default(false)
-        .prompt()
+        .initial_value(false)
+        .interact()
         .map_err(|e| format!("remove aborted: {e}"))?;
         if !confirmed {
             println!("Cancelled.");

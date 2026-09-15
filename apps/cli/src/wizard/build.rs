@@ -2,8 +2,7 @@ use std::path::{Path, PathBuf};
 
 use andler_core::config::{ConfigDraft, DiskDraft, DiskSource, DraftKind, FirmwareDraft};
 use andler_core::{
-    AndroidBootMode, AndroidProfile, ArmTranslator, CdromBus, DisplayEngine, NetworkMode,
-    RenderBackend,
+    AndroidBootMode, AndroidProfile, CdromBus, DisplayEngine, NetworkMode, RenderBackend,
 };
 use andler_firmware::HardwareDefaults;
 
@@ -40,7 +39,7 @@ fn load_template(flags: &PartialArgs) -> Result<Option<TemplateFile>, WizardErro
     match flags.template.as_deref() {
         Some(name) => TemplateFile::load(name)
             .map(Some)
-            .map_err(|e| WizardError::Inquire(e.to_string())),
+            .map_err(|e| WizardError::Message(e.to_string())),
         None => Ok(None),
     }
 }
@@ -300,11 +299,7 @@ pub(crate) fn resolve_arm_translator(
     }
     detected
         .arm_translator
-        .map(|t| match t {
-            ArmTranslator::Libndk => CliArmTranslator::Libndk,
-            ArmTranslator::Libhoudini => CliArmTranslator::Libhoudini,
-            ArmTranslator::None => CliArmTranslator::None,
-        })
+        .map(CliArmTranslator::from)
         .unwrap_or(CliArmTranslator::None)
 }
 
@@ -316,15 +311,15 @@ pub(crate) fn reresolve_android_base_image(
     basic_result: &mut BasicResult,
     advanced: Option<&AdvancedConfig>,
     detected: &HardwareDefaults,
-) {
+) -> Result<(), WizardError> {
     let BasicResult::Android(a) = basic_result else {
-        return;
+        return Ok(());
     };
     let Some(adv) = advanced else {
-        return;
+        return Ok(());
     };
     if !a.base_image_auto_resolved {
-        return;
+        return Ok(());
     }
 
     let profile = andler_core::AndroidProfile {
@@ -337,17 +332,16 @@ pub(crate) fn reresolve_android_base_image(
     };
     match andler_core::base_image::resolve(&profile) {
         Ok(path) => a.base_image = path.to_string_lossy().into_owned(),
-        Err(e) => ui::result(
-            ui::Status::Warn,
-            &format!(
-                "No base image matches the current Android settings ({e}). Keeping the previous \
+        Err(e) => ui::warn(format!(
+            "No base image matches the current Android settings ({e}). Keeping the previous \
              one — download a matching build with `andler image download --android-version \
              {} --variant {}` and pick it, or choose a different one manually.",
-                a.android_version as u8,
-                if adv.gapps { "GAPPS" } else { "VANILLA" },
-            ),
-        ),
+            a.android_version as u8,
+            if adv.gapps { "GAPPS" } else { "VANILLA" },
+        ))?,
     }
+
+    Ok(())
 }
 
 /// The domain `AndroidProfile` a set of basic answers describes — what the
@@ -378,7 +372,7 @@ pub(crate) fn sample_detected() -> HardwareDefaults {
         gpu_render: RenderBackend::Venus,
         display_engine: DisplayEngine::Gtk,
         audio_server: andler_core::AudioBackend::Pipewire,
-        arm_translator: Some(ArmTranslator::Libndk),
+        arm_translator: Some(andler_core::ArmTranslator::Libndk),
         venus_supported: true,
         passt_available: true,
     }
@@ -387,7 +381,7 @@ pub(crate) fn sample_detected() -> HardwareDefaults {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use andler_core::{AudioBackend, PointerMode, Resolution};
+    use andler_core::{ArmTranslator, AudioBackend, PointerMode, Resolution};
 
     use super::sample_detected;
 
@@ -662,7 +656,8 @@ mod tests {
             &mut basic_result,
             Some(&advanced_with_gapps(true)),
             &sample_detected(),
-        );
+        )
+        .expect("re-resolution must not fail");
 
         let BasicResult::Android(a) = &basic_result else {
             panic!("expected Android");
@@ -682,7 +677,8 @@ mod tests {
             &mut basic_result,
             Some(&advanced_with_gapps(true)),
             &sample_detected(),
-        );
+        )
+        .expect("re-resolution must not fail");
 
         let BasicResult::Android(a) = &basic_result else {
             panic!("expected Android");
@@ -705,7 +701,8 @@ mod tests {
             &mut basic_result,
             Some(&advanced_with_gapps(true)),
             &sample_detected(),
-        );
+        )
+        .expect("re-resolution must not fail");
 
         let BasicResult::Android(a) = &basic_result else {
             panic!("expected Android");

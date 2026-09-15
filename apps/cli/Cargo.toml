@@ -25,11 +25,15 @@ serde_json = "1"
 regex = "1"
 thiserror = { workspace = true }
 toml = "0.8"
-# Interactive wizard — arrows/Enter/Space (Select/MultiSelect/Text/Confirm).
-# Chosen over ratatui: sequential prompts, not full-screen TUI;
-# inquire provides exactly the needed UX without extra complexity.
-# Version locked — inquire API is unstable between minor versions.
-inquire = "0.7"
+# Interactive prompts — arrows/Enter/Space (Select/MultiSelect/Input/Confirm)
+# plus spinner and progress-bar rendering.
+# Chosen over ratatui: sequential prompts, not a full-screen TUI.
+# Chosen over inquire: typed `Select<T>`/`MultiSelect<T>` take the value, its
+# label and its hint separately (no encoding meaning in a label string and
+# parsing it back), `initial_value` sets the default by value rather than by
+# list position, and the progress bars share the same look and the same
+# `indicatif` engine the rest of the CLI already renders with.
+cliclack = "0.5"
 chrono = { version = "0.4", features = ["serde"] }
 libc = "0.2"
 

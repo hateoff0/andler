@@ -1,13 +1,11 @@
 use std::path::Path;
 
-use inquire::{Confirm, CustomType, Select, Text};
-
 use crate::helpers::format_bytes;
 use crate::{CliAndroidVersion, TracedClient};
 
 use super::advanced::ask_gapps;
 use super::ui;
-use super::{map_inquire_err, WizardError, WizardKind};
+use super::{WizardError, WizardKind};
 
 const DEFAULT_DISK_GIB: u64 = 256;
 const MAX_DISK_GIB: u64 = 65536;
@@ -77,7 +75,7 @@ pub fn run_linux(
     instances_root: Option<String>,
     disk_size_gib: Option<u64>,
 ) -> Result<LinuxBasicResult, WizardError> {
-    ui::header("linux image & storage");
+    ui::step("linux image & storage")?;
     let iso = ask_iso_path(iso_path)?;
     let disk_size_gib = ask_disk_size(disk_size_gib.unwrap_or(DEFAULT_DISK_GIB))?;
     let instances_root = instances_root.unwrap_or_else(crate::create::default_instances_root);
@@ -98,7 +96,7 @@ pub async fn run_android(
     instances_root: Option<String>,
     disk_size_gib: Option<u64>,
 ) -> Result<AndroidBasicResult, WizardError> {
-    ui::header("android image & storage");
+    ui::step("android image & storage")?;
     let android_version = ask_android_version()?;
     let gapps = ask_gapps(None)?;
     let choice = super::base_image::ask(client, base_image_path, android_version, gapps).await?;
@@ -120,36 +118,37 @@ pub fn ask_kind(prefilled: Option<WizardKind>) -> Result<WizardKind, WizardError
     if let Some(k) = prefilled {
         return Ok(k);
     }
-    ui::header("vm type");
-    let choice = Select::new("VM type:", vec!["Linux", "Android"])
-        .with_help_message(
-            "Linux — any distro from an ISO; Android — Waydroid on the base image, \
-             with GPU acceleration",
+    let kind = cliclack::select("Which VM do you want to create?")
+        .item(WizardKind::Linux, "Linux", "any distro from an ISO")
+        .item(
+            WizardKind::Android,
+            "Android",
+            "Waydroid on a base image, with GPU acceleration",
         )
-        .prompt()
-        .map_err(map_inquire_err)?;
+        .initial_value(WizardKind::Linux)
+        .interact()?;
 
-    Ok(if choice == "Linux" {
-        WizardKind::Linux
-    } else {
-        WizardKind::Android
-    })
+    Ok(kind)
 }
 
 pub fn ask_name(prefilled: Option<String>, kind: WizardKind) -> Result<String, WizardError> {
     if let Some(n) = prefilled {
         return Ok(n);
     }
-    ui::header("name");
     let placeholder = match kind {
         WizardKind::Linux => "my-linux-vm",
         WizardKind::Android => "my-android-vm",
     };
-    Text::new("VM name:")
-        .with_placeholder(placeholder)
-        .with_validator(validate_name)
-        .prompt()
-        .map_err(map_inquire_err)
+    let name: String = cliclack::input("What should the VM be called?")
+        .placeholder(placeholder)
+        // cliclack hands a validator a `&String`; the check itself takes the
+        // slice it actually needs.
+        .validate(|input: &String| validate_name(input))
+        .interact()?;
+    // The name reaches `instance.toml` and the daemon's config validation:
+    // trimming it here is what the operator meant, and it keeps a stray space
+    // from failing that validation later.
+    Ok(name.trim().to_string())
 }
 
 pub fn ask_iso_path(prefilled: Option<String>) -> Result<String, WizardError> {
@@ -157,81 +156,64 @@ pub fn ask_iso_path(prefilled: Option<String>) -> Result<String, WizardError> {
         validate_iso_path(&p)?;
         return Ok(p);
     }
-    let path = Text::new("Path to ISO image (Enter — skip, boot from disk):")
-        .with_placeholder("/home/user/isos/cachyos.iso")
-        .with_help_message(
-            "Enter path to .iso file, or press Enter to skip (boot from existing disk)",
-        )
-        .with_default("")
-        .with_validator(|s: &str| match validate_iso_path(s) {
-            Ok(()) => Ok(inquire::validator::Validation::Valid),
-            Err(e) => Ok(inquire::validator::Validation::Invalid(e.into())),
-        })
-        .prompt()
-        .map_err(map_inquire_err)?;
+    let path: String =
+        cliclack::input("Path to the ISO image\nEnter skips it and boots from the disk")
+            .placeholder("/home/user/isos/cachyos.iso")
+            .required(false)
+            .validate(|input: &String| validate_iso_input(input))
+            .interact()?;
+    let path = path.trim().to_string();
     validate_iso_path(&path)?;
     Ok(path)
 }
 
 pub fn ask_android_version() -> Result<CliAndroidVersion, WizardError> {
-    let choice = Select::new(
-        "Android version:",
-        vec!["Android 13 (recommended)", "Android 11"],
-    )
-    .with_help_message("Android 13 tracks Waydroid's current LineageOS builds and has the better Venus/VirtIO-GPU support")
-    .prompt()
-    .map_err(map_inquire_err)?;
+    let version = cliclack::select("Android version")
+        .item(
+            CliAndroidVersion::Android13,
+            "Android 13",
+            "recommended — newest LineageOS base",
+        )
+        .item(
+            CliAndroidVersion::Android11,
+            "Android 11",
+            "previous LineageOS base",
+        )
+        .initial_value(CliAndroidVersion::Android13)
+        .interact()?;
 
-    Ok(if choice.starts_with("Android 13") {
-        CliAndroidVersion::Android13
-    } else {
-        CliAndroidVersion::Android11
-    })
+    Ok(version)
 }
 
 pub fn ask_disk_size(default_gib: u64) -> Result<u64, WizardError> {
-    CustomType::<u64>::new("Disk size (GiB):")
-        .with_default(default_gib)
-        .with_help_message("Thin-provisioned qcow2 — nominal limit, not actual host usage")
-        .with_formatter(&|v: u64| format!("{v} GiB"))
-        .with_error_message("Enter an integer between 1 and 65536, e.g. 256")
-        .with_validator(|v: &u64| {
-            if (1..=MAX_DISK_GIB).contains(v) {
-                Ok(inquire::validator::Validation::Valid)
-            } else {
-                Ok(inquire::validator::Validation::Invalid(
-                    format!("Enter an integer between 1 and {MAX_DISK_GIB}, e.g. 256").into(),
-                ))
-            }
-        })
-        .prompt()
-        .map_err(map_inquire_err)
+    let size: u64 = cliclack::input(
+        "Disk size (GiB)\nthin-provisioned qcow2 — a nominal limit, not host usage",
+    )
+    .default_input(&default_gib.to_string())
+    .validate(|input: &String| validate_disk_size(input))
+    .interact()?;
+
+    Ok(size)
 }
 
 fn ask_enable_uefi() -> Result<bool, WizardError> {
-    let use_uefi = Confirm::new("Use UEFI/OVMF firmware?")
-        .with_help_message("Recommended — requires edk2-ovmf. Legacy BIOS if declined.")
-        .with_default(true)
-        .prompt()
-        .map_err(map_inquire_err)?;
+    let use_uefi = cliclack::confirm(
+        "Use UEFI/OVMF firmware?\nrecommended — needs edk2-ovmf; No uses legacy BIOS",
+    )
+    .initial_value(true)
+    .interact()?;
     Ok(use_uefi)
 }
 
-fn validate_name(
-    s: &str,
-) -> Result<inquire::validator::Validation, Box<dyn std::error::Error + Send + Sync>> {
-    let s = s.trim();
-    if s.is_empty() {
-        return Ok(inquire::validator::Validation::Invalid(
-            "Name cannot be empty".into(),
-        ));
+fn validate_name(name: &str) -> Result<(), String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("the name cannot be empty".into());
     }
-    if is_valid_name(s) {
-        Ok(inquire::validator::Validation::Valid)
+    if is_valid_name(name) {
+        Ok(())
     } else {
-        Ok(inquire::validator::Validation::Invalid(
-            "Name can contain letters, digits, '-', '_' and '.'".into(),
-        ))
+        Err("name can contain letters, digits, '-', '_' and '.'".into())
     }
 }
 
@@ -241,19 +223,33 @@ fn is_valid_name(s: &str) -> bool {
             .all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == '.')
 }
 
+fn validate_disk_size(input: &str) -> Result<(), String> {
+    let range = format!("enter an integer between 1 and {MAX_DISK_GIB}, e.g. 256");
+    let gib: u64 = input.trim().parse().map_err(|_| range.clone())?;
+    if (1..=MAX_DISK_GIB).contains(&gib) {
+        Ok(())
+    } else {
+        Err(range)
+    }
+}
+
+fn validate_iso_input(input: &str) -> Result<(), String> {
+    validate_iso_path(input.trim()).map_err(|e| e.to_string())
+}
+
 fn validate_iso_path(path: &str) -> Result<(), WizardError> {
     if path.is_empty() {
         return Ok(());
     }
     let path_obj = Path::new(path);
     if !path_obj.exists() {
-        return Err(WizardError::Inquire(format!(
+        return Err(WizardError::Message(format!(
             "ISO not found: {path}\n\
              Check the path, or press Enter at the prompt to boot without an ISO."
         )));
     }
     if !path_obj.is_file() {
-        return Err(WizardError::Inquire(format!(
+        return Err(WizardError::Message(format!(
             "Not a file: {path} — expected a path to an .iso file."
         )));
     }
@@ -263,14 +259,14 @@ fn validate_iso_path(path: &str) -> Result<(), WizardError> {
 pub(crate) fn validate_base_image_path(path: &str) -> Result<(), WizardError> {
     let path_obj = Path::new(path);
     if !path_obj.exists() {
-        return Err(WizardError::Inquire(format!(
+        return Err(WizardError::Message(format!(
             "Base image not found: {path}\n\
              Build one with `docker/images/build.sh <11|13> <VANILLA|GAPPS>`, download a \
              published one with `andler image download`, or point at an existing .qcow2."
         )));
     }
     if !path_obj.is_file() {
-        return Err(WizardError::Inquire(format!(
+        return Err(WizardError::Message(format!(
             "Not a file: {path} — expected a path to a .qcow2 base image."
         )));
     }
@@ -293,16 +289,36 @@ mod tests {
 
     #[test]
     fn name_validation_accepts_real_names_and_rejects_separators() {
-        assert!(is_valid_name("my-android-vm"));
-        assert!(is_valid_name("vm_2.1"));
-        assert!(!is_valid_name(""));
-        assert!(!is_valid_name("my vm"));
-        assert!(!is_valid_name("vm/2"));
+        assert!(validate_name("my-android-vm").is_ok());
+        assert!(validate_name("vm_2.1").is_ok());
+        assert!(
+            validate_name(" my-linux ").is_ok(),
+            "the prompt trims what it returns, so surrounding space is not a rejection"
+        );
+        assert!(validate_name("").is_err());
+        assert!(validate_name("my vm").is_err());
+        assert!(validate_name("vm/2").is_err());
+    }
+
+    #[test]
+    fn disk_size_validation_holds_the_documented_range() {
+        assert!(validate_disk_size("1").is_ok());
+        assert!(validate_disk_size("256").is_ok());
+        assert!(validate_disk_size("65536").is_ok());
+        assert!(validate_disk_size(" 512 ").is_ok());
+        assert!(validate_disk_size("0").is_err());
+        assert!(validate_disk_size("65537").is_err());
+        assert!(validate_disk_size("16 GiB").is_err());
+        assert!(
+            validate_disk_size("0").unwrap_err().contains("1 and 65536"),
+            "the error must name the range, not just the failure"
+        );
     }
 
     #[test]
     fn empty_iso_path_is_allowed_and_missing_files_are_not() {
         assert!(validate_iso_path("").is_ok());
+        assert!(validate_iso_input("").is_ok());
 
         let missing = "/nonexistent/andler-wizard.iso";
         let err = validate_iso_path(missing).unwrap_err();

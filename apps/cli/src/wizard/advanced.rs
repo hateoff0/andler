@@ -1,12 +1,11 @@
 use andler_core::{AudioBackend, CdromBus, NetworkMode, PointerMode, RenderBackend, Resolution};
 use andler_firmware::HardwareDefaults;
-use inquire::{Confirm, CustomType, MultiSelect, Select, Text};
 
 use crate::CliArmTranslator;
 
 use super::basic::{AndroidBasicResult, LinuxBasicResult};
 use super::ui;
-use super::{map_inquire_err, WizardError};
+use super::WizardError;
 
 const MIN_GPU_MEMORY_MIB: u64 = 256;
 const MAX_GPU_MEMORY_MIB: u64 = 16384;
@@ -80,12 +79,26 @@ pub enum Group {
 impl Group {
     fn label(&self) -> &'static str {
         match self {
-            Group::BootDisks => "Boot & disks (CD-ROM bus, compact on shutdown)",
-            Group::DisplayGpu => "Display & GPU (render backend, memory, resolution, fullscreen)",
-            Group::Devices => "Devices (audio, clipboard, input pointer)",
-            Group::CpuMemory => "CPU & memory (cores, RAM)",
-            Group::Network => "Network (NAT / bridge / isolated)",
-            Group::Android => "Android (GApps, ARM translator, disk overlay)",
+            Group::BootDisks => "Boot & disks",
+            Group::DisplayGpu => "Display & GPU",
+            Group::Devices => "Devices",
+            Group::CpuMemory => "CPU & memory",
+            Group::Network => "Network",
+            Group::Android => "Android",
+        }
+    }
+
+    /// What the group owns, shown while its entry is highlighted: six groups
+    /// have to fit one screen, so the label stays short and the detail lives
+    /// here instead of in the label.
+    fn hint(&self) -> &'static str {
+        match self {
+            Group::BootDisks => "CD-ROM bus, compact on shutdown",
+            Group::DisplayGpu => "render backend, GPU memory, resolution, fullscreen",
+            Group::Devices => "audio, clipboard, input pointer",
+            Group::CpuMemory => "cores, RAM",
+            Group::Network => "NAT, bridge or isolated",
+            Group::Android => "GApps, ARM translator, disk overlay",
         }
     }
 
@@ -105,20 +118,16 @@ fn ask_groups(groups: &[Group]) -> Result<Vec<Group>, WizardError> {
     if groups.is_empty() {
         return Ok(Vec::new());
     }
-    let options: Vec<String> = groups.iter().map(|g| g.label().to_string()).collect();
-    let picked = MultiSelect::new("Which settings do you want to change?", options)
-        .with_help_message(
-            "Space toggles an entry, Enter confirms. \
-             Nothing selected keeps the current configuration as it is.",
-        )
-        .prompt()
-        .map_err(map_inquire_err)?;
+    let mut prompt = cliclack::multiselect(
+        "Which settings do you want to change?\nspace toggles, Enter confirms; \
+         empty keeps the current answers",
+    )
+    .required(false);
+    for group in groups {
+        prompt = prompt.item(*group, group.label(), group.hint());
+    }
 
-    Ok(groups
-        .iter()
-        .filter(|g| picked.iter().any(|picked| picked == g.label()))
-        .copied()
-        .collect())
+    Ok(prompt.interact()?)
 }
 
 pub fn run_linux(
@@ -126,7 +135,7 @@ pub fn run_linux(
     detected: &HardwareDefaults,
     prefilled: Option<&AdvancedConfig>,
 ) -> Result<AdvancedConfig, WizardError> {
-    ui::header("advanced settings");
+    ui::step("advanced settings")?;
 
     let mut config = prefilled.cloned().unwrap_or_default();
     let wanted = wanted_groups(
@@ -140,7 +149,7 @@ pub fn run_linux(
         prefilled,
     )?;
 
-    ask_boot_disks(result, detected, prefilled, &mut config, &wanted)?;
+    ask_boot_disks(result, prefilled, &mut config, &wanted)?;
     ask_display_gpu(detected, prefilled, &mut config, &wanted)?;
     ask_devices(detected, prefilled, &mut config, &wanted)?;
     ask_cpu_memory(prefilled, &mut config, &wanted)?;
@@ -154,7 +163,7 @@ pub fn run_android(
     detected: &HardwareDefaults,
     prefilled: Option<&AdvancedConfig>,
 ) -> Result<AdvancedConfig, WizardError> {
-    ui::header("advanced settings");
+    ui::step("advanced settings")?;
 
     let mut config = prefilled.cloned().unwrap_or_default();
     let wanted = wanted_groups(
@@ -202,7 +211,7 @@ fn ask_android(
     if !ask_group(wanted, Group::Android) {
         return Ok(());
     }
-    ui::section(Group::Android.title());
+    ui::step(Group::Android.title())?;
 
     config.gapps = ask_gapps(prefilled.map(|p| p.gapps).or(Some(result.gapps)))?;
     config.arm_translator = Some(ask_arm_translator(
@@ -215,7 +224,6 @@ fn ask_android(
 
 fn ask_boot_disks(
     result: &LinuxBasicResult,
-    _detected: &HardwareDefaults,
     prefilled: Option<&AdvancedConfig>,
     config: &mut AdvancedConfig,
     wanted: &[Group],
@@ -223,12 +231,11 @@ fn ask_boot_disks(
     if !ask_group(wanted, Group::BootDisks) {
         return Ok(());
     }
-    ui::section(Group::BootDisks.title());
+    ui::step(Group::BootDisks.title())?;
 
     let recommended =
         CdromBus::recommended_for_iso_filename(std::path::Path::new(&result.iso_path));
     config.cdrom_bus = Some(ask_cdrom_bus(
-        &result.iso_path,
         recommended,
         prefilled.and_then(|p| p.cdrom_bus),
     )?);
@@ -245,7 +252,7 @@ fn ask_display_gpu(
     if !ask_group(wanted, Group::DisplayGpu) {
         return Ok(());
     }
-    ui::section(Group::DisplayGpu.title());
+    ui::step(Group::DisplayGpu.title())?;
 
     config.gpu_render = ask_gpu_render(detected, prefilled.map(|p| p.gpu_render.clone()))?;
     config.gpu_memory_mib = ask_gpu_memory(prefilled.map(|p| p.gpu_memory_mib))?;
@@ -263,7 +270,7 @@ fn ask_devices(
     if !ask_group(wanted, Group::Devices) {
         return Ok(());
     }
-    ui::section(Group::Devices.title());
+    ui::step(Group::Devices.title())?;
 
     config.audio_backend = ask_audio_backend(detected, prefilled.map(|p| p.audio_backend))?;
     config.clipboard_enabled = ask_clipboard_enabled(prefilled.map(|p| p.clipboard_enabled))?;
@@ -279,7 +286,7 @@ fn ask_cpu_memory(
     if !ask_group(wanted, Group::CpuMemory) {
         return Ok(());
     }
-    ui::section(Group::CpuMemory.title());
+    ui::step(Group::CpuMemory.title())?;
 
     config.cpu_cores = ask_cpu_cores(prefilled.map(|p| p.cpu_cores))?;
     config.memory_gib = ask_memory_gib(prefilled.map(|p| p.memory_gib))?;
@@ -294,7 +301,7 @@ fn ask_network(
     if !ask_group(wanted, Group::Network) {
         return Ok(());
     }
-    ui::section(Group::Network.title());
+    ui::step(Group::Network.title())?;
 
     config.network_mode = ask_network_mode(prefilled.map(|p| p.network_mode.clone()))?;
     config.bridge_interface = if let NetworkMode::Bridge { .. } = config.network_mode {
@@ -306,48 +313,39 @@ fn ask_network(
 }
 
 fn ask_cdrom_bus(
-    _iso_name: &str,
     recommended: CdromBus,
     prefilled: Option<CdromBus>,
 ) -> Result<CdromBus, WizardError> {
-    if let Some(bus) = prefilled {
-        return Ok(bus);
-    }
-
-    let virtio = "virtio-scsi (faster, modern distro initrds support it)";
-    let ide = "ide (compatible with Windows and any unknown ISO)";
-    let options = if recommended == CdromBus::VirtioScsi {
-        vec![virtio, ide]
-    } else {
-        vec![ide, virtio]
-    };
-
-    let choice = Select::new(
-        &format!("CD-ROM bus (auto: {}):", ui::cdrom_bus_label(recommended)),
-        options,
+    // The prefilled answer is the default, exactly like every other question:
+    // returning it straight back made the modify pass unable to change this
+    // one group's first answer.
+    let bus = cliclack::select(format!(
+        "CD-ROM bus (auto: {})",
+        ui::cdrom_bus_label(recommended)
+    ))
+    .item(
+        CdromBus::VirtioScsi,
+        "virtio-scsi",
+        "faster — modern distro initrds support it",
     )
-    .with_help_message(
-        "virtio-scsi — faster, modern distro initrds support it; \
-         ide — compatible with Windows and any unknown ISO",
+    .item(
+        CdromBus::Ide,
+        "ide",
+        "compatible with Windows and any unknown ISO",
     )
-    .prompt()
-    .map_err(map_inquire_err)?;
+    .initial_value(prefilled.unwrap_or(recommended))
+    .interact()?;
 
-    Ok(if choice.starts_with("virtio") {
-        CdromBus::VirtioScsi
-    } else {
-        CdromBus::Ide
-    })
+    Ok(bus)
 }
 
 fn ask_compact_on_shutdown(prefilled: Option<bool>) -> Result<bool, WizardError> {
-    Confirm::new("Compact disk after shutdown?")
-        .with_default(prefilled.unwrap_or(false))
-        .with_help_message(
-            "Saves space but rewrites entire disk file — may take time on large disks",
-        )
-        .prompt()
-        .map_err(map_inquire_err)
+    let compact = cliclack::confirm(
+        "Compact the disk after shutdown?\nsaves space, but rewrites the whole file",
+    )
+    .initial_value(prefilled.unwrap_or(false))
+    .interact()?;
+    Ok(compact)
 }
 
 fn ask_gpu_render(
@@ -356,66 +354,49 @@ fn ask_gpu_render(
 ) -> Result<RenderBackend, WizardError> {
     let default = prefilled.unwrap_or_else(|| detected.gpu_render.clone());
 
-    let venus = "Venus (3D via Vulkan, fastest)";
-    let virgl = "VirGL (OpenGL 3D, broader compatibility)";
-    let virtio = "VirtioGPU (2D only)";
-    let cpu = "CPU (software rendering)";
-
-    let mut options = vec![virgl, virtio, cpu];
+    let mut prompt = cliclack::select(format!(
+        "GPU render backend (detected: {})",
+        ui::render_label(&detected.gpu_render)
+    ));
     if detected.venus_supported {
-        options.insert(0, venus);
+        prompt = prompt.item(RenderBackend::Venus, "Venus", "Vulkan 3D — fastest");
     }
-
-    let default_label = render_label(default);
-    let prompt_options: Vec<String> = options
-        .iter()
-        .map(|o| {
-            if *o == default_label {
-                format!("{o} (recommended)")
-            } else {
-                (*o).to_string()
-            }
-        })
-        .collect();
-
-    let choice = Select::new("GPU render:", prompt_options.clone())
-        .with_help_message(
-            "Venus — Vulkan 3D (fastest); VirGL — OpenGL 3D (broader); \
-             VirtioGPU — 2D; CPU — software",
+    prompt = prompt
+        .item(
+            RenderBackend::VirGl,
+            "VirGL",
+            "OpenGL 3D — broader compatibility",
         )
-        .with_starting_cursor(
-            prompt_options
-                .iter()
-                .position(|o| o.starts_with(default_label))
-                .unwrap_or(0),
-        )
-        .prompt()
-        .map_err(map_inquire_err)?;
+        .item(RenderBackend::VirtioGpu, "VirtioGPU", "2D only")
+        .item(
+            RenderBackend::Cpu,
+            "CPU",
+            "software rendering, no GPU acceleration",
+        );
 
-    Ok(parse_render_choice(&choice))
+    Ok(prompt.initial_value(default).interact()?)
 }
 
 fn ask_gpu_memory(prefilled: Option<u64>) -> Result<u64, WizardError> {
-    CustomType::<u64>::new("GPU memory (MiB):")
-        .with_default(prefilled.unwrap_or(4096))
-        .with_help_message(
-            "Host memory allocated for GPU device. 4096 MiB is sufficient for most workloads.",
-        )
-        .with_error_message("Enter an integer between 256 and 16384, e.g. 4096")
-        .with_validator(|v: &u64| {
-            if (MIN_GPU_MEMORY_MIB..=MAX_GPU_MEMORY_MIB).contains(v) {
-                Ok(inquire::validator::Validation::Valid)
-            } else {
-                Ok(inquire::validator::Validation::Invalid(
-                    format!(
-                        "Enter an integer between {MIN_GPU_MEMORY_MIB} and {MAX_GPU_MEMORY_MIB}, e.g. 4096"
-                    )
-                    .into(),
-                ))
-            }
-        })
-        .prompt()
-        .map_err(map_inquire_err)
+    let mib: u64 = cliclack::input("GPU memory (MiB)\nhost RAM the virtual GPU may use")
+        .default_input(&prefilled.unwrap_or(4096).to_string())
+        .validate(validate_range(MIN_GPU_MEMORY_MIB, MAX_GPU_MEMORY_MIB))
+        .interact()?;
+    Ok(mib)
+}
+
+/// One validator for the three numeric questions: same wording, same bounds
+/// check, and the operator reads the range before anything is parsed.
+fn validate_range(min: u64, max: u64) -> impl Fn(&String) -> Result<(), String> {
+    move |input: &String| {
+        let message = format!("enter an integer between {min} and {max}");
+        let value: u64 = input.trim().parse().map_err(|_| message.clone())?;
+        if (min..=max).contains(&value) {
+            Ok(())
+        } else {
+            Err(message)
+        }
+    }
 }
 
 fn ask_display_resolution(prefilled: Option<Resolution>) -> Result<Resolution, WizardError> {
@@ -423,28 +404,22 @@ fn ask_display_resolution(prefilled: Option<Resolution>) -> Result<Resolution, W
         .map(|r| format!("{}x{}", r.width, r.height))
         .unwrap_or_else(|| "1920x1080".to_string());
 
-    let raw = Text::new("Display resolution (e.g. 1920x1080):")
-        .with_default(&default)
-        .with_help_message(
-            "The resolution the guest session applies at boot (QEMU fw_cfg -> weston/Plasma); \
-             any WxH the virtual display advertises works.",
-        )
-        .with_validator(|s: &str| match parse_resolution(s) {
-            Ok(_) => Ok(inquire::validator::Validation::Valid),
-            Err(e) => Ok(inquire::validator::Validation::Invalid(e.into())),
-        })
-        .prompt()
-        .map_err(map_inquire_err)?;
+    let raw: String = cliclack::input(
+        "Display resolution\napplied by the guest session at boot\n\
+         any WxH the virtual display advertises",
+    )
+    .default_input(&default)
+    .validate(|input: &String| parse_resolution(input).map(|_| ()))
+    .interact()?;
 
-    parse_resolution(&raw).map_err(WizardError::Inquire)
+    parse_resolution(&raw).map_err(WizardError::Message)
 }
 
 fn ask_fullscreen(prefilled: Option<bool>) -> Result<bool, WizardError> {
-    Confirm::new("Start in fullscreen mode?")
-        .with_default(prefilled.unwrap_or(false))
-        .with_help_message("Start the VM window in fullscreen mode.")
-        .prompt()
-        .map_err(map_inquire_err)
+    let fullscreen = cliclack::confirm("Start the VM window in fullscreen mode?")
+        .initial_value(prefilled.unwrap_or(false))
+        .interact()?;
+    Ok(fullscreen)
 }
 
 fn ask_audio_backend(
@@ -453,23 +428,17 @@ fn ask_audio_backend(
 ) -> Result<AudioBackend, WizardError> {
     let default = prefilled.unwrap_or(detected.audio_server);
 
-    let pipewire = "PipeWire (auto-detected)";
-    let pulse = "PulseAudio (auto-detected)";
-    let none = "None (no audio)";
+    let backend = cliclack::select(format!(
+        "Audio backend (detected: {})",
+        ui::audio_label(detected.audio_server)
+    ))
+    .item(AudioBackend::Pipewire, "PipeWire", "modern, recommended")
+    .item(AudioBackend::Pulseaudio, "PulseAudio", "legacy")
+    .item(AudioBackend::None, "None", "no audio")
+    .initial_value(default)
+    .interact()?;
 
-    let (options, default_idx) = match default {
-        AudioBackend::Pipewire => (vec![pipewire, pulse, none], 0),
-        AudioBackend::Pulseaudio => (vec![pulse, pipewire, none], 0),
-        AudioBackend::None => (vec![none, pipewire, pulse], 0),
-    };
-
-    let choice = Select::new("Audio backend:", options)
-        .with_help_message("PipeWire — modern, recommended; PulseAudio — legacy; None — no audio")
-        .with_starting_cursor(default_idx)
-        .prompt()
-        .map_err(map_inquire_err)?;
-
-    Ok(parse_audio_choice(choice))
+    Ok(backend)
 }
 
 /// Clipboard sharing is a pair: QEMU wires the SPICE agent channel, and the
@@ -477,191 +446,85 @@ fn ask_audio_backend(
 /// the guest half itself (see `wizard::apply`), so the answer here is the
 /// whole setting, not half of one.
 fn ask_clipboard_enabled(prefilled: Option<bool>) -> Result<bool, WizardError> {
-    Confirm::new("Enable clipboard sharing between host and VM?")
-        .with_default(prefilled.unwrap_or(true))
-        .with_help_message(
-            "Copy-paste between host and VM. The wizard installs the guest-side \
-             spice-vdagent right after creating the VM.",
-        )
-        .prompt()
-        .map_err(map_inquire_err)
+    let clipboard = cliclack::confirm(
+        "Share the clipboard between host and VM?\ncopy-paste both ways; the guest side needs spice-vdagent,\n\
+         which the wizard installs right after creating the VM",
+    )
+    .initial_value(prefilled.unwrap_or(true))
+    .interact()?;
+    Ok(clipboard)
 }
 
 fn ask_input_pointer(prefilled: Option<PointerMode>) -> Result<PointerMode, WizardError> {
     let default = prefilled.unwrap_or(PointerMode::Tablet);
-    let tablet = "tablet (absolute coordinates, recommended)";
-    let mouse = "mouse (relative coordinates)";
 
-    let options = if default == PointerMode::Tablet {
-        vec![tablet, mouse]
-    } else {
-        vec![mouse, tablet]
-    };
-
-    let choice = Select::new("Input pointer:", options)
-        .with_help_message(
-            "tablet — absolute coordinates (recommended); mouse — relative coordinates",
+    let pointer = cliclack::select("Input pointer")
+        .item(
+            PointerMode::Tablet,
+            "tablet",
+            "absolute coordinates — recommended",
         )
-        .prompt()
-        .map_err(map_inquire_err)?;
+        .item(PointerMode::Mouse, "mouse", "relative coordinates")
+        .initial_value(default)
+        .interact()?;
 
-    Ok(if choice.starts_with("mouse") {
-        PointerMode::Mouse
-    } else {
-        PointerMode::Tablet
-    })
+    Ok(pointer)
 }
 
 fn ask_cpu_cores(prefilled: Option<u32>) -> Result<u32, WizardError> {
-    CustomType::<u32>::new("CPU cores:")
-        .with_default(prefilled.unwrap_or(4))
-        .with_help_message("Number of virtual CPUs. Default 4 is sufficient for most use cases.")
-        .with_error_message("Enter an integer between 1 and 128")
-        .with_validator(|v: &u32| {
-            if (MIN_CPU_CORES..=MAX_CPU_CORES).contains(v) {
-                Ok(inquire::validator::Validation::Valid)
-            } else {
-                Ok(inquire::validator::Validation::Invalid(
-                    format!("Enter an integer between {MIN_CPU_CORES} and {MAX_CPU_CORES}").into(),
-                ))
-            }
-        })
-        .prompt()
-        .map_err(map_inquire_err)
+    let cores: u32 = cliclack::input("CPU cores\nvirtual CPUs — 4 suits most workloads")
+        .default_input(&prefilled.unwrap_or(4).to_string())
+        .validate(validate_range(MIN_CPU_CORES.into(), MAX_CPU_CORES.into()))
+        .interact()?;
+    Ok(cores)
 }
 
 fn ask_memory_gib(prefilled: Option<u64>) -> Result<u64, WizardError> {
-    CustomType::<u64>::new("Memory (GiB):")
-        .with_default(prefilled.unwrap_or(8))
-        .with_help_message("RAM in GiB. Default 8 is sufficient for most use cases.")
-        .with_error_message("Enter an integer between 1 and 1024, e.g. 8")
-        .with_validator(|v: &u64| {
-            if (MIN_MEMORY_GIB..=MAX_MEMORY_GIB).contains(v) {
-                Ok(inquire::validator::Validation::Valid)
-            } else {
-                Ok(inquire::validator::Validation::Invalid(
-                    format!(
-                        "Enter an integer between {MIN_MEMORY_GIB} and {MAX_MEMORY_GIB}, e.g. 8"
-                    )
-                    .into(),
-                ))
-            }
-        })
-        .prompt()
-        .map_err(map_inquire_err)
+    let gib: u64 = cliclack::input("Memory (GiB)\nguest RAM — 8 GiB suits most workloads")
+        .default_input(&prefilled.unwrap_or(8).to_string())
+        .validate(validate_range(MIN_MEMORY_GIB, MAX_MEMORY_GIB))
+        .interact()?;
+    Ok(gib)
 }
 
 fn ask_arm_translator(
     detected: &HardwareDefaults,
     prefilled: Option<CliArmTranslator>,
 ) -> Result<CliArmTranslator, WizardError> {
-    let auto = detected.arm_translator.map(|t| match t {
-        andler_core::ArmTranslator::Libndk => "libndk (auto)",
-        andler_core::ArmTranslator::Libhoudini => "libhoudini (auto)",
-        andler_core::ArmTranslator::None => "none (auto)",
-    });
+    let default = prefilled
+        .or_else(|| detected.arm_translator.map(CliArmTranslator::from))
+        .unwrap_or(CliArmTranslator::None);
 
-    let default = prefilled.or_else(|| {
-        detected.arm_translator.map(|t| match t {
-            andler_core::ArmTranslator::Libndk => CliArmTranslator::Libndk,
-            andler_core::ArmTranslator::Libhoudini => CliArmTranslator::Libhoudini,
-            andler_core::ArmTranslator::None => CliArmTranslator::None,
-        })
-    });
+    let translator = cliclack::select(format!(
+        "ARM translator (detected: {})\n~18 MiB, installed into the instance disk after creation",
+        ui::arm_label(detected.arm_translator)
+    ))
+    .item(CliArmTranslator::Libndk, "libndk", "AMD CPUs")
+    .item(CliArmTranslator::Libhoudini, "libhoudini", "Intel CPUs")
+    .item(CliArmTranslator::None, "none", "no ARM app support")
+    .initial_value(default)
+    .interact()?;
 
-    let auto_hint = auto.unwrap_or("none (auto)");
-    let none = "none";
-    let libndk = "libndk (AMD)";
-    let libhoudini = "libhoudini (Intel)";
-
-    let default_label = match default {
-        Some(CliArmTranslator::Libndk) => libndk,
-        Some(CliArmTranslator::Libhoudini) => libhoudini,
-        _ => none,
-    };
-
-    let prompt = format!("ARM translator (auto: {auto_hint}):");
-    let mut ordered = vec![default_label.to_string()];
-    for opt in [none, libndk, libhoudini] {
-        if opt != default_label {
-            ordered.push(opt.to_string());
-        }
-    }
-
-    let choice = Select::new(&prompt, ordered)
-        .with_help_message(
-            "ARM apps on an x86 guest. The translator (~18 MiB) is downloaded and installed \
-             into the instance disk right after creation; libndk — AMD CPUs, \
-             libhoudini — Intel CPUs, none — no ARM app support.",
-        )
-        .prompt()
-        .map_err(map_inquire_err)?;
-
-    Ok(parse_arm_translator(&choice).unwrap_or(CliArmTranslator::None))
+    Ok(translator)
 }
 
 pub(super) fn ask_gapps(prefilled: Option<bool>) -> Result<bool, WizardError> {
-    Confirm::new("Enable GApps?")
-        .with_default(prefilled.unwrap_or(false))
-        .with_help_message(
-            "Google Play Store and Google services. This selects the GAPPS base image when \
-             one is available; on a fresh image, Play needs internet on first boot.",
-        )
-        .prompt()
-        .map_err(map_inquire_err)
+    let gapps = cliclack::confirm(
+        "Enable GApps?\nGoogle Play Store and services; picks the GAPPS base image\nwhen one exists",
+    )
+    .initial_value(prefilled.unwrap_or(false))
+    .interact()?;
+    Ok(gapps)
 }
 
 fn ask_linked_overlay(prefilled: Option<bool>) -> Result<bool, WizardError> {
-    Confirm::new("Link disk to base image as an overlay (instead of a full copy)?")
-        .with_default(prefilled.unwrap_or(false))
-        .with_help_message(
-            "Default (No) makes a full, independent copy of the base image — safest, uses \
-             more disk space. Yes creates a thin overlay backed by the base image — saves \
-             space, but the instance breaks if the base image is moved or deleted.",
-        )
-        .prompt()
-        .map_err(map_inquire_err)
-}
-
-fn render_label(backend: RenderBackend) -> &'static str {
-    match backend {
-        RenderBackend::Venus => "Venus (3D via Vulkan, fastest)",
-        RenderBackend::VirGl => "VirGL (OpenGL 3D, broader compatibility)",
-        RenderBackend::VirtioGpu => "VirtioGPU (2D only)",
-        RenderBackend::Cpu => "CPU (software rendering)",
-        RenderBackend::Passthrough { .. } => "CPU (software rendering)",
-    }
-}
-
-fn parse_render_choice(choice: &str) -> RenderBackend {
-    if choice.starts_with("Venus") {
-        RenderBackend::Venus
-    } else if choice.starts_with("VirGL") {
-        RenderBackend::VirGl
-    } else if choice.starts_with("VirtioGPU") {
-        RenderBackend::VirtioGpu
-    } else {
-        RenderBackend::Cpu
-    }
-}
-
-fn parse_audio_choice(choice: &str) -> AudioBackend {
-    if choice.starts_with("Pulse") {
-        AudioBackend::Pulseaudio
-    } else if choice.starts_with("None") {
-        AudioBackend::None
-    } else {
-        AudioBackend::Pipewire
-    }
-}
-
-pub fn parse_arm_translator(s: &str) -> Option<CliArmTranslator> {
-    match s.split_whitespace().next()? {
-        "libndk" => Some(CliArmTranslator::Libndk),
-        "libhoudini" => Some(CliArmTranslator::Libhoudini),
-        "none" => Some(CliArmTranslator::None),
-        _ => None,
-    }
+    let linked = cliclack::confirm(
+        "Link the disk to the base image instead of copying it?\nNo copies the image: independent and safe, uses disk space\n\
+         Yes keeps a thin overlay: saves space, but the instance\nbreaks if the base image moves or is deleted",
+    )
+    .initial_value(prefilled.unwrap_or(false))
+    .interact()?;
+    Ok(linked)
 }
 
 pub fn parse_resolution(s: &str) -> Result<Resolution, String> {
@@ -681,76 +544,106 @@ pub fn parse_resolution(s: &str) -> Result<Resolution, String> {
     Ok(Resolution::new(width, height))
 }
 
-fn ask_network_mode(prefilled: Option<NetworkMode>) -> Result<NetworkMode, WizardError> {
-    let options = vec![
-        "NAT (default)",
-        "Bridge",
-        "Isolated (off every host network)",
-    ];
-    let selection = Select::new("Network mode:", options)
-        .with_help_message("NAT needs no host setup; bridge requires an existing bridge interface")
-        .with_starting_cursor(match prefilled {
-            Some(NetworkMode::Nat) => 0,
-            Some(NetworkMode::Bridge { .. }) => 1,
-            Some(NetworkMode::Isolated) => 2,
-            None => 0,
-        })
-        .prompt()
-        .map_err(map_inquire_err)?;
+/// The three answers this question can give, as values instead of label
+/// strings: `NetworkMode::Bridge` carries the interface name, which the next
+/// question fills in, so the choice itself is a separate type.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum NetworkChoice {
+    Nat,
+    Bridge,
+    Isolated,
+}
 
-    Ok(match selection {
-        "NAT (default)" | "NAT" => NetworkMode::Nat,
-        "Bridge" => NetworkMode::Bridge {
+impl NetworkChoice {
+    fn label(self) -> &'static str {
+        match self {
+            NetworkChoice::Nat => "NAT",
+            NetworkChoice::Bridge => "Bridge",
+            NetworkChoice::Isolated => "Isolated",
+        }
+    }
+
+    fn hint(self) -> &'static str {
+        match self {
+            NetworkChoice::Nat => "no host setup — the guest shares the host's network",
+            NetworkChoice::Bridge => "the guest joins a bridge that already exists on the host",
+            NetworkChoice::Isolated => "a private namespace: no route off the host",
+        }
+    }
+
+    /// Which entry the cursor starts on, so the modify pass opens on what was
+    /// answered last time. A bridge interface name is ignored: the entry
+    /// stands for the mode, and the name is asked for separately.
+    fn from_mode(mode: Option<&NetworkMode>) -> Self {
+        match mode {
+            Some(NetworkMode::Bridge { .. }) => NetworkChoice::Bridge,
+            Some(NetworkMode::Isolated) => NetworkChoice::Isolated,
+            _ => NetworkChoice::Nat,
+        }
+    }
+}
+
+fn network_mode(choice: NetworkChoice) -> NetworkMode {
+    match choice {
+        NetworkChoice::Nat => NetworkMode::Nat,
+        NetworkChoice::Bridge => NetworkMode::Bridge {
             interface: String::new(),
         },
-        "Isolated (off every host network)" | "Isolated" => NetworkMode::Isolated,
-        _ => unreachable!(),
-    })
+        NetworkChoice::Isolated => NetworkMode::Isolated,
+    }
+}
+
+fn ask_network_mode(prefilled: Option<NetworkMode>) -> Result<NetworkMode, WizardError> {
+    let choice = cliclack::select("Network mode")
+        .item(
+            NetworkChoice::Nat,
+            NetworkChoice::Nat.label(),
+            NetworkChoice::Nat.hint(),
+        )
+        .item(
+            NetworkChoice::Bridge,
+            NetworkChoice::Bridge.label(),
+            NetworkChoice::Bridge.hint(),
+        )
+        .item(
+            NetworkChoice::Isolated,
+            NetworkChoice::Isolated.label(),
+            NetworkChoice::Isolated.hint(),
+        )
+        .initial_value(NetworkChoice::from_mode(prefilled.as_ref()))
+        .interact()?;
+
+    Ok(network_mode(choice))
 }
 
 fn ask_bridge_interface(prefilled: Option<String>) -> Result<Option<String>, WizardError> {
-    let prompt = Text::new("Bridge interface name (e.g., br0):")
-        .with_placeholder("br0")
-        .with_validator(|input: &str| {
-            if input.trim().is_empty() {
-                Ok(inquire::validator::Validation::Invalid(
-                    inquire::validator::ErrorMessage::Custom("Bridge interface name cannot be empty".to_string()),
-                ))
-            } else if !input.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_') {
-                Ok(inquire::validator::Validation::Invalid(
-                    inquire::validator::ErrorMessage::Custom("Interface name can only contain letters, numbers, hyphens, and underscores".to_string()),
-                ))
-            } else {
-                Ok(inquire::validator::Validation::Valid)
+    let prompt = cliclack::input("Bridge interface (e.g. br0)")
+        .placeholder("br0")
+        .validate(|input: &String| -> Result<(), String> {
+            let name = input.trim();
+            if name.is_empty() {
+                return Err("the interface name cannot be empty".into());
             }
-        })
-        .with_default(&prefilled.unwrap_or_default())
-        .prompt()
-        .map_err(map_inquire_err)?;
+            if !name
+                .chars()
+                .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+            {
+                return Err("letters, digits, '-' and '_' only".into());
+            }
+            Ok(())
+        });
+    let mut prompt = match prefilled {
+        Some(name) => prompt.default_input(&name),
+        None => prompt,
+    };
 
-    if prompt.trim().is_empty() {
-        Ok(None)
-    } else {
-        Ok(Some(prompt.trim().to_string()))
-    }
+    let name: String = prompt.interact()?;
+    Ok(Some(name.trim().to_string()))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn parse_arm_translator_valid() {
-        assert_eq!(
-            parse_arm_translator("libndk (AMD)"),
-            Some(CliArmTranslator::Libndk)
-        );
-    }
-
-    #[test]
-    fn parse_arm_translator_invalid() {
-        assert_eq!(parse_arm_translator("unknown"), None);
-    }
 
     #[test]
     fn parse_resolution_valid() {
@@ -767,6 +660,56 @@ mod tests {
     #[test]
     fn parse_resolution_out_of_range() {
         assert!(parse_resolution("8192x8192").is_err());
+    }
+
+    #[test]
+    fn the_numeric_validator_holds_its_bounds() {
+        let gpu_memory = validate_range(MIN_GPU_MEMORY_MIB, MAX_GPU_MEMORY_MIB);
+
+        assert!(gpu_memory(&"256".to_string()).is_ok());
+        assert!(gpu_memory(&"4096".to_string()).is_ok());
+        assert!(gpu_memory(&"16384".to_string()).is_ok());
+        assert!(gpu_memory(&"255".to_string()).is_err());
+        assert!(gpu_memory(&"16385".to_string()).is_err());
+        assert!(gpu_memory(&"lots".to_string()).is_err());
+        assert_eq!(
+            gpu_memory(&"2048".to_string()).map(|_| "accepted"),
+            Ok("accepted"),
+            "a value inside the range must pass, not merely be reported on"
+        );
+    }
+
+    #[test]
+    fn the_network_choice_opens_on_the_mode_that_was_already_answered() {
+        assert_eq!(
+            NetworkChoice::from_mode(Some(&NetworkMode::Bridge {
+                interface: "br0".to_string()
+            })),
+            NetworkChoice::Bridge,
+            "the bridge interface name is asked for separately, the entry stands for the mode"
+        );
+        assert_eq!(
+            NetworkChoice::from_mode(Some(&NetworkMode::Isolated)),
+            NetworkChoice::Isolated
+        );
+        assert_eq!(
+            NetworkChoice::from_mode(Some(&NetworkMode::Nat)),
+            NetworkChoice::Nat
+        );
+        assert_eq!(NetworkChoice::from_mode(None), NetworkChoice::Nat);
+    }
+
+    #[test]
+    fn a_bridge_choice_leaves_the_interface_for_the_next_question() {
+        assert_eq!(
+            network_mode(NetworkChoice::Bridge),
+            NetworkMode::Bridge {
+                interface: String::new()
+            },
+            "the interface name comes from its own question, never from the mode choice"
+        );
+        assert_eq!(network_mode(NetworkChoice::Nat), NetworkMode::Nat);
+        assert_eq!(network_mode(NetworkChoice::Isolated), NetworkMode::Isolated);
     }
 
     #[test]

@@ -864,7 +864,10 @@ impl From<CliDiskFormat> for andler_rpc::proto::DiskFormat {
     }
 }
 
-#[derive(Debug, Clone, Copy, ValueEnum)]
+/// The wizard's typed choices require `Eq` (cliclack's `Select`/`MultiSelect`
+/// are generic over `T: Clone + Eq`) — and `PartialEq` is what a reader's
+/// tests compare answers with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum CliAndroidVersion {
     #[value(name = "11")]
     Android11,
@@ -937,6 +940,16 @@ impl From<CliArmTranslator> for andler_core::ArmTranslator {
             CliArmTranslator::None => andler_core::ArmTranslator::None,
             CliArmTranslator::Libndk => andler_core::ArmTranslator::Libndk,
             CliArmTranslator::Libhoudini => andler_core::ArmTranslator::Libhoudini,
+        }
+    }
+}
+
+impl From<andler_core::ArmTranslator> for CliArmTranslator {
+    fn from(value: andler_core::ArmTranslator) -> Self {
+        match value {
+            andler_core::ArmTranslator::None => CliArmTranslator::None,
+            andler_core::ArmTranslator::Libndk => CliArmTranslator::Libndk,
+            andler_core::ArmTranslator::Libhoudini => CliArmTranslator::Libhoudini,
         }
     }
 }

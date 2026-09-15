@@ -34,7 +34,19 @@
 
 ## [Unreleased]
 
-_Nothing yet._
+### Changed
+
+- **The wizard's prompts are typed, and the dialog reads as one session.** Every question is now built from the answer's own value instead of a label string that was parsed back — GPU backend, audio backend, ARM translator, CD-ROM bus, network mode, VM type, configuration mode, Android version and the summary action all carry their value through, so the wizard cannot disagree with itself about what an option means. The label tables and the `parse_*_choice` helpers that re-derived the value from the text are gone, as is the option reordering that existed only to place the default first.
+- **Every option explains itself where it is highlighted.** An entry is a short label plus a hint (`Venus` — `Vulkan 3D — fastest`), and the recommended answer is the one the cursor opens on rather than a `(recommended)` suffix in the label; the multi-select for advanced groups lists what each group owns instead of a label with the detail bolted on in parentheses.
+- **The wizard is framed and speaks one language.** The session opens with `andler · create a virtual machine` and closes with `The instance is ready.`; a cancelled prompt is followed by `Nothing was created.` (previously a bare `Cancelled.` on its own line, which said nothing about the outcome); steps, warnings and progress all use the same symbol set as the prompts.
+- **Wizard progress is a bar, and the wizard no longer owns a progress renderer.** The base-image download shows transferred bytes against the total with an ETA, creation and the guest-selection apply are spinners, and the ~60-line hand-rolled ANSI writer that drew `\r` progress lines is removed. The download bar uses a template sized for an 80-column terminal instead of the stock one, which spends 98 columns on the same line and made the live frame wrap. Nothing is drawn when stderr is not a terminal, so `--quick` under a pipe stays silent where it used to print progress lines. The questions need a terminal on stderr now: `andler create 2>log` refuses with the non-TTY usage error instead of drawing prompts into the log file.
+- **Every line the wizard draws fits the terminal.** A prompt's hint sits on the same line as its label and is not wrapped by the prompt library, so the hints, the question lines and the progress messages were sized for 80 columns rather than left to the terminal's mid-word wrap — which, for a redrawn frame, left the wrapped remainder on screen. The daemon's messages (a catalog error, a failed download) keep their full text by moving to a wrapped log line instead of the one-line progress frame.
+- **One prompt library for the whole CLI.** The wizard, `remove --purge` and `snapshot delete` confirmations are built on the same prompt engine, whose spinner and progress bars are the `indicatif` engine the rest of the CLI already renders with; `inquire` is no longer a dependency.
+- **A VM name is trimmed at the prompt.** Leading and trailing spaces used to be accepted by the validator and then fail the daemon's own config validation; the name the operator typed is what is stored.
+
+### Fixed
+
+- **`Change some settings` could not change the CD-ROM bus.** The modify pass handed the group's previous answer straight back instead of offering it as the default, so picking "Boot & disks" re-asked the compact-on-shutdown question but silently kept the old bus. Every question now treats a previous answer as its default, exactly like the rest of the advanced groups.
 
 ---
 
