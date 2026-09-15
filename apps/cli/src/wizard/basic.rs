@@ -118,7 +118,7 @@ pub fn ask_kind(prefilled: Option<WizardKind>) -> Result<WizardKind, WizardError
     if let Some(k) = prefilled {
         return Ok(k);
     }
-    let kind = cliclack::select("Which VM do you want to create?")
+    let kind = cliclack::select("which VM do you want to create?")
         .item(WizardKind::Linux, "Linux", "any distro from an ISO")
         .item(
             WizardKind::Android,
@@ -139,7 +139,7 @@ pub fn ask_name(prefilled: Option<String>, kind: WizardKind) -> Result<String, W
         WizardKind::Linux => "my-linux-vm",
         WizardKind::Android => "my-android-vm",
     };
-    let name: String = cliclack::input("What should the VM be called?")
+    let name: String = cliclack::input("what should the VM be called?")
         .placeholder(placeholder)
         // cliclack hands a validator a `&String`; the check itself takes the
         // slice it actually needs.
@@ -157,7 +157,7 @@ pub fn ask_iso_path(prefilled: Option<String>) -> Result<String, WizardError> {
         return Ok(p);
     }
     let path: String =
-        cliclack::input("Path to the ISO image\nEnter skips it and boots from the disk")
+        cliclack::input("path to the ISO image\nEnter skips it and boots from the disk")
             .placeholder("/home/user/isos/cachyos.iso")
             .required(false)
             .validate(|input: &String| validate_iso_input(input))
@@ -168,7 +168,7 @@ pub fn ask_iso_path(prefilled: Option<String>) -> Result<String, WizardError> {
 }
 
 pub fn ask_android_version() -> Result<CliAndroidVersion, WizardError> {
-    let version = cliclack::select("Android version")
+    let version = cliclack::select("android version")
         .item(
             CliAndroidVersion::Android13,
             "Android 13",
@@ -187,7 +187,7 @@ pub fn ask_android_version() -> Result<CliAndroidVersion, WizardError> {
 
 pub fn ask_disk_size(default_gib: u64) -> Result<u64, WizardError> {
     let size: u64 = cliclack::input(
-        "Disk size (GiB)\nthin-provisioned qcow2 — a nominal limit, not host usage",
+        "disk size (GiB)\nthin-provisioned qcow2 — a nominal limit, not host usage",
     )
     .default_input(&default_gib.to_string())
     .validate(|input: &String| validate_disk_size(input))
@@ -198,7 +198,7 @@ pub fn ask_disk_size(default_gib: u64) -> Result<u64, WizardError> {
 
 fn ask_enable_uefi() -> Result<bool, WizardError> {
     let use_uefi = cliclack::confirm(
-        "Use UEFI/OVMF firmware?\nrecommended — needs edk2-ovmf; No uses legacy BIOS",
+        "use UEFI/OVMF firmware?\nrecommended — needs edk2-ovmf; No uses legacy BIOS",
     )
     .initial_value(true)
     .interact()?;

@@ -59,7 +59,7 @@ pub async fn ask(
 
     let choice = match &published {
         Some(image) => cliclack::select(format!(
-            "No {variant} image for Android {} in the cache\nwhere should the guest image come from?",
+            "no {variant} image for Android {} in the cache\nwhere should the guest image come from?",
             version.number()
         ))
         .item(
@@ -95,7 +95,7 @@ pub async fn ask(
         return download(client, &image).await;
     }
 
-    let path: String = cliclack::input("Path to the Android base image")
+    let path: String = cliclack::input("path to the android base image")
         .placeholder("/home/user/.andler/cache/base-images/android13-vanilla/…")
         .validate(|input: &String| {
             validate_base_image_path(input.trim()).map_err(|e| e.to_string())
@@ -151,7 +151,7 @@ async fn download(
     image: &RemoteBaseImageEntry,
 ) -> Result<Choice, WizardError> {
     let confirmed = cliclack::confirm(format!(
-        "Download {} ({})?\nverified against the release manifest's sha256\n\
+        "download {} ({})?\nverified against the release manifest's sha256\n\
          installed into ~/.andler/cache/base-images/",
         image.id,
         super::basic::describe_size(image.download_bytes)

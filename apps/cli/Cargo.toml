@@ -34,6 +34,9 @@ toml = "0.8"
 # list position, and the progress bars share the same look and the same
 # `indicatif` engine the rest of the CLI already renders with.
 cliclack = "0.5"
+# Already in the tree through cliclack and indicatif; a direct dependency for
+# the `Style` type its `Theme` trait is defined in (apps/cli/src/theme.rs).
+console = "0.16"
 chrono = { version = "0.4", features = ["serde"] }
 libc = "0.2"
 

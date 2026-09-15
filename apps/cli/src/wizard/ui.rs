@@ -292,7 +292,14 @@ fn row_prefix(
 ) -> (String, usize) {
     let mut prefix = " ".repeat(INDENT);
     if label_width > 0 {
-        prefix.push_str(&pad(label, label_width));
+        // The label is the quiet half of the row: the value is what the
+        // operator reads, the label only says what it is.
+        let padded = pad(label, label_width);
+        prefix.push_str(&if styled {
+            paint(&padded, DIM, styled)
+        } else {
+            padded
+        });
         prefix.push_str(&" ".repeat(GAP));
     }
     if status_width > 0 {

@@ -25,7 +25,7 @@ pub fn run(
     print!("{}", summary_text(basic, advanced, detected));
     println!();
 
-    let action = cliclack::select("What next?")
+    let action = cliclack::select("what next?")
         .item(
             SummaryAction::Create,
             "Create the VM",

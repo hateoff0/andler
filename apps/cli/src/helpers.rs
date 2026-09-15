@@ -204,15 +204,36 @@ pub fn emit_json<T: serde::Serialize>(value: &T) -> std::result::Result<(), serd
 /// `andler image download` and the wizard's guest-image question so both show
 /// the same thing for the same stream.
 ///
-/// The template is cliclack's download shape minus `[{elapsed_precise}]` and
-/// with a 20-column bar: the stock one spends 98 columns on this line (symbol,
-/// message, 30-column bar, byte counters, ETA), and a live frame wider than
-/// the terminal wraps — the next redraw then leaves the wrapped remainder on
-/// screen. Nothing is drawn when stderr is not a terminal, which is what
-/// leaves non-interactive callers with their line-oriented output.
+/// The line answers "how fast, and how long is this going to take" — a 2.3 GB
+/// image takes minutes, and "272 MiB / 2.27 GiB" alone does not say whether
+/// that is two minutes or forty. cliclack's stock download template spends 98
+/// columns on it (symbol, message, 30-column bar, counters, ETA), and a live
+/// frame wider than the terminal wraps, which leaves the wrapped remainder on
+/// screen at the next redraw; so the shape is chosen for the terminal it is
+/// drawn on, dropping the total and then the bar as the width shrinks.
+/// Nothing is drawn when stderr is not a terminal, which is what leaves
+/// non-interactive callers with their line-oriented output.
 pub fn download_bar() -> cliclack::ProgressBar {
-    cliclack::progress_bar(1)
-        .with_template("{msg} [{bar:20.cyan/blue}] {bytes}/{total_bytes} ({eta})")
+    let columns = terminal_columns(libc::STDERR_FILENO).unwrap_or(80);
+    let template = if columns >= 110 {
+        "{msg} [{bar:32.cyan/blue}] {bytes}/{total_bytes} ({bytes_per_sec}, {eta})"
+    } else if columns >= 78 {
+        "{msg} [{bar:10.cyan/blue}] {bytes} ({bytes_per_sec}, {eta})"
+    } else {
+        "{msg} ({bytes_per_sec})"
+    };
+    cliclack::progress_bar(1).with_template(template)
+}
+
+/// The terminal's width, for callers that size their output to it.
+fn terminal_columns(fd: i32) -> Option<usize> {
+    // SAFETY: TIOCGWINSZ only writes the size into the winsize this call owns.
+    let (measured, size) = unsafe {
+        let mut size: libc::winsize = std::mem::zeroed();
+        let measured = libc::ioctl(fd, libc::TIOCGWINSZ, &mut size);
+        (measured, size)
+    };
+    (measured == 0 && size.ws_col > 0).then_some(size.ws_col as usize)
 }
 
 /// What the bar says for one stream message: deliberately short, because it

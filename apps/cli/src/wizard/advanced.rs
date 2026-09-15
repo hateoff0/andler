@@ -119,7 +119,7 @@ fn ask_groups(groups: &[Group]) -> Result<Vec<Group>, WizardError> {
         return Ok(Vec::new());
     }
     let mut prompt = cliclack::multiselect(
-        "Which settings do you want to change?\nspace toggles, Enter confirms; \
+        "which settings do you want to change?\nspace toggles, Enter confirms; \
          empty keeps the current answers",
     )
     .required(false);
@@ -341,7 +341,7 @@ fn ask_cdrom_bus(
 
 fn ask_compact_on_shutdown(prefilled: Option<bool>) -> Result<bool, WizardError> {
     let compact = cliclack::confirm(
-        "Compact the disk after shutdown?\nsaves space, but rewrites the whole file",
+        "compact the disk after shutdown?\nsaves space, but rewrites the whole file",
     )
     .initial_value(prefilled.unwrap_or(false))
     .interact()?;
@@ -405,7 +405,7 @@ fn ask_display_resolution(prefilled: Option<Resolution>) -> Result<Resolution, W
         .unwrap_or_else(|| "1920x1080".to_string());
 
     let raw: String = cliclack::input(
-        "Display resolution\napplied by the guest session at boot\n\
+        "display resolution\napplied by the guest session at boot\n\
          any WxH the virtual display advertises",
     )
     .default_input(&default)
@@ -416,7 +416,7 @@ fn ask_display_resolution(prefilled: Option<Resolution>) -> Result<Resolution, W
 }
 
 fn ask_fullscreen(prefilled: Option<bool>) -> Result<bool, WizardError> {
-    let fullscreen = cliclack::confirm("Start the VM window in fullscreen mode?")
+    let fullscreen = cliclack::confirm("start the VM window in fullscreen mode?")
         .initial_value(prefilled.unwrap_or(false))
         .interact()?;
     Ok(fullscreen)
@@ -429,7 +429,7 @@ fn ask_audio_backend(
     let default = prefilled.unwrap_or(detected.audio_server);
 
     let backend = cliclack::select(format!(
-        "Audio backend (detected: {})",
+        "audio backend (detected: {})",
         ui::audio_label(detected.audio_server)
     ))
     .item(AudioBackend::Pipewire, "PipeWire", "modern, recommended")
@@ -447,7 +447,7 @@ fn ask_audio_backend(
 /// whole setting, not half of one.
 fn ask_clipboard_enabled(prefilled: Option<bool>) -> Result<bool, WizardError> {
     let clipboard = cliclack::confirm(
-        "Share the clipboard between host and VM?\ncopy-paste both ways; the guest side needs spice-vdagent,\n\
+        "share the clipboard between host and VM?\ncopy-paste both ways; the guest side needs spice-vdagent,\n\
          which the wizard installs right after creating the VM",
     )
     .initial_value(prefilled.unwrap_or(true))
@@ -458,7 +458,7 @@ fn ask_clipboard_enabled(prefilled: Option<bool>) -> Result<bool, WizardError> {
 fn ask_input_pointer(prefilled: Option<PointerMode>) -> Result<PointerMode, WizardError> {
     let default = prefilled.unwrap_or(PointerMode::Tablet);
 
-    let pointer = cliclack::select("Input pointer")
+    let pointer = cliclack::select("input pointer")
         .item(
             PointerMode::Tablet,
             "tablet",
@@ -480,7 +480,7 @@ fn ask_cpu_cores(prefilled: Option<u32>) -> Result<u32, WizardError> {
 }
 
 fn ask_memory_gib(prefilled: Option<u64>) -> Result<u64, WizardError> {
-    let gib: u64 = cliclack::input("Memory (GiB)\nguest RAM — 8 GiB suits most workloads")
+    let gib: u64 = cliclack::input("memory (GiB)\nguest RAM — 8 GiB suits most workloads")
         .default_input(&prefilled.unwrap_or(8).to_string())
         .validate(validate_range(MIN_MEMORY_GIB, MAX_MEMORY_GIB))
         .interact()?;
@@ -510,7 +510,7 @@ fn ask_arm_translator(
 
 pub(super) fn ask_gapps(prefilled: Option<bool>) -> Result<bool, WizardError> {
     let gapps = cliclack::confirm(
-        "Enable GApps?\nGoogle Play Store and services; picks the GAPPS base image\nwhen one exists",
+        "enable GApps?\nGoogle Play Store and services; picks the GAPPS base image\nwhen one exists",
     )
     .initial_value(prefilled.unwrap_or(false))
     .interact()?;
@@ -519,7 +519,7 @@ pub(super) fn ask_gapps(prefilled: Option<bool>) -> Result<bool, WizardError> {
 
 fn ask_linked_overlay(prefilled: Option<bool>) -> Result<bool, WizardError> {
     let linked = cliclack::confirm(
-        "Link the disk to the base image instead of copying it?\nNo copies the image: independent and safe, uses disk space\n\
+        "link the disk to the base image instead of copying it?\nNo copies the image: independent and safe, uses disk space\n\
          Yes keeps a thin overlay: saves space, but the instance\nbreaks if the base image moves or is deleted",
     )
     .initial_value(prefilled.unwrap_or(false))
@@ -594,7 +594,7 @@ fn network_mode(choice: NetworkChoice) -> NetworkMode {
 }
 
 fn ask_network_mode(prefilled: Option<NetworkMode>) -> Result<NetworkMode, WizardError> {
-    let choice = cliclack::select("Network mode")
+    let choice = cliclack::select("network mode")
         .item(
             NetworkChoice::Nat,
             NetworkChoice::Nat.label(),
@@ -617,7 +617,7 @@ fn ask_network_mode(prefilled: Option<NetworkMode>) -> Result<NetworkMode, Wizar
 }
 
 fn ask_bridge_interface(prefilled: Option<String>) -> Result<Option<String>, WizardError> {
-    let prompt = cliclack::input("Bridge interface (e.g. br0)")
+    let prompt = cliclack::input("bridge interface (e.g. br0)")
         .placeholder("br0")
         .validate(|input: &String| -> Result<(), String> {
             let name = input.trim();

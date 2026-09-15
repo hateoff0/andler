@@ -184,7 +184,7 @@ pub(crate) fn resolve_draft(
 }
 
 fn ask_wizard_mode() -> Result<WizardMode, WizardError> {
-    let mode = cliclack::select("How much do you want to configure?")
+    let mode = cliclack::select("how much do you want to configure?")
         .item(
             WizardMode::Basic,
             "Recommended settings",

@@ -18,6 +18,7 @@ mod op;
 mod preview;
 mod snapshot;
 mod status;
+mod theme;
 mod verify;
 mod wizard;
 
@@ -1060,6 +1061,9 @@ fn cli_error_message(err: &(dyn std::error::Error + 'static), addr: &str) -> Str
 
 #[tokio::main]
 async fn main() -> std::process::ExitCode {
+    // The dialog's look is global inside cliclack (prompts, spinners and the
+    // progress bars share it), so it is installed once, here.
+    theme::install();
     let cli = Cli::parse();
     let addr = resolve_daemon_addr(&cli);
     let json = cli.json_requested();
