@@ -106,14 +106,17 @@ pub fn report(
                 screen.entry(
                     &entry.name,
                     selection_status(entry.status()),
-                    entry.message.clone(),
+                    short_ids(&entry.message, id),
                 );
             }
         }
         Some(Err(e)) => {
             screen.outcome(
                 Status::Failed,
-                format!("Could not apply the guest-side selections: {e}"),
+                format!(
+                    "Could not apply the guest-side selections: {}",
+                    short_ids(&e.to_string(), id)
+                ),
             );
             screen.note(&format!(
                 "The VM itself was created; re-run `andler guest apply {short}` to retry."
@@ -132,6 +135,13 @@ pub fn report(
         format!("andler config view {short} — inspect the resolved configuration"),
     );
     screen.print();
+}
+
+/// The daemon's messages name the instance by its full id — 64 hex columns in
+/// the middle of a sentence, which the panel then has to break mid-token. Every
+/// other line of this report shows the short id, so the message does too.
+fn short_ids(text: &str, id: &str) -> String {
+    text.replace(id, crate::helpers::short_id(id))
 }
 
 fn selection_status(status: GuestProfileStatus) -> Status {

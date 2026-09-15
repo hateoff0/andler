@@ -316,7 +316,7 @@ GPU fields (vram, gpu) appear when AMD, NVIDIA, or Intel GPU data is available.
 | `lifecycle.rs` | — | `Start`, `Stop`, `Pause`, `Resume`, `Remove` commands |
 | `clone.rs` | — | `Clone`, `Export` commands |
 | `instance_file.rs` | — | TOML instance file parser |
-| `helpers.rs` | — | `parse_size`, `format_size`, `format_bytes`, `ensure_qcow2_extension`, `spinner`, `short_id`, `emit_json` |
+| `helpers.rs` | — | `parse_size`, `format_size`, `format_bytes`, `ensure_qcow2_extension`, `spinner`, `download_bar`/`download_bar_message`/`update_download_bar` (the shared base-image download bar, used by `image download` and the wizard), `short_id`, `emit_json` |
 | `wizard/mod.rs` | — | Wizard orchestration: `run` (answers → request), `--quick` defaults, `handle_wizard` (create + apply + report), errors |
 | `wizard/basic.rs` | — | Basic questions: kind, name, ISO, disk size, UEFI, Android version/package set |
 | `wizard/advanced.rs` | — | Advanced questions grouped by area (boot/disks, display/GPU, devices, CPU/memory, network, Android); "change some settings" re-asks the picked groups, each question defaulting to its previous answer |

@@ -1,4 +1,6 @@
-use andler_rpc::proto::{BackendKind, InstanceStateKind};
+use andler_rpc::proto::{
+    BackendKind, BaseImageDownloadPhase, BaseImageDownloadProgress, InstanceStateKind,
+};
 use std::future::Future;
 use std::io::IsTerminal;
 
@@ -198,6 +200,59 @@ pub fn emit_json<T: serde::Serialize>(value: &T) -> std::result::Result<(), serd
     Ok(())
 }
 
+/// The progress bar a base-image download reports through, shared by
+/// `andler image download` and the wizard's guest-image question so both show
+/// the same thing for the same stream.
+///
+/// The template is cliclack's download shape minus `[{elapsed_precise}]` and
+/// with a 20-column bar: the stock one spends 98 columns on this line (symbol,
+/// message, 30-column bar, byte counters, ETA), and a live frame wider than
+/// the terminal wraps — the next redraw then leaves the wrapped remainder on
+/// screen. Nothing is drawn when stderr is not a terminal, which is what
+/// leaves non-interactive callers with their line-oriented output.
+pub fn download_bar() -> cliclack::ProgressBar {
+    cliclack::progress_bar(1)
+        .with_template("{msg} [{bar:20.cyan/blue}] {bytes}/{total_bytes} ({eta})")
+}
+
+/// What the bar says for one stream message: deliberately short, because it
+/// shares the line with the bar, the byte counters and the ETA, and the asset
+/// names (`linux-waydroid-<id>.qcow2.zst.NN.part`) are far longer than that
+/// budget. An empty line means "nothing to report" — the caller keeps what is
+/// already on screen. The batch position appears only when the daemon knows
+/// it: mid-transfer messages carry no index, and `(0/0)` is not worth showing.
+pub fn download_bar_message(message: &BaseImageDownloadProgress) -> String {
+    match message.phase() {
+        BaseImageDownloadPhase::Downloading if message.asset_count > 0 => {
+            format!(
+                "downloading part {}/{}",
+                message.asset_index, message.asset_count
+            )
+        }
+        BaseImageDownloadPhase::Downloading => "downloading".to_string(),
+        BaseImageDownloadPhase::Verifying => "verifying".to_string(),
+        BaseImageDownloadPhase::Extracting => "unpacking the image".to_string(),
+        BaseImageDownloadPhase::Installing => "installing the image".to_string(),
+        BaseImageDownloadPhase::Resolving => "resolving the build".to_string(),
+        BaseImageDownloadPhase::Done => "done".to_string(),
+        BaseImageDownloadPhase::Unspecified => String::new(),
+    }
+}
+
+/// Feeds one stream message into the bar: the position whenever the daemon
+/// reports bytes (so the bar also advances through the extraction, which
+/// reports the unpacked total), and the phase line whenever there is one.
+pub fn update_download_bar(progress: &cliclack::ProgressBar, message: &BaseImageDownloadProgress) {
+    if message.total_bytes > 0 {
+        progress.set_length(message.total_bytes);
+        progress.set_position(message.downloaded_bytes.min(message.total_bytes));
+    }
+    let line = download_bar_message(message);
+    if !line.is_empty() {
+        progress.set_message(line);
+    }
+}
+
 /// Emit a value as compact JSON on stdout: the single source of truth for
 /// `--json` output so every subcommand formats identically. Streaming outputs
 /// (metrics, events) call this per sample to stay line-based.
@@ -361,6 +416,133 @@ fn operation_phase(op: &andler_rpc::proto::OperationInfo) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn download_message(
+        phase: BaseImageDownloadPhase,
+        asset: &str,
+        asset_index: u32,
+        asset_count: u32,
+    ) -> BaseImageDownloadProgress {
+        BaseImageDownloadProgress {
+            phase: phase.into(),
+            asset: asset.to_string(),
+            asset_index,
+            asset_count,
+            downloaded_bytes: 0,
+            total_bytes: 0,
+            message: String::new(),
+            installed_path: String::new(),
+        }
+    }
+
+    #[test]
+    fn every_download_phase_names_itself_on_the_bar() {
+        assert_eq!(
+            download_bar_message(&download_message(
+                BaseImageDownloadPhase::Verifying,
+                "image.qcow2.zst.00.part",
+                1,
+                2
+            )),
+            "verifying"
+        );
+        assert_eq!(
+            download_bar_message(&download_message(
+                BaseImageDownloadPhase::Extracting,
+                "stem",
+                0,
+                0
+            )),
+            "unpacking the image"
+        );
+        assert_eq!(
+            download_bar_message(&download_message(
+                BaseImageDownloadPhase::Installing,
+                "stem",
+                0,
+                0
+            )),
+            "installing the image"
+        );
+        assert_eq!(
+            download_bar_message(&download_message(
+                BaseImageDownloadPhase::Resolving,
+                "stem",
+                0,
+                0
+            )),
+            "resolving the build"
+        );
+        assert_eq!(
+            download_bar_message(&download_message(
+                BaseImageDownloadPhase::Done,
+                "stem",
+                0,
+                0
+            )),
+            "done"
+        );
+        assert_eq!(
+            download_bar_message(&download_message(
+                BaseImageDownloadPhase::Unspecified,
+                "stem",
+                0,
+                0
+            )),
+            "",
+            "an unspecified phase must not overwrite the line already on screen"
+        );
+    }
+
+    #[test]
+    fn the_batch_position_only_appears_when_the_daemon_knows_it() {
+        assert_eq!(
+            download_bar_message(&download_message(
+                BaseImageDownloadPhase::Downloading,
+                "image.qcow2.zst.00.part",
+                1,
+                2
+            )),
+            "downloading part 1/2"
+        );
+        assert_eq!(
+            download_bar_message(&download_message(
+                BaseImageDownloadPhase::Downloading,
+                "image.qcow2.zst.00.part",
+                0,
+                0
+            )),
+            "downloading",
+            "mid-transfer messages carry no index, and (0/0) is noise"
+        );
+    }
+
+    #[test]
+    fn a_download_bar_line_stays_inside_the_terminal() {
+        // The bar's own chrome — `[{elapsed}] [20-column bar] {bytes}/{total}
+        // ({eta})` plus cliclack's symbol prefix — is about 50 columns, so
+        // anything much above 25 here wraps the live frame and the next redraw
+        // leaves the wrapped remainder behind.
+        for phase in [
+            BaseImageDownloadPhase::Downloading,
+            BaseImageDownloadPhase::Verifying,
+            BaseImageDownloadPhase::Extracting,
+            BaseImageDownloadPhase::Installing,
+            BaseImageDownloadPhase::Resolving,
+            BaseImageDownloadPhase::Done,
+        ] {
+            let line = download_bar_message(&download_message(
+                phase,
+                "linux-waydroid-android13-vanilla-e2e1234.qcow2.zst.00.part",
+                12,
+                97,
+            ));
+            assert!(
+                line.chars().count() <= 24,
+                "{phase:?} renders {line:?}, which is too long for the bar's own chrome"
+            );
+        }
+    }
 
     #[test]
     fn short_id_truncates_full_id_to_twelve_chars() {

@@ -1,6 +1,6 @@
 use andler_rpc::proto::{
-    AndroidVersion as ProtoAndroidVersion, BaseImageDownloadPhase, BaseImageDownloadProgress,
-    DownloadBaseImageRequest, ListRemoteBaseImagesRequest, RemoteBaseImageEntry,
+    AndroidVersion as ProtoAndroidVersion, BaseImageDownloadPhase, DownloadBaseImageRequest,
+    ListRemoteBaseImagesRequest, RemoteBaseImageEntry,
 };
 
 use crate::{CliAndroidVersion, TracedClient};
@@ -162,19 +162,10 @@ async fn download(
         return Err(WizardError::Cancelled);
     }
 
-    // One bar for the whole payload: the daemon reports bytes fetched so far
-    // across every asset, so the bar only moves forward — across parts, and
-    // across the extraction that follows them.
-    //
-    // The template is cliclack's download shape minus `[{elapsed_precise}]`
-    // and with a 20-column bar: the stock one spends 98 columns on this line
-    // (3 for the symbol, 25 for the message, 30 for the bar, 20 for the byte
-    // counters, 4 for the ETA), and a live frame wider than the terminal wraps
-    // — the redraw then leaves the wrapped remainder on screen.
-    let progress = cliclack::progress_bar(1)
-        .with_template("{msg} [{bar:20.cyan/blue}] {bytes}/{total_bytes} ({eta})");
-    // The message stays short on purpose: it shares the line with the bar,
-    // the byte counters and the ETA.
+    // The same bar `andler image download` reports through: one bar for the
+    // whole payload, moving only forward — across parts, and across the
+    // extraction that follows them.
+    let progress = crate::helpers::download_bar();
     progress.start("downloading the base image");
 
     let mut stream = match client
@@ -202,14 +193,7 @@ async fn download(
     loop {
         match stream.message().await {
             Ok(Some(message)) => {
-                if message.total_bytes > 0 {
-                    progress.set_length(message.total_bytes);
-                    progress.set_position(message.downloaded_bytes.min(message.total_bytes));
-                }
-                let line = progress_line(&message);
-                if !line.is_empty() {
-                    progress.set_message(line);
-                }
+                crate::helpers::update_download_bar(&progress, &message);
                 if message.phase() == BaseImageDownloadPhase::Done {
                     installed = message.installed_path;
                 }
@@ -242,126 +226,4 @@ async fn download(
         path: installed,
         auto_resolved: true,
     })
-}
-
-/// What the line under the progress bar says for one stream message. The
-/// batch position is only printed when the daemon knows it — mid-transfer
-/// messages carry no asset index, and `(0/0)` is not something to show.
-fn progress_line(message: &BaseImageDownloadProgress) -> String {
-    match message.phase() {
-        BaseImageDownloadPhase::Downloading if message.asset_count > 0 => {
-            format!(
-                "downloading part {}/{}",
-                message.asset_index, message.asset_count
-            )
-        }
-        BaseImageDownloadPhase::Downloading => "downloading".to_string(),
-        BaseImageDownloadPhase::Verifying => "verifying".to_string(),
-        BaseImageDownloadPhase::Extracting => "unpacking the image".to_string(),
-        BaseImageDownloadPhase::Installing => "installing the image".to_string(),
-        BaseImageDownloadPhase::Resolving => "resolving the build".to_string(),
-        BaseImageDownloadPhase::Done => "done".to_string(),
-        BaseImageDownloadPhase::Unspecified => String::new(),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn message(
-        phase: BaseImageDownloadPhase,
-        asset: &str,
-        asset_index: u32,
-        asset_count: u32,
-    ) -> BaseImageDownloadProgress {
-        BaseImageDownloadProgress {
-            phase: phase.into(),
-            asset: asset.to_string(),
-            asset_index,
-            asset_count,
-            downloaded_bytes: 0,
-            total_bytes: 0,
-            message: String::new(),
-            installed_path: String::new(),
-        }
-    }
-
-    #[test]
-    fn every_phase_names_itself_on_the_progress_line() {
-        assert_eq!(
-            progress_line(&message(
-                BaseImageDownloadPhase::Verifying,
-                "image.qcow2.zst.00.part",
-                1,
-                2
-            )),
-            "verifying"
-        );
-        assert_eq!(
-            progress_line(&message(BaseImageDownloadPhase::Extracting, "stem", 0, 0)),
-            "unpacking the image"
-        );
-        assert_eq!(
-            progress_line(&message(BaseImageDownloadPhase::Installing, "stem", 0, 0)),
-            "installing the image"
-        );
-        assert_eq!(
-            progress_line(&message(BaseImageDownloadPhase::Resolving, "stem", 0, 0)),
-            "resolving the build"
-        );
-        assert_eq!(
-            progress_line(&message(BaseImageDownloadPhase::Done, "stem", 0, 0)),
-            "done"
-        );
-        assert_eq!(
-            progress_line(&message(BaseImageDownloadPhase::Unspecified, "stem", 0, 0)),
-            "",
-            "an unspecified phase must not overwrite the line already on screen"
-        );
-    }
-
-    #[test]
-    fn the_batch_position_only_appears_when_the_daemon_knows_it() {
-        assert_eq!(
-            progress_line(&message(
-                BaseImageDownloadPhase::Downloading,
-                "image.qcow2.zst.00.part",
-                1,
-                2
-            )),
-            "downloading part 1/2"
-        );
-        assert_eq!(
-            progress_line(&message(
-                BaseImageDownloadPhase::Downloading,
-                "image.qcow2.zst.00.part",
-                0,
-                0
-            )),
-            "downloading",
-            "mid-transfer messages carry no index, and (0/0) is noise"
-        );
-    }
-
-    #[test]
-    fn a_progress_line_stays_inside_the_terminal() {
-        // The download template adds `[{elapsed}] [30-char bar] {bytes}/{total}
-        // ({eta})` — about 55 columns — so anything above ~24 here wraps the
-        // live frame, and a wrapped frame leaves its tail behind on redraw.
-        for phase in [
-            BaseImageDownloadPhase::Downloading,
-            BaseImageDownloadPhase::Verifying,
-            BaseImageDownloadPhase::Extracting,
-            BaseImageDownloadPhase::Installing,
-            BaseImageDownloadPhase::Resolving,
-            BaseImageDownloadPhase::Done,
-        ] {
-            let line = progress_line(&message(phase, "some-image.qcow2.zst.00.part", 12, 97));
-            assert!(
-                line.chars().count() <= 24,
-                "{phase:?} renders {line:?}, which is too long for the download template's chrome"
-            );
-        }
-    }
 }

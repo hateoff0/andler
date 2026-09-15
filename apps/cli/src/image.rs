@@ -1,13 +1,12 @@
-use crate::helpers::{emit_json, format_bytes};
+use crate::helpers::{download_bar, emit_json, format_bytes, update_download_bar};
 use crate::CliAndroidVersion;
 use crate::TracedClient;
 use andler_rpc::proto::{
     AndroidVersion as ProtoAndroidVersion, BaseImageDownloadPhase, BaseImageDownloadProgress,
     DownloadBaseImageRequest, ListRemoteBaseImagesRequest, RemoteBaseImageEntry,
 };
-use indicatif::{ProgressBar, ProgressStyle};
+use cliclack::ProgressBar;
 use std::io::IsTerminal;
-use std::time::Duration;
 
 /// Package set of a published base image; `docker/images/build.sh` builds
 /// exactly these two.
@@ -150,7 +149,17 @@ pub async fn handle(
                 force,
             };
             let mut stream = client.download_base_image(request).await?.into_inner();
-            let progress = if json { ProgressBar::hidden() } else { bar() };
+            // The bar needs a terminal on stderr; without one (or under
+            // `--json`) the stream is reported as lines, which is what a log
+            // or a script consumes.
+            let live = !json && std::io::stderr().is_terminal();
+            let progress = download_bar();
+            if live {
+                // `start` is what applies the bar's template and puts a first
+                // line on screen; without it the bar renders indicatif's
+                // default style, with no phase and no byte counters.
+                progress.start("downloading the base image");
+            }
             let mut last_reported_step = 0u64;
 
             while let Some(message) = stream.message().await? {
@@ -169,11 +178,13 @@ pub async fn handle(
                         message.installed_path,
                     );
                 } else {
-                    render_progress(&progress, &message, &mut last_reported_step);
+                    render_progress(live, &progress, &message, &mut last_reported_step);
                 }
             }
 
-            progress.finish_and_clear();
+            if live {
+                progress.clear();
+            }
             Ok(())
         }
     }
@@ -205,26 +216,13 @@ fn phase_name(phase: BaseImageDownloadPhase) -> &'static str {
     }
 }
 
-fn bar() -> ProgressBar {
-    if !std::io::stderr().is_terminal() {
-        return ProgressBar::hidden();
-    }
-    let progress = ProgressBar::new(0);
-    if let Ok(style) = ProgressStyle::default_bar()
-        .template("{spinner} {msg} [{bar:32}] {bytes}/{total_bytes} ({eta})")
-    {
-        progress.set_style(style.progress_chars("=>-"));
-    }
-    progress.enable_steady_tick(Duration::from_millis(200));
-    progress
-}
-
 fn render_progress(
+    live: bool,
     progress: &ProgressBar,
     message: &BaseImageDownloadProgress,
     last_reported_step: &mut u64,
 ) {
-    if progress.is_hidden() {
+    if !live {
         // Non-interactive output stays line-oriented: phase transitions and
         // the outcome, plus one line per 10% of the payload so a log or a
         // redirected terminal shows the download is alive instead of sitting
@@ -260,28 +258,14 @@ fn render_progress(
     }
 
     match message.phase() {
-        BaseImageDownloadPhase::Resolving => {
-            progress.set_message(message.message.clone());
-        }
-        BaseImageDownloadPhase::Downloading | BaseImageDownloadPhase::Extracting => {
-            progress.set_length(message.total_bytes);
-            progress.set_position(message.downloaded_bytes);
-            progress.set_message(match message.asset_count {
-                0 => message.asset.clone(),
-                count => format!("{} ({}/{count})", message.asset, message.asset_index),
-            });
-        }
-        BaseImageDownloadPhase::Verifying => {
-            progress.set_message(format!("verifying {}", message.asset));
-        }
-        BaseImageDownloadPhase::Installing => {
-            progress.set_message("installing into the cache");
-        }
         BaseImageDownloadPhase::Done => {
-            progress.finish_and_clear();
+            progress.clear();
             println!("✓ {}", message.message);
             println!("  {}", message.installed_path);
         }
         BaseImageDownloadPhase::Unspecified => {}
+        // Everything else moves the shared bar: the same wording the wizard
+        // shows for the same stream.
+        _ => update_download_bar(progress, message),
     }
 }
