@@ -51,6 +51,7 @@
 ### Fixed
 
 - **`Change some settings` could not change the CD-ROM bus.** The modify pass handed the group's previous answer straight back instead of offering it as the default, so picking "Boot & disks" re-asked the compact-on-shutdown question but silently kept the old bus. Every question now treats a previous answer as its default, exactly like the rest of the advanced groups.
+- **Creation from a multi-GB base image took a minute.** The base-image pin derives the image's sha256 on every create, and the hashing ran at 48 MB/s in the profile a developer builds; the digest is now memoized per `(path, size, mtime)` — replacing the image still changes one of those and re-hashes — and the `sha2` backend is built with its SHA-NI path, which took the single hash from 51 s to 1.2 s in release. Repeated creates from the same image: 54 s → 2 s (debug), and the cached-image case is now dominated by the appliance boot.
 
 ---
 

@@ -32,7 +32,10 @@ prost = "0.13"
 clap = { version = "4", features = ["derive"] }
 dirs = "5"
 rand = "0.10"
-sha2 = "0.10"
+# `asm` selects the SHA-NI accelerated backend: the soft fallback hashes at
+# ~48 MB/s, which turned a base-image pin check (2.5 GB) into a 50-second
+# create. Same digest, same API — a different implementation of it.
+sha2 = { version = "0.10", features = ["asm"] }
 
 [workspace.lints.clippy]
 # Every `unsafe` block must carry a `// SAFETY:` justification above it

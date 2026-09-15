@@ -27,6 +27,15 @@ pub fn arm_translators_dir() -> PathBuf {
     andler_home().join("cache/arm-translators")
 }
 
+/// Where the digest memo for base images lives (see the daemon's
+/// `base_image_digest`): the pin derive hashes a multi-GB image, which a
+/// release build does in a second and a debug build in a minute, so the
+/// digest is remembered per `(path, size, mtime)` instead of recomputed on
+/// every create.
+pub fn base_image_digests_path() -> PathBuf {
+    andler_home().join("cache/base-image-digests.json")
+}
+
 pub fn db_path() -> PathBuf {
     andler_home().join("andlerd.db")
 }

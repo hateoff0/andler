@@ -1,4 +1,5 @@
 mod audit;
+mod base_image_digest;
 mod clone_ops;
 mod disk_chain;
 mod error;
