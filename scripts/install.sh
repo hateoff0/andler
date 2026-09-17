@@ -95,7 +95,7 @@ SKIP_DEPS=0
 WITH_OPTIONAL=0
 DRY_RUN=0
 DATA_DIR="${ANDLER_HOME:-$HOME/.andler}"
-OPTIONAL_RECORD="$DATA_DIR/optional-deps.txt"
+OPTIONAL_RECORD="$DATA_DIR/optional-packages"
 
 usage() {
     cat <<'EOF'
@@ -588,16 +588,25 @@ install_optional_dependencies() {
     record_optional_packages "$pkgs"
 }
 
+# Records the set in $DATA_DIR/optional-packages: a comment header saying what
+# wrote it and how to undo it, the package manager family it was installed
+# with (removal uses that, not a fresh detection), then one package per line —
+# sorted and unique, merged with whatever an earlier --with-optional left.
 record_optional_packages() {
     local existing=""
     if [[ -f "$OPTIONAL_RECORD" ]]; then
-        existing="$(<"$OPTIONAL_RECORD")"
+        existing="$(sed '/^#/d;/^family=/d' "$OPTIONAL_RECORD")"
     fi
     mkdir -p "$DATA_DIR"
     {
-        printf '%s\n' "$existing" | tr ' ' '\n'
-        printf '%s\n' "$1" | tr ' ' '\n'
-    } | sed '/^$/d' | sort -u >"$OPTIONAL_RECORD"
+        printf '# ANDLER optional packages — installed by scripts/install.sh --with-optional\n'
+        printf '# remove the set with: scripts/uninstall.sh --optional\n'
+        printf 'family=%s\n' "$FAMILY"
+        {
+            printf '%s\n' "$existing" | tr ' ' '\n'
+            printf '%s\n' "$1" | tr ' ' '\n'
+        } | sed '/^$/d' | sort -u
+    } >"$OPTIONAL_RECORD"
     ui_ok "recorded" "$OPTIONAL_RECORD (uninstall.sh --optional removes this set)"
 }
 

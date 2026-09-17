@@ -30,7 +30,7 @@ source "$DEPS_LIB"
 UNIT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
 UNIT_DEST="$UNIT_DIR/andlerd.service"
 DATA_DIR="${ANDLER_HOME:-$HOME/.andler}"
-OPTIONAL_RECORD="$DATA_DIR/optional-deps.txt"
+OPTIONAL_RECORD="$DATA_DIR/optional-packages"
 
 PURGE=0
 BINARIES=0
@@ -177,8 +177,10 @@ fi
 ui_section "Optional packages"
 
 recorded_optional=""
+recorded_family=""
 if [[ -f "$OPTIONAL_RECORD" ]]; then
-    recorded_optional="$(tr '\n' ' ' <"$OPTIONAL_RECORD" | sed 's/ *$//')"
+    recorded_family="$(sed -n 's/^family=//p' "$OPTIONAL_RECORD" | head -n 1)"
+    recorded_optional="$(sed '/^#/d;/^family=/d;/^[[:space:]]*$/d' "$OPTIONAL_RECORD" | tr '\n' ' ' | sed 's/ *$//')"
 fi
 
 if [[ "$REMOVE_OPTIONAL" -eq 0 ]]; then
@@ -195,7 +197,10 @@ elif [[ -z "$recorded_optional" ]]; then
     ui_ok "nothing to remove" "no record at $OPTIONAL_RECORD"
     ui_fix "only install.sh --with-optional writes one; remove anything else with your package manager"
 else
-    family="$(deps_detect_family)"
+    # The manager the packages were installed with, not whatever this host
+    # detects now: the record knows, and the two can differ (a relocated
+    # ANDLER_HOME, a distribution change).
+    family="${recorded_family:-$(deps_detect_family)}"
     mode="no"
     [[ "$ASSUME_YES" -eq 1 ]] && mode="yes"
     cmd="$(pkg_remove_command "$family" "$mode" $recorded_optional)"
@@ -203,6 +208,7 @@ else
         ui_fail "unknown distribution" "no package manager to drive"
         ui_fix "remove these yourself: $recorded_optional"
     else
+        ui_kv "manager" "$family"
         ui_kv "packages" "$recorded_optional"
         ui_kv "command" "$cmd"
         confirm_or_die "remove them"

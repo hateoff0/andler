@@ -29,7 +29,7 @@ scripts/install.sh --component cli --no-service --from-release v0.1.0
 | `--from-release [TAG]` | install a published release instead of local binaries; the tag defaults to the latest release. Uses `gh` when present, otherwise `curl` against the GitHub API (`GH_TOKEN`/`GITHUB_TOKEN`/`ANDLER_INSTALL_TOKEN` for a private repository) |
 | `--bin-dir DIR` | where the binaries land (default `~/.local/bin`) |
 | `--no-service` | install binaries only, leave systemd alone |
-| `--with-optional` | also install the optional dependencies the report lists as missing, through the detected package manager (`pacman`/`apt`/`dnf`); the installed set is recorded at `$ANDLER_HOME/optional-deps.txt` so `uninstall.sh --optional` removes exactly it |
+| `--with-optional` | also install the optional dependencies the report lists as missing, through the detected package manager (`pacman`/`apt`/`dnf`); the installed set is recorded at `$ANDLER_HOME/optional-packages` so `uninstall.sh --optional` removes exactly it |
 | `--check-deps` | print the dependency report and exit — status 1 when a *required* one is missing |
 | `--skip-deps` | install without checking (for images/CI that provision later) |
 | `--dry-run` | print the plan — including the exact optional-package command — and change nothing |
@@ -85,7 +85,8 @@ afterwards, warning when a locally assembled pair mismatches.
 
 Nothing outside `--bin-dir`, `~/.config/systemd/user/`, and — with
 `--with-optional` — the packages themselves plus their record at
-`$ANDLER_HOME/optional-deps.txt`. Installing the daemon writes the unit with
+`$ANDLER_HOME/optional-packages` (a header saying what wrote it and which
+package manager to use, then one package per line). Installing the daemon writes the unit with
 `ExecStart` pointing at the binary it just installed, then
 `systemctl --user daemon-reload` + `enable --now andlerd`, and probes the daemon
 through the freshly installed CLI. When a daemon answers on this host the run
@@ -131,7 +132,7 @@ scripts/uninstall.sh --optional --binaries --purge --yes   # everything, unatten
 
 | Flag | Effect |
 | :--- | :--- |
-| `--optional` | remove the packages `install.sh --with-optional` recorded (reads `$ANDLER_HOME/optional-deps.txt`; without a record it says so and names the flag that writes one) |
+| `--optional` | remove the packages `install.sh --with-optional` recorded (reads `$ANDLER_HOME/optional-packages` and the package manager it names; without a record it says so and names the flag that writes one) |
 | `--binaries` | remove `andler`/`andlerd` from `--bin-dir` |
 | `--bin-dir DIR` | where they live (default `~/.local/bin`; implies `--binaries`) |
 | `--purge` | delete the data root — instances, disks, snapshots, database |

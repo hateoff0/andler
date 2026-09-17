@@ -233,19 +233,23 @@ expect_ok "--with-optional installs the missing set" -- \
     "$INSTALL" --component daemon --bin-dir "$WORK/bin" --no-service --with-optional
 expect_out_grep "the package command is shown" "install"
 expect_out_grep "the record is announced" "uninstall.sh --optional"
-expect_file "the installed set was recorded" "$OPT_HOME/optional-deps.txt"
-if [[ -s "$OPT_HOME/optional-deps.txt" ]]; then
-    pass "the record names what was installed ($(tr '\n' ' ' <"$OPT_HOME/optional-deps.txt"))"
+expect_file "the installed set was recorded" "$OPT_HOME/optional-packages"
+if [[ -s "$OPT_HOME/optional-packages" ]]; then
+    pass "the record names what was installed ($(sed '/^#/d;/^family=/d' "$OPT_HOME/optional-packages" | tr '\n' ' '))"
 else
-    fail "the record at $OPT_HOME/optional-deps.txt is empty"
+    fail "the record at $OPT_HOME/optional-packages is empty"
 fi
+expect_ok "the record says which manager installed the set" -- \
+    grep -q "^family=" "$OPT_HOME/optional-packages"
+expect_ok "the record explains how to undo itself" -- \
+    grep -q "uninstall.sh --optional" "$OPT_HOME/optional-packages"
 expect_file "the package manager was actually driven" "$WORK/stub-calls.log"
 
 expect_ok "uninstall --optional removes exactly the recorded set" -- \
     as_install_user env PATH="$WORK/stubs:$WORK/shadow-optional" ANDLER_HOME="$OPT_HOME" \
     "$UNINSTALL" --optional --yes
 expect_out_grep "the removal is reported" "removed"
-expect_no_file "the record is dropped once the packages are gone" "$OPT_HOME/optional-deps.txt"
+expect_no_file "the record is dropped once the packages are gone" "$OPT_HOME/optional-packages"
 
 # --- systemd ----------------------------------------------------------------
 
@@ -295,7 +299,7 @@ expect_out_grep "the missing record is explained" "no record at"
 # root-owned directory is not removable by the user the scripts refuse to run as).
 as_install_user mkdir -p "$WORK/home/instances" "$WORK/home/cache"
 echo "test" >"$WORK/home/andlerd.db"
-printf 'passt\n' >"$WORK/home/optional-deps.txt"
+printf 'passt\n' >"$WORK/home/optional-packages"
 
 expect_ok "the recorded optional set is reported as left installed" -- \
     as_install_user env ANDLER_HOME="$WORK/home" "$UNINSTALL" --bin-dir "$WORK/bin"
@@ -308,7 +312,7 @@ expect_fail "an unattended package removal is refused" -- \
     as_install_user sh -c 'exec env ANDLER_HOME="$1" "$2" --optional --bin-dir "$3" </dev/null' sh \
     "$WORK/home" "$UNINSTALL" "$WORK/bin"
 expect_err_grep "the refusal names --yes" "--yes"
-expect_file "the record survived the refusal" "$WORK/home/optional-deps.txt"
+expect_file "the record survived the refusal" "$WORK/home/optional-packages"
 
 expect_fail "a purge without a TTY refuses" -- \
     as_install_user sh -c 'exec env ANDLER_HOME="$1" "$2" --purge </dev/null' sh "$WORK/home" "$UNINSTALL"
