@@ -137,7 +137,7 @@ expect_out_grep "the report counts what is missing" "required dependencies missi
 expect_out_grep "the fix names the package" "(qemu-system-x86|qemu-kvm)"
 
 expect_fail "an install stops when a required dependency is missing" -- \
-    env PATH="$WORK/shadow" "$INSTALL" --component both --bin-dir "$WORK/bin-missing" --no-service
+    as_install_user env PATH="$WORK/shadow" "$INSTALL" --component both --bin-dir "$WORK/bin-missing" --no-service
 expect_out_grep "the refusal carries the fix command" "(pacman -S --needed|apt install|dnf install)"
 expect_no_file "nothing was installed" "$WORK/bin-missing/andlerd"
 
@@ -290,7 +290,10 @@ expect_ok "uninstall --optional without a record is not an error" -- \
     as_install_user env ANDLER_HOME="$WORK/home-empty" "$UNINSTALL" --optional --bin-dir "$WORK/bin"
 expect_out_grep "the missing record is explained" "no record at"
 
-mkdir -p "$WORK/home/instances" "$WORK/home/cache"
+# The scratch data root belongs to the install user, or the purge it is here to
+# exercise could not remove it (the suite runs as root in the container, and a
+# root-owned directory is not removable by the user the scripts refuse to run as).
+as_install_user mkdir -p "$WORK/home/instances" "$WORK/home/cache"
 echo "test" >"$WORK/home/andlerd.db"
 printf 'passt\n' >"$WORK/home/optional-deps.txt"
 
