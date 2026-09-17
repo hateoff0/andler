@@ -115,7 +115,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn only_pacman_leaves_a_lock_file_behind() {
         assert_eq!(
             PackageManager::Pacman.stale_lock_path(),
@@ -126,6 +125,7 @@ mod tests {
         assert_eq!(PackageManager::Dnf.stale_lock_path(), None);
     }
 
+    #[test]
     fn refresh_shapes_match_each_manager() {
         assert_eq!(PackageManager::Apt.refresh_args(), vec!["update"]);
         assert_eq!(PackageManager::Dnf.refresh_args(), vec!["makecache"]);
