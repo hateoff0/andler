@@ -12,7 +12,8 @@ suite that drives the real daemon, CLI, QEMU/KVM, and SQLite.
 | `compose.yaml` | Compose shortcuts; every service builds with context `../..` (repository root). |
 | `e2e.sh` | Suite orchestrator: fresh daemon, runs each `tests/NN_*.sh` suite, prints a per-suite summary. |
 | `tests/common.sh` | Assertion helpers (`expect_ok`, `expect_fail`, `expect_out_grep`, …), daemon lifecycle, fixture builders. |
-| `tests/NN_*.sh` | One self-contained suite per functional area (lifecycle, config, disk, snapshots, clone/export, guest, preview/verify, persistence, ops, connect, exec, port forwards, boot mode, version, events). |
+| `tests/NN_*.sh` | One self-contained suite per functional area (lifecycle, config, disk, snapshots, clone/export, guest, preview/verify, persistence, ops, connect, exec, port forwards, boot mode, version, events, install scripts). |
+| `../scripts/*.sh` | Copied into the image at `/usr/local/share/andler-e2e/scripts` so `34_install_scripts.sh` drives the real installer and uninstaller, not a copy of them. |
 
 All commands below run from the **repository root**.
 
@@ -112,6 +113,7 @@ Coverage by suite:
 | `32_image_download.sh` | Base-image downloads against a local fixture "release server" (the same asset shape the CI workflow publishes: a `<stem>.manifest.json` plus `<stem>.qcow2.zst.NN.part` files): `image list` (human + `--json`, version filter, draft release excluded), `image download` by version/variant and by release tag (verified install, byte-identical payload, manifest provenance, scratch dir removed, re-download reused), a corrupted part refused with the cached image left intact, `--json` progress lines, an unpublished combination reported actionably, and an instance created from the downloaded image |
 | `31_oci_export.sh` | `export-oci`: exports an instance disk as an OCI image layout directory (`oci-layout` + `index.json` + `config.json` + a rootfs blob under `blobs/sha256/`) and verifies the `index.json` parses as a manifest list (`manifests[]` with `mediaType`), `--json` output, and a nonexistent-source negative. Skips when `qemu-img` is unavailable.
 | `33_wizard.sh` | The interactive wizard on a real PTY (`script` supplies the terminal and forwards the key sequence, sent once the first prompt is up so no key can sit in the canonical line buffer): a full create whose typed answers reach the daemon (`512 GiB` disk and a declined UEFI answer land in `config view` and `instance.toml`, the summary screen was shown), and `Esc` cancelling with `Nothing was created.`, exit zero and no instance |
+| `34_install_scripts.sh` | `scripts/install.sh` / `scripts/uninstall.sh` against the binaries this image built: the dependency report on a complete host and on one with QEMU hidden from a rebuilt PATH (which must refuse, name the missing binary and carry the install command, installing nothing), a local install into a scratch bin dir with the two versions compared, the systemd branch appropriate to the host (the container has no user manager, so the service install must refuse and write no unit; a developer host with a live manager asserts the satisfied report instead), and the uninstall paths — keep binaries, refuse an unattended purge without `--yes`, purge a scratch `ANDLER_HOME` while the harness's own data root survives, then remove the binaries |
 
 ### Guest package ops: offline (07) + online (23)
 

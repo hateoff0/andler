@@ -58,7 +58,7 @@
 - [🧭 CLI Cheatsheet](#-cli-cheatsheet)
 - [🌦️ Environment Variables](#-environment-variables)
 - [🗃️ Data Layout](#-data-layout)
-- [🖥️ Host Requirements](#-host-requirements)
+- [🖥️ Host Requirements & Dependencies](#-host-requirements--dependencies)
 - [🩺 Diagnostics](#-diagnostics)
 - [❓ FAQ](#-faq)
 - [🧪 Testing & Verification](#-testing--verification)
@@ -226,12 +226,34 @@ Every archive ships a `.sha256` sidecar, and public releases carry a build-prove
 ### 1 · Install
 
 ```bash
-scripts/install.sh --component both   --from-release            # latest: CLI + daemon + user service
-scripts/install.sh --component daemon --from-release v0.1.0     # a pinned daemon
-scripts/install.sh --component cli    --from-release v0.1.0 --no-service   # client only
+scripts/install.sh                                                    # local build (PATH or target/release): daemon + CLI + user service
+scripts/install.sh --from-release                                     # latest release, same three things
+scripts/install.sh --check-deps                                       # host dependency report only, nothing installed
+scripts/install.sh --component cli --no-service --from-release v0.1.0 # a client machine: just the CLI, no systemd
 ```
 
-The script verifies the published checksum, installs into `~/.local/bin` (`--bin-dir` to change it) and — for the daemon — writes and enables the per-user systemd unit. Without `--from-release` it installs a binary you already have: an explicit path, one on `PATH`, or `target/release` after `cargo build --release`.
+`daemon + CLI` is the default on purpose: the two verify each other, so the pair is the only combination that cannot drift. The installer walks the host first — the same checks `andler doctor` runs, grouped by what this install actually covers — and for anything missing prints the command that installs it for your distribution:
+
+```text
+▸ Host dependencies
+  required for '--component both' + the systemd user service
+  ✓ qemu-system-x86_64 · /usr/bin/qemu-system-x86_64
+  ✓ qemu-img · /usr/bin/qemu-img
+  ✓ OVMF/UEFI firmware · /usr/share/edk2/x64/OVMF_CODE.4m.fd + /usr/share/edk2/x64/OVMF_VARS.4m.fd
+  ✓ /dev/kvm · accessible
+
+  optional — a missing one disables only the feature named, everything else works
+  ✓ ip (iproute2) · /usr/bin/ip
+  ⚠ guestfish (guestfs-tools) · offline guest operations (install/remove, boot mode, ARM translators)
+      → sudo pacman -S --needed libguestfs
+
+  ✓ required dependencies · all present
+  1 optional dependency is missing — the feature named above stays unavailable
+```
+
+A missing *required* dependency stops the install with the one command that fixes it (`--skip-deps` overrides, `--check-deps` reports and exits); a missing *optional* one only costs you the feature it names. Everything the tables below list is in this report.
+
+Then it verifies the published checksum, installs into `~/.local/bin` (`--bin-dir` to change it) and — for the daemon — writes and enables the per-user systemd unit. Re-running is idempotent: it overwrites, re-checks and re-points the unit at the binary it just installed. Without `--from-release` the binaries come from a path you pass, from `PATH`, or from `target/release` after `cargo build --release`.
 
 <details>
 <summary><strong>Download and install by hand</strong></summary>
@@ -263,8 +285,12 @@ andler doctor
 
 ```bash
 systemctl --user status andlerd
-scripts/install.sh --component daemon --bin-dir ~/.local/bin    # (re)install the unit for that binary
+scripts/install.sh --component daemon --bin-dir ~/.local/bin    # (re)write the unit for that binary
+scripts/uninstall.sh                                            # stop, disable, remove the unit
+scripts/uninstall.sh --binaries --purge                         # …plus the binaries and the data root
 ```
+
+`uninstall.sh` is scoped exactly like the installer: the user unit and (with `--binaries`) the binaries in `--bin-dir`; `~/.andler` — instances, disks, snapshots, database — survives unless `--purge` is passed, which asks for `yes` on a terminal (`--yes` answers for scripts, `ANDLER_HOME` moves what is deleted).
 
 One daemon per `ANDLER_HOME` (flock on `~/.andler/andlerd.lock`); default listen address `127.0.0.1:50051`, overridable with `ANDLERD_LISTEN_ADDR`.
 
@@ -610,19 +636,60 @@ Instance IDs are 64-hex; commands accept Docker-style prefixes, and `list` shows
 
 ---
 
-## 🖥️ Host Requirements
+## 🖥️ Host Requirements & Dependencies
 
-| Requirement | Needed for | Notes |
+Two commands answer "will ANDLER work on this machine?" with the same verdict: **`scripts/install.sh --check-deps`** before installing, **`andler doctor`** afterwards. Both print one line per dependency and, for anything missing, the exact command that installs it on your distribution.
+
+### Required
+
+| Dependency | Needed for | Package (Arch · Debian/Ubuntu · Fedora) |
 | :--- | :--- | :--- |
-| Linux with KVM (`/dev/kvm`, user in `kvm`) | every VM | mandatory; without it QEMU falls back to unusable software emulation |
-| `qemu-system-x86_64` + `qemu-img` | spawn, disk ops | OVMF/UEFI boot support required |
-| OVMF/UEFI firmware pair | guest boot | auto-discovered across distro layouts; override with `ANDLERD_OVMF_CODE` / `ANDLERD_OVMF_VARS` |
-| `guestfish` (guestfs-tools) | offline guest operations | the online QGA path needs none of this |
-| `oras` | OCI image export/import | optional; `doctor` warns when missing |
-| `CAP_NET_ADMIN` on `andlerd` | bridge networking | `Nat` mode works without it |
-| `protoc` | building from source | contributors only |
+| Linux **x86_64** with **KVM** — `/dev/kvm` readable/writable, your user in the `kvm` group | every VM; without it QEMU falls back to software emulation, which is not a supported mode | kernel `kvm-intel`/`kvm-amd` modules + `sudo usermod -aG kvm $USER` |
+| **`qemu-system-x86_64`** (a full QEMU build with UEFI support) | spawning guests | `qemu-system-x86` · `qemu-system-x86` · `qemu-kvm` |
+| **`qemu-img`** | disk create/clone/resize/compact, every snapshot layer | `qemu-img` · `qemu-utils` · `qemu-img` |
+| **OVMF/UEFI firmware pair** (`OVMF_CODE*` + `OVMF_VARS*`) | guest boot; each instance's `VARS.fd` is copied from the template | `edk2-ovmf` · `ovmf` · `edk2-ovmf` |
+| **systemd user instance** | only when installing the daemon as a user service — running `andlerd` by hand needs none | `systemd` (skip with `--no-service`) |
+| **`tar`**, **`sha256sum`**, **`curl`** | only for the release install path (`--from-release`) | `tar`, `coreutils`, `curl` |
 
-Full prerequisite list with per-distro commands: [`docs/DEVELOPMENT.md`][doc-dev].
+The OVMF pair is auto-discovered across the common distro layouts (`/usr/share/edk2/x64/`, `/usr/share/OVMF/`, `/usr/share/edk2-ovmf/x64/`, `/usr/share/qemu/`); pin your own with `ANDLERD_OVMF_CODE` / `ANDLERD_OVMF_VARS` when they live elsewhere.
+
+### Optional — each one unlocks exactly one feature
+
+| Dependency | Unlocks | Package |
+| :--- | :--- | :--- |
+| `ip` (iproute2) | `network.mode = "Bridge"` and `"Isolated"` — it creates the taps both hand to QEMU | `iproute2` |
+| `unshare` (util-linux) + unprivileged user namespaces + `/dev/net/tun` | `network.mode = "Isolated"`: the guest's QEMU builds its tap inside its own user namespace, so no host capability is involved | `util-linux`, `modprobe tun` |
+| `CAP_NET_ADMIN` on `andlerd` | `network.mode = "Bridge"` | `sudo setcap cap_net_admin+ep $(command -v andlerd)` |
+| `passt` | NAT through passt instead of the built-in slirp (auto-detected; slirp is the fallback, not an error) | `passt` |
+| `guestfish` (guestfs-tools) | every **offline** guest operation: `guest install/remove --offline`, boot-mode and ARM-translator switches, `guest apply`, and the maintenance auto-start fallback | `libguestfs` · `libguestfs-tools` · `guestfs-tools` |
+| `debugfs` (e2fsprogs) | reading `build.prop` out of the Waydroid `system.img` while staging an ARM translator | `e2fsprogs` |
+| `lspci` (pciutils) | GPU vendor auto-detection when `/sys/class/drm` has no usable card node | `pciutils` |
+| `glxinfo` (mesa-utils) | reporting the host Mesa version that decides **Venus vs VirGL** for a new instance | `mesa-utils` · `mesa-utils` · `mesa-demos` |
+| NVIDIA driver (`nvidia-smi` and/or NVML) | NVIDIA VRAM and GPU-load metrics in `andler metrics` (AMD sysfs and Intel `i915`/`xe` need nothing) | your driver package: `nvidia-utils` · `nvidia-driver` · `akmod-nvidia` |
+| `oras` | pushing an exported OCI layout to a registry — `export-oci` itself writes the layout and needs nothing | upstream: <https://oras.land> (Arch: AUR `oras`) |
+| host **Mesa** with the Venus/VirGL drivers | 3D at all: Venus (Vulkan) and VirGL (OpenGL) are Mesa drivers on the *host* talking to the guest's `virtio-gpu` | your distro's `mesa` packages |
+| `protoc` (`protobuf-compiler`) | building from source only | `protobuf` · `protobuf-compiler` · `protobuf-compiler` |
+
+### One-liners
+
+```bash
+# Arch / CachyOS / EndeavourOS / Manjaro
+sudo pacman -S --needed qemu-system-x86 qemu-img edk2-ovmf \
+    iproute2 util-linux e2fsprogs pciutils mesa-utils libguestfs passt
+
+# Debian / Ubuntu
+sudo apt install qemu-system-x86 qemu-utils ovmf \
+    iproute2 util-linux e2fsprogs pciutils mesa-utils libguestfs-tools passt
+
+# Fedora / RHEL family
+sudo dnf install qemu-kvm qemu-img edk2-ovmf \
+    iproute2 util-linux e2fsprogs pciutils mesa-demos guestfs-tools passt
+
+# every distro: KVM access for your user, then a re-login
+sudo usermod -aG kvm "$USER"
+```
+
+Nothing else runs as root: the daemon is unprivileged, offline guest work happens inside the libguestfs appliance (a QEMU VM of its own), and Bridge mode is the single feature that additionally wants `CAP_NET_ADMIN`. Build-time prerequisites — Rust toolchain, Docker for the test harness — live in [`docs/DEVELOPMENT.md`][doc-dev].
 
 ---
 
@@ -632,6 +699,8 @@ Full prerequisite list with per-distro commands: [`docs/DEVELOPMENT.md`][doc-dev
 andler doctor            # read-only; works even with the daemon down
 andler doctor --json     # {"overall": "ok" | "needs_attention", "checks": [...]}
 ```
+
+Before anything is installed, `scripts/install.sh --check-deps` prints the host half of this report — KVM, QEMU, OVMF, and every optional tool below — with the per-distro install command for each gap.
 
 ```text
 andler doctor
@@ -661,6 +730,7 @@ Base images
 | Instance stuck in `Error` | `andler status <id>` records why (health check, backend loss, refused start); `andler start <id>` retries from `Error`. |
 | A failed start, reason unclear | Tail `~/.andler/instances/<id>/qemu.log` and `console.log` — `andler logs <id>` streams the same. |
 | Offline `guest install` fails | `andler doctor` shows the missing prerequisite; retry with `--offline` only for a VM that cannot boot. |
+| `scripts/install.sh` refuses to install | A **required** dependency is missing: the report names it and prints the one command that installs everything missing on your distribution. `--skip-deps` installs anyway (the covered features will fail), `--check-deps` runs the report on its own. |
 | Two daemons | One daemon per `ANDLER_HOME`; point `ANDLER_HOME` elsewhere for a test run. |
 
 ---

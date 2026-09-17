@@ -64,7 +64,7 @@ Any active state can transition to `Error` via `Fail(msg)`. `Stopped`/`Error` ac
 | `docker/e2e/` | Containerized test harness: build env, compose targets, E2E suite |
 | `docker/images/` | Guest base-image build pipelines (rootfs → bootable qcow2) |
 | `docs/` | Architecture, development guide, API reference, gRPC reference, changelog, roadmap |
-| `scripts/` | systemd service unit, installation script |
+| `scripts/` | install/uninstall scripts (dependency report, binaries, user unit) + the systemd unit |
 
 Every crate directory has its own `README.md` with crate-local behavior and integration notes (e.g. QEMU wire schemas in `backends/andler-qemu/README.md`). Read the relevant crate README before modifying that crate's code.
 
@@ -308,7 +308,7 @@ Where the living truths live — read the owner before writing the claim anywher
 
 | Doc | Owns |
 |-----|------|
-| `README.md` | top-level feature list, quick start |
+| `README.md` | top-level feature list, quick start, the host dependency matrix |
 | `docs/ARCHITECTURE.md` | architecture, FSM, snapshot mechanism |
 | `docs/API.md` | CLI reference, TOML config examples |
 | `docs/GRPC_API.md` | proto messages, gRPC status-code table |
@@ -547,7 +547,9 @@ live snapshots + offline restore, clone/export (all three modes + removal
 protection), guest install/remove/list and boot-mode (deep tests over a real
 rootfs via qemu-nbd, SKIP when the `nbd` module is unavailable), hotplug
 attach/detach disk+net on a live VM, dry-run/
-verify/wizard/completions/doctor, and daemon-restart persistence. Each suite
+verify/wizard/completions/doctor, the install/uninstall scripts (dependency
+report, install into a scratch bin dir, purge of a scratch data root), and
+daemon-restart persistence. Each suite
 leaves no instances behind.
 
 ### Coverage Expectations

@@ -161,8 +161,12 @@ COPY --from=builder /andler/dist/andler /usr/local/bin/andler
 COPY --from=builder /andler/dist/andlerd /usr/local/bin/andlerd
 COPY docker/e2e/e2e.sh /usr/local/bin/andler-e2e
 COPY docker/e2e/tests /usr/local/share/andler-e2e/tests
+# The installer scripts, so 34_install_scripts.sh drives the real thing rather
+# than a copy of it (they expect to find each other and andlerd.service).
+COPY scripts /usr/local/share/andler-e2e/scripts
 
-RUN chmod +x /usr/local/bin/andler-e2e /usr/local/bin/andler /usr/local/bin/andlerd
+RUN chmod +x /usr/local/bin/andler-e2e /usr/local/bin/andler /usr/local/bin/andlerd \
+        /usr/local/share/andler-e2e/scripts/*.sh
 
 CMD ["/usr/local/bin/andler-e2e"]
 

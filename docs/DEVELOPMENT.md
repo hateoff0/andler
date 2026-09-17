@@ -15,6 +15,13 @@
 - **`qemu-utils`** (`qemu-img` for disk operations)
 - **`/dev/kvm`** access for real QEMU process tests
 
+Building is only half of it: *running* ANDLER needs KVM access, QEMU with UEFI
+support, an OVMF/UEFI pair, and — per feature — the optional tools (guestfs for
+offline guest work, iproute2/util-linux for bridge and isolated networking, the
+GPU vendor tools for vendor metrics). That list, with the package names per
+distribution, lives in the README's *Host Requirements & Dependencies* section;
+`scripts/install.sh --check-deps` prints it for the machine you are on.
+
 ## Building
 
 ### Local Build
@@ -291,8 +298,10 @@ andler/
 │   └── archive/                  # Historical/planned docs (may not exist)
 │
 └── scripts/
-    ├── andlerd.service           # systemd user unit
-    └── install.sh                # systemd installation script
+    ├── install.sh                # dependency report, binaries, systemd user unit
+    ├── uninstall.sh              # service/binaries/data removal
+    ├── ui.sh                     # output helpers shared by the two scripts
+    └── andlerd.service           # systemd user unit
 ```
 
 ## Common Development Tasks
