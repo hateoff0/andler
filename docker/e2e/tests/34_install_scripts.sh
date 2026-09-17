@@ -78,10 +78,10 @@ fi
 # --- flags and usage --------------------------------------------------------
 
 expect_ok "install --help runs" -- "$INSTALL" --help
-expect_out_grep "--help documents the dependency report" -- "check-deps"
-expect_out_grep "--help documents the release source" -- "from-release"
-expect_out_grep "--help documents the optional set" -- "with-optional"
-expect_out_grep "--help documents the dry run" -- "dry-run"
+expect_out_grep "--help documents the dependency report" "check-deps"
+expect_out_grep "--help documents the release source" "from-release"
+expect_out_grep "--help documents the optional set" "with-optional"
+expect_out_grep "--help documents the dry run" "dry-run"
 
 expect_fail "an unknown flag is rejected" -- "$INSTALL" --definitely-not-a-flag
 expect_err_grep "the rejection names the flag" "unknown option"
@@ -197,6 +197,56 @@ expect_out_grep "doctor reached the daemon" "andlerd: reachable at"
 expect_out_grep "the doctor pass is summarised" "(host, daemon and base images check out|found something to look at)"
 expect_out_grep "the run still reports success where it did" "Installed"
 
+# --- the optional set, end to end (stubbed package manager) -----------------
+
+# The real managers would change the machine, so PATH carries a stub that logs
+# its arguments and succeeds — enough to prove the round trip the flags
+# promise: report → install → record → removal reads the record → record
+# dropped. `glxinfo` is hidden from PATH (a shadow dir, like the QEMU one), so
+# the set has one guaranteed member whatever this host already has.
+mkdir -p "$WORK/shadow-optional" "$WORK/stubs"
+for dir in /usr/local/bin /usr/bin /bin /usr/sbin /sbin; do
+    [[ -d "$dir" ]] || continue
+    for f in "$dir"/*; do
+        [[ -f "$f" && -x "$f" ]] || continue
+        name="$(basename "$f")"
+        [[ "$name" == "glxinfo" ]] && continue
+        ln -sf "$f" "$WORK/shadow-optional/$name"
+    done
+done
+cat >"$WORK/stubs/sudo" <<'STUB'
+#!/bin/sh
+exec "$@"
+STUB
+for pm in pacman apt dnf; do
+    cat >"$WORK/stubs/$pm" <<STUB
+#!/bin/sh
+echo "\$0 \$*" >>"$WORK/stub-calls.log"
+exit 0
+STUB
+done
+chmod +x "$WORK/stubs/"* "$WORK/stubs/sudo"
+
+OPT_HOME="$WORK/opt-home"
+expect_ok "--with-optional installs the missing set" -- \
+    as_install_user env PATH="$WORK/stubs:$WORK/shadow-optional" ANDLER_HOME="$OPT_HOME" \
+    "$INSTALL" --component daemon --bin-dir "$WORK/bin" --no-service --with-optional
+expect_out_grep "the package command is shown" "install"
+expect_out_grep "the record is announced" "uninstall.sh --optional"
+expect_file "the installed set was recorded" "$OPT_HOME/optional-deps.txt"
+if [[ -s "$OPT_HOME/optional-deps.txt" ]]; then
+    pass "the record names what was installed ($(tr '\n' ' ' <"$OPT_HOME/optional-deps.txt"))"
+else
+    fail "the record at $OPT_HOME/optional-deps.txt is empty"
+fi
+expect_file "the package manager was actually driven" "$WORK/stub-calls.log"
+
+expect_ok "uninstall --optional removes exactly the recorded set" -- \
+    as_install_user env PATH="$WORK/stubs:$WORK/shadow-optional" ANDLER_HOME="$OPT_HOME" \
+    "$UNINSTALL" --optional --yes
+expect_out_grep "the removal is reported" "removed"
+expect_no_file "the record is dropped once the packages are gone" "$OPT_HOME/optional-deps.txt"
+
 # --- systemd ----------------------------------------------------------------
 
 # The dependency report has to say what it thinks of the user manager; the
@@ -247,19 +297,19 @@ printf 'passt\n' >"$WORK/home/optional-deps.txt"
 expect_ok "the recorded optional set is reported as left installed" -- \
     as_install_user env ANDLER_HOME="$WORK/home" "$UNINSTALL" --bin-dir "$WORK/bin"
 expect_out_grep "the recorded packages are named" "passt"
-expect_out_grep "the removal flag is offered" -- "--optional"
+expect_out_grep "the removal flag is offered" "--optional"
 
 # Removing system packages is destructive: it needs the same typed confirmation
 # as a purge, and a non-TTY run must refuse it *before* touching the manager.
 expect_fail "an unattended package removal is refused" -- \
     as_install_user sh -c 'exec env ANDLER_HOME="$1" "$2" --optional --bin-dir "$3" </dev/null' sh \
     "$WORK/home" "$UNINSTALL" "$WORK/bin"
-expect_err_grep "the refusal names --yes" -- "--yes"
+expect_err_grep "the refusal names --yes" "--yes"
 expect_file "the record survived the refusal" "$WORK/home/optional-deps.txt"
 
 expect_fail "a purge without a TTY refuses" -- \
     as_install_user sh -c 'exec env ANDLER_HOME="$1" "$2" --purge </dev/null' sh "$WORK/home" "$UNINSTALL"
-expect_err_grep "the refusal names --yes" -- "--yes"
+expect_err_grep "the refusal names --yes" "--yes"
 expect_file "the scratch data root survived the refusal" "$WORK/home/andlerd.db"
 
 expect_ok "an unattended purge deletes the data root ANDLER_HOME points at" -- \
