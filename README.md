@@ -228,6 +228,8 @@ Every archive ships a `.sha256` sidecar, and public releases carry a build-prove
 ```bash
 scripts/install.sh                                                    # local build (PATH or target/release): daemon + CLI + user service
 scripts/install.sh --from-release                                     # latest release, same three things
+scripts/install.sh --with-optional                                    # …and install the optional dependency set too
+scripts/install.sh --dry-run --with-optional                          # show what that would install, change nothing
 scripts/install.sh --check-deps                                       # host dependency report only, nothing installed
 scripts/install.sh --component cli --no-service --from-release v0.1.0 # a client machine: just the CLI, no systemd
 ```
@@ -253,7 +255,9 @@ scripts/install.sh --component cli --no-service --from-release v0.1.0 # a client
 
 A missing *required* dependency stops the install with the one command that fixes it (`--skip-deps` overrides, `--check-deps` reports and exits); a missing *optional* one only costs you the feature it names. Everything the tables below list is in this report.
 
-Then it verifies the published checksum, installs into `~/.local/bin` (`--bin-dir` to change it) and — for the daemon — writes and enables the per-user systemd unit. Re-running is idempotent: it overwrites, re-checks and re-points the unit at the binary it just installed. Without `--from-release` the binaries come from a path you pass, from `PATH`, or from `target/release` after `cargo build --release`.
+`--with-optional` installs the missing optional packages through your own package manager (`pacman`/`apt`/`dnf`) and records the set, so `scripts/uninstall.sh --optional` removes exactly those again — nothing else is ever uninstalled. Two are deliberately left to you: the NVIDIA driver (a distribution-specific kernel-module package that wants a reboot) and `oras` (not packaged everywhere); the report prints their instructions instead.
+
+Then it verifies the published checksum, installs into `~/.local/bin` (`--bin-dir` to change it) and — for the daemon — writes and enables the per-user systemd unit. Installing is idempotent: it overwrites, re-checks and re-points the unit at the binary it just installed. Without `--from-release` the binaries come from a path you pass, from `PATH`, or from `target/release` after `cargo build --release`. When a daemon answers on this host the run closes with `andler doctor`, whose report is the authoritative version of the one it opened with. `--dry-run` prints the plan (and the exact package command) and changes nothing; `--check-deps` and `--dry-run` are also the two modes that accept being run as root, which is what containers and CI images need.
 
 <details>
 <summary><strong>Download and install by hand</strong></summary>
@@ -287,10 +291,11 @@ andler doctor
 systemctl --user status andlerd
 scripts/install.sh --component daemon --bin-dir ~/.local/bin    # (re)write the unit for that binary
 scripts/uninstall.sh                                            # stop, disable, remove the unit
+scripts/uninstall.sh --optional                                 # …plus the packages --with-optional installed
 scripts/uninstall.sh --binaries --purge                         # …plus the binaries and the data root
 ```
 
-`uninstall.sh` is scoped exactly like the installer: the user unit and (with `--binaries`) the binaries in `--bin-dir`; `~/.andler` — instances, disks, snapshots, database — survives unless `--purge` is passed, which asks for `yes` on a terminal (`--yes` answers for scripts, `ANDLER_HOME` moves what is deleted).
+`uninstall.sh` is scoped exactly like the installer: the user unit, the optional packages it recorded (only with `--optional`), and — with `--binaries` — the binaries in `--bin-dir`; `~/.andler` — instances, disks, snapshots, database — survives unless `--purge` is passed, which asks for `yes` on a terminal (`--yes` answers for scripts and for the package removal, `ANDLER_HOME` moves what is deleted).
 
 One daemon per `ANDLER_HOME` (flock on `~/.andler/andlerd.lock`); default listen address `127.0.0.1:50051`, overridable with `ANDLERD_LISTEN_ADDR`.
 
@@ -654,6 +659,8 @@ Two commands answer "will ANDLER work on this machine?" with the same verdict: *
 The OVMF pair is auto-discovered across the common distro layouts (`/usr/share/edk2/x64/`, `/usr/share/OVMF/`, `/usr/share/edk2-ovmf/x64/`, `/usr/share/qemu/`); pin your own with `ANDLERD_OVMF_CODE` / `ANDLERD_OVMF_VARS` when they live elsewhere.
 
 ### Optional — each one unlocks exactly one feature
+
+`scripts/install.sh --with-optional` installs whichever of these your package manager provides, and records the set so `scripts/uninstall.sh --optional` takes exactly those back out. Two rows are never installed for you — the **NVIDIA driver**, a distribution-specific kernel-module package that wants a reboot, and **`oras`**, which is not packaged everywhere; the report prints their own instructions instead.
 
 | Dependency | Unlocks | Package |
 | :--- | :--- | :--- |

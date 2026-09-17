@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
 # ANDLER uninstaller — reverses what scripts/install.sh installed.
 #
-# Scoped like the installer: only the *current user's* systemd user directory
-# (~/.config/systemd/user/), the binaries install.sh placed in --bin-dir, and —
-# with --purge — the data root. Instance data survives unless --purge is given,
-# and an explicit 'yes' is required on a TTY (same policy as `andler remove
-# --purge`); --yes answers for scripts. Run it as yourself, not with sudo.
+# Scoped like the installer: the *current user's* systemd user directory
+# (~/.config/systemd/user/), the binaries install.sh placed in --bin-dir, the
+# optional packages install.sh --with-optional recorded, and — with --purge —
+# the data root. Instance data survives unless --purge is given, and the two
+# destructive actions (removing system packages, deleting the data root) each
+# need an explicit 'yes' on a TTY (same policy as `andler remove --purge`);
+# --yes answers both for scripts. Run it as yourself, not with sudo.
 #
 # Flags and behavior are documented in scripts/README.md.
 
@@ -13,39 +15,50 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 UI_LIB="$SCRIPT_DIR/ui.sh"
-if [[ ! -f "$UI_LIB" ]]; then
-    printf 'error: %s is missing — run the uninstaller from a repository checkout (scripts/uninstall.sh).\n' "$UI_LIB" >&2
-    exit 1
-fi
+DEPS_LIB="$SCRIPT_DIR/deps.sh"
+for lib in "$UI_LIB" "$DEPS_LIB"; do
+    if [[ ! -f "$lib" ]]; then
+        printf 'error: %s is missing — run the uninstaller from a repository checkout (scripts/uninstall.sh).\n' "$lib" >&2
+        exit 1
+    fi
+done
 # shellcheck source=scripts/ui.sh
 source "$UI_LIB"
+# shellcheck source=scripts/deps.sh
+source "$DEPS_LIB"
 
 UNIT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
 UNIT_DEST="$UNIT_DIR/andlerd.service"
 DATA_DIR="${ANDLER_HOME:-$HOME/.andler}"
+OPTIONAL_RECORD="$DATA_DIR/optional-deps.txt"
 
 PURGE=0
 BINARIES=0
+REMOVE_OPTIONAL=0
 ASSUME_YES=0
 BIN_DIR="$HOME/.local/bin"
 
 usage() {
     cat <<'EOF'
-Remove the ANDLER user service, and — on request — the binaries and the data.
+Remove the ANDLER user service, and — on request — the packages, binaries and
+data that install.sh put there.
 
 Usage:
   scripts/uninstall.sh [options]
 
 Options:
+  --optional       remove the optional packages install.sh --with-optional
+                   installed (read from the record it wrote)
   --binaries       also remove andler/andlerd from --bin-dir
   --bin-dir DIR    where the binaries live (default: ~/.local/bin; implies --binaries)
   --purge          also delete the data root (instances, disks, snapshots, database)
-  --yes            answer 'yes' to the --purge confirmation (for scripts)
+  --yes            answer the confirmations (--optional removal, --purge) for scripts
   --no-color       plain output (NO_COLOR is honoured too)
   -h, --help       this text
 
 The data root is $ANDLER_HOME, defaulting to ~/.andler — --purge deletes that
-directory and nothing else. Binaries elsewhere on PATH are never touched.
+directory and nothing else. Binaries elsewhere on PATH are never touched, and
+packages are only ever removed when --optional is given.
 EOF
 }
 
@@ -57,6 +70,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --binaries)
             BINARIES=1
+            shift
+            ;;
+        --optional)
+            REMOVE_OPTIONAL=1
             shift
             ;;
         --bin-dir)
@@ -92,6 +109,28 @@ if [[ "${EUID:-$(id -u)}" -eq 0 ]]; then
     ui_error "run this as your normal user, not root/sudo — the service is per-user"
     exit 1
 fi
+
+# The confirmation the two destructive actions share: a typed 'yes' on a
+# terminal, or --yes for a script. Anything else stops with the flag to use.
+confirm_or_die() {
+    local what="$1" answer
+    if [[ "$ASSUME_YES" -eq 1 ]]; then
+        ui_ok "confirmation" "--yes was given"
+        return 0
+    fi
+    if [[ -t 0 ]]; then
+        printf '      Type "yes" to %s: ' "$what"
+        read -r answer
+        if [[ "$answer" != "yes" ]]; then
+            ui_error "aborted — nothing was changed"
+            exit 1
+        fi
+        return 0
+    fi
+    ui_error "refusing to $what without a confirmation"
+    ui_hint "run it on a terminal, or pass --yes for a script"
+    exit 1
+}
 
 ui_banner "uninstaller" "Android Linux Emulator & Runtime"
 
@@ -131,6 +170,52 @@ if [[ -f "$UNIT_DEST" ]]; then
     fi
 else
     ui_ok "no unit file" "$UNIT_DEST"
+fi
+
+# --- optional packages -------------------------------------------------------
+
+ui_section "Optional packages"
+
+recorded_optional=""
+if [[ -f "$OPTIONAL_RECORD" ]]; then
+    recorded_optional="$(tr '\n' ' ' <"$OPTIONAL_RECORD" | sed 's/ *$//')"
+fi
+
+if [[ "$REMOVE_OPTIONAL" -eq 0 ]]; then
+    if [[ -n "$recorded_optional" ]]; then
+        ui_ok "left installed" "$recorded_optional"
+        ui_fix "remove them with: $0 --optional   (this is the set install.sh --with-optional installed)"
+        if [[ "$PURGE" -eq 1 ]]; then
+            ui_note "the record at $OPTIONAL_RECORD lives in the data root, so --purge would take it with it"
+        fi
+    else
+        ui_ok "nothing recorded" "install.sh --with-optional installed no packages for this data root"
+    fi
+elif [[ -z "$recorded_optional" ]]; then
+    ui_ok "nothing to remove" "no record at $OPTIONAL_RECORD"
+    ui_fix "only install.sh --with-optional writes one; remove anything else with your package manager"
+else
+    family="$(deps_detect_family)"
+    mode="no"
+    [[ "$ASSUME_YES" -eq 1 ]] && mode="yes"
+    cmd="$(pkg_remove_command "$family" "$mode" $recorded_optional)"
+    if [[ -z "$cmd" ]]; then
+        ui_fail "unknown distribution" "no package manager to drive"
+        ui_fix "remove these yourself: $recorded_optional"
+    else
+        ui_kv "packages" "$recorded_optional"
+        ui_kv "command" "$cmd"
+        confirm_or_die "remove them"
+        if bash -c "$cmd"; then
+            rm -f "$OPTIONAL_RECORD"
+            ui_ok "removed" "$recorded_optional"
+            ui_ok "record dropped" "$OPTIONAL_RECORD"
+        else
+            ui_error "the package manager did not complete — the record was kept"
+            ui_hint "run it yourself for the full output: $cmd"
+            exit 1
+        fi
+    fi
 fi
 
 # --- binaries ----------------------------------------------------------------
@@ -185,20 +270,7 @@ if [[ -n "$running_daemon" ]]; then
     ui_fix "stop it first: systemctl --user stop andlerd, or kill $running_daemon"
 fi
 
-if [[ "$ASSUME_YES" -eq 1 ]]; then
-    ui_ok "confirmation" "--yes was given"
-elif [[ -t 0 ]]; then
-    printf '      Type "yes" to delete %s: ' "$DATA_DIR"
-    read -r answer
-    if [[ "$answer" != "yes" ]]; then
-        ui_error "aborted — nothing was deleted"
-        exit 1
-    fi
-else
-    ui_error "refusing to delete $DATA_DIR without a confirmation"
-    ui_hint "run it on a terminal, or pass --yes for a script"
-    exit 1
-fi
+confirm_or_die "delete $DATA_DIR"
 
 rm -rf "$DATA_DIR"
 ui_ok "removed" "$DATA_DIR"

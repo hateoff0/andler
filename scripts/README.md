@@ -6,8 +6,9 @@ product: the binaries themselves come from a release or from `cargo build`.
 | File | Purpose |
 | :--- | :--- |
 | `install.sh` | host dependency report (optional), binaries, and the systemd user unit |
-| `uninstall.sh` | the reverse — service, binaries, and (on request) the data root |
+| `uninstall.sh` | the reverse — service, optional packages, binaries, and (on request) the data root |
 | `ui.sh` | presentation helpers shared by both: banner, aligned rows, ✓ / ⚠ / ✗ lines |
+| `deps.sh` | shared distribution facts: package family, which package ships which dependency, install/remove command lines |
 | `andlerd.service` | the systemd **user** unit both scripts install and remove |
 
 ## `install.sh` — dependencies, binaries, and the user service
@@ -17,6 +18,8 @@ scripts/install.sh                                       # local build: daemon +
 scripts/install.sh /path/to/andlerd                      # explicit local daemon binary
 scripts/install.sh --from-release                        # latest release, same three things
 scripts/install.sh --check-deps                          # host dependency report only
+scripts/install.sh --dry-run --with-optional             # what would be installed, including packages
+scripts/install.sh --with-optional                       # …and install the optional set too
 scripts/install.sh --component cli --no-service --from-release v0.1.0
 ```
 
@@ -26,10 +29,18 @@ scripts/install.sh --component cli --no-service --from-release v0.1.0
 | `--from-release [TAG]` | install a published release instead of local binaries; the tag defaults to the latest release. Uses `gh` when present, otherwise `curl` against the GitHub API (`GH_TOKEN`/`GITHUB_TOKEN`/`ANDLER_INSTALL_TOKEN` for a private repository) |
 | `--bin-dir DIR` | where the binaries land (default `~/.local/bin`) |
 | `--no-service` | install binaries only, leave systemd alone |
+| `--with-optional` | also install the optional dependencies the report lists as missing, through the detected package manager (`pacman`/`apt`/`dnf`); the installed set is recorded at `$ANDLER_HOME/optional-deps.txt` so `uninstall.sh --optional` removes exactly it |
 | `--check-deps` | print the dependency report and exit — status 1 when a *required* one is missing |
 | `--skip-deps` | install without checking (for images/CI that provision later) |
+| `--dry-run` | print the plan — including the exact optional-package command — and change nothing |
 | `--repo OWNER/REPO` | release source (default `hateoff0/andler`) |
 | `--no-color` | plain output (`NO_COLOR` is honoured too) |
+
+`--with-optional` never installs two things: the **NVIDIA driver** (a
+distribution-specific kernel-module package that wants a reboot) and **oras**
+(not packaged everywhere). Both stay listed in the report with their own
+instructions. System packages need `sudo`, which the flag uses; if it is
+missing, the command is printed instead of run.
 
 ### The dependency report
 
@@ -72,11 +83,16 @@ afterwards, warning when a locally assembled pair mismatches.
 
 ### What it writes
 
-Nothing outside `--bin-dir` and `~/.config/systemd/user/`. Installing the
-daemon writes the unit with `ExecStart` pointing at the binary it just
-installed, then `systemctl --user daemon-reload` + `enable --now andlerd`, and
-probes the daemon through the freshly installed CLI before declaring success.
-Re-running is idempotent: it overwrites, re-checks and re-points.
+Nothing outside `--bin-dir`, `~/.config/systemd/user/`, and — with
+`--with-optional` — the packages themselves plus their record at
+`$ANDLER_HOME/optional-deps.txt`. Installing the daemon writes the unit with
+`ExecStart` pointing at the binary it just installed, then
+`systemctl --user daemon-reload` + `enable --now andlerd`, and probes the daemon
+through the freshly installed CLI. When a daemon answers on this host the run
+ends with the authoritative version of the report it opened with —
+`andler doctor` — whose findings are advisory: the required set was already
+gated before anything was installed. Re-running is idempotent: it overwrites,
+re-checks and re-points.
 
 A release publishes one archive per component, plus the pair:
 `andlerd-<tag>-linux-x86_64.tar.gz`, `andler-cli-<tag>-linux-x86_64.tar.gz` and
@@ -86,6 +102,13 @@ A release publishes one archive per component, plus the pair:
 The CLI and the daemon must come from the same release: `andler` checks the
 daemon's version before every command and refuses a daemon built from a
 different one.
+
+### As root
+
+Installing refuses to run as root: `andlerd` is a per-user service whose unit,
+binaries and data belong to the invoking user's session. The two read-only
+modes — `--check-deps` and `--dry-run` — are allowed as root, which is what a
+container or a CI image needs.
 
 ## `andlerd.service` — the user unit
 
@@ -100,21 +123,25 @@ copying it to `~/.config/systemd/user/`, `systemctl --user daemon-reload` and
 ## `uninstall.sh` — remove what install.sh put there
 
 ```bash
-scripts/uninstall.sh                  # stop + disable + delete the unit
-scripts/uninstall.sh --binaries       # also remove ~/.local/bin/{andler,andlerd}
-scripts/uninstall.sh --binaries --purge --yes   # …and the data root, unattended
+scripts/uninstall.sh                            # stop + disable + delete the unit
+scripts/uninstall.sh --optional                 # also remove the recorded optional packages
+scripts/uninstall.sh --binaries                 # also remove ~/.local/bin/{andler,andlerd}
+scripts/uninstall.sh --optional --binaries --purge --yes   # everything, unattended
 ```
 
 | Flag | Effect |
 | :--- | :--- |
+| `--optional` | remove the packages `install.sh --with-optional` recorded (reads `$ANDLER_HOME/optional-deps.txt`; without a record it says so and names the flag that writes one) |
 | `--binaries` | remove `andler`/`andlerd` from `--bin-dir` |
 | `--bin-dir DIR` | where they live (default `~/.local/bin`; implies `--binaries`) |
 | `--purge` | delete the data root — instances, disks, snapshots, database |
-| `--yes` | answer the `--purge` confirmation (which otherwise needs a TTY and a typed `yes`) |
+| `--yes` | answer the two confirmations (package removal, `--purge`), which otherwise need a TTY and a typed `yes` |
 | `--no-color` | plain output |
 
 The data root is `$ANDLER_HOME`, defaulting to `~/.andler`; `--purge` deletes
 exactly that directory, and the runtime socket directory
 (`$XDG_RUNTIME_DIR/andler`) when no `andlerd` process is using it. Nothing else
-is touched: binaries elsewhere on `PATH` stay, and instance data survives
-without `--purge`.
+is touched: binaries elsewhere on `PATH` stay, packages are only ever removed
+with `--optional`, and instance data survives without `--purge`. The record
+lives inside the data root, so a `--purge` without `--optional` drops the list
+along with everything else — the run says so before it happens.

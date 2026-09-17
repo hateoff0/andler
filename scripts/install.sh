@@ -18,12 +18,17 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 UI_LIB="$SCRIPT_DIR/ui.sh"
-if [[ ! -f "$UI_LIB" ]]; then
-    printf 'error: %s is missing — run the installer from a repository checkout (scripts/install.sh).\n' "$UI_LIB" >&2
-    exit 1
-fi
+DEPS_LIB="$SCRIPT_DIR/deps.sh"
+for lib in "$UI_LIB" "$DEPS_LIB"; do
+    if [[ ! -f "$lib" ]]; then
+        printf 'error: %s is missing — run the installer from a repository checkout (scripts/install.sh).\n' "$lib" >&2
+        exit 1
+    fi
+done
 # shellcheck source=scripts/ui.sh
 source "$UI_LIB"
+# shellcheck source=scripts/deps.sh
+source "$DEPS_LIB"
 
 UNIT_TEMPLATE="$SCRIPT_DIR/andlerd.service"
 UNIT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
@@ -87,6 +92,10 @@ REPO="${ANDLER_RELEASE_REPO:-hateoff0/andler}"
 LOCAL_DAEMON=""
 CHECK_DEPS=0
 SKIP_DEPS=0
+WITH_OPTIONAL=0
+DRY_RUN=0
+DATA_DIR="${ANDLER_HOME:-$HOME/.andler}"
+OPTIONAL_RECORD="$DATA_DIR/optional-deps.txt"
 
 usage() {
     cat <<'EOF'
@@ -104,8 +113,16 @@ Options:
                                `curl` against the GitHub API)
   --bin-dir DIR                where the binaries land (default: ~/.local/bin)
   --no-service                 do not touch systemd (binaries only)
+  --with-optional              also install the optional dependencies the report
+                               lists as missing (iproute2, util-linux, passt,
+                               guestfs, e2fsprogs, pciutils, mesa-utils) through
+                               the detected package manager; what was installed
+                               is recorded so `uninstall.sh --optional` removes
+                               exactly that set again
   --check-deps                 report host dependencies and exit
   --skip-deps                  install without checking host dependencies
+  --dry-run                    print the plan (and the optional package
+                               command) and change nothing
   --repo OWNER/REPO            release source (default: hateoff0/andler)
   --no-color                   plain output (NO_COLOR is honoured too)
   -h, --help                   this text
@@ -152,6 +169,14 @@ while [[ $# -gt 0 ]]; do
             SKIP_DEPS=1
             shift
             ;;
+        --with-optional | --optional)
+            WITH_OPTIONAL=1
+            shift
+            ;;
+        --dry-run)
+            DRY_RUN=1
+            shift
+            ;;
         --no-color)
             NO_COLOR=1
             export NO_COLOR
@@ -193,9 +218,30 @@ if [[ "$CHECK_DEPS" -eq 1 && "$SKIP_DEPS" -eq 1 ]]; then
     exit 1
 fi
 
-if [[ "${EUID:-$(id -u)}" -eq 0 ]]; then
+if [[ "$WITH_OPTIONAL" -eq 1 && "$SKIP_DEPS" -eq 1 ]]; then
+    ui_error "--with-optional has nothing to install without the dependency check"
+    ui_hint "--skip-deps means 'do not look at the host'; drop one of the two"
+    exit 1
+fi
+
+if [[ "$WITH_OPTIONAL" -eq 1 && "$CHECK_DEPS" -eq 1 ]]; then
+    ui_error "--check-deps reports and exits — it installs no packages"
+    ui_hint "run --with-optional on its own, or keep --check-deps to see the report first"
+    exit 1
+fi
+
+# --check-deps and --dry-run change nothing, so they are safe to run as root
+# (containers and CI images usually are). Installing is not: andlerd is a
+# per-user service whose unit, binaries and data belong to the invoking user.
+read_only_run=0
+if [[ "$CHECK_DEPS" -eq 1 || "$DRY_RUN" -eq 1 ]]; then
+    read_only_run=1
+fi
+
+if [[ "${EUID:-$(id -u)}" -eq 0 && "$read_only_run" -eq 0 ]]; then
     ui_error "run this as your normal user, not root/sudo — andlerd is a per-user service"
     ui_hint "why: the comment at the top of scripts/andlerd.service"
+    ui_hint "a read-only run is fine as root: --check-deps, --dry-run"
     exit 1
 fi
 
@@ -214,54 +260,7 @@ fi
 
 # --- distro family, for install commands -------------------------------------
 
-FAMILY="unknown"
-detect_family() {
-    local id="" like=""
-    if [[ -r /etc/os-release ]]; then
-        id="$(sed -n 's/^ID="\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' /etc/os-release | head -n 1)"
-        like="$(sed -n 's/^ID_LIKE="\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' /etc/os-release | head -n 1)"
-    fi
-    case " $id $like " in
-        *" arch "*|*" cachyos "*|*" manjaro "*|*" endeavouros "*|*" garuda "*) FAMILY="arch" ;;
-        *" debian "*|*" ubuntu "*|*" linuxmint "*|*" pop "*|*" kali "*|*" zorin "*) FAMILY="debian" ;;
-        *" fedora "*|*" rhel "*|*" centos "*|*" rocky "*|*" almalinux "*|*" nobara "*) FAMILY="fedora" ;;
-    esac
-}
-detect_family
-
-# Packages that ship each dependency, one position per family.
-pkg_names() {
-    case "$1" in
-        qemu) echo "qemu-system-x86|qemu-system-x86|qemu-kvm" ;;
-        qemu-img) echo "qemu-img|qemu-utils|qemu-img" ;;
-        ovmf) echo "edk2-ovmf|ovmf|edk2-ovmf" ;;
-        tar-release | tar) echo "tar|tar|tar" ;;
-        sha256-release) echo "coreutils|coreutils|coreutils" ;;
-        download) echo "curl|curl|curl" ;;
-        systemd) echo "systemd|systemd|systemd" ;;
-        ip) echo "iproute2|iproute2|iproute2" ;;
-        unshare) echo "util-linux|util-linux|util-linux" ;;
-        passt) echo "passt|passt|passt" ;;
-        guestfish) echo "libguestfs|libguestfs-tools|guestfs-tools" ;;
-        debugfs) echo "e2fsprogs|e2fsprogs|e2fsprogs" ;;
-        oras) echo "-|-|-" ;;
-        lspci) echo "pciutils|pciutils|pciutils" ;;
-        glxinfo) echo "mesa-utils|mesa-utils|mesa-demos" ;;
-        nvidia-smi) echo "nvidia-utils|nvidia-driver|akmod-nvidia" ;;
-        *) echo "-|-|-" ;;
-    esac
-}
-
-pkg_names_for_family() {
-    local arch deb fed
-    IFS='|' read -r arch deb fed <<<"$(pkg_names "$1")"
-    case "$FAMILY" in
-        arch) printf '%s' "$arch" ;;
-        debian) printf '%s' "$deb" ;;
-        fedora) printf '%s' "$fed" ;;
-        *) printf '%s' "Arch: $arch / Debian: $deb / Fedora: $fed" ;;
-    esac
-}
+FAMILY="$(deps_detect_family)"
 
 # How a dependency is named in the report — the binary or the thing that breaks.
 dep_label() {
@@ -292,7 +291,7 @@ dep_label() {
 
 # One actionable line for a dependency the host is missing.
 fix_for() {
-    local key="$1" pkgs cmd
+    local key="$1" pkgs
     case "$key" in
         kvm)
             printf 'sudo usermod -aG kvm $USER   (then log out and back in)'
@@ -320,17 +319,12 @@ fix_for() {
             ;;
     esac
 
-    pkgs="$(pkg_names_for_family "$key")"
+    pkgs="$(pkg_names_for_family "$key" "$FAMILY")"
     if [[ "$FAMILY" == "unknown" || -z "$pkgs" || "$pkgs" == "-" ]]; then
         printf 'install the package that provides %s (%s)' "$(dep_label "$key")" "$pkgs"
         return
     fi
-    case "$FAMILY" in
-        arch) cmd="sudo pacman -S --needed" ;;
-        debian) cmd="sudo apt install" ;;
-        fedora) cmd="sudo dnf install" ;;
-    esac
-    printf '%s %s' "$cmd" "$pkgs"
+    printf '%s' "$(pkg_install_command "$FAMILY" "$pkgs")"
 }
 
 # --- individual probes -------------------------------------------------------
@@ -483,7 +477,13 @@ dep_detail() {
 
 MISSING_REQUIRED=()
 MISSING_PKGS=()
+MISSING_OPTIONAL_KEYS=()
 ABSENT_OPTIONAL=0
+
+# Optional dependencies `--with-optional` will not install on its own: the
+# NVIDIA driver is a kernel-module package that wants a reboot and a
+# distribution-specific flavour, and oras is not packaged everywhere.
+OPTIONAL_NOT_AUTO_INSTALLED=("nvidia-smi" "oras")
 
 report_dependency() {
     local key="$1" kind="$2" target="$3" level="$4" why="$5" detail pkgs
@@ -497,16 +497,108 @@ report_dependency() {
         ui_fail "$(dep_label "$key")" "$why"
         ui_fix "$(fix_for "$key")"
         MISSING_REQUIRED+=("$(dep_label "$key")")
-        pkgs="$(pkg_names_for_family "$key")"
+        pkgs="$(pkg_names_for_family "$key" "$FAMILY")"
         if [[ "$FAMILY" != "unknown" && -n "$pkgs" && "$pkgs" != "-" ]]; then
             MISSING_PKGS+=("$pkgs")
         fi
     else
         ABSENT_OPTIONAL=$((ABSENT_OPTIONAL + 1))
+        MISSING_OPTIONAL_KEYS+=("$key")
         ui_warn "$(dep_label "$key")" "$why"
         ui_fix "$(fix_for "$key")"
     fi
     return 0
+}
+
+# Packages `--with-optional` can install for the missing decorative set, one
+# package per key, deduplicated (util-linux and e2fsprogs are usually present
+# already, so the list is nearly always shorter than the report). Empty when the
+# distribution is unknown: there is no package manager to name them from.
+optional_packages_to_install() {
+    local key pkg seen=() seen_pkg out=() skip
+    [[ "$FAMILY" == "unknown" ]] && return 0
+    for key in ${MISSING_OPTIONAL_KEYS[@]+"${MISSING_OPTIONAL_KEYS[@]}"}; do
+        skip=0
+        for seen in ${OPTIONAL_NOT_AUTO_INSTALLED[@]+"${OPTIONAL_NOT_AUTO_INSTALLED[@]}"}; do
+            [[ "$key" == "$seen" ]] && skip=1
+        done
+        (( skip )) && continue
+        pkg="$(pkg_names_for_family "$key" "$FAMILY")"
+        [[ -n "$pkg" && "$pkg" != "-" ]] || continue
+        for seen_pkg in ${out[@]+"${out[@]}"}; do
+            [[ "$pkg" == "$seen_pkg" ]] && skip=1
+        done
+        (( skip )) && continue
+        out+=("$pkg")
+    done
+    printf '%s' "${out[*]:-}"
+}
+
+# The missing optional dependencies as the report names them — what to say when
+# there is no package manager to build a command for.
+missing_optional_labels() {
+    local key out=""
+    for key in ${MISSING_OPTIONAL_KEYS[@]+"${MISSING_OPTIONAL_KEYS[@]}"}; do
+        out+="${out:+, }$(dep_label "$key")"
+    done
+    printf '%s' "$out"
+}
+
+# Installs the missing optional packages this host can get from its own
+# package manager, and records them so `uninstall.sh --optional` removes
+# exactly that set again. Prints the plan and stops under --dry-run.
+install_optional_dependencies() {
+    local pkgs cmd
+
+    if [[ "$FAMILY" == "unknown" ]]; then
+        if (( ${#MISSING_OPTIONAL_KEYS[@]} == 0 )); then
+            ui_ok "nothing to install" "no optional dependency is missing"
+            return 0
+        fi
+        ui_fail "unknown distribution" "no package manager to drive"
+        ui_fix "install what the report listed as missing: $(missing_optional_labels)"
+        return 1
+    fi
+
+    pkgs="$(optional_packages_to_install)"
+    if [[ -z "$pkgs" ]]; then
+        ui_ok "nothing to install" "every optional dependency this flag covers is already present"
+        return 0
+    fi
+
+    cmd="$(pkg_install_command "$FAMILY" "$pkgs")"
+    ui_kv "packages" "$pkgs"
+    ui_kv "command" "$cmd"
+    if [[ "$DRY_RUN" -eq 1 ]]; then
+        ui_note "--dry-run: nothing was installed"
+        return 0
+    fi
+    if ! command -v sudo >/dev/null 2>&1; then
+        ui_fail "sudo" "not found — system packages need it"
+        ui_fix "install them yourself: ${cmd#sudo }"
+        return 1
+    fi
+
+    if ! bash -c "$cmd"; then
+        ui_error "the package manager did not complete"
+        ui_hint "run it yourself for the full output: $cmd"
+        return 1
+    fi
+    ui_ok "installed" "$pkgs"
+    record_optional_packages "$pkgs"
+}
+
+record_optional_packages() {
+    local existing=""
+    if [[ -f "$OPTIONAL_RECORD" ]]; then
+        existing="$(<"$OPTIONAL_RECORD")"
+    fi
+    mkdir -p "$DATA_DIR"
+    {
+        printf '%s\n' "$existing" | tr ' ' '\n'
+        printf '%s\n' "$1" | tr ' ' '\n'
+    } | sed '/^$/d' | sort -u >"$OPTIONAL_RECORD"
+    ui_ok "recorded" "$OPTIONAL_RECORD (uninstall.sh --optional removes this set)"
 }
 
 check_dependencies() {
@@ -545,6 +637,9 @@ check_dependencies() {
             ui_note "1 optional dependency is missing — the feature named above stays unavailable"
         elif (( ABSENT_OPTIONAL > 1 )); then
             ui_note "$ABSENT_OPTIONAL optional dependencies are missing — the features named above stay unavailable"
+        fi
+        if [[ "$WITH_OPTIONAL" -eq 0 && -n "$(optional_packages_to_install)" ]]; then
+            ui_note "install them through your package manager with: $0 --with-optional"
         fi
         return 0
     fi
@@ -600,7 +695,7 @@ resolve_latest_tag() {
 
 download_release() {
     local base
-    ui_step 1 "$TOTAL_STEPS" "Download"
+    step "Download"
     ui_kv "release" "$RELEASE_TAG ($REPO)"
     ui_kv "asset" "$asset"
 
@@ -667,9 +762,34 @@ resolve_local_cli() {
 
 # --- plan and install --------------------------------------------------------
 
-TOTAL_STEPS=1
-[[ "$FROM_RELEASE" -eq 1 ]] && TOTAL_STEPS=$((TOTAL_STEPS + 1))
-[[ "$wants_service" -eq 1 ]] && TOTAL_STEPS=$((TOTAL_STEPS + 1))
+# The post-install `andler doctor` pass needs the CLI and a daemon on *this*
+# host: doctor reports on the machine it runs on, so asking it about a daemon
+# elsewhere would describe the wrong hardware.
+verify_eligible=0
+if [[ "$wants_cli" -eq 1 && "$DRY_RUN" -eq 0 ]]; then
+    case "${ANDLERD_LISTEN_ADDR:-127.0.0.1:50051}" in
+        127.0.0.1:* | localhost:* | "[::1]":*) verify_eligible=1 ;;
+    esac
+fi
+
+# Steps this run will show: install binaries, plus download (release), the
+# optional package set, the service, and the `andler doctor` pass. A dry run
+# prints only what it would do, so it counts only those.
+if [[ "$DRY_RUN" -eq 1 ]]; then
+    TOTAL_STEPS=$WITH_OPTIONAL
+else
+    TOTAL_STEPS=1
+    [[ "$FROM_RELEASE" -eq 1 ]] && TOTAL_STEPS=$((TOTAL_STEPS + 1))
+    [[ "$WITH_OPTIONAL" -eq 1 ]] && TOTAL_STEPS=$((TOTAL_STEPS + 1))
+    [[ "$wants_service" -eq 1 ]] && TOTAL_STEPS=$((TOTAL_STEPS + 1))
+    [[ "$verify_eligible" -eq 1 ]] && TOTAL_STEPS=$((TOTAL_STEPS + 1))
+fi
+
+STEP=0
+step() {
+    STEP=$((STEP + 1))
+    ui_step "$STEP" "$TOTAL_STEPS" "$1"
+}
 
 case "$COMPONENT" in
     both) asset_prefix="andler" ;;
@@ -699,13 +819,6 @@ if [[ "$CHECK_DEPS" -eq 1 ]]; then
     exit 0
 fi
 
-mkdir -p "$BIN_DIR"
-if [[ ! -w "$BIN_DIR" ]]; then
-    ui_error "$BIN_DIR is not writable"
-    ui_hint "pass --bin-dir with a directory you own (e.g. ~/.local/bin)"
-    exit 1
-fi
-
 ui_section "Install plan"
 ui_kv "component" "$([[ "$COMPONENT" == "both" ]] && echo "andlerd + andler" || echo "$COMPONENT")"
 if [[ "$FROM_RELEASE" -eq 1 ]]; then
@@ -715,6 +828,26 @@ else
 fi
 ui_kv "bin-dir" "$BIN_DIR"
 ui_kv "service" "$([[ "$wants_service" -eq 1 ]] && echo "andlerd systemd user unit" || echo "not installed")"
+if [[ "$WITH_OPTIONAL" -eq 1 ]]; then
+    ui_kv "optional" "$(optional_packages_to_install || true)"
+fi
+
+if [[ "$DRY_RUN" -eq 1 ]]; then
+    if [[ "$WITH_OPTIONAL" -eq 1 ]]; then
+        step "Optional dependencies"
+        install_optional_dependencies
+    fi
+    ui_note "--dry-run: nothing was downloaded, installed or written"
+    printf '\n'
+    exit 0
+fi
+
+mkdir -p "$BIN_DIR"
+if [[ ! -w "$BIN_DIR" ]]; then
+    ui_error "$BIN_DIR is not writable"
+    ui_hint "pass --bin-dir with a directory you own (e.g. ~/.local/bin)"
+    exit 1
+fi
 
 scratch=""
 cleanup() {
@@ -750,11 +883,7 @@ if [[ "$FROM_RELEASE" -eq 1 ]]; then
     src_dir="$scratch/${asset%.tar.gz}"
 fi
 
-if [[ "$FROM_RELEASE" -eq 1 ]]; then
-    ui_step 2 "$TOTAL_STEPS" "Install binaries"
-else
-    ui_step 1 "$TOTAL_STEPS" "Install binaries"
-fi
+step "Install binaries"
 
 if [[ "$wants_daemon" -eq 1 ]]; then
     if [[ "$FROM_RELEASE" -eq 1 ]]; then
@@ -791,6 +920,11 @@ if [[ "$wants_daemon" -eq 1 && "$wants_cli" -eq 1 ]]; then
     fi
 fi
 
+if [[ "$WITH_OPTIONAL" -eq 1 ]]; then
+    step "Optional dependencies"
+    install_optional_dependencies || true
+fi
+
 case ":$PATH:" in
     *":$BIN_DIR:"*) ;;
     *)
@@ -806,7 +940,7 @@ esac
 # --- the service (daemon only) ----------------------------------------------
 
 if [[ "$wants_service" -eq 1 ]]; then
-    ui_step "$TOTAL_STEPS" "$TOTAL_STEPS" "Install the andlerd user service"
+    step "Install the andlerd user service"
 
     if ! systemd_user_ready; then
         ui_fail "systemd user instance" "not reachable — the unit cannot be installed or started"
@@ -855,6 +989,42 @@ if [[ "$wants_service" -eq 1 ]]; then
             ui_warn "andlerd" "not answering at $daemon_url yet"
             ui_fix "systemctl --user status andlerd   &&   journalctl --user -u andlerd -n 50"
         fi
+    fi
+fi
+
+# --- verify (the CLI's own report, when a daemon answers here) ---------------
+
+if [[ "$verify_eligible" -eq 1 ]]; then
+    step "Verify"
+
+    # The service step already probed; without it (--no-service, or a daemon
+    # started by hand) this is the only probe, and it is bounded.
+    daemon_url="http://${ANDLERD_LISTEN_ADDR:-127.0.0.1:50051}"
+    if [[ "${daemon_ready:-}" == "" ]]; then
+        daemon_ready=0
+        for _ in $(seq 1 10); do
+            if "$BIN_DIR/andler" --daemon-addr "$daemon_url" list >/dev/null 2>&1; then
+                daemon_ready=1
+                break
+            fi
+            sleep 0.3
+        done
+    fi
+
+    if (( daemon_ready )); then
+        # The authoritative version of the report this script opened with:
+        # doctor also covers the base-image cache, metrics and the daemon's own
+        # view. Its findings do not fail the install — the required set was
+        # already checked above, and what is left here is advisory.
+        if "$BIN_DIR/andler" --daemon-addr "$daemon_url" doctor; then
+            ui_ok "andler doctor" "host, daemon and base images check out"
+        else
+            ui_warn "andler doctor" "found something to look at (above)"
+            ui_fix "every line it flagged carries the command that fixes it"
+        fi
+    else
+        ui_warn "skipped" "nothing answers at $daemon_url"
+        ui_fix "run it once a daemon is up: andler doctor"
     fi
 fi
 

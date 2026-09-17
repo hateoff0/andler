@@ -299,8 +299,9 @@ andler/
 │
 └── scripts/
     ├── install.sh                # dependency report, binaries, systemd user unit
-    ├── uninstall.sh              # service/binaries/data removal
+    ├── uninstall.sh              # service/packages/binaries/data removal
     ├── ui.sh                     # output helpers shared by the two scripts
+    ├── deps.sh                   # shared distro/package facts for both scripts
     └── andlerd.service           # systemd user unit
 ```
 
