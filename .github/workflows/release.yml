@@ -85,7 +85,7 @@ jobs:
 
           # Stage the archive outside dist/ so dist/ holds files only: the
           # attestation globs and the upload list then mean exactly one thing.
-          mkdir -p "staging/$bundle"
+          mkdir -p dist "staging/$bundle"
           cp target/release/andler target/release/andlerd LICENSE README.md "staging/$bundle/"
           tar -C staging -czf "dist/${bundle}.tar.gz" "$bundle"
 
