@@ -4,11 +4,20 @@ name: Release
 #
 #   git tag -a v0.1.0 -m "ANDLER 0.1.0" && git push origin v0.1.0
 #
-# The archive layout matches the README's install instructions: `andler` and
-# `andlerd` sit at the archive root, so `tar -xzf andler-*.tar.gz` drops both
-# binaries next to each other. Automated base-image builds publish their own
-# `base-image-*` releases with `--latest=false`, so `releases/latest` keeps
-# pointing at the project release.
+# One artifact set per platform, named after the Rust target triple so what a
+# file runs on is never a guess:
+#
+#   andler-<tag>-x86_64-unknown-linux-gnu.tar.gz   both binaries + LICENSE + README
+#   andler-<tag>-x86_64-unknown-linux-gnu          the CLI alone, raw
+#   andlerd-<tag>-x86_64-unknown-linux-gnu         the daemon alone, raw
+#   SHA256SUMS                                     checksums for the three above
+#
+# The archive name equals the CLI binary name plus `.tar.gz`, so `tar -xzf` on
+# a downloaded asset drops a runnable `andler` next to its daemon. A daemon-only
+# host downloads the one raw binary instead of a second archive.
+#
+# Automated base-image builds publish their own `base-image-*` releases with
+# `--latest=false`, so `releases/latest` keeps pointing at the project release.
 #
 # Add targets by extending the packaging steps (a musl build needs
 # `rustup target add x86_64-unknown-linux-musl` plus a musl toolchain); the
@@ -69,66 +78,74 @@ jobs:
         run: |
           set -euo pipefail
           tag="${{ steps.version.outputs.tag }}"
-          base="linux-x86_64"
-          bundle="andler-${tag}-${base}"
-          daemon="andlerd-${tag}-${base}"
-          cli="andler-cli-${tag}-${base}"
+          triple="x86_64-unknown-linux-gnu"
+          bundle="andler-${tag}-${triple}"
+          cli="andler-${tag}-${triple}"
+          daemon="andlerd-${tag}-${triple}"
 
-          # Three archives from one build: the pair (the default -- the CLI
-          # refuses a daemon built from a different version, so installing both
-          # together is the path that cannot drift), and one per component for
-          # the two cases that are real: a host that only runs the daemon, and a
-          # client that only talks to a daemon elsewhere.
-          mkdir -p "dist/$bundle" "dist/$daemon" "dist/$cli"
-          cp target/release/andler target/release/andlerd LICENSE README.md "dist/$bundle/"
-          cp target/release/andlerd LICENSE "dist/$daemon/"
-          cp target/release/andler LICENSE "dist/$cli/"
+          # Stage the archive outside dist/ so dist/ holds files only: the
+          # attestation globs and the upload list then mean exactly one thing.
+          mkdir -p "staging/$bundle"
+          cp target/release/andler target/release/andlerd LICENSE README.md "staging/$bundle/"
+          tar -C staging -czf "dist/${bundle}.tar.gz" "$bundle"
 
-          for dir in "$bundle" "$daemon" "$cli"; do
-            tar -C dist -czf "dist/${dir}.tar.gz" "$dir"
-            (cd dist && sha256sum "${dir}.tar.gz" > "${dir}.tar.gz.sha256")
-          done
+          # The raw binaries: a host that wants exactly one of them should not
+          # have to download (or unpack) the pair.
+          cp target/release/andler "dist/${cli}"
+          cp target/release/andlerd "dist/${daemon}"
 
-          echo "bundle=$bundle" >> "$GITHUB_OUTPUT"
-          echo "daemon=$daemon" >> "$GITHUB_OUTPUT"
-          echo "cli=$cli" >> "$GITHUB_OUTPUT"
+          # One checksum manifest for the whole set — `sha256sum -c SHA256SUMS`
+          # is the verification everybody already has in their shell.
+          (cd dist && sha256sum "${bundle}.tar.gz" "$cli" "$daemon" >SHA256SUMS)
+
+          {
+            echo "bundle=$bundle"
+            echo "cli=$cli"
+            echo "daemon=$daemon"
+          } >> "$GITHUB_OUTPUT"
           ls -lh dist
 
-      - name: Smoke-check the packaged binaries
+      - name: Smoke-check the packaged artifacts
         run: |
           set -euo pipefail
           bundle="${{ steps.package.outputs.bundle }}"
-          daemon="${{ steps.package.outputs.daemon }}"
           cli="${{ steps.package.outputs.cli }}"
+          daemon="${{ steps.package.outputs.daemon }}"
+          unpack="$RUNNER_TEMP/unpack"
 
-          for archive in "$bundle" "$daemon" "$cli"; do
-            (cd dist && sha256sum -c "${archive}.tar.gz.sha256" --status) \
-              || { echo "::error::$archive failed its checksum"; exit 1; }
-          done
+          (cd dist && sha256sum -c SHA256SUMS) \
+            || { echo "::error::the published set fails SHA256SUMS"; exit 1; }
 
-          # The artifacts must carry exactly what their names promise.
-          test "$(tar -tzf "dist/${daemon}.tar.gz" | grep -c '/andlerd$')" = 1
-          test "$(tar -tzf "dist/${daemon}.tar.gz" | grep -c '/andler$')" = 0
-          test "$(tar -tzf "dist/${cli}.tar.gz" | grep -c '/andler$')" = 1
-          test "$(tar -tzf "dist/${cli}.tar.gz" | grep -c '/andlerd$')" = 0
+          # The archive must carry both binaries (the CLI refuses a daemon built
+          # from another version, so the pair is what cannot drift) and the raw
+          # assets must be the same two programs.
+          test "$(tar -tzf "dist/${bundle}.tar.gz" | grep -c '/andler$')" = 1
+          test "$(tar -tzf "dist/${bundle}.tar.gz" | grep -c '/andlerd$')" = 1
+          test "$(tar -tzf "dist/${bundle}.tar.gz" | grep -c '/README.md$')" = 1
+          test "$(tar -tzf "dist/${bundle}.tar.gz" | grep -c '/LICENSE$')" = 1
+          cmp dist/"$cli" target/release/andler
+          cmp dist/"$daemon" target/release/andlerd
 
-          tar -xzf "dist/${bundle}.tar.gz" -C /tmp
-          "/tmp/${bundle}/andler" --version
-          "/tmp/${bundle}/andlerd" --version
-          tar -xzf "dist/${daemon}.tar.gz" -C /tmp
-          "/tmp/${daemon}/andlerd" --version
-          tar -xzf "dist/${cli}.tar.gz" -C /tmp
-          "/tmp/${cli}/andler" --version
+          mkdir -p "$unpack"
+          tar -xzf "dist/${bundle}.tar.gz" -C "$unpack"
+          "$unpack/$bundle/andler" --version
+          "$unpack/$bundle/andlerd" --version
+          "dist/${cli}" --version
+          "dist/${daemon}" --version
 
       - name: Attest the build provenance
         # Artifact attestations are available for public repositories (and for
         # private ones on GitHub Enterprise Cloud). Skipping on a private repo
         # keeps the release publishable before the repository is opened; the
-        # assets and their .sha256 sidecars are published either way.
+        # assets and their checksums are published either way.
         if: github.event.repository.visibility == 'public'
         uses: actions/attest-build-provenance@v4
         with:
-          subject-path: dist/*.tar.gz
+          subject-path: |
+            dist/*.tar.gz
+            dist/andler-*-x86_64-unknown-linux-gnu
+            dist/andlerd-*-x86_64-unknown-linux-gnu
+            dist/SHA256SUMS
 
       - name: Extract the changelog section
         id: notes
@@ -138,25 +155,45 @@ jobs:
           repo="${{ github.repository }}"
           tag="${{ github.event.inputs.tag || github.ref_name }}"
           commit="${GITHUB_SHA}"
+          bundle="${{ steps.package.outputs.bundle }}"
+          cli="${{ steps.package.outputs.cli }}"
+          daemon="${{ steps.package.outputs.daemon }}"
+
           awk -v ver="$version" '
             $0 ~ "^## \\[" ver "\\]" { found = 1; next }
             found && /^## \[/ { exit }
             found { print }
           ' docs/CHANGELOG.md > section.md
           if [ -s section.md ]; then
-            # Same navigation row the README opens with, so the release reads as
-            # part of the project rather than a detached changelog dump.
+            # The release page has to answer "which file do I download" before it
+            # answers "what changed": the navigation row the README opens with,
+            # then the artifact set, then the changelog section verbatim.
             {
               echo "**<a href=\"https://github.com/${repo}#readme\">README</a>** &nbsp;•&nbsp; **<a href=\"https://github.com/${repo}#-quick-start\">Quick start</a>** &nbsp;•&nbsp; **<a href=\"https://github.com/${repo}/blob/main/docs/CHANGELOG.md\">Changelog</a>** &nbsp;•&nbsp; **<a href=\"https://github.com/${repo}/blob/main/docs/ROADMAP.md\">Roadmap</a>**"
+              echo
+              echo "### Assets"
+              echo
+              echo "\`x86_64\` · glibc · one set per platform, checksums in \`SHA256SUMS\`."
+              echo
+              echo "| Asset | What it is |"
+              echo "| :--- | :--- |"
+              echo "| \`${bundle}.tar.gz\` | \`andler\` + \`andlerd\` + \`LICENSE\` + \`README.md\` — the usual download |"
+              echo "| \`${cli}\` | the CLI on its own, raw (a client machine) |"
+              echo "| \`${daemon}\` | the daemon on its own, raw (a host that only serves VMs) |"
+              echo "| \`SHA256SUMS\` | \`sha256sum -c SHA256SUMS\` verifies all three |"
+              echo
+              echo "Install with <code>scripts/install.sh --from-release ${tag}</code>, or unpack the archive and put the two binaries on your \`PATH\` — the snippet below does it by hand."
+              echo
+              echo "---"
               echo
               sed '/./,$!d' section.md
               # Which build these notes describe: the notes are the changelog
               # section verbatim, so the commit and the verification of the
-              # archives are stated here rather than left to be guessed.
+              # artifacts are stated here rather than left to be guessed.
               echo
               echo "---"
               echo
-              echo "<sub><b>Note: Release \`${tag}\`</b> · built from <a href=\"https://github.com/${repo}/commit/${commit}\"><code>${commit:0:12}</code></a> on $(date -u +%Y-%m-%d) · every archive ships a <code>.sha256</code> sidecar and a <a href=\"https://github.com/${repo}/attestations\">build-provenance attestation</a> where the repository is public · the notes above are the <code>[${version}]</code> section of <code>docs/CHANGELOG.md</code> verbatim</sub>"
+              echo "<sub><b>Note: Release \`${tag}\`</b> · built from <a href=\"https://github.com/${repo}/commit/${commit}\"><code>${commit:0:12}</code></a> on $(date -u +%Y-%m-%d) · every artifact is covered by <code>SHA256SUMS</code> and, where the repository is public, by a <a href=\"https://github.com/${repo}/attestations\">build-provenance attestation</a> · the section after the assets table is the <code>[${version}]</code> section of <code>docs/CHANGELOG.md</code> verbatim</sub>"
             } > notes.md
             echo "have_notes=true" >> "$GITHUB_OUTPUT"
           else
@@ -171,11 +208,27 @@ jobs:
           set -euo pipefail
           tag="${{ steps.version.outputs.tag }}"
           repo="${{ github.repository }}"
+          bundle="${{ steps.package.outputs.bundle }}"
+          cli="${{ steps.package.outputs.cli }}"
+          daemon="${{ steps.package.outputs.daemon }}"
+          assets=("dist/${bundle}.tar.gz" "dist/${cli}" "dist/${daemon}" "dist/SHA256SUMS")
+
           if gh release view "$tag" --repo "$repo" >/dev/null 2>&1; then
             # Re-running for an existing tag rewrites the assets (--clobber) and
-            # refreshes the body, so a release published with an older template
-            # picks up the current one without burning a new tag.
-            gh release upload "$tag" --repo "$repo" --clobber dist/*.tar.gz dist/*.sha256
+            # refreshes the body, so a release published with an older layout
+            # picks up the current one without burning a new tag. Assets the
+            # layout no longer publishes are removed, or they would sit next to
+            # the new set and read as alternatives.
+            keep=" $(printf '%s ' "${assets[@]##*/}")"
+            while read -r name; do
+              [ -n "$name" ] || continue
+              case "$keep" in
+                *" $name "*) continue ;;
+              esac
+              echo "removing stale asset: $name"
+              gh release delete-asset "$tag" "$name" --repo "$repo" --yes
+            done < <(gh release view "$tag" --repo "$repo" --json assets --jq '.assets[].name')
+            gh release upload "$tag" --repo "$repo" --clobber "${assets[@]}"
             if [ "${{ steps.notes.outputs.have_notes }}" = "true" ]; then
               gh release edit "$tag" --repo "$repo" --title "$tag" --notes-file notes.md
             else
@@ -186,9 +239,9 @@ jobs:
             # the version a reader needs; the project name is already the repo.
             if [ "${{ steps.notes.outputs.have_notes }}" = "true" ]; then
               gh release create "$tag" --repo "$repo" --latest \
-                --notes-file notes.md dist/*.tar.gz dist/*.sha256
+                --notes-file notes.md "${assets[@]}"
             else
               gh release create "$tag" --repo "$repo" --latest \
-                --generate-notes dist/*.tar.gz dist/*.sha256
+                --generate-notes "${assets[@]}"
             fi
           fi

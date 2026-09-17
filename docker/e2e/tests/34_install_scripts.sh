@@ -251,6 +251,83 @@ expect_ok "uninstall --optional removes exactly the recorded set" -- \
 expect_out_grep "the removal is reported" "removed"
 expect_no_file "the record is dropped once the packages are gone" "$OPT_HOME/optional-packages"
 
+# --- the release path, against a fixture release server ---------------------
+
+# The real GitHub release is not reachable from the harness (and would change
+# under us), so the suite serves the layout the workflow publishes — archive,
+# raw binaries, SHA256SUMS — from a local directory and points the installer at
+# it with ANDLER_RELEASE_BASE_URL. Covers the download, the checksum check
+# against the manifest, a component-only install from the same archive, and the
+# refusal of an archive the manifest does not vouch for.
+REL_TAG="v9.9.9"
+TRIPLE="x86_64-unknown-linux-gnu"
+BUNDLE="andler-${REL_TAG}-${TRIPLE}"
+REL_ROOT="$WORK/release"
+mkdir -p "$REL_ROOT/$REL_TAG/staging/$BUNDLE"
+cp "$WORK/bin/andler" "$WORK/bin/andlerd" "$REL_ROOT/$REL_TAG/staging/$BUNDLE/"
+for extra in "$SCRIPTS_DIR/../LICENSE" "$SCRIPTS_DIR/../README.md"; do
+    [[ -f "$extra" ]] && cp "$extra" "$REL_ROOT/$REL_TAG/staging/$BUNDLE/"
+done
+tar -C "$REL_ROOT/$REL_TAG/staging" -czf "$REL_ROOT/$REL_TAG/${BUNDLE}.tar.gz" "$BUNDLE"
+cp "$WORK/bin/andler" "$REL_ROOT/$REL_TAG/andler-${REL_TAG}-${TRIPLE}"
+cp "$WORK/bin/andlerd" "$REL_ROOT/$REL_TAG/andlerd-${REL_TAG}-${TRIPLE}"
+(cd "$REL_ROOT/$REL_TAG" && sha256sum "${BUNDLE}.tar.gz" "andler-${REL_TAG}-${TRIPLE}" "andlerd-${REL_TAG}-${TRIPLE}" >SHA256SUMS)
+rm -rf "$REL_ROOT/$REL_TAG/staging"
+
+# A free port is picked here rather than parsed out of the server's banner: the
+# banner goes through Python's block-buffered stdout when it is not a TTY, so on
+# some interpreters it never reaches the log file.
+FIXTURE_PORT="$(python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')"
+python3 -m http.server "$FIXTURE_PORT" --bind 127.0.0.1 --directory "$REL_ROOT" >"$WORK/fixture.log" 2>&1 &
+FIXTURE_PID=$!
+FIXTURE_UP=0
+for _ in $(seq 1 50); do
+    if curl -fsS "http://127.0.0.1:$FIXTURE_PORT/" >/dev/null 2>&1; then
+        FIXTURE_UP=1
+        break
+    fi
+    sleep 0.1
+done
+if (( FIXTURE_UP == 0 )); then
+    echo "    fixture server log:"
+    sed 's/^/      /' "$WORK/fixture.log" | head -10
+    fail "the fixture release server did not start on port $FIXTURE_PORT"
+fi
+echo "  fixture release: http://127.0.0.1:$FIXTURE_PORT/$REL_TAG"
+
+expect_ok "the installer installs from a release" -- \
+    as_install_user env ANDLER_RELEASE_BASE_URL="http://127.0.0.1:$FIXTURE_PORT" \
+    "$INSTALL" --from-release "$REL_TAG" --bin-dir "$WORK/bin-release" --no-service --skip-deps
+expect_out_grep "the archive is verified against the manifest" "checksum verified"
+expect_out_grep "the manifest is named" "SHA256SUMS"
+expect_file "the CLI came out of the archive" "$WORK/bin-release/andler"
+expect_file "the daemon came out of the archive" "$WORK/bin-release/andlerd"
+expect_ok "the installed CLI runs" -- "$WORK/bin-release/andler" --version
+
+expect_ok "a component-only install takes the same archive" -- \
+    as_install_user env ANDLER_RELEASE_BASE_URL="http://127.0.0.1:$FIXTURE_PORT" \
+    "$INSTALL" --from-release "$REL_TAG" --component daemon \
+    --bin-dir "$WORK/bin-release-daemon" --no-service --skip-deps
+expect_no_file "the client was not installed" "$WORK/bin-release-daemon/andler"
+expect_file "the daemon was" "$WORK/bin-release-daemon/andlerd"
+
+# A fixture server has no catalog to ask, so the tag is not optional there.
+expect_fail "the latest tag cannot be resolved from a fixture server" -- \
+    as_install_user env ANDLER_RELEASE_BASE_URL="http://127.0.0.1:$FIXTURE_PORT" \
+    "$INSTALL" --from-release --bin-dir "$WORK/bin-release-latest" --no-service --skip-deps
+expect_err_grep "the refusal asks for the tag" "tag"
+
+# Anything the manifest does not vouch for is refused before it is unpacked.
+printf 'x' >>"$REL_ROOT/$REL_TAG/${BUNDLE}.tar.gz"
+expect_fail "a tampered archive is refused" -- \
+    as_install_user env ANDLER_RELEASE_BASE_URL="http://127.0.0.1:$FIXTURE_PORT" \
+    "$INSTALL" --from-release "$REL_TAG" --bin-dir "$WORK/bin-release-bad" --no-service --skip-deps
+expect_err_grep "the refusal names the checksum" "checksum"
+expect_no_file "nothing was installed from it" "$WORK/bin-release-bad/andler"
+
+kill "$FIXTURE_PID" 2>/dev/null || true
+wait "$FIXTURE_PID" 2>/dev/null || true
+
 # --- systemd ----------------------------------------------------------------
 
 # The dependency report has to say what it thinks of the user manager; the

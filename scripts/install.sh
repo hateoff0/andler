@@ -96,6 +96,9 @@ WITH_OPTIONAL=0
 DRY_RUN=0
 DATA_DIR="${ANDLER_HOME:-$HOME/.andler}"
 OPTIONAL_RECORD="$DATA_DIR/optional-packages"
+# Fixture-server hook (the e2e suite serves a release tree over HTTP); unset
+# means the real GitHub release URL.
+RELEASE_BASE_URL_OVERRIDE="${ANDLER_RELEASE_BASE_URL:-}"
 
 usage() {
     cat <<'EOF'
@@ -110,7 +113,11 @@ Options:
   --from-release [TAG]         install a published GitHub release instead of
                                local binaries; TAG defaults to the latest
                                release (uses `gh` when present, otherwise
-                               `curl` against the GitHub API)
+                               `curl` against the GitHub API). A release
+                               publishes one archive per platform (both
+                               binaries), the raw binaries, and SHA256SUMS —
+                               the archive is checksum-verified before it is
+                               unpacked
   --bin-dir DIR                where the binaries land (default: ~/.local/bin)
   --no-service                 do not touch systemd (binaries only)
   --with-optional              also install the optional dependencies the report
@@ -129,6 +136,12 @@ Options:
 
 Without --from-release the binaries come from a path you pass, from PATH, or
 from target/release of a checkout built with cargo.
+
+Environment:
+  ANDLER_RELEASE_BASE_URL   fetch the artifacts from another base URL (a mirror
+                            or a fixture server) instead of GitHub; the tag
+                            must then be passed explicitly. The assets and
+                            SHA256SUMS are looked up under <base>/<tag>/.
 
 Examples:
   scripts/install.sh                              # local build: daemon + CLI + service
@@ -681,6 +694,12 @@ resolve_latest_tag() {
         auth=(-H "Authorization: Bearer $token")
     fi
 
+    if [[ -n "$RELEASE_BASE_URL_OVERRIDE" ]]; then
+        ui_error "ANDLER_RELEASE_BASE_URL is set, so there is no catalog to ask for the latest tag"
+        ui_hint "pass the tag the fixture server publishes: $0 --from-release <tag>"
+        exit 1
+    fi
+
     if command -v gh >/dev/null 2>&1; then
         if gh release view --repo "$REPO" --json tagName --jq .tagName 2>/dev/null; then
             return 0
@@ -708,32 +727,43 @@ download_release() {
     ui_kv "release" "$RELEASE_TAG ($REPO)"
     ui_kv "asset" "$asset"
 
-    if command -v gh >/dev/null 2>&1; then
+    # gh is the path for GitHub releases; a fixture server (ANDLER_RELEASE_BASE_URL,
+    # used by the e2e suite) is plain HTTP, so it always goes through curl.
+    if [[ -z "$RELEASE_BASE_URL_OVERRIDE" ]] && command -v gh >/dev/null 2>&1; then
         if ! gh release download "$RELEASE_TAG" --repo "$REPO" --dir "$scratch" \
-            --pattern "${asset}*"; then
+            --pattern "$asset" --pattern "SHA256SUMS"; then
             ui_error "${asset} is not attached to release $RELEASE_TAG of $REPO"
             ui_hint "what that release publishes: gh release view $RELEASE_TAG --repo $REPO"
             exit 1
         fi
     else
-        base="https://github.com/${REPO}/releases/download/${RELEASE_TAG}"
-        if ! curl -fsSL --connect-timeout 10 --max-time 600 -o "$scratch/$asset" "$base/$asset"; then
-            ui_error "cannot download $base/$asset"
-            ui_hint "check the tag and the network, or install gh: https://cli.github.com"
-            exit 1
-        fi
-        if ! curl -fsSL --connect-timeout 10 --max-time 60 -o "$scratch/${asset}.sha256" "$base/${asset}.sha256"; then
-            ui_error "cannot download ${asset}.sha256"
-            exit 1
-        fi
+        base="${RELEASE_BASE_URL_OVERRIDE:-https://github.com/${REPO}/releases/download}/${RELEASE_TAG}"
+        for name in "$asset" "SHA256SUMS"; do
+            if ! curl -fsSL --connect-timeout 10 --max-time 600 -o "$scratch/$name" "$base/$name"; then
+                ui_error "cannot download $base/$name"
+                ui_hint "check the tag and the network, or install gh: https://cli.github.com"
+                exit 1
+            fi
+        done
     fi
-    ui_ok "downloaded" "$asset"
+    ui_ok "downloaded" "$asset + SHA256SUMS"
 
-    if ! (cd "$scratch" && sha256sum -c "${asset}.sha256") >/dev/null; then
-        ui_error "${asset} failed its checksum check — refusing to install it"
+    # `sha256sum -c` on the manifest alone would expect the raw binaries too;
+    # the one line that names the archive is the one to check here.
+    local expected actual
+    expected="$(sed -n "s/^\([0-9a-f]\{64\}\)[[:space:]]\{1,\}${asset}\$/\1/p" "$scratch/SHA256SUMS" | head -n 1)"
+    if [[ -z "$expected" ]]; then
+        ui_error "SHA256SUMS has no entry for $asset — refusing to install an unverifiable archive"
+        ui_fix "the release may be older than this installer: check $RELEASE_TAG in $REPO"
         exit 1
     fi
-    ui_ok "checksum verified" "${asset}.sha256"
+    actual="$(sha256sum "$scratch/$asset" | awk '{print $1}')"
+    if [[ "$actual" != "$expected" ]]; then
+        ui_error "$asset failed its checksum check — refusing to install it"
+        ui_fix "expected $expected, got $actual"
+        exit 1
+    fi
+    ui_ok "checksum verified" "$asset against SHA256SUMS"
 
     tar -xzf "$scratch/$asset" -C "$scratch"
     ui_ok "unpacked" "${asset%.tar.gz}"
@@ -800,12 +830,6 @@ step() {
     ui_step "$STEP" "$TOTAL_STEPS" "$1"
 }
 
-case "$COMPONENT" in
-    both) asset_prefix="andler" ;;
-    daemon) asset_prefix="andlerd" ;;
-    cli) asset_prefix="andler-cli" ;;
-esac
-
 ui_banner "installer" "Android Linux Emulator & Runtime"
 
 if [[ "$SKIP_DEPS" -eq 1 ]]; then
@@ -831,7 +855,7 @@ fi
 ui_section "Install plan"
 ui_kv "component" "$([[ "$COMPONENT" == "both" ]] && echo "andlerd + andler" || echo "$COMPONENT")"
 if [[ "$FROM_RELEASE" -eq 1 ]]; then
-    ui_kv "source" "release ${RELEASE_TAG:-<latest>} (github.com/$REPO)"
+    ui_kv "source" "release ${RELEASE_TAG:-<latest>} (${RELEASE_BASE_URL_OVERRIDE:-github.com/$REPO})"
 else
     ui_kv "source" "local binaries (PATH or target/release)"
 fi
@@ -872,7 +896,7 @@ src_dir=""
 if [[ "$FROM_RELEASE" -eq 1 ]]; then
     host_arch="$(uname -m)"
     if [[ "$host_arch" != "x86_64" ]]; then
-        ui_error "published artifacts cover linux-x86_64 only (this host is $host_arch)"
+        ui_error "published artifacts cover x86_64-unknown-linux-gnu only (this host is $host_arch)"
         ui_hint "build from source instead: cargo build --release -p daemon -p cli"
         exit 1
     fi
@@ -886,10 +910,12 @@ if [[ "$FROM_RELEASE" -eq 1 ]]; then
         fi
     fi
 
-    asset="${asset_prefix}-${RELEASE_TAG}-linux-x86_64.tar.gz"
+    # One archive per platform holds both binaries; which of them lands on PATH
+    # is --component's job, not a second download's.
+    asset="andler-${RELEASE_TAG}-x86_64-unknown-linux-gnu.tar.gz"
     scratch="$(mktemp -d)"
     download_release
-    src_dir="$scratch/${asset%.tar.gz}"
+    src_dir="$scratch/andler-${RELEASE_TAG}-x86_64-unknown-linux-gnu"
 fi
 
 step "Install binaries"

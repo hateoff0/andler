@@ -215,15 +215,16 @@ Three boundaries hold the design together: `andler-core` is the bottom layer and
 > [!IMPORTANT]
 > **Prebuilt release archives are the recommended path.** Building from source is only needed to work on ANDLER itself.
 
-Each release publishes three archives, so you install what you need and nothing else:
+Each release publishes one artifact set per platform, with the target triple in every file name — what a file runs on is never a guess:
 
-| Archive | Contains | For |
+| Asset | Contains | For |
 | :--- | :--- | :--- |
-| `andler-<tag>-linux-x86_64.tar.gz` | both binaries, `LICENSE`, `README.md` | the default: a host that serves VMs and drives them |
-| `andlerd-<tag>-linux-x86_64.tar.gz` | `andlerd` | a host that only serves VMs |
-| `andler-cli-<tag>-linux-x86_64.tar.gz` | `andler` | a client machine, talking to a daemon elsewhere |
+| `andler-<tag>-x86_64-unknown-linux-gnu.tar.gz` | `andler` + `andlerd`, `LICENSE`, `README.md` | the default: a host that serves VMs and drives them |
+| `andler-<tag>-x86_64-unknown-linux-gnu` | the CLI alone, raw | a client machine, talking to a daemon elsewhere |
+| `andlerd-<tag>-x86_64-unknown-linux-gnu` | the daemon alone, raw | a host that only serves VMs |
+| `SHA256SUMS` | checksums of all three | `sha256sum -c SHA256SUMS` verifies any download you make by hand |
 
-Every archive ships a `.sha256` sidecar, and public releases carry a build-provenance attestation.
+The archive name is the CLI's file name plus `.tar.gz`, so `tar -xzf` on a downloaded asset drops a runnable `andler` next to its daemon. Public releases carry a build-provenance attestation for every artifact.
 
 ### 1 · Install
 
@@ -265,10 +266,18 @@ Then it verifies the published checksum, installs into `~/.local/bin` (`--bin-di
 <summary><strong>Download and install by hand</strong></summary>
 
 ```bash
-tar -xzf andler-v0.1.0-linux-x86_64.tar.gz        # or andlerd-… / andler-cli-…
-sudo install -m 0755 andler-v0.1.0-linux-x86_64/andler  /usr/local/bin/andler
-sudo install -m 0755 andler-v0.1.0-linux-x86_64/andlerd /usr/local/bin/andlerd
+set -euo pipefail
+tag=v0.1.0 triple=x86_64-unknown-linux-gnu
+base="https://github.com/hateoff0/andler/releases/download/$tag"
+bundle="andler-$tag-$triple"
+
+curl -fSLO "$base/$bundle.tar.gz" && curl -fSLO "$base/SHA256SUMS"
+sha256sum -c SHA256SUMS                        # the manifest covers the archive and both raw binaries
+tar -xzf "$bundle.tar.gz"
+install -m 0755 "$bundle"/{andler,andlerd} ~/.local/bin/   # or /usr/local/bin with sudo
 ```
+
+The raw binaries install the same way: `curl -fSLO "$base/andler-$tag-$triple"` for the client alone, `andlerd-…` for the daemon alone. `~/.local/bin` has to be on `PATH`; for the systemd user unit on top of a hand-installed daemon, run `scripts/install.sh --component daemon --bin-dir ~/.local/bin` from a checkout — it writes and enables the unit pointing at that binary.
 
 </details>
 

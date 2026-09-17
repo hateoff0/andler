@@ -128,7 +128,7 @@ What is next is the short-term list below.
 - ✅ Unified `create` + interactive wizard, VM templates, `config view|edit|set|status`, `--dry-run`/`--verify`, `--json`, partial instance IDs, shell completions, `doctor`.
 - ✅ One resolver for every creation front-end: flags, a TOML file and the wizard's answers produce the same config and the same validation outcome (proved by a test that runs all three through the same draft).
 - ✅ Unit, integration, gRPC round-trip, and containerized E2E tiers; the four-step pre-merge gate plus per-commit gating on `main`.
-- ✅ Release pipeline: a `v*` tag publishes `andler` + `andlerd` archives with `SHA256SUMS` and a build-provenance attestation, so installation is a download rather than a build.
+- ✅ Release pipeline: a `v*` tag publishes one archive per target triple (`andler-<tag>-x86_64-unknown-linux-gnu.tar.gz`, both binaries), the raw `andler`/`andlerd` binaries for hosts that want one of them, and `SHA256SUMS` over the set, with a build-provenance attestation — so installation is a download rather than a build.
 - ✅ OVMF discovery across distro packaging layouts via a prioritized candidate list (Arch, Debian/Ubuntu, Fedora, openSUSE, `qemu` layouts).
 - ✅ `ANDLERD_DEV_RESTART=1` — dev restart leaves VMs running and the next daemon start adopts them.
 

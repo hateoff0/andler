@@ -77,7 +77,7 @@ Fedora families. Optional ones (`ip`, `unshare`, `/dev/net/tun`,
 list with package names per family is in the README's *Host Requirements &
 Dependencies* section.
 
-Release installs are checksum-verified against the published `.sha256` before
+Release installs are checksum-verified against the published `SHA256SUMS` before
 anything is written, and the script re-checks the two installed versions
 afterwards, warning when a locally assembled pair mismatches.
 
@@ -95,10 +95,17 @@ ends with the authoritative version of the report it opened with —
 gated before anything was installed. Re-running is idempotent: it overwrites,
 re-checks and re-points.
 
-A release publishes one archive per component, plus the pair:
-`andlerd-<tag>-linux-x86_64.tar.gz`, `andler-cli-<tag>-linux-x86_64.tar.gz` and
-`andler-<tag>-linux-x86_64.tar.gz`. The script downloads the one that matches
-`--component` and verifies its published `.sha256`.
+A release publishes one artifact set per platform, named after the Rust target
+triple: `andler-<tag>-x86_64-unknown-linux-gnu.tar.gz` (both binaries, `LICENSE`,
+`README.md`), the raw `andler-…` and `andlerd-…` binaries next to it for a host
+that wants exactly one of them, and `SHA256SUMS` covering all three. The script
+downloads the archive — whichever component was asked for comes out of it —
+checks it against its own `SHA256SUMS` line, and refuses to unpack anything the
+manifest does not name.
+
+`ANDLER_RELEASE_BASE_URL` points the download at another base URL (a mirror, or
+the fixture server the E2E suite uses); the assets are then looked up under
+`<base>/<tag>/`, and the tag has to be passed explicitly.
 
 The CLI and the daemon must come from the same release: `andler` checks the
 daemon's version before every command and refuses a daemon built from a

@@ -66,9 +66,8 @@ _Published as [`v0.1.0`](https://github.com/hateoff0/andler/releases/tag/v0.1.0)
 ### Install
 
 ```bash
-tar -xzf andler-v0.1.0-linux-x86_64.tar.gz
-sudo install -m 0755 andler-v0.1.0-linux-x86_64/andler \
-                  andler-v0.1.0-linux-x86_64/andlerd /usr/local/bin/
+tar -xzf andler-v0.1.0-x86_64-unknown-linux-gnu.tar.gz
+install -m 0755 andler-v0.1.0-x86_64-unknown-linux-gnu/{andler,andlerd} ~/.local/bin/
 
 andler --version          # andler 0.1.0
 andlerd --version         # andlerd 0.1.0
@@ -76,7 +75,7 @@ andler doctor             # KVM, QEMU, OVMF, zero-root prerequisites, daemon
 andlerd                   # or: scripts/install.sh  → systemd user unit
 ```
 
-The archive ships both binaries, `LICENSE` and `README.md`, with a `.sha256` sidecar and a build-provenance attestation.
+The archive ships both binaries, `LICENSE` and `README.md`; the raw `andler`/`andlerd` binaries and a `SHA256SUMS` manifest covering the whole set sit next to it, and every artifact carries a build-provenance attestation on a public repository.
 
 ### Requirements
 
@@ -100,8 +99,8 @@ Linux with KVM (`/dev/kvm`, user in the `kvm` group), QEMU with OVMF/UEFI suppor
 - **Isolated network mode.** `network.mode = "isolated"` starts the guest's QEMU inside a fresh unprivileged user + network namespace whose tap is the guest's only interface: no route to any host network, no host interface created, and QMP/QGA stay reachable because they are UNIX sockets. The namespace is validated before the guest starts (exactly `lo` plus the tap, no IPv4 route) and a host that cannot provide one is refused with an actionable message rather than degraded; `stop` leaves no namespace or tap behind, and `doctor` names what the host is missing.
 - **One resolver for every creation front-end.** CLI flags, a TOML file and the wizard's answers now build the same draft and go through the same resolution and validation, so a key added in one place works in all of them; the test that proves it runs all three and compares the resolved config and the validation outcome.
 
-- **One archive per component.** A release publishes `andlerd-<tag>-linux-x86_64.tar.gz` (daemon), `andler-cli-<tag>-linux-x86_64.tar.gz` (client) and `andler-<tag>-linux-x86_64.tar.gz` (both, plus `LICENSE` and `README.md`), each with its own `.sha256`. A host that only serves VMs does not download the CLI, and a client machine can install just the client.
-- **`scripts/install.sh` installs from a release.** `--component daemon|cli|both`, `--from-release [TAG]`, `--bin-dir DIR`, `--no-service`: it downloads the archive for the component, verifies the published checksum, installs into `~/.local/bin`, and points the systemd user unit at exactly the binary it installed. `scripts/uninstall.sh` gained `--binaries` for the reverse.
+- **One artifact set per platform.** A release publishes `andler-<tag>-x86_64-unknown-linux-gnu.tar.gz` (both binaries, `LICENSE`, `README.md`), the raw `andler-<tag>-x86_64-unknown-linux-gnu` and `andlerd-<tag>-x86_64-unknown-linux-gnu` binaries for a host that wants exactly one of them, and one `SHA256SUMS` over all three — the target triple is in every name, `tar -xzf` on the archive drops a runnable `andler` next to its daemon, and `sha256sum -c SHA256SUMS` is the verification everybody already has. Re-running the workflow for an existing tag replaces the set and deletes the assets the layout no longer publishes, so a release page never shows two generations of files at once.
+- **`scripts/install.sh` installs from a release.** `--component daemon|cli|both`, `--from-release [TAG]`, `--bin-dir DIR`, `--no-service`: it downloads the platform archive, checks it against its `SHA256SUMS` line — and refuses to unpack a file the manifest does not name or whose digest does not match — installs the requested binaries into `~/.local/bin`, and points the systemd user unit at exactly the daemon it installed. `ANDLER_RELEASE_BASE_URL` redirects the download at a mirror or a fixture server. `scripts/uninstall.sh` gained `--binaries` for the reverse.
 - **`scripts/install.sh` checks the host before it installs.** Every run except `--skip-deps` prints a dependency report — required (KVM access, `qemu-system-x86_64`, `qemu-img`, the OVMF/UEFI pair, and `tar`/`sha256sum`/`curl` on the release path) and optional (`ip`, `unshare`, `/dev/net/tun`, `CAP_NET_ADMIN`, `passt`, `guestfish`, `debugfs`, `oras`, `lspci`, `glxinfo`, `nvidia-smi`), each optional entry naming the single feature it unlocks and each gap carrying the command that installs it for the detected Arch/Debian/Fedora family, plus one line that installs everything missing at once. A missing *required* dependency stops the install instead of producing a daemon that fails at the first VM: `--check-deps` runs the report alone (exit 1 when something required is missing), `--skip-deps` bypasses it. Resolving the latest release no longer requires `gh` — `curl` against the GitHub API is the fallback (`GH_TOKEN`/`GITHUB_TOKEN`/`ANDLER_INSTALL_TOKEN` for a private repository).
 - **`--with-optional` installs the optional set, `uninstall.sh --optional` takes it back out.** The installer runs the missing optional packages through the host's own package manager (`pacman`/`apt`/`dnf`) and records exactly what it installed, and with which manager, in `$ANDLER_HOME/optional-packages`; the uninstaller reads that record, shows the command, asks for the same typed `yes` (`--yes` answers it) and removes precisely that set — nothing else on the system is ever uninstalled. The NVIDIA driver (a distribution-specific kernel-module package that wants a reboot) and `oras` (not packaged everywhere) are deliberately never auto-installed; the report prints their own instructions. `--dry-run` prints the plan and the exact package command without changing anything.
 - **The installer ends with `andler doctor`.** When a daemon answers on the host it is installing on, the run closes with the CLI's own report — the authoritative version of the dependency report it opened with (base images, the daemon's view, and the checks the shell cannot make) — and its findings stay advisory, because the required set was already gated. `--check-deps` and `--dry-run` are read-only and now run as root too, which is what a container or a CI image needs; installing still refuses root.
