@@ -140,6 +140,8 @@ CPU %, resident RAM, disk and network throughput from `/proc`, plus VRAM and GPU
 
 ## ⏱️ 30-Second Tour
 
+Once installed — one command, see [📦 Installation](#-installation):
+
 ```text
 $ andler image download --android-version 13 --variant gapps     # base image from Releases
 $ andler create --kind android --name pixel --android-version 13 --arm-translator libndk
@@ -316,13 +318,22 @@ Requires `protoc` for gRPC code generation. Reproducible builds and the full tes
 
 ## 🚀 Quick Start
 
-### 0 · Start the daemon
+### 0 · Install
 
 ```bash
-andlerd            # or: systemctl --user start andlerd
+git clone --depth 1 https://github.com/hateoff0/andler && cd andler
+scripts/install.sh --from-release     # dependency report → daemon + CLI into ~/.local/bin → systemd user unit
 ```
 
-### 1 · Create a VM — wizard or flags
+The installer checks the host first (KVM, QEMU, OVMF) and prints the command that installs anything missing for your distribution; `--with-optional` installs the optional set too, `--component cli --no-service` installs just the client on a machine that talks to a daemon elsewhere, `--check-deps` only reports. Nothing is built: the binaries come from the latest release, checksum-verified. The archive-by-hand path and the full flag table are in [📦 Installation](#-installation).
+
+### 1 · Start the daemon
+
+```bash
+andlerd            # start by hand, or: systemctl --user status andlerd   (the installer enabled it)
+```
+
+### 2 · Create a VM — wizard or flags
 
 ```bash
 andler create                                   # interactive wizard, hardware auto-detection
@@ -333,7 +344,7 @@ andler create --template desktop --kind linux --name work --quick
 
 Preview without touching the daemon: `--dry-run` prints the resolved config and the real QEMU command line; `--verify` prints a ✓/✗ pre-flight report and exits non-zero on failure.
 
-### 2 · Create an Android VM — base image from the release catalog
+### 3 · Create an Android VM — base image from the release catalog
 
 ```bash
 andler image list
@@ -343,7 +354,7 @@ andler create --kind android --name pixel --android-version 13 --arm-translator 
 
 Every part is checksum-verified against the release manifest before anything lands in the cache; an already-cached build is reused without a request.
 
-### 3 · Boot, watch, and snapshot
+### 4 · Boot, watch, and snapshot
 
 ```bash
 andler start dev
