@@ -548,7 +548,8 @@ protection), guest install/remove/list and boot-mode (deep tests over a real
 rootfs via qemu-nbd, SKIP when the `nbd` module is unavailable), hotplug
 attach/detach disk+net on a live VM, dry-run/
 verify/wizard/completions/doctor, the install/uninstall scripts (dependency
-report, install into a scratch bin dir, purge of a scratch data root), and
+report, install into a scratch bin dir, the release path against a fixture
+release server, purge of a scratch data root), and
 daemon-restart persistence. Each suite
 leaves no instances behind.
 
