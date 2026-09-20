@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum AudioBackend {
     Pipewire,
     Pulseaudio,
@@ -9,6 +10,7 @@ pub enum AudioBackend {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum AudioDevice {
     VirtioSound,
 
@@ -54,7 +56,7 @@ mod tests {
 
     #[test]
     fn device_field_deserializes_with_default_when_missing() {
-        let json = r#"{"backend":"Pipewire"}"#;
+        let json = r#"{"backend":"pipewire"}"#;
         let cfg: AudioConfig = serde_json::from_str(json).expect("must deserialize");
         assert_eq!(cfg.device, AudioDevice::VirtioSound);
     }

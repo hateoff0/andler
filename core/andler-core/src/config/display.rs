@@ -13,6 +13,7 @@ impl Resolution {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum DisplayEngine {
     Sdl,
 
@@ -31,6 +32,11 @@ pub struct DisplayConfig {
     pub dpi: u32,
 
     pub fps_limit: u32,
+    /// TOML/JSON key is `engine`, not `display_engine`: it already lives
+    /// under `[display]`, so the field name doesn't need to repeat the
+    /// section name. Kept as `display_engine` on the Rust side since that
+    /// identifier is used well beyond this struct.
+    #[serde(rename = "engine")]
     pub display_engine: DisplayEngine,
     pub fullscreen: bool,
 }

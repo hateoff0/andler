@@ -8,6 +8,7 @@ use crate::config::{
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum AndroidVersion {
     Android11,
     Android13,
@@ -23,6 +24,7 @@ impl std::fmt::Display for AndroidVersion {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
 pub enum ArmTranslator {
     #[default]
     None,
@@ -33,6 +35,7 @@ pub enum ArmTranslator {
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum AndroidBootMode {
     #[default]
     Android,

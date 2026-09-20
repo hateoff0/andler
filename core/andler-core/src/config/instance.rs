@@ -84,21 +84,29 @@ impl Default for InstanceId {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum BackendKind {
     Qemu,
 }
 
+/// Tagged on `type` rather than left externally tagged: both variants carry
+/// fields, so the default representation would nest a second table
+/// (`[kind.LinuxVm]` inside `[kind]`) purely to hold the discriminator. A
+/// `type` key alongside the variant's own fields keeps `[kind]` one table
+/// deep. `linux`/`android` (not `linux-vm`/`android-vm`) match the names
+/// `andler status`/`config get` already print for this key.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type")]
 pub enum InstanceKind {
+    #[serde(rename = "linux")]
     LinuxVm {
         iso_path: PathBuf,
 
         cdrom_bus: CdromBus,
     },
 
-    AndroidVm {
-        android_profile: AndroidProfile,
-    },
+    #[serde(rename = "android")]
+    AndroidVm { android_profile: AndroidProfile },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

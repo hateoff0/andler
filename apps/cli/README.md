@@ -180,7 +180,7 @@ cores = 8
 sockets = 1
 threads = 2
 affinity = []
-priority = "High"
+priority = "high"
 
 [memory]
 size_bytes = 8589934592
@@ -192,17 +192,17 @@ ksm = true
 resolution = { width = 1920, height = 1080 }
 dpi = 96
 fps_limit = 0
-display_engine = "Sdl"
+engine = "sdl"
 fullscreen = false
 
 [gpu]
-render_backend = "Venus"
+render_backend = "venus"
 hostmem_bytes = 4294967296
 blob = true
 gl = true
 
 [network]
-mode = "Nat"
+mode = "nat"
 device_model = "virtio-net-pci"
 
 [firmware]
@@ -210,7 +210,7 @@ ovmf_code_path = "/usr/share/edk2/x64/OVMF_CODE.4m.fd"
 ovmf_vars_path = "/path/to/VARS.fd"
 
 [audio]
-backend = "Pipewire"
+backend = "pipewire"
 
 [input]
 tablet_mode = true
@@ -226,7 +226,7 @@ For servers, CI, or Docker:
 
 ```toml
 [gpu]
-render_backend = "Cpu"
+render_backend = "cpu"
 hostmem_bytes = 67108864
 blob = false
 gl = false
@@ -235,14 +235,14 @@ gl = false
 resolution = { width = 1024, height = 768 }
 dpi = 96
 fps_limit = 0
-display_engine = "None"
+engine = "none"
 fullscreen = false
 
 [audio]
-backend = "None"
+backend = "none"
 ```
 
-`display_engine = "None"` = `-display none`, no X11/Wayland access at all.
+`engine = "none"` = `-display none`, no X11/Wayland access at all.
 
 ## TOML Parsing (`instance_file.rs`)
 

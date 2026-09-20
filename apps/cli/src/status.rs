@@ -484,14 +484,28 @@ fn print_instance_config(config: GetInstanceConfigResponse) {
     let boot_mode = config.boot_mode();
     match config.kind.and_then(|k| k.kind) {
         Some(instance_kind::Kind::LinuxVm(linux_vm)) => {
-            println!("kind: LinuxVm");
+            println!("kind: linux");
             println!("  iso_path: {}", linux_vm.iso_path);
-            println!("  cdrom_bus: {:?}", linux_vm.cdrom_bus());
+            println!(
+                "  cdrom_bus: {}",
+                match linux_vm.cdrom_bus() {
+                    andler_rpc::proto::CdromBus::VirtioScsi => "virtioscsi",
+                    andler_rpc::proto::CdromBus::Ide => "ide",
+                    andler_rpc::proto::CdromBus::Unspecified => "unspecified",
+                }
+            );
         }
         Some(instance_kind::Kind::AndroidVm(android_vm)) => {
-            println!("kind: AndroidVm");
+            println!("kind: android");
             if let Some(profile) = android_vm.android_profile {
-                println!("  android_version: {:?}", profile.android_version());
+                println!(
+                    "  android_version: {}",
+                    match profile.android_version() {
+                        andler_rpc::proto::AndroidVersion::Android11 => "android11",
+                        andler_rpc::proto::AndroidVersion::Android13 => "android13",
+                        andler_rpc::proto::AndroidVersion::Unspecified => "unspecified",
+                    }
+                );
                 println!("  gapps: {}", profile.gapps);
                 println!("  microg: {}", profile.microg);
                 fn translator_label(translator: andler_rpc::proto::ArmTranslator) -> &'static str {
@@ -529,10 +543,10 @@ fn print_instance_config(config: GetInstanceConfigResponse) {
         println!(
             "  priority: {}",
             match cpu.priority() {
-                CpuPriority::Unspecified => "UNSPECIFIED",
-                CpuPriority::Low => "Low",
-                CpuPriority::Normal => "Normal",
-                CpuPriority::High => "High",
+                CpuPriority::Low => "low",
+                CpuPriority::Normal => "normal",
+                CpuPriority::High => "high",
+                CpuPriority::Unspecified => "unspecified",
             }
         );
     }
@@ -554,10 +568,10 @@ fn print_instance_config(config: GetInstanceConfigResponse) {
         println!(
             "  format: {}",
             match disk.format() {
-                DiskFormat::Unspecified => "UNSPECIFIED",
-                DiskFormat::Qcow2 => "Qcow2",
-                DiskFormat::Raw => "Raw",
-                DiskFormat::Vdi => "Vdi",
+                DiskFormat::Qcow2 => "qcow2",
+                DiskFormat::Raw => "raw",
+                DiskFormat::Vdi => "vdi",
+                DiskFormat::Unspecified => "unspecified",
             }
         );
         if !disk.base_image.is_empty() {
@@ -576,14 +590,14 @@ fn print_instance_config(config: GetInstanceConfigResponse) {
         println!("  dpi: {}", display.dpi);
         println!("  fps_limit: {}", display.fps_limit);
         println!(
-            "  display_engine: {}",
+            "  engine: {}",
             match display.display_engine() {
-                DisplayEngine::Unspecified => "UNSPECIFIED",
-                DisplayEngine::Sdl => "Sdl",
-                DisplayEngine::Spice => "Spice",
-                DisplayEngine::Dbus => "Dbus",
-                DisplayEngine::DisplayNone => "None",
-                DisplayEngine::Gtk => "Gtk",
+                DisplayEngine::Sdl => "sdl",
+                DisplayEngine::Gtk => "gtk",
+                DisplayEngine::Spice => "spice",
+                DisplayEngine::Dbus => "dbus",
+                DisplayEngine::DisplayNone => "none",
+                DisplayEngine::Unspecified => "unspecified",
             }
         );
         println!("  fullscreen: {}", display.fullscreen);
@@ -595,12 +609,12 @@ fn print_instance_config(config: GetInstanceConfigResponse) {
         println!("  blob: {}", gpu.blob);
         println!("  gl: {}", gpu.gl);
         match gpu.render_backend.and_then(|rb| rb.kind) {
-            Some(render_backend::Kind::Venus(_)) => println!("  render_backend: Venus"),
-            Some(render_backend::Kind::VirtioGpu(_)) => println!("  render_backend: VirtioGpu"),
-            Some(render_backend::Kind::VirGl(_)) => println!("  render_backend: VirGl"),
-            Some(render_backend::Kind::Cpu(_)) => println!("  render_backend: Cpu"),
+            Some(render_backend::Kind::Venus(_)) => println!("  render_backend: venus"),
+            Some(render_backend::Kind::VirtioGpu(_)) => println!("  render_backend: virtiogpu"),
+            Some(render_backend::Kind::VirGl(_)) => println!("  render_backend: virgl"),
+            Some(render_backend::Kind::Cpu(_)) => println!("  render_backend: cpu"),
             Some(render_backend::Kind::Passthrough(p)) => {
-                println!("  render_backend: Passthrough({})", p.gpu_pci_id)
+                println!("  render_backend: passthrough({})", p.gpu_pci_id)
             }
             None => println!("  render_backend: <missing>"),
         }
@@ -615,12 +629,12 @@ fn print_instance_config(config: GetInstanceConfigResponse) {
                     andler_rpc::proto::NatBackend::Passt => "passt",
                     _ => "slirp",
                 };
-                println!("  mode: Nat ({nat_backend})")
+                println!("  mode: nat ({nat_backend})")
             }
             Some(network_mode::Kind::Bridge(b)) => {
-                println!("  mode: Bridge({})", b.interface)
+                println!("  mode: bridge({})", b.interface)
             }
-            Some(network_mode::Kind::Isolated(_)) => println!("  mode: Isolated"),
+            Some(network_mode::Kind::Isolated(_)) => println!("  mode: isolated"),
             None => println!("  mode: <missing>"),
         }
     }
@@ -640,19 +654,19 @@ fn print_instance_config(config: GetInstanceConfigResponse) {
         println!(
             "  backend: {}",
             match audio.backend() {
-                AudioBackend::Unspecified => "UNSPECIFIED",
-                AudioBackend::Pipewire => "Pipewire",
-                AudioBackend::Pulseaudio => "Pulseaudio",
-                AudioBackend::AudioNone => "None",
+                AudioBackend::Pipewire => "pipewire",
+                AudioBackend::Pulseaudio => "pulseaudio",
+                AudioBackend::AudioNone => "none",
+                AudioBackend::Unspecified => "unspecified",
             }
         );
         println!(
             "  device: {}",
             match audio.device() {
+                andler_rpc::proto::AudioDevice::VirtioSound => "virtiosound",
+                andler_rpc::proto::AudioDevice::Ich9Hda => "ich9hda",
                 andler_rpc::proto::AudioDevice::Unspecified =>
-                    "UNSPECIFIED (defaults to virtio-sound)",
-                andler_rpc::proto::AudioDevice::VirtioSound => "virtio-sound",
-                andler_rpc::proto::AudioDevice::Ich9Hda => "ich9-hda",
+                    "unspecified (defaults to virtiosound)",
             }
         );
     }
@@ -688,12 +702,12 @@ fn print_instance_config(config: GetInstanceConfigResponse) {
                         andler_rpc::proto::NatBackend::Passt => "passt",
                         _ => "slirp",
                     };
-                    println!("  mode: Nat ({nat_backend})")
+                    println!("  mode: nat ({nat_backend})")
                 }
                 Some(network_mode::Kind::Bridge(b)) => {
-                    println!("  mode: Bridge({})", b.interface)
+                    println!("  mode: bridge({})", b.interface)
                 }
-                Some(network_mode::Kind::Isolated(_)) => println!("  mode: Isolated"),
+                Some(network_mode::Kind::Isolated(_)) => println!("  mode: isolated"),
                 None => println!("  mode: <missing>"),
             }
         }

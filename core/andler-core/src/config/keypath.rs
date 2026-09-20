@@ -554,7 +554,7 @@ pub fn config_keys() -> &'static [ConfigKey] {
             live: false,
         },
         ConfigKey {
-            key: "display.display_engine",
+            key: "display.engine",
             get: |cfg| enum_lower(&cfg.display.display_engine),
             set: Some(|cfg, value| {
                 cfg.display.display_engine = parse_enum(

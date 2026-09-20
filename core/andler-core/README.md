@@ -115,11 +115,13 @@ Created → Starting → Running ⇄ Paused → Stopping → Stopped → Created
 
 Nine configuration sections, each in its own file:
 
+**Wire casing**: every enum below is a Rust `PascalCase` identifier, but on disk (`instance.toml`) and over the CLI's JSON output every one of them serializes as a single lowercase word — `RenderBackend::VirtioGpu` is `render_backend = "virtiogpu"`, `CpuPriority::Normal` is `priority = "normal"`, and so on (`#[serde(rename_all = "lowercase")]` on each enum). `InstanceKind` is the one exception with its own explicit renames: it's tagged on an internal `type` key so `[kind]` stays one table deep instead of nesting a second `[kind.LinuxVm]` table just to hold the discriminator, and that `type` is `"linux"` / `"android"` (not `"linuxvm"`/`"androidvm"`) to match the names the CLI prints for this key. `DisplayConfig::display_engine` similarly carries `#[serde(rename = "engine")]` so the key is `display.engine`, not the stuttering `display.display_engine`. None of this affects the Rust identifiers themselves — only what `toml`/`serde_json` read and write.
+
 #### `config::instance` — Top-Level Config
 
 - **`InstanceId`**: 32 random bytes; `Display` = 64 lowercase hex chars (docker-style). Any unique hex prefix resolves to the instance. Unique per instance.
 - **`BackendKind`**: `Qemu`.
-- **`InstanceKind`**: `LinuxVm { iso_path, cdrom_bus }` | `AndroidVm { android_profile }`.
+- **`InstanceKind`**: `LinuxVm { iso_path, cdrom_bus }` | `AndroidVm { android_profile }` — `[kind]` on disk with `type = "linux"` or `type = "android"` plus that variant's own fields alongside it.
 - **`InstanceConfig`**: The full configuration struct combining all sections:
 
 ```rust
@@ -173,7 +175,7 @@ Each sub-config has a `reference_default()` method that produces sensible defaul
 #### `config::display`
 
 - `DisplayEngine`: `Sdl` | `Gtk` | `Spice` | `Dbus` | `None` (headless, `-display none`).
-- `DisplayConfig`: `resolution` (width/height), `dpi`, `fps_limit` (0 = unlimited), `display_engine`, `fullscreen`.
+- `DisplayConfig`: `resolution` (width/height), `dpi`, `fps_limit` (0 = unlimited), `display_engine` (TOML/JSON key: `engine`), `fullscreen`.
 - Default: 1920x1080, 96 DPI, no limit, SDL, no fullscreen.
 **NVIDIA GTK issue**: GTK (`gtk,gl=on`) produces a black screen on some NVIDIA configurations. SDL works reliably on those same machines. The actual default (Sdl vs Gtk) is determined at runtime based on the host's GPU vendor, not a static default.
 

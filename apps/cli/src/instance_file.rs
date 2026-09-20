@@ -700,7 +700,7 @@ mod tests {
 
     #[test]
     fn android_linux_only_sections_are_rejected_not_silently_dropped() {
-        let toml = format!("{MINIMAL_ANDROID_TOML}\n[cpu]\ncores = 16\nsockets = 1\nthreads = 1\npriority = \"Normal\"\n");
+        let toml = format!("{MINIMAL_ANDROID_TOML}\n[cpu]\ncores = 16\nsockets = 1\nthreads = 1\npriority = \"normal\"\n");
         let err = resolve_err(&toml);
         assert!(err.contains("`cpu` section"), "{err}");
     }

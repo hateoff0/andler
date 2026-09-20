@@ -380,7 +380,7 @@ andler snapshot create dev --tag clean-install
 
 ```toml
 [gpu]
-render_backend = "Venus"    # Venus | VirGl | VirtioGpu | Cpu
+render_backend = "venus"    # venus | virgl | virtiogpu | cpu
 hostmem_bytes = 4294967296  # 4 GiB shared graphics memory
 blob = true                 # virtio-gpu shared memory (required for Venus)
 gl = true                   # expose GL contexts
@@ -388,12 +388,12 @@ gl = true                   # expose GL contexts
 
 | Backend | Protocol | Best fit |
 | :--- | :--- | :--- |
-| **`Venus`** | Vulkan over `virtio-gpu` | Wayland desktops, Vulkan apps, Android 3D |
-| **`VirGl`** | OpenGL over `virtio-gpu` | GL compositors, classic desktops |
-| **`VirtioGpu`** | 2D `virtio-gpu` | Lightweight VMs, CI nodes |
-| **`Cpu`** | Software framebuffer | Headless hosts with no usable DRM node |
+| **`venus`** | Vulkan over `virtio-gpu` | Wayland desktops, Vulkan apps, Android 3D |
+| **`virgl`** | OpenGL over `virtio-gpu` | GL compositors, classic desktops |
+| **`virtiogpu`** | 2D `virtio-gpu` | Lightweight VMs, CI nodes |
+| **`cpu`** | Software framebuffer | Headless hosts with no usable DRM node |
 
-| Display engine | `Sdl` (low overhead, default on NVIDIA) · `Gtk` · `Spice` · `Dbus` · `None` |
+| Display engine | `sdl` (low overhead, default on NVIDIA) · `gtk` · `spice` · `dbus` · `none` |
 | :--- | :--- |
 | **Resolution** | Applied *inside* the guest: passed as QEMU `fw_cfg` on boot, and switched live on a running VM with `andler config set <id> display.resolution WxH` through the guest agent. |
 
@@ -484,7 +484,7 @@ compact_on_shutdown = false
 cores = 8
 sockets = 1
 threads = 1
-priority = "Normal"
+priority = "normal"
 affinity = [0, 1, 2, 3]      # taskset pinning + cross-instance overlap gate
 
 [memory]
@@ -493,18 +493,18 @@ mem_lock = false             # mlock guest RAM (-overcommit mem-lock=on)
 hugepages = false            # back RAM with /dev/hugepages
 
 [gpu]
-render_backend = "Venus"
+render_backend = "venus"
 hostmem_bytes = 4294967296
 blob = true
 gl = true
 
 [display]
 resolution = { width = 1920, height = 1080 }
-display_engine = "Sdl"       # Sdl | Gtk | Spice | Dbus | None
+engine = "sdl"       # sdl | gtk | spice | dbus | none
 
 [network]
-mode = "Nat"                 # Nat | Bridge | Isolated
-nat_backend = "Slirp"        # or "Passt" when available
+mode = "nat"                 # nat | bridge | isolated
+nat_backend = "slirp"        # or "passt" when available
 device_model = "virtio-net-pci"
 
 [[network.port_forwards]]
@@ -513,11 +513,11 @@ host_port = 2222
 guest_port = 22
 
 [audio]
-backend = "Pipewire"
-device = "VirtioSound"
+backend = "pipewire"
+device = "virtiosound"
 
 [input]
-pointer_mode = "Tablet"
+pointer_mode = "tablet"
 hide_host_cursor = true
 clipboard_enabled = true     # needs spice-vdagent inside the guest
 
@@ -684,9 +684,9 @@ The OVMF pair is auto-discovered across the common distro layouts (`/usr/share/e
 
 | Dependency | Unlocks | Package |
 | :--- | :--- | :--- |
-| `ip` (iproute2) | `network.mode = "Bridge"` and `"Isolated"` — it creates the taps both hand to QEMU | `iproute2` |
-| `unshare` (util-linux) + unprivileged user namespaces + `/dev/net/tun` | `network.mode = "Isolated"`: the guest's QEMU builds its tap inside its own user namespace, so no host capability is involved | `util-linux`, `modprobe tun` |
-| `CAP_NET_ADMIN` on `andlerd` | `network.mode = "Bridge"` | `sudo setcap cap_net_admin+ep $(command -v andlerd)` |
+| `ip` (iproute2) | `network.mode = "bridge"` and `"isolated"` — it creates the taps both hand to QEMU | `iproute2` |
+| `unshare` (util-linux) + unprivileged user namespaces + `/dev/net/tun` | `network.mode = "isolated"`: the guest's QEMU builds its tap inside its own user namespace, so no host capability is involved | `util-linux`, `modprobe tun` |
+| `CAP_NET_ADMIN` on `andlerd` | `network.mode = "bridge"` | `sudo setcap cap_net_admin+ep $(command -v andlerd)` |
 | `passt` | NAT through passt instead of the built-in slirp (auto-detected; slirp is the fallback, not an error) | `passt` |
 | `guestfish` (guestfs-tools) | every **offline** guest operation: `guest install/remove --offline`, boot-mode and ARM-translator switches, `guest apply`, and the maintenance auto-start fallback | `libguestfs` · `libguestfs-tools` · `guestfs-tools` |
 | `debugfs` (e2fsprogs) | reading `build.prop` out of the Waydroid `system.img` while staging an ARM translator | `e2fsprogs` |
@@ -738,7 +738,7 @@ Hypervisor
   ✓ qemu-img: /usr/bin/qemu-img
   ✓ OVMF/UEFI firmware: /usr/share/OVMF/OVMF_CODE_4M.fd + /usr/share/OVMF/OVMF_VARS_4M.fd
   ⚠ CAP_NET_ADMIN: not held — bridge networking will fail
-      → setcap on andlerd, or use network mode = "Nat"
+      → setcap on andlerd, or use network mode = "nat"
 
 Offline guest operations (libguestfs appliance)
   ✓ oras: /usr/bin/oras
@@ -774,21 +774,21 @@ No. Venus (Vulkan) and VirGL (OpenGL) share your existing host GPU over `virtio-
 <details>
 <summary><strong>Is root required?</strong></summary>
 
-No. The daemon runs as your user and performs no privileged operations: online guest work goes over the guest agent, offline work inside the libguestfs appliance, a QEMU VM of its own. Bridge networking is the one feature that additionally wants `CAP_NET_ADMIN` on `andlerd`; `Nat` mode needs nothing.
+No. The daemon runs as your user and performs no privileged operations: online guest work goes over the guest agent, offline work inside the libguestfs appliance, a QEMU VM of its own. Bridge networking is the one feature that additionally wants `CAP_NET_ADMIN` on `andlerd`; `nat` mode needs nothing.
 
 </details>
 
 <details>
 <summary><strong>Does it work on NVIDIA hosts?</strong></summary>
 
-Yes. The Android session composites through Weston over GL rather than a Vulkan-only compositor, so frames present on any host GPU; `Sdl` is the default display engine when an NVIDIA GPU is detected.
+Yes. The Android session composites through Weston over GL rather than a Vulkan-only compositor, so frames present on any host GPU; `sdl` is the default display engine when an NVIDIA GPU is detected.
 
 </details>
 
 <details>
 <summary><strong>Can I run everything headless?</strong></summary>
 
-Yes — set `display.display_engine = "None"`, or create from the built-in `headless` template. Metrics, logs, events, `exec`, and the guest agent all work with no display attached.
+Yes — set `display.engine = "none"`, or create from the built-in `headless` template. Metrics, logs, events, `exec`, and the guest agent all work with no display attached.
 
 </details>
 

@@ -58,8 +58,8 @@ pub fn colorize_status(kind: InstanceStateKind, is_tty: bool) -> String {
 
 pub fn backend_kind_name(kind: BackendKind) -> &'static str {
     match kind {
-        BackendKind::Unspecified => "UNSPECIFIED",
-        BackendKind::Qemu => "Qemu",
+        BackendKind::Unspecified => "unspecified",
+        BackendKind::Qemu => "qemu",
     }
 }
 

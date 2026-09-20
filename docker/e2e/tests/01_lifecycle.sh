@@ -33,7 +33,7 @@ expect_err_grep "status error mentions not found" "not found"
 
 expect_ok "config view" -- andler config view "$ID"
 expect_out_grep "config shows the name" "e2e-lifecycle"
-expect_out_grep "config shows headless display" "display_engine: None"
+expect_out_grep "config shows headless display" "engine: none"
 
 expect_fail "config of a nonexistent instance" -- andler config view "$UNKNOWN_ID"
 

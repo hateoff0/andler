@@ -986,7 +986,7 @@ Request for a partial configuration update by key/value.
 | Field | Type | Description |
 |-------|------|-------------|
 | `instance_ref` | `string` | Instance ID (full or prefix). |
-| `key` | `string` | Configuration key. The whitelist is the settable key-path table in `andler-core` (`config_keys()`): `name`, `cpu.cores`/`sockets`/`threads`/`priority`, `memory.size_bytes`/`ballooning`/`zram`/`ksm`/`mem_lock`/`hugepages`, `disk.thin_provisioning`/`trim_on_shutdown`/`compact_on_shutdown`/`snapshot_timeout_secs`, `display.resolution` (any state; applied live to a running guest via the guest agent), `display.dpi`/`fps_limit`/`display_engine`/`fullscreen`, `gpu.render_backend`/`hostmem_bytes`/`blob`/`gl`, `network.mode`/`device_model`/`nat_backend`, `audio.backend`/`device`, `input.pointer_mode`/`hide_host_cursor`/`clipboard_enabled`, `firmware.enable_uefi`. Any other key is rejected with `InvalidC…
+| `key` | `string` | Configuration key. The whitelist is the settable key-path table in `andler-core` (`config_keys()`): `name`, `cpu.cores`/`sockets`/`threads`/`priority`, `memory.size_bytes`/`ballooning`/`zram`/`ksm`/`mem_lock`/`hugepages`, `disk.thin_provisioning`/`trim_on_shutdown`/`compact_on_shutdown`/`snapshot_timeout_secs`, `display.resolution` (any state; applied live to a running guest via the guest agent), `display.dpi`/`fps_limit`/`engine`/`fullscreen`, `gpu.render_backend`/`hostmem_bytes`/`blob`/`gl`, `network.mode`/`device_model`/`nat_backend`, `audio.backend`/`device`, `input.pointer_mode`/`hide_host_cursor`/`clipboard_enabled`, `firmware.enable_uefi`. Any other key is rejected with `InvalidC…
 | `value` | `string` | New value. |
 
 ### `GuestPackageEntry`

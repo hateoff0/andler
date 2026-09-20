@@ -170,7 +170,7 @@ ovmf_vars_path = "$dir/VARS.fd"
 # Defaults (reference_default()) target a desktop with real GPU/sound/X server.
 # DisplayEngine::None is true headless — no X11/Wayland dependency needed.
 [gpu]
-render_backend = "Cpu"
+render_backend = "cpu"
 hostmem_bytes = 67108864
 blob = false
 gl = false
@@ -179,11 +179,11 @@ gl = false
 resolution = { width = 1024, height = 768 }
 dpi = 96
 fps_limit = 0
-display_engine = "None"
+engine = "none"
 fullscreen = false
 
 [audio]
-backend = "None"
+backend = "none"
 EOF
     andler create --file "$dir/instance.toml" | sed -n 's/.*(\(.*\))/\1/p'
 }

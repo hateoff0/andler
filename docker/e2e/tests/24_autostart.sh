@@ -22,7 +22,7 @@ ovmf_vars_path = "$WORK/auto/VARS.fd"
 autostart = true
 
 [gpu]
-render_backend = "Cpu"
+render_backend = "cpu"
 hostmem_bytes = 67108864
 blob = false
 gl = false
@@ -31,11 +31,11 @@ gl = false
 resolution = { width = 1024, height = 768 }
 dpi = 96
 fps_limit = 0
-display_engine = "None"
+engine = "none"
 fullscreen = false
 
 [audio]
-backend = "None"
+backend = "none"
 EOF
 AUTO_ID="$(andler create --file "$WORK/auto/instance.toml" | sed -n 's/.*(\(.*\))/\1/p')"
 [[ -n "$AUTO_ID" ]] || fail "empty id from autostart create"

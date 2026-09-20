@@ -37,7 +37,7 @@ ovmf_vars_path = "$WORK/VARS.fd"
 size_bytes = $OVERCOMMIT
 
 [gpu]
-render_backend = "Cpu"
+render_backend = "cpu"
 hostmem_bytes = 67108864
 blob = false
 gl = false
@@ -46,11 +46,11 @@ gl = false
 resolution = { width = 1024, height = 768 }
 dpi = 96
 fps_limit = 0
-display_engine = "None"
+engine = "none"
 fullscreen = false
 
 [audio]
-backend = "None"
+backend = "none"
 EOF
 
 qemu-img create -f qcow2 "$WORK/disk.qcow2" 2G >/dev/null 2>&1

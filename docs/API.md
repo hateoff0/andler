@@ -205,7 +205,7 @@ andler config --instance <instance-id> [--edit]
 | `cpu.affinity` | read-only | Immutable via `config set`: pin the VM's threads to host CPUs by editing `affinity = [0, 2, 4, 6]` in `instance.toml` — the QEMU process is `taskset`-pinned to that set, and starting an instance whose pin overlaps a running pinned instance is refused (`host CPU N is pinned by running instance …`) |
 | `memory.size_bytes` / `memory.ballooning` / `memory.zram` / `memory.ksm` / `memory.mem_lock` / `memory.hugepages` | size string / `true`\|`false` | Instance must be stopped |
 | `disk.thin_provisioning` / `disk.trim_on_shutdown` / `disk.compact_on_shutdown` / `disk.snapshot_timeout_secs` | boolean / seconds | Instance must be stopped |
-| `display.dpi` / `display.fps_limit` / `display.display_engine` / `display.fullscreen` | int / engine name / boolean | Instance must be stopped |
+| `display.dpi` / `display.fps_limit` / `display.engine` / `display.fullscreen` | int / engine name / boolean | Instance must be stopped |
 | `gpu.render_backend` / `gpu.hostmem_bytes` / `gpu.blob` / `gpu.gl` | backend name / bytes / boolean | Instance must be stopped |
 | `network.mode` / `network.device_model` / `network.nat_backend` | mode / model / backend name | Instance must be stopped |
 | `network.port_forwards` | read-only | Immutable: fixed at create time (QEMU netdev `hostfwd=`) |
@@ -856,7 +856,7 @@ cores = 8
 sockets = 1
 threads = 2
 affinity = [0, 2, 4, 6]
-priority = "High"
+priority = "high"
 
 [memory]
 size_bytes = 8589934592
@@ -870,20 +870,20 @@ hugepages = false
 resolution = { width = 1920, height = 1080 }
 dpi = 96
 fps_limit = 0
-display_engine = "Sdl"
+engine = "sdl"
 fullscreen = false
 
 [gpu]
-render_backend = "Venus"
+render_backend = "venus"
 hostmem_bytes = 4294967296
 blob = true
 gl = true
 
 [network]
-mode = "Nat"
+mode = "nat"
 device_model = "virtio-net-pci"
 [[network.port_forwards]]
-protocol = "Tcp"
+protocol = "tcp"
 host_port = 2222
 guest_port = 22
 
@@ -892,11 +892,11 @@ ovmf_code_path = "/usr/share/edk2/x64/OVMF_CODE.4m.fd"
 ovmf_vars_path = "/path/to/VARS.fd"
 
 [audio]
-backend = "Pipewire"
-device = "VirtioSound"
+backend = "pipewire"
+device = "virtiosound"
 
 [input]
-pointer_mode = "Tablet"
+pointer_mode = "tablet"
 hide_host_cursor = true
 clipboard_enabled = true
 ```
@@ -907,22 +907,22 @@ Hotplugged devices are persisted as array-of-tables (added by `andler attach`, e
 [[extra_disks]]
 path = "/data/games.qcow2"
 size_bytes = 21474836480
-format = "Qcow2"
+format = "qcow2"
 thin_provisioning = true
 trim_on_shutdown = false
 compact_on_shutdown = false
 
 [[extra_networks]]
-mode = "Nat"
+mode = "nat"
 device_model = "virtio-net-pci"
-nat_backend = "Slirp"
+nat_backend = "slirp"
 ```
 
 ### Headless Mode
 
 ```toml
 [gpu]
-render_backend = "Cpu"
+render_backend = "cpu"
 hostmem_bytes = 67108864
 blob = false
 gl = false
@@ -931,11 +931,11 @@ gl = false
 resolution = { width = 1024, height = 768 }
 dpi = 96
 fps_limit = 0
-display_engine = "None"
+engine = "none"
 fullscreen = false
 
 [audio]
-backend = "None"
+backend = "none"
 ```
 
 ### Section Defaults
@@ -944,15 +944,40 @@ Any section can be omitted entirely. If present, it must be complete (no partial
 
 | Section | Default |
 |---------|---------|
-| `cpu` | 4 cores, 1 socket, 1 thread, no affinity, Normal priority |
+| `cpu` | 4 cores, 1 socket, 1 thread, no affinity, normal priority |
 | `memory` | 8 GiB, no ballooning, no zram, KSM on |
 | `disk` | 256 GiB qcow2, no backing, thin provisioning, discard |
-| `display` | 1920x1080, 96 DPI, no limit, SDL, no fullscreen |
-| `gpu` | Venus, 4096 MiB hostmem, blob+gl on |
-| `network` | NAT, virtio-net-pci |
+| `display` | 1920x1080, 96 DPI, no limit, sdl, no fullscreen |
+| `gpu` | venus, 4096 MiB hostmem, blob+gl on |
+| `network` | nat, virtio-net-pci |
 | `firmware` | OVMF_CODE at `/usr/share/edk2/x64/OVMF_CODE.4m.fd` |
-| `audio` | PipeWire, VirtioSound |
-| `input` | Tablet pointer, hide_cursor+clipboard true |
+| `audio` | pipewire, virtiosound |
+| `input` | tablet pointer, hide_cursor+clipboard true |
+
+### The file the daemon writes
+
+`instance.toml` under `~/.andler/instances/<id>/` is the full resolved config — every section explicit (no defaults left implicit), plus `id`, `backend` and `schema_version`. The kind is one `[kind]` table tagged on `type`, and the discriminator is `linux` / `android`:
+
+```toml
+id = "4f54b7c06590f9077535027a7873702c002acc5584d1fbe6adfda949ae2c158c"
+name = "my-linux-vm"
+backend = "qemu"
+schema_version = 1
+
+[kind]
+type = "linux"
+iso_path = "/home/user/isos/cachyos.iso"
+cdrom_bus = "ide"
+
+[cpu]
+cores = 8
+sockets = 1
+threads = 2
+priority = "high"
+# …memory, disk, display, gpu, network, firmware, audio, input…
+```
+
+Every enum value is a single lowercase word (`render_backend = "venus"`, `display.engine = "sdl"`, `nat_backend = "slirp"`) — the same names `andler config view` prints and `andler config set` accepts. An Android instance writes `type = "android"` with an `[kind.android_profile]` table (`android_version = "android13"`, `arm_translator`, `boot_mode`, `base_image_pin`) instead of `iso_path`/`cdrom_bus`. A file that uses the old `PascalCase` values or a nested `[kind.LinuxVm]` table no longer parses; see the changelog for the migration.
 
 ## gRPC Protocol
 

@@ -667,7 +667,7 @@ cdrom_bus = "virtio"
 cores = 8
 sockets = 1
 threads = 1
-priority = "Normal"
+priority = "normal"
 
 [memory]
 size_bytes = 17179869184
@@ -681,26 +681,26 @@ hugepages = false
 resolution = {{ width = 2560, height = 1440 }}
 dpi = 96
 fps_limit = 0
-display_engine = "Gtk"
+engine = "gtk"
 fullscreen = true
 
 [gpu]
-render_backend = "VirGl"
+render_backend = "virgl"
 hostmem_bytes = 8589934592
 blob = true
 gl = true
 
 [network]
-mode = "Nat"
+mode = "nat"
 device_model = "virtio-net-pci"
-nat_backend = "Passt"
+nat_backend = "passt"
 
 [audio]
-backend = "None"
-device = "VirtioSound"
+backend = "none"
+device = "virtiosound"
 
 [input]
-pointer_mode = "Mouse"
+pointer_mode = "mouse"
 hide_host_cursor = true
 clipboard_enabled = false
 "#,

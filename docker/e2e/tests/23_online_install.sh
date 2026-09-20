@@ -64,7 +64,7 @@ ovmf_vars_path = "$WORK/inst/VARS.fd"
 cdrom_bus = "virtio"
 
 [gpu]
-render_backend = "Cpu"
+render_backend = "cpu"
 hostmem_bytes = 67108864
 blob = false
 gl = false
@@ -73,11 +73,11 @@ gl = false
 resolution = { width = 1024, height = 768 }
 dpi = 96
 fps_limit = 0
-display_engine = "None"
+engine = "none"
 fullscreen = false
 
 [audio]
-backend = "None"
+backend = "none"
 EOF
 OID="$(andler create --file "$WORK/inst/instance.toml" | sed -n 's/.*(\(.*\))/\1/p')"
 [[ -n "$OID" ]] || fail "empty id from online instance create"

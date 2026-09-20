@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum NatBackend {
     Slirp,
 
@@ -8,6 +9,7 @@ pub enum NatBackend {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum NetworkMode {
     Nat,
 
@@ -43,6 +45,7 @@ pub struct PortForward {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum PortForwardProtocol {
     Tcp,
 
@@ -106,7 +109,7 @@ mod tests {
 
     #[test]
     fn nat_backend_deserializes_with_default_when_missing() {
-        let json = r#"{"mode":"Nat","device_model":"virtio-net-pci"}"#;
+        let json = r#"{"mode":"nat","device_model":"virtio-net-pci"}"#;
         let cfg: NetworkConfig = serde_json::from_str(json).expect("must deserialize");
         assert_eq!(cfg.nat_backend, NatBackend::Slirp);
     }

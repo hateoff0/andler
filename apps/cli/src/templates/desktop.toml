@@ -1,6 +1,10 @@
 # Desktop template: SDL window, GPU-accelerated rendering, audio.
+# These values are the same as InstanceConfig's own defaults (core::config
+# Default impls) — the defaults are already desktop-oriented, so this
+# template exists for an explicit, discoverable `--template desktop` rather
+# than to change anything. `headless` is the one that actually differs.
 [gpu]
-render_backend = "Venus"
+render_backend = "venus"
 hostmem_bytes = 4294967296
 blob = true
 gl = true
@@ -9,9 +13,9 @@ gl = true
 resolution = { width = 1920, height = 1080 }
 dpi = 96
 fps_limit = 0
-display_engine = "Sdl"
+engine = "sdl"
 fullscreen = false
 
 [audio]
-backend = "Pipewire"
-device = "VirtioSound"
+backend = "pipewire"
+device = "virtiosound"
