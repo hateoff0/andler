@@ -103,8 +103,8 @@ pub enum BackendKind {
 /// fields, so the default representation would nest a second table
 /// (`[kind.LinuxVm]` inside `[kind]`) purely to hold the discriminator. A
 /// `type` key alongside the variant's own fields keeps `[kind]` one table
-/// deep. `linux`/`android` (not `linux-vm`/`android-vm`) match the names
-/// `andler status`/`config get` already print for this key.
+/// deep. `linux`/`android` (not `linux-vm`/`android-vm`) match the names the
+/// CLI prints for this key.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum InstanceKind {
