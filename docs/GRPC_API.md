@@ -318,6 +318,7 @@ Request to create a Linux VM. Fields correspond 1:1 to `InstanceConfig` except `
 | `input` | `InputConfig` | Input configuration. |
 | `cdrom_bus` | `CdromBus` | CD-ROM bus (defaults to `IDE`). |
 | `autostart` | `bool` | Start this instance automatically when the daemon starts (default `false`). |
+| `instances_root` | `string` | Root directory the instance directory is created in; empty uses the daemon's `~/.andler/instances`. |
 
 ### `AndroidVersion`
 

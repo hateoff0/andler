@@ -71,7 +71,12 @@ impl Creation {
             InstanceKind::LinuxVm {
                 iso_path,
                 cdrom_bus,
-            } => ProtoRequest::Linux(Box::new(linux_request(&self.cfg, iso_path, *cdrom_bus))),
+            } => ProtoRequest::Linux(Box::new(linux_request(
+                &self.cfg,
+                iso_path,
+                *cdrom_bus,
+                &self.instances_root,
+            ))),
             InstanceKind::AndroidVm { android_profile } => {
                 ProtoRequest::Android(Box::new(android_request(
                     &self.cfg,
@@ -95,6 +100,7 @@ fn linux_request(
     cfg: &InstanceConfig,
     iso_path: &Path,
     cdrom_bus: CdromBus,
+    instances_root: &str,
 ) -> CreateInstanceRequest {
     let mut req = CreateInstanceRequest {
         name: cfg.name.clone(),
@@ -109,6 +115,7 @@ fn linux_request(
         audio: Some(cfg.audio.into()),
         input: Some(cfg.input.into()),
         autostart: cfg.autostart,
+        instances_root: instances_root.to_string(),
         ..Default::default()
     };
     req.set_cdrom_bus(cdrom_bus.into());

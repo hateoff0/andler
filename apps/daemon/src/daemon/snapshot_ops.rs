@@ -46,28 +46,27 @@ impl Daemon {
             });
         }
 
-        if let Some(store) = &self.store {
-            if store
-                .get_snapshot(id, &tag)
-                .await
-                .map_err(DaemonError::Store)?
-                .is_some()
-            {
-                return Err(DaemonError::SnapshotAlreadyExists {
-                    instance_id: id,
-                    tag,
-                });
-            }
+        let Some(store) = &self.store else {
+            return Err(DaemonError::SnapshotStoreUnavailable { instance_id: id });
+        };
+
+        if store
+            .get_snapshot(id, &tag)
+            .await
+            .map_err(DaemonError::Store)?
+            .is_some()
+        {
+            return Err(DaemonError::SnapshotAlreadyExists {
+                instance_id: id,
+                tag,
+            });
         }
 
-        let mut current = 0usize;
-        if let Some(store) = &self.store {
-            current += store
-                .load_snapshots(id)
-                .await
-                .map_err(DaemonError::Store)?
-                .len();
-        }
+        let mut current = store
+            .load_snapshots(id)
+            .await
+            .map_err(DaemonError::Store)?
+            .len();
         if let Ok(existing) = backend.snapshot_list(&handle).await {
             current += existing.len();
         }
@@ -127,12 +126,9 @@ impl Daemon {
             });
         }
 
-        let parent_id = match &self.store {
-            Some(store) => disk_chain::main_chain_head(store, id)
-                .await?
-                .map(|record| record.id),
-            None => None,
-        };
+        let parent_id = disk_chain::main_chain_head(store, id)
+            .await?
+            .map(|record| record.id);
 
         let record = SnapshotRecord {
             id: uuid,
@@ -145,20 +141,18 @@ impl Daemon {
             branch: None,
         };
 
-        if let Some(store) = &self.store {
-            let stored = andler_store::StoredSnapshot {
-                id: record.id,
-                instance_id: record.instance_id,
-                tag: record.tag.clone(),
-                description: record.description.clone(),
-                created_at: record.created_at.clone(),
-                layer_path: record.layer_path.clone(),
-                parent_id: record.parent_id,
-                branch: None,
-            };
-            if let Err(e) = store.save_snapshot(&stored).await {
-                tracing::warn!(instance_id = %id, tag = %tag, error = %e, "failed to persist snapshot metadata; daemon restart will recover it");
-            }
+        let stored = andler_store::StoredSnapshot {
+            id: record.id,
+            instance_id: record.instance_id,
+            tag: record.tag.clone(),
+            description: record.description.clone(),
+            created_at: record.created_at.clone(),
+            layer_path: record.layer_path.clone(),
+            parent_id: record.parent_id,
+            branch: None,
+        };
+        if let Err(e) = store.save_snapshot(&stored).await {
+            tracing::warn!(instance_id = %id, tag = %tag, error = %e, "failed to persist snapshot metadata; daemon restart will recover it");
         }
 
         Ok(record)

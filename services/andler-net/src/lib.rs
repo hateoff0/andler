@@ -11,6 +11,9 @@ pub enum NetError {
     #[error("Bridge {0} not found")]
     BridgeNotFound(String),
 
+    #[error("Interface {0} exists but is not a bridge")]
+    NotABridge(String),
+
     #[error("Interface {0} already exists and is in use")]
     InterfaceExists(String),
 
@@ -84,6 +87,19 @@ impl NetworkService for DefaultNetworkService {
 
         if !output.status.success() {
             return Err(NetError::BridgeNotFound(bridge.to_string()));
+        }
+
+        // `ip link show` succeeds for *any* existing interface — a plain NIC,
+        // a bond, a VLAN — not just bridges. Enslaving the tap to one of
+        // those fails deep inside `ip link set ... master`, with a kernel
+        // errno instead of a message that names the actual problem. The
+        // kernel only creates this sysfs directory for real bridge devices,
+        // so checking it first turns that failure into a clear, specific one.
+        if !tokio::fs::metadata(format!("/sys/class/net/{bridge}/bridge"))
+            .await
+            .is_ok_and(|meta| meta.is_dir())
+        {
+            return Err(NetError::NotABridge(bridge.to_string()));
         }
 
         run_ip(&["tuntap", "add", "dev", vm_iface, "mode", "tap"]).await?;
@@ -170,6 +186,12 @@ mod tests {
     fn net_error_display_bridge_not_found() {
         let err = NetError::BridgeNotFound("br0".to_string());
         assert_eq!(err.to_string(), "Bridge br0 not found");
+    }
+
+    #[test]
+    fn net_error_display_not_a_bridge() {
+        let err = NetError::NotABridge("eth0".to_string());
+        assert_eq!(err.to_string(), "Interface eth0 exists but is not a bridge");
     }
 
     #[test]

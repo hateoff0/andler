@@ -10,7 +10,7 @@ pub enum DaemonError {
     #[error("invalid config: {0}")]
     InvalidConfig(String),
 
-    #[error("instance {0:?} not found")]
+    #[error("instance {0} not found")]
     InstanceNotFound(InstanceId),
 
     #[error("no backend registered for {0:?}")]
@@ -118,6 +118,13 @@ pub enum DaemonError {
         instance_id: InstanceId,
         format: String,
     },
+
+    #[error(
+        "cannot create a snapshot of instance {instance_id}: this daemon was started without a \
+         metadata store, so external snapshots would be written to disk but never listed, \
+         restored, or deleted again"
+    )]
+    SnapshotStoreUnavailable { instance_id: InstanceId },
 
     #[error(
         "export of instance {instance_id} to OCI requires a qcow2 disk (current format: {format}); \
@@ -406,6 +413,7 @@ impl DaemonError {
             }
             DaemonError::SnapshotLimitExceeded { .. } => ErrorKind::FailedPrecondition,
             DaemonError::SnapshotRequiresQcow2 { .. } => ErrorKind::FailedPrecondition,
+            DaemonError::SnapshotStoreUnavailable { .. } => ErrorKind::FailedPrecondition,
             DaemonError::ExportRequiresQcow2 { .. } => ErrorKind::FailedPrecondition,
             DaemonError::OciExport { .. } => ErrorKind::FailedPrecondition,
             DaemonError::SnapshotLayerMissing { .. } => ErrorKind::NotFound,

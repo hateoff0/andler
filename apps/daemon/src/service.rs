@@ -120,7 +120,9 @@ impl AndlerService for DaemonService {
         &self,
         request: Request<CreateInstanceRequest>,
     ) -> Result<Response<CreateInstanceResponse>, Status> {
-        let mut cfg = InstanceConfig::try_from(request.into_inner())?;
+        let req = request.into_inner();
+        let instances_root = req.instances_root.clone();
+        let mut cfg = InstanceConfig::try_from(req)?;
 
         if cfg.firmware.ovmf_code_path.as_os_str().is_empty() {
             cfg.firmware.ovmf_code_path = self.ovmf.code.clone();
@@ -138,7 +140,11 @@ impl AndlerService for DaemonService {
             .daemon
             .create_linux_instance(
                 cfg,
-                andler_core::paths::instances_root(),
+                if instances_root.is_empty() {
+                    andler_core::paths::instances_root()
+                } else {
+                    instances_root.into()
+                },
                 ovmf_vars_template,
             )
             .await?;

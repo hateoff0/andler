@@ -214,6 +214,7 @@ fn sample_create_instance_request() -> CreateInstanceRequest {
         input: Some(input),
         cdrom_bus: andler_rpc::proto::CdromBus::Ide as i32,
         autostart: false,
+        instances_root: String::new(),
     }
 }
 
@@ -249,6 +250,38 @@ async fn create_instance_round_trips_over_real_grpc_and_status_reports_created()
         "a Linux VM's terminal readiness level is GuestOsUp, derived from its (kind, boot_mode) profile"
     );
 
+    server.abort();
+}
+
+#[tokio::test]
+async fn create_instance_places_the_instance_dir_in_the_requested_instances_root() {
+    let (mut client, server) = spawn_server_and_connect().await;
+
+    let root = std::env::temp_dir().join(format!("andler-grpc-root-{}", uuid::Uuid::new_v4()));
+
+    let mut request = sample_create_instance_request();
+    request.instances_root = root.to_string_lossy().into_owned();
+
+    let response = client
+        .create_instance(request)
+        .await
+        .expect("a CreateInstanceRequest carrying instances_root must be accepted")
+        .into_inner();
+
+    assert!(
+        root.join(&response.instance_id)
+            .join("instance.toml")
+            .is_file(),
+        "the instance directory must be created under the requested instances_root"
+    );
+    assert!(
+        !andler_core::paths::instances_root()
+            .join(&response.instance_id)
+            .exists(),
+        "an explicit instances_root must not also write into the daemon's default root"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
     server.abort();
 }
 

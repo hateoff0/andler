@@ -150,6 +150,30 @@ async fn config_status_shows_pending_file_edit_on_running_instance() {
 }
 
 #[tokio::test]
+async fn config_status_is_in_sync_right_after_config_set() {
+    let dir = TestTempDir::new();
+    let daemon = Daemon::new();
+    let mut cfg = sample_config();
+    cfg.disk.path = dir.path().join("disk.qcow2");
+    cfg.firmware.ovmf_vars_path = dir.path().join("VARS.fd");
+    let id = cfg.id;
+    daemon.create_instance(cfg).await.unwrap();
+
+    daemon
+        .set_instance_config(id, "cpu.cores", "6")
+        .await
+        .unwrap();
+
+    let (config, diffs, file_error, _) = daemon.config_status(id).await.unwrap();
+    assert_eq!(config.cpu.cores, 6);
+    assert!(file_error.is_none());
+    assert!(
+        diffs.is_empty(),
+        "`config set` writes the value it applied to the file, so nothing is pending: {diffs:?}"
+    );
+}
+
+#[tokio::test]
 async fn config_status_on_idle_instance_applies_file_edit() {
     let dir = TestTempDir::new();
     let daemon = Daemon::new();

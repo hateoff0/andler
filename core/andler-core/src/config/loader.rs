@@ -5,11 +5,11 @@
 
 use crate::config::{migrate_schema, InstanceConfig};
 
-/// Parses `instance.toml` content and runs schema migrations. Errors name
-/// the offending line/field via the toml/serde context.
+/// Parses `instance.toml` content and runs schema migrations. The error is the
+/// toml/serde message alone — every caller names the file itself, because only
+/// the caller knows which path it read.
 pub fn parse_instance_config_toml(input: &str) -> Result<InstanceConfig, String> {
-    let mut cfg: InstanceConfig =
-        toml::from_str(input).map_err(|e| format!("invalid instance.toml: {e}"))?;
+    let mut cfg: InstanceConfig = toml::from_str(input).map_err(|e| e.to_string())?;
     migrate_schema(&mut cfg)?;
     Ok(cfg)
 }

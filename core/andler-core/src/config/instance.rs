@@ -11,8 +11,18 @@ use crate::android_profile::AndroidProfile;
 
 pub const INSTANCE_ID_HEX_LEN: usize = 64;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct InstanceId([u8; 32]);
+
+/// Hex, exactly like `Display`. The derived form printed the raw byte array
+/// (`InstanceId([79, 84, …])`), which tells an operator nothing and cannot be
+/// pasted back into a command — but `{:?}` is what most error messages and
+/// log fields use, so the two must agree.
+impl std::fmt::Debug for InstanceId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(self, f)
+    }
+}
 
 impl std::fmt::Display for InstanceId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

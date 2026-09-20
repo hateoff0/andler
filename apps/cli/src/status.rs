@@ -50,6 +50,7 @@ fn readiness_line(response: &InstanceStatusResponse) -> String {
 pub async fn handle_status(
     client: &mut TracedClient,
     instance_id: String,
+    full_id: bool,
     json: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let response = client
@@ -59,10 +60,16 @@ pub async fn handle_status(
         .await?
         .into_inner();
     let state = response.state();
+    let display_id = if full_id {
+        instance_id.as_str()
+    } else {
+        crate::helpers::short_id(&instance_id)
+    };
     if json {
-        emit_json(&status_json(&instance_id, &response))?;
+        emit_json(&status_json(display_id, &response))?;
         return Ok(());
     }
+    println!("instance_id: {display_id}");
     println!(
         "state: {}",
         colorize_status(state, std::io::stdout().is_terminal())
@@ -284,6 +291,19 @@ pub async fn handle_config_status(
     Ok(())
 }
 
+fn compile_grep(grep: Option<String>) -> Option<regex::Regex> {
+    match grep {
+        Some(pattern) => match regex::Regex::new(&pattern) {
+            Ok(re) => Some(re),
+            Err(err) => {
+                eprintln!("invalid --grep regex {pattern:?}: {err}");
+                std::process::exit(2);
+            }
+        },
+        None => None,
+    }
+}
+
 fn log_line_matches_filters(
     line: &andler_rpc::proto::LogLineResponse,
     source: &Option<CliLogSource>,
@@ -304,16 +324,7 @@ pub async fn handle_logs(
     grep: Option<String>,
     tail: Option<usize>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let grep_re = match grep {
-        Some(pattern) => match regex::Regex::new(&pattern) {
-            Ok(re) => Some(re),
-            Err(err) => {
-                eprintln!("invalid --grep regex {pattern:?}: {err}");
-                std::process::exit(2);
-            }
-        },
-        None => None,
-    };
+    let grep_re = compile_grep(grep);
 
     let mut stream = client
         .stream_instance_logs(InstanceIdRequest { instance_id })
@@ -718,7 +729,10 @@ pub async fn handle_daemon_logs(
     follow: bool,
     json: bool,
     since: Option<u64>,
+    grep: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let grep_re = compile_grep(grep);
+
     let mut stream = client
         .stream_daemon_logs(andler_rpc::proto::DaemonLogsRequest {
             follow,
@@ -730,6 +744,9 @@ pub async fn handle_daemon_logs(
     let mut stdout = std::io::stdout();
     use std::io::Write;
     while let Some(line) = stream.message().await? {
+        if grep_re.as_ref().is_some_and(|re| !re.is_match(&line.line)) {
+            continue;
+        }
         if json {
             writeln!(
                 stdout,

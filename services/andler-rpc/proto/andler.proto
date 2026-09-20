@@ -235,6 +235,7 @@ message CreateInstanceRequest {
     InputConfig input = 11;
     CdromBus cdrom_bus = 12;
     bool autostart = 13;
+    string instances_root = 14;
 }
 
 enum AndroidVersion {

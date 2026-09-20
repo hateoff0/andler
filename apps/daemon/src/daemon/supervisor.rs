@@ -937,5 +937,9 @@ impl InstanceSupervisor {
         if let Ok(meta) = tokio::fs::metadata(&self.config_path).await {
             self.config_mtime = meta.modified().ok();
         }
+        // The file now holds exactly what memory holds, and the mtime guard
+        // above would never re-read it: keep the cached snapshot honest.
+        self.file_config = Some(self.config.clone());
+        self.file_error = None;
     }
 }

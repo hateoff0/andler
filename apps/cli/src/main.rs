@@ -121,6 +121,9 @@ dual_id_args!(ResumeArgs,
     pub json: bool,
 );
 dual_id_args!(StatusArgs,
+    #[arg(long = "full-id", short = 'q')]
+    pub full_id: bool,
+
     #[arg(long)]
     pub json: bool,
 );
@@ -187,9 +190,8 @@ dual_id_args!(MetricsArgs,
 
 #[derive(Subcommand)]
 pub enum ConfigCommand {
-    View {
-        instance_id: Option<String>,
-    },
+    /// Print the resolved configuration as human-readable text (no --json yet)
+    View { instance_id: Option<String> },
 
     Edit {
         instance_id: Option<String>,
@@ -207,6 +209,12 @@ pub enum ConfigCommand {
         key: String,
 
         value: String,
+
+        #[arg(
+            long,
+            help = "Emit the applied change as JSON instead of human-readable text"
+        )]
+        json: bool,
     },
 
     /// File-vs-memory diff: what `instance.toml` holds vs what the daemon
@@ -219,12 +227,13 @@ pub enum ConfigCommand {
 }
 
 impl ConfigCommand {
-    /// Whether `--json` was requested for a config subcommand. Only
-    /// `config status` emits JSON.
+    /// Whether `--json` was requested for a config subcommand. `view` has no
+    /// JSON output yet; `status`/`edit`/`set` each carry their own flag.
     fn json_requested(&self) -> bool {
         match self {
             ConfigCommand::Status { json, .. } => *json,
             ConfigCommand::Edit { json, .. } => *json,
+            ConfigCommand::Set { json, .. } => *json,
             _ => false,
         }
     }
@@ -242,7 +251,11 @@ pub struct ConfigFlags {
     #[arg(long, short)]
     pub file: Option<PathBuf>,
 
-    #[arg(long, help = "Emit the result as JSON instead of human-readable text")]
+    #[arg(
+        long,
+        help = "Emit the result as JSON instead of human-readable text (status/edit/set only; \
+                view has no JSON output yet)"
+    )]
     pub json: bool,
 }
 
@@ -423,7 +436,9 @@ enum Command {
     /// Stream an instance's QEMU stdout/stderr
     Logs(LogsArgs),
 
-    /// Stream daemon events (lifecycle, operations, QMP); optional instance filter
+    /// Stream daemon events (lifecycle, operations, QMP); optional instance filter.
+    /// No --tail: the event bus is live-only (no history for a new subscriber to
+    /// replay) — for a bounded look at recent output, see `logs <id> --tail`.
     Events(EventsArgs),
 
     /// Stream per-instance metrics (CPU, memory, disk, network, GPU)
@@ -486,6 +501,8 @@ enum Command {
         #[command(subcommand)]
         action: SnapshotAction,
 
+        /// Emit JSON instead of human-readable text (before the subcommand;
+        /// `list` is the subcommand that has a JSON form)
         #[arg(long)]
         json: bool,
     },
@@ -956,7 +973,10 @@ impl From<andler_core::ArmTranslator> for CliArmTranslator {
 }
 
 fn format_grpc_error(err: &tonic::Status) -> String {
-    let msg = err.message().trim_matches('"');
+    // The message is the daemon's verbatim: `trim_matches('"')` used to strip
+    // the quotes of a `{…:?}` field, which left messages like `no instance
+    // found matching "abcd` — half a quoted value, never a balanced one.
+    let msg = err.message();
     match err.code() {
         tonic::Code::NotFound => format!("instance not found: {msg}"),
         tonic::Code::InvalidArgument => format!("invalid argument: {msg}"),
@@ -1213,7 +1233,7 @@ async fn run(cli: Cli, addr: &str) -> Result<(), Box<dyn std::error::Error>> {
         }
         Some(Command::Status(args)) => {
             let id = args.resolve_id()?;
-            status::handle_status(&mut client, id.to_string(), args.json).await?;
+            status::handle_status(&mut client, id.to_string(), args.full_id, args.json).await?;
         }
         Some(Command::List {
             full_id,
@@ -1254,6 +1274,7 @@ async fn run(cli: Cli, addr: &str) -> Result<(), Box<dyn std::error::Error>> {
                 instance_id,
                 key,
                 value,
+                json,
             }) => {
                 client
                     .set_instance_config(andler_rpc::proto::SetInstanceConfigRequest {
@@ -1262,7 +1283,18 @@ async fn run(cli: Cli, addr: &str) -> Result<(), Box<dyn std::error::Error>> {
                         value: value.clone(),
                     })
                     .await?;
-                println!("{instance_id}: {key} = {value}");
+                if json {
+                    println!(
+                        "{}",
+                        serde_json::json!({
+                            "instance_id": instance_id,
+                            "key": key,
+                            "value": value,
+                        })
+                    );
+                } else {
+                    println!("{instance_id}: {key} = {value}");
+                }
             }
             None => {
                 let id = flags
@@ -1285,7 +1317,14 @@ async fn run(cli: Cli, addr: &str) -> Result<(), Box<dyn std::error::Error>> {
             let is_daemon = args.instance_id.as_deref() == Some("daemon")
                 || args.instance.as_deref() == Some("daemon");
             if is_daemon {
-                status::handle_daemon_logs(&mut client, args.follow, args.json, args.since).await?;
+                status::handle_daemon_logs(
+                    &mut client,
+                    args.follow,
+                    args.json,
+                    args.since,
+                    args.grep,
+                )
+                .await?;
             } else {
                 if args.follow || args.json || args.since.is_some() {
                     eprintln!(
@@ -1459,6 +1498,16 @@ mod main_error_formatting_tests {
         assert_eq!(
             format_grpc_error(&status),
             "instance not found: instance \"a1b2c3\" not found"
+        );
+    }
+
+    #[test]
+    fn format_grpc_error_keeps_a_quoted_value_at_the_end() {
+        let status = tonic::Status::not_found("no instance found matching \"abcdef\"");
+        assert_eq!(
+            format_grpc_error(&status),
+            "instance not found: no instance found matching \"abcdef\"",
+            "a message that ends with a quoted value must keep both quotes"
         );
     }
 
